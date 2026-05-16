@@ -1,0 +1,20 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Julia
+**/Manifest.toml
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

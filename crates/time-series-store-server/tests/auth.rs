@@ -1,0 +1,108 @@
+//! Integration tests for the api_key auth interceptor.
+
+use std::time::Duration as StdDuration;
+
+use chrono::{Duration, TimeZone, Utc};
+use ndarray::ArrayD;
+use time_series_store_core::{
+    create_store, Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData,
+};
+use time_series_store_proto::pb::{
+    time_series_store_client::TimeSeriesStoreClient, CountsReq,
+};
+use time_series_store_server::auth::ApiKeyInterceptor;
+use time_series_store_server::service::TimeSeriesStoreService;
+use tokio::net::TcpListener;
+use tonic::metadata::MetadataValue;
+use tonic::service::InterceptorLayer;
+use tonic::transport::Channel;
+
+fn make_store() -> Store {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let data: ArrayD<f64> =
+        ArrayD::from_shape_vec(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+    let s = SingleTimeSeries::new(initial, resolution, data);
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesData::SingleTimeSeries(s),
+            Features::new(),
+            None,
+            None,
+        )
+        .unwrap();
+    store
+}
+
+async fn spawn_authed(keys: Vec<String>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let interceptor = ApiKeyInterceptor::new(keys);
+    let service = TimeSeriesStoreService::new(make_store());
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .layer(InterceptorLayer::new(interceptor))
+            .add_service(service.into_server())
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    format!("http://{local_addr}")
+}
+
+async fn channel(addr: &str) -> Channel {
+    Channel::from_shared(addr.to_string())
+        .unwrap()
+        .connect()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn missing_header_is_rejected() {
+    let addr = spawn_authed(vec!["secret-1".into()]).await;
+    let mut client = TimeSeriesStoreClient::new(channel(&addr).await);
+    let err = client.get_counts(CountsReq {}).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn wrong_key_is_rejected() {
+    let addr = spawn_authed(vec!["secret-1".into()]).await;
+    let key: MetadataValue<_> = "nope".parse().unwrap();
+    let mut client = TimeSeriesStoreClient::with_interceptor(
+        channel(&addr).await,
+        move |mut req: tonic::Request<()>| {
+            req.metadata_mut().insert("x-api-key", key.clone());
+            Ok(req)
+        },
+    );
+    let err = client.get_counts(CountsReq {}).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn correct_key_succeeds() {
+    let addr = spawn_authed(vec!["secret-1".into(), "secret-2".into()]).await;
+    let key: MetadataValue<_> = "secret-2".parse().unwrap();
+    let mut client = TimeSeriesStoreClient::with_interceptor(
+        channel(&addr).await,
+        move |mut req: tonic::Request<()>| {
+            req.metadata_mut().insert("x-api-key", key.clone());
+            Ok(req)
+        },
+    );
+    let resp = client
+        .get_counts(CountsReq {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.static_time_series, 1);
+}

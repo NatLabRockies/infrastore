@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+package time_series_store.v1;
+
+// Read-only gRPC service for `time-series-store`.
+//
+// All write operations (add, remove, clear, compact) require local filesystem
+// access and are NOT exposed through this service.
+service TimeSeriesStore {
+  rpc ListTimeSeries     (ListReq)        returns (ListResp);
+  rpc GetTimeSeries      (GetReq)         returns (GetResp);
+  rpc GetTimeSeriesKeys  (KeysReq)        returns (KeysResp);
+  rpc GetResolutions     (ResolutionsReq) returns (ResolutionsResp);
+  rpc GetCounts          (CountsReq)      returns (CountsResp);
+  rpc HasTimeSeries      (HasReq)         returns (HasResp);
+  rpc VerifyIntegrity    (VerifyReq)      returns (VerifyResp);
+}
+
+// ---- Common types ----
+
+enum TimeSeriesType {
+  SINGLE_TIME_SERIES                 = 0;
+  NON_SEQUENTIAL_TIME_SERIES         = 1;
+  DETERMINISTIC                      = 2;
+  DETERMINISTIC_SINGLE_TIME_SERIES   = 3;
+  PROBABILISTIC                      = 4;
+  SCENARIOS                          = 5;
+}
+
+enum OwnerCategory {
+  COMPONENT               = 0;
+  SUPPLEMENTAL_ATTRIBUTE  = 1;
+}
+
+message FeatureValue {
+  oneof value {
+    int64  int_value   = 1;
+    double float_value = 2;
+    bool   bool_value  = 3;
+  }
+}
+
+message Features {
+  map<string, FeatureValue> entries = 1;
+}
+
+message TimeSeriesKey {
+  int64           owner_id          = 1;
+  TimeSeriesType  time_series_type  = 2;
+  string          name              = 3;
+  // Resolution in nanoseconds. 0 = unset (e.g. NonSequentialTimeSeries).
+  int64           resolution_ns     = 4;
+  Features        features          = 5;
+}
+
+message TimeSeriesMetadata {
+  int64           owner_id                       = 1;
+  string          owner_type                     = 2;
+  OwnerCategory   owner_category                 = 3;
+  TimeSeriesType  time_series_type               = 4;
+  string          name                           = 5;
+  bytes           data_hash                      = 6;        // 32 bytes
+  // Temporal — populated when applicable to the time series type.
+  string          initial_timestamp_rfc3339      = 7;
+  int64           resolution_ns                  = 8;
+  uint64          length                         = 9;
+  int64           horizon_ns                     = 10;
+  int64           interval_ns                    = 11;
+  uint64          count                          = 12;
+  repeated string timestamps_rfc3339             = 13;
+  Features        features                       = 14;
+  string          scaling_factor_multiplier      = 15;
+  string          units                          = 16;
+}
+
+// ---- ListTimeSeries ----
+
+message ListReq {
+  optional int64           owner_id          = 1;
+  optional string          owner_type        = 2;
+  optional TimeSeriesType  time_series_type  = 3;
+  optional string          name              = 4;
+  optional int64           resolution_ns     = 5;
+  Features                 features          = 6;
+}
+message ListResp {
+  repeated TimeSeriesMetadata metadata = 1;
+}
+
+// ---- GetTimeSeries ----
+
+message GetReq {
+  TimeSeriesKey  key                       = 1;
+  // Optional time-range slicing on the time axis.
+  optional string start_rfc3339            = 2;
+  optional string end_rfc3339              = 3;
+}
+message GetResp {
+  string             initial_timestamp_rfc3339  = 1;
+  int64              resolution_ns              = 2;
+  uint64             length                     = 3;
+  repeated uint64    shape                      = 4;
+  repeated double    values                     = 5;
+}
+
+// ---- GetTimeSeriesKeys ----
+
+message KeysReq {
+  int64 owner_id = 1;
+}
+message KeysResp {
+  repeated TimeSeriesKey keys = 1;
+}
+
+// ---- GetResolutions ----
+
+message ResolutionsReq {
+  optional TimeSeriesType time_series_type = 1;
+}
+message ResolutionsResp {
+  repeated int64 resolution_ns = 1;
+}
+
+// ---- GetCounts ----
+
+message CountsReq {}
+message CountsResp {
+  int64 components_with_time_series = 1;
+  int64 static_time_series          = 2;
+  int64 forecasts                   = 3;
+}
+
+// ---- HasTimeSeries ----
+
+message HasReq {
+  TimeSeriesKey key = 1;
+}
+message HasResp {
+  bool present = 1;
+}
+
+// ---- VerifyIntegrity ----
+
+message VerifyReq {}
+message VerifyResp {
+  repeated string errors = 1;
+}

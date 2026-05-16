@@ -1,0 +1,20 @@
+[package]
+name = "time-series-store-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "C ABI for time-series-store (used by the Julia binding)"
+
+[lib]
+name = "time_series_store_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+chrono = { workspace = true }
+ndarray = { workspace = true }
+serde_json = { workspace = true }
+time-series-store-core = { workspace = true }
+
+[build-dependencies]
+cbindgen = { workspace = true }
