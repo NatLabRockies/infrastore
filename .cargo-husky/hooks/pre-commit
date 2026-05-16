@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# Pre-commit hook for time-series-store.
+
+set -e
+
+echo '+cargo fmt --all -- --check'
+cargo fmt --all -- --check
+
+echo '+cargo clippy --workspace --all-targets --all-features -- -D warnings'
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+echo '+dprint check'
+dprint check
+
+if command -v shellcheck >/dev/null 2>&1; then
+  echo '+shellcheck (all .sh files)'
+  find . -name '*.sh' -not -path './target/*' -not -path './.venv/*' -not -path '*/\.venv/*' -type f -exec shellcheck {} +
+else
+  echo 'shellcheck not found, skipping shell script linting'
+fi

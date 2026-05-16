@@ -1,0 +1,12 @@
+[server]
+host = "0.0.0.0"
+port = 50051
+
+[data]
+files = ["./store.nc"]
+
+[authentication]
+# "none" or "api_key". For api_key, populate `keys` and clients must send
+# the value in the `x-api-key` request header.
+method = "none"
+# keys = ["replace-me-with-a-secret-1", "replace-me-with-a-secret-2"]
