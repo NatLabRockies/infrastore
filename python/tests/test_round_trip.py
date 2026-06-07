@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from time_series import (
+from time_series_store import (
     DuplicateTimeSeriesError,
     InvalidParameterError,
     NotFoundError,
@@ -105,11 +105,11 @@ def test_duplicate_key_raises():
     store = TimeSeriesStore.create(in_memory=True)
     s = make_series()
     store.add_time_series(
-        1, "Generator", OwnerCategory.Component, "load", s,
+        "1", "Generator", OwnerCategory.Component, "load", s,
     )
     with pytest.raises(DuplicateTimeSeriesError):
         store.add_time_series(
-            1, "Generator", OwnerCategory.Component, "load", s,
+            "1", "Generator", OwnerCategory.Component, "load", s,
         )
 
 
@@ -117,7 +117,7 @@ def test_missing_key_raises_not_found():
     store = TimeSeriesStore.create(in_memory=True)
     s = make_series()
     key = store.add_time_series(
-        1, "Generator", OwnerCategory.Component, "load", s,
+        "1", "Generator", OwnerCategory.Component, "load", s,
     )
     store.remove_time_series(key)
     with pytest.raises(NotFoundError):
@@ -131,7 +131,7 @@ def test_time_range_slicing():
     data = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
     s = SingleTimeSeries(initial, resolution, data)
     key = store.add_time_series(
-        1, "Generator", OwnerCategory.Component, "load", s,
+        "1", "Generator", OwnerCategory.Component, "load", s,
     )
 
     start = initial + timedelta(hours=2)
@@ -146,7 +146,7 @@ def test_read_only_blocks_writes(tmp_path):
     path = tmp_path / "store.nc"
     store = TimeSeriesStore.create(path=str(path), in_memory=False)
     store.add_time_series(
-        1, "Generator", OwnerCategory.Component, "load", make_series(),
+        "1", "Generator", OwnerCategory.Component, "load", make_series(),
     )
     store.flush()
     del store
@@ -155,7 +155,7 @@ def test_read_only_blocks_writes(tmp_path):
     assert ro.read_only is True
     with pytest.raises(ReadOnlyStoreError):
         ro.add_time_series(
-            2, "Generator", OwnerCategory.Component, "load", make_series(),
+            "2", "Generator", OwnerCategory.Component, "load", make_series(),
         )
 
 
@@ -163,8 +163,8 @@ def test_invalid_feature_value_raises():
     store = TimeSeriesStore.create(in_memory=True)
     with pytest.raises(InvalidParameterError):
         store.add_time_series(
-            1, "Generator", OwnerCategory.Component, "load", make_series(),
-            features={"bad": "string-value"},
+            "1", "Generator", OwnerCategory.Component, "load", make_series(),
+            features={"bad": [1, 2, 3]},  # lists aren't valid feature values (int/float/bool/str)
         )
 
 
@@ -173,7 +173,7 @@ def test_counts_and_resolutions():
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     data = np.array([1.0, 2.0, 3.0])
 
-    for owner, res in [(1, timedelta(hours=1)), (2, timedelta(minutes=15)), (3, timedelta(hours=4))]:
+    for owner, res in [("1", timedelta(hours=1)), ("2", timedelta(minutes=15)), ("3", timedelta(hours=4))]:
         s = SingleTimeSeries(initial, res, data)
         store.add_time_series(
             owner, "Generator", OwnerCategory.Component, "load", s,
@@ -192,7 +192,7 @@ def test_numpy_array_received_as_ndarray():
     store = TimeSeriesStore.create(in_memory=True)
     s = make_series()
     key = store.add_time_series(
-        1, "Generator", OwnerCategory.Component, "load", s,
+        "1", "Generator", OwnerCategory.Component, "load", s,
     )
     got = store.get_time_series(key)
     arr = np.asarray(got.data)

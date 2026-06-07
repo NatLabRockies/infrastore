@@ -1,5 +1,10 @@
 # Packaging & distribution
 
+> **Status: local development.** Nothing is published to a registry yet (the repo
+> isn't open source). `TimeSeriesStore.jl` is consumed via `Pkg.develop`, and the
+> cdylib via the `TIME_SERIES_STORE_LIB` env var. The steps below are the
+> publish plan for when the repo can be open-sourced.
+
 This repo is the single source of truth for the time-series-store engine and the
 language bindings that wrap it. Layout (monorepo):
 
