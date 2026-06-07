@@ -13,13 +13,14 @@ SQLite. It exposes multiple bindings over a shared core:
 - **gRPC server + Rust client** — `time-series-store-server` (read-only server; writes need local
   filesystem access)
 - **Python** — `time-series-store-py` via PyO3 (abi3-py310 wheel)
-- **Julia** — `time-series-store-ffi` C ABI cdylib, wrapped by `julia/TimeSeries.jl`
+- **Julia** — `time-series-store-ffi` C ABI cdylib, wrapped by `julia/TimeSeriesStore.jl`
 
-**v0 scope:** `SingleTimeSeries` is the only time-series type implemented end-to-end. The other five
-types (NonSequentialTimeSeries, Deterministic, DeterministicSingleTimeSeries, Probabilistic,
-Scenarios) have reserved slots in the metadata schema and the `TimeSeriesType` enum so they can land
-later without breaking changes. Only 1-D `data` is supported. Auth is `none` (default) or `api_key`
-via the `x-api-key` header. See `README.md` for the full scope and resolved design questions.
+**Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
+end-to-end across Rust, gRPC, Python, and Julia. `Deterministic`, `DeterministicSingleTimeSeries`,
+`Probabilistic`, and `Scenarios` are implemented in the Rust core and C ABI, but are not yet fully
+wrapped by Python, Julia, or gRPC. Arrays are dtype-generic and may have multidimensional
+per-timestep values. Auth is `none` (default) or `api_key` via the `x-api-key` header. See
+`README.md` and `docs/src/explanation/data-model.md` for the authoritative feature matrix.
 
 ## Code Quality Requirements
 
@@ -27,17 +28,26 @@ via the `x-api-key` header. See `README.md` for the full scope and resolved desi
 
 ```bash
 cargo fmt --all -- --check                              # Rust formatting
-cargo clippy --workspace --all-targets -- -D warnings   # Rust linting
-cargo test --workspace                                  # Tests
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features                   # Tests
+dprint check                                             # Markdown formatting
+cargo deny check --config deny.toml                     # Dependency policy
 ```
 
 **Key requirements:**
 
 - **Rust code**: Must compile without clippy warnings. Use
-  `cargo clippy --workspace --all-targets -- -D warnings` to verify.
-- **Edition**: The workspace is on Rust edition 2024 (requires Rust 1.95+). Match the surrounding
-  code's idioms.
-- **Before committing**: Always run the checks manually. Keep the workspace clippy-clean.
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings` to verify.
+- **Toolchain**: The workspace uses Rust edition 2024 and declares an MSRV of Rust 1.95.0. Do not
+  use APIs requiring a newer compiler without intentionally updating `rust-version` and CI.
+- **Pre-commit**: `cargo-husky` installs `.cargo-husky/hooks/pre-commit`, which runs rustfmt,
+  Clippy, dprint, and shellcheck when available. Do not bypass a failing hook. Tests and
+  `cargo-deny` are still required before committing.
+- **CI**: Workspace builds and tests run on Linux, macOS, and Windows. Avoid Unix-only assumptions
+  in shared Rust code, build scripts, paths, and workflow changes.
+- **Dependency policy**: `deny.toml` rejects wildcard dependencies and unknown registries or Git
+  sources. Internal path dependencies must include a version. New licenses must be reviewed before
+  adding them to the allowlist.
 
 For detailed style guidelines, see `docs/style-guide.md`.
 
@@ -56,17 +66,18 @@ crates/
   time-series-store-py/      # PyO3 bindings
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
 proto/                       # .proto sources
-julia/TimeSeries.jl/         # Julia package wrapping the C ABI
+julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite
 examples/                    # Sample server config + basic_rust.rs example
+.github/workflows/           # Cross-platform tests, linting, security, wheel builds
 ```
 
 ## Build & Test
 
 ```bash
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --all-features
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ### Prerequisites
@@ -87,20 +98,22 @@ export HDF5_DIR="$(brew --prefix hdf5)"
 On Linux (Debian/Ubuntu): `sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler` (set
 `HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial` if the build script can't find HDF5).
 
+On Windows, CI installs `netcdf-c:x64-windows` with vcpkg and sets `NETCDF_DIR`, `HDF5_DIR`, and
+`PKG_CONFIG_PATH`. Keep these requirements in mind when changing native dependencies.
+
 The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
-`cargo build
---workspace` can link the PyO3 cdylib without `maturin`. On Linux those flags are inert.
+`cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux and Windows those
+flags are inert.
 
 ## Bindings
 
 ### Python (PyO3)
 
 ```bash
-cd crates/time-series-store-py
 python3 -m venv .venv && source .venv/bin/activate
 pip install maturin pytest numpy
-maturin develop
-pytest ../../python/tests
+maturin develop --manifest-path crates/time-series-store-py/Cargo.toml
+pytest python/tests
 ```
 
 ### Julia (C ABI)
@@ -108,12 +121,17 @@ pytest ../../python/tests
 ```bash
 cargo build -p time-series-store-ffi --release
 export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
-julia --project=julia/TimeSeries.jl -e 'using Pkg; Pkg.instantiate()'
-julia --project=julia/TimeSeries.jl julia/TimeSeries.jl/test/runtests.jl
+julia --project=julia/TimeSeriesStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.jl
 ```
 
-The FFI crate generates `time_series_store.h` via `cbindgen`; keep the checked-in header in sync
-with the `extern "C"` surface in `time-series-store-ffi/src/lib.rs`.
+The FFI build script generates `crates/time-series-store-ffi/include/time_series_store.h` via
+`cbindgen`. Never hand-edit the header. Any change to an exported `extern "C"` function must:
+
+- include an accurate Rustdoc `# Safety` section covering pointer validity, ownership, lengths,
+  concurrency, and the matching deallocator;
+- regenerate and commit the header;
+- update the Julia wrapper and tests when the ABI behavior changes.
 
 ## Server
 
@@ -128,18 +146,30 @@ cargo run -p time-series-store-server -- --config my_server.toml
 
 ## Storage Format
 
-- **Arrays**: a NetCDF file with attribute `data_format_version = "0.1.0"` and group
-  `time_series/single/`. Each compacted dataset is named `sts_{length}_{resolution_seconds}` with
-  shape `(length, 1000)` and chunking `(1, 1000)` (per-timestep reads across all components are
-  contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash per column; an
-  empty string marks a free slot.
-- **Metadata**: a sidecar SQLite file at `<path>.sqlite`. The two artifacts ship together.
-- **Compaction**: triggered only by an explicit `Store::compact()` call.
+- A persisted store is a NetCDF file plus a SQLite sidecar at `<netcdf-path>.sqlite`. They are one
+  logical artifact and must be moved, copied, and deleted together.
+- `DATA_FORMAT_VERSION` in `crates/time-series-store-core/src/version.rs` is the on-disk
+  compatibility contract. Any incompatible NetCDF layout, SQLite schema, dtype encoding, or hashing
+  change must bump it and update format documentation and compatibility tests.
+- Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` with a companion
+  `<dataset>_h` hash variable. Standalone arrays use `arr_{hex_hash}`. See
+  `crates/time-series-store-core/src/storage/netcdf.rs` for the implementation and
+  `docs/src/reference/file-format.md` for the user-facing specification; keep them synchronized.
+- Deletion creates reusable packed slots or unreachable standalone variables. Physical shrinking is
+  not available in NetCDF, and compaction behavior must remain explicit.
 
 ## Conventions
 
 - Keep the multi-language surface consistent: a change to the core public API usually needs matching
   updates across the proto definitions, the gRPC server/client, the PyO3 bindings, and the FFI/Julia
   binding. When adding a feature, check all bindings before considering it done.
-- Reserved-but-unimplemented time-series types should return `InvalidParameter` (or the equivalent)
-  rather than silently mis-handling input, preserving the v0 forward-compatibility contract.
+- Treat `time-series-store-core` as the source of truth. Binding crates depend on core; core must
+  not depend on bindings.
+- Use `TimeSeriesError` and the shared `Result` alias for core errors. Unsupported operations must
+  return an explicit error rather than silently changing semantics.
+- Preserve typed-array dtype, shape, byte order, timestamps, features, and hashes across every
+  binding and persistence round trip.
+- Do not manually edit generated artifacts. Besides the C header, protobuf output is generated by
+  the proto crate's build script.
+- Keep changes scoped. Do not commit local virtual environments, Python caches, generated NetCDF
+  test data, or machine-specific library paths.
