@@ -120,13 +120,45 @@ function _check(code::Int32)
     end
 end
 
+# ---- Element dtypes -------------------------------------------------------
+# Codes must match `Dtype` in the Rust core / FFI.
+
+_dtype_code(::Type{Float64}) = Int32(0)
+_dtype_code(::Type{Float32}) = Int32(1)
+_dtype_code(::Type{Int64})   = Int32(2)
+_dtype_code(::Type{Int32})   = Int32(3)
+_dtype_code(::Type{UInt64})  = Int32(4)
+_dtype_code(::Type{Bool})    = Int32(5)
+_dtype_code(::Type{T}) where {T} =
+    throw(InvalidParameterError("unsupported element dtype $T"))
+
+const _DTYPE_JULIA = (Float64, Float32, Int64, Int32, UInt64, Bool)
+_julia_dtype(code::Integer) = _DTYPE_JULIA[Int(code) + 1]
+
+# Row-major little-endian bytes for a (possibly multi-dimensional) array. Julia
+# is column-major, so transpose the axis order before flattening.
+function _row_major_bytes(arr::AbstractArray)
+    flat = if ndims(arr) <= 1
+        Vector(vec(arr))
+    else
+        Vector(vec(permutedims(arr, reverse(ntuple(identity, ndims(arr))))))
+    end
+    return collect(reinterpret(UInt8, flat))
+end
+
 # ---- Single time series ---------------------------------------------------
 
 struct SingleTimeSeries
     initial_timestamp :: DateTime
     resolution        :: Period
-    data              :: Vector{Float64}
+    "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time)."
+    data              :: AbstractArray
+    "Opaque logical-type tag for the binding to reconstruct domain objects."
+    logical_type      :: Union{Nothing,String}
 end
+
+SingleTimeSeries(initial, resolution, data::AbstractArray) =
+    SingleTimeSeries(initial, resolution, data, nothing)
 
 # ---- Keys -----------------------------------------------------------------
 
@@ -229,19 +261,24 @@ function add_time_series!(
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
     scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     initial_ns = _to_unix_ns(ts.initial_timestamp)
     resolution_ns = _resolution_to_ns(ts.resolution)
-    data = Vector{Float64}(ts.data)
+    dtype = _dtype_code(eltype(ts.data))
+    dims = UInt64[size(ts.data)...]
+    bytes = _row_major_bytes(ts.data)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     units_ptr = units === nothing ? C_NULL : pointer(String(units))
     scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : pointer(String(scaling_factor_multiplier))
+    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
 
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_store_add_single, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64,
-         Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+         Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
+         Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle,
         owner_uuid,
         owner_type,
@@ -249,8 +286,12 @@ function add_time_series!(
         name,
         initial_ns,
         resolution_ns,
-        data,
-        UInt64(length(data)),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        logical_ptr,
         features_json,
         units_ptr,
         scaling_ptr,
@@ -280,12 +321,13 @@ function get_metadata(
     out_resolution = Ref{Int64}(0)
     out_length = Ref{UInt64}(0)
     out_hash = Vector{UInt8}(undef, 32)
+    out_dtype = Ref{Int32}(0)
     code = ccall(
         (:ts_store_get_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring,
-         Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}),
+         Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32}),
         store.handle, owner_uuid, name, resolution_ns, features_json,
-        out_initial, out_resolution, out_length, out_hash,
+        out_initial, out_resolution, out_length, out_hash, out_dtype,
     )
     _check(code)
     res_ms = div(out_resolution[], 1_000_000)
@@ -294,29 +336,33 @@ function get_metadata(
         resolution=Millisecond(res_ms),
         length=Int(out_length[]),
         data_hash=out_hash,
+        dtype=_julia_dtype(out_dtype[]),
     )
 end
 
 """
-    get_array_by_hash(store, data_hash) -> Vector{Float64}
+    get_array_by_hash(store, data_hash, ::Type{T}=Float64) -> Vector{T}
 
-Fetch the full stored array for a 32-byte content hash.
+Fetch the full stored array for a 32-byte content hash, interpreting the raw
+element bytes as `T`. For multi-dimensional element shapes the result is the
+flat row-major vector; the caller reshapes using the known element shape.
 """
-function get_array_by_hash(store::Store, data_hash::Vector{UInt8})
+function get_array_by_hash(store::Store, data_hash::Vector{UInt8}, ::Type{T}=Float64) where {T}
     length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
-    out_data = Ref{Ptr{Float64}}(C_NULL)
+    out_dtype = Ref{Int32}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_array_by_hash, lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
-        store.handle, data_hash, out_data, out_len,
+        (Ptr{Cvoid}, Ptr{UInt8}, Ref{Int32}, Ref{Ptr{UInt8}}, Ref{UInt64}),
+        store.handle, data_hash, out_dtype, out_data, out_len,
     )
     _check(code)
-    n = Int(out_len[])
-    raw = unsafe_wrap(Array, out_data[], n; own=false)
-    result = copy(raw)
-    ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_data[], out_len[])
-    return result
+    nbytes = Int(out_len[])
+    raw = unsafe_wrap(Array, out_data[], nbytes; own=false)
+    bytes = copy(raw)
+    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_len[])
+    return collect(reinterpret(T, bytes))
 end
 
 """

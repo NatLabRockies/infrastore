@@ -40,15 +40,6 @@ int32_t ts_store_open(const char *path, bool read_only, struct TsStore **out);
 
 void ts_store_free(struct TsStore *handle);
 
-/**
- * Add a SingleTimeSeries to the store.
- *
- * `data_ptr` / `data_len` describe a contiguous array of f64 values along the
- * time axis. `features_json`, when non-null, is parsed as a JSON object whose
- * values must be int / float / bool. `units` and `scaling_expr` are optional.
- * On success, `out_key` receives an owned `TsKey *` that the caller must
- * release with `ts_key_free`.
- */
 int32_t ts_store_add_single(struct TsStore *handle,
                             const char *owner_uuid,
                             const char *owner_type,
@@ -56,8 +47,12 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             const char *name,
                             int64_t initial_ts_unix_ns,
                             int64_t resolution_ns,
-                            const double *data_ptr,
-                            uint64_t data_len,
+                            int32_t dtype,
+                            uint64_t ndims,
+                            const uint64_t *dims_ptr,
+                            const uint8_t *data_ptr,
+                            uint64_t data_byte_len,
+                            const char *logical_type,
                             const char *features_json,
                             const char *units,
                             const char *scaling_expr,
@@ -105,7 +100,8 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
                               int64_t *out_initial_ts_unix_ns,
                               int64_t *out_resolution_ns,
                               uint64_t *out_length,
-                              uint8_t *out_data_hash);
+                              uint8_t *out_data_hash,
+                              int32_t *out_dtype);
 
 /**
  * True iff a SingleTimeSeries with the given attributes exists.
@@ -133,8 +129,9 @@ int32_t ts_store_remove_by_attrs(struct TsStore *handle,
  */
 int32_t ts_store_get_array_by_hash(const struct TsStore *handle,
                                    const uint8_t *data_hash,
-                                   double **out_data,
-                                   uint64_t *out_data_len);
+                                   int32_t *out_dtype,
+                                   uint8_t **out_data,
+                                   uint64_t *out_byte_len);
 
 /**
  * Add a forecast. `data_ptr`/`data_len` is the flattened storage array
@@ -252,6 +249,11 @@ int32_t ts_store_clear(struct TsStore *handle, const char *owner_uuid);
 void ts_key_free(struct TsKey *key);
 
 void ts_buffer_free_f64(double *ptr, uint64_t len);
+
+/**
+ * Free a `u8` buffer returned by `ts_store_get_array_by_hash`.
+ */
+void ts_buffer_free_u8(uint8_t *ptr, uint64_t len);
 
 /**
  * Copy the thread-local error message into `buf` (UTF-8, null-terminated).

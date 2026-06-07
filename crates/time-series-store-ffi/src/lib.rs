@@ -158,6 +158,42 @@ pub unsafe extern "C" fn ts_store_free(handle: *mut TsStoreHandle) {
 /// values must be int / float / bool. `units` and `scaling_expr` are optional.
 /// On success, `out_key` receives an owned `TsKey *` that the caller must
 /// release with `ts_key_free`.
+/// Build a [`TypedArray`] from a dtype code, shape (`ndims` × `dims_ptr`), and
+/// raw little-endian bytes. Returns an FFI error code on failure (and sets the
+/// thread-local error). The buffers are borrowed for the duration of the call.
+unsafe fn build_typed_array(
+    dtype_code: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+) -> std::result::Result<core_lib::TypedArray, i32> {
+    let dtype = match core_lib::Dtype::from_code(dtype_code) {
+        Some(d) => d,
+        None => {
+            set_error(format!("invalid dtype code {dtype_code}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let dims: Vec<usize> = if ndims == 0 || dims_ptr.is_null() {
+        Vec::new()
+    } else {
+        unsafe { slice::from_raw_parts(dims_ptr, ndims as usize) }
+            .iter()
+            .map(|&d| d as usize)
+            .collect()
+    };
+    let bytes = if data_byte_len == 0 || data_ptr.is_null() {
+        Vec::new()
+    } else {
+        unsafe { slice::from_raw_parts(data_ptr, data_byte_len as usize) }.to_vec()
+    };
+    core_lib::TypedArray::new(dtype, dims, bytes).map_err(|e| {
+        set_error(e);
+        TS_ERR_INVALID_PARAMETER
+    })
+}
+
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_single(
@@ -168,8 +204,12 @@ pub unsafe extern "C" fn ts_store_add_single(
     name: *const c_char,
     initial_ts_unix_ns: i64,
     resolution_ns: i64,
-    data_ptr: *const f64,
-    data_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     scaling_expr: *const c_char,
@@ -228,6 +268,10 @@ pub unsafe extern "C" fn ts_store_add_single(
         Ok(v) => v,
         Err(c) => return c,
     };
+    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
     let features = match unsafe { parse_features_json(features_json) } {
         Ok(f) => f,
         Err(code) => return code,
@@ -241,24 +285,27 @@ pub unsafe extern "C" fn ts_store_add_single(
         }
     };
     let resolution = Duration::nanoseconds(resolution_ns);
-    let len = data_len as usize;
-    let values: &[f64] = unsafe { slice::from_raw_parts(data_ptr, len) };
-    let array = core_lib::TypedArray::from_f64(vec![len], values);
+    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
+    {
+        Ok(a) => a,
+        Err(c) => return c,
+    };
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array);
-    let data = core_lib::TimeSeriesData::SingleTimeSeries(single);
 
-    match store.inner.add_time_series(
-        owner_uuid,
-        owner_type,
+    let req = core_lib::AddRequest {
+        owner_uuid: owner_uuid.to_string(),
+        owner_type: owner_type.to_string(),
         owner_category,
-        name,
-        data,
+        name: name.to_string(),
+        data: core_lib::TimeSeriesData::SingleTimeSeries(single),
         features,
         units,
-        scaling_expr,
-    ) {
-        Ok(key) => {
-            let handle = Box::new(TsKeyHandle { inner: key });
+        scaling_factor_multiplier: scaling_expr,
+        logical_type,
+    };
+    match store.inner.add_time_series_bulk(vec![req]) {
+        Ok(mut keys) => {
+            let handle = Box::new(TsKeyHandle { inner: keys.remove(0) });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
         }
@@ -510,6 +557,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
     out_resolution_ns: *mut i64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
+    out_dtype: *mut i32,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -520,6 +568,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         || out_resolution_ns.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
+        || out_dtype.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
@@ -550,6 +599,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         *out_resolution_ns = res_ns;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
+        *out_dtype = meta.dtype.code();
     }
     TS_OK
 }
@@ -616,15 +666,16 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
 pub unsafe extern "C" fn ts_store_get_array_by_hash(
     handle: *const TsStoreHandle,
     data_hash: *const u8,
-    out_data: *mut *mut f64,
-    out_data_len: *mut u64,
+    out_dtype: *mut i32,
+    out_data: *mut *mut u8,
+    out_byte_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if data_hash.is_null() || out_data.is_null() || out_data_len.is_null() {
+    if data_hash.is_null() || out_dtype.is_null() || out_data.is_null() || out_byte_len.is_null() {
         set_error("a pointer is null");
         return TS_ERR_NULL_POINTER;
     }
@@ -634,13 +685,17 @@ pub unsafe extern "C" fn ts_store_get_array_by_hash(
         Ok(a) => a,
         Err(e) => return map_core_error(e),
     };
-    let mut buf: Vec<f64> = array.to_f64_vec().unwrap_or_default();
+    // Hand back the raw little-endian element bytes + dtype; the caller
+    // interprets them according to the requested element type.
+    let dtype = array.dtype.code();
+    let mut buf: Vec<u8> = array.bytes;
     let len = buf.len() as u64;
     let p = buf.as_mut_ptr();
     std::mem::forget(buf);
     unsafe {
+        *out_dtype = dtype;
         *out_data = p;
-        *out_data_len = len;
+        *out_byte_len = len;
     }
     TS_OK
 }
@@ -1139,6 +1194,15 @@ pub unsafe extern "C" fn ts_key_free(key: *mut TsKeyHandle) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_buffer_free_f64(ptr: *mut f64, len: u64) {
+    if !ptr.is_null() {
+        let len = len as usize;
+        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+    }
+}
+
+/// Free a `u8` buffer returned by `ts_store_get_array_by_hash`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_buffer_free_u8(ptr: *mut u8, len: u64) {
     if !ptr.is_null() {
         let len = len as usize;
         unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };

@@ -89,3 +89,25 @@ end
         end
     end
 end
+
+@testset "dtype-parameterized arrays" begin
+    store = Store(in_memory=true)
+    res = Hour(1)
+    t0 = DateTime(2024, 1, 1)
+
+    # Int64 scalar series round-trips with its dtype.
+    add_time_series!(store, "c1", "Generator", Component, "load",
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "Int64"))
+    m = get_metadata(store, "c1", "load"; resolution=res)
+    @test m.dtype == Int64
+    @test get_array_by_hash(store, m.data_hash, Int64) == Int64[10, 20, 30]
+
+    # Multi-dim element tuple (4 steps × 3 coeffs) round-trips, row-major correct.
+    A = Float64[i + j / 10 for i in 1:4, j in 1:3]
+    add_time_series!(store, "c2", "Generator", Component, "cost",
+        SingleTimeSeries(t0, res, A, "QuadraticFunctionData"))
+    mq = get_metadata(store, "c2", "cost"; resolution=res)
+    @test mq.dtype == Float64
+    flat = get_array_by_hash(store, mq.data_hash, Float64)
+    @test permutedims(reshape(flat, (3, 4)), (2, 1)) == A
+end
