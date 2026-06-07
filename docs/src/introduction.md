@@ -64,11 +64,10 @@ flowchart TB
 
 **`SingleTimeSeries`** and **`NonSequentialTimeSeries`** — regular and explicitly timestamped static
 series — are implemented end to end across every interface (Rust, Python, Julia, and the gRPC
-server). The four forecast types
-(`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) are implemented in
-the **Rust core and the C ABI**; the Python and Julia bindings and the gRPC server currently expose
-them only as enum values and aggregate counts, not yet as create/read operations. See
-[Data Model](./explanation/data-model.md) for the full picture.
+server). The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
+`Scenarios`) are implemented in the **Rust core and the C ABI**; the Python and Julia bindings and
+the gRPC server currently expose them only as enum values and aggregate counts, not yet as
+create/read operations. See [Data Model](./explanation/data-model.md) for the full picture.
 
 ## Who Should Read This
 

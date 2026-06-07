@@ -2,6 +2,7 @@
 name = "time-series-store-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Core types, storage, and metadata for time-series-store"
@@ -18,6 +19,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "user-hooks"] }
 tempfile = "3"
 
 [[example]]

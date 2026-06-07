@@ -5,8 +5,6 @@
 //! a JSON object). Errors are reported via int32 status codes and a thread-
 //! local message accessed through [`ts_last_error_message`].
 
-#![allow(clippy::missing_safety_doc)]
-
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char};
@@ -90,6 +88,13 @@ unsafe fn cstr_to_optional_path(p: *const c_char) -> Result<Option<PathBuf>, i32
 
 // ---- Store create / open / free ------------------------------------------
 
+/// Create a time-series store and return an owning handle through `out`.
+///
+/// # Safety
+///
+/// `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
+/// null-terminated UTF-8 string. The returned handle must be released exactly once with
+/// `ts_store_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_create(
     path: *const c_char,
@@ -117,6 +122,12 @@ pub unsafe extern "C" fn ts_store_create(
     TS_OK
 }
 
+/// Open an existing time-series store and return an owning handle through `out`.
+///
+/// # Safety
+///
+/// `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
+/// one pointer. The returned handle must be released exactly once with `ts_store_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_open(
     path: *const c_char,
@@ -144,6 +155,12 @@ pub unsafe extern "C" fn ts_store_open(
     TS_OK
 }
 
+/// Release a store handle returned by `ts_store_create` or `ts_store_open`.
+///
+/// # Safety
+///
+/// `handle` must be null or a live handle returned by this library that has not already been freed.
+/// The handle must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_free(handle: *mut TsStoreHandle) {
     if !handle.is_null() {
@@ -153,13 +170,6 @@ pub unsafe extern "C" fn ts_store_free(handle: *mut TsStoreHandle) {
 
 // ---- add_single -----------------------------------------------------------
 
-/// Add a SingleTimeSeries to the store.
-///
-/// `data_ptr` / `data_len` describe a contiguous array of f64 values along the
-/// time axis. `features_json`, when non-null, is parsed as a JSON object whose
-/// values must be int / float / bool. `units` and `scaling_expr` are optional.
-/// On success, `out_key` receives an owned `TsKey *` that the caller must
-/// release with `ts_key_free`.
 /// Build a [`TypedArray`] from a dtype code, shape (`ndims` × `dims_ptr`), and
 /// raw little-endian bytes. Returns an FFI error code on failure (and sets the
 /// thread-local error). The buffers are borrowed for the duration of the call.
@@ -196,6 +206,18 @@ unsafe fn build_typed_array(
     })
 }
 
+/// Add a SingleTimeSeries to the store.
+///
+/// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float, or
+/// bool. `logical_type`, `units`, and `scaling_expr` are optional.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. Required string pointers must reference
+/// null-terminated UTF-8 strings; optional string pointers may be null. `dims_ptr` must reference
+/// `ndims` elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
+/// `out_key` must be valid for writing one pointer. The returned key must be released with
+/// `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_single(
@@ -320,6 +342,14 @@ pub unsafe extern "C" fn ts_store_add_single(
 // ---- add_non_sequential --------------------------------------------------
 
 /// Add a NonSequentialTimeSeries to the store.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. Required string pointers must reference
+/// null-terminated UTF-8 strings; optional string pointers may be null. `timestamps_unix_ns` must
+/// reference `timestamps_len` elements, `dims_ptr` must reference `ndims` elements when `ndims` is
+/// nonzero, and `data_ptr` must reference `data_byte_len` bytes. `out_key` must be valid for
+/// writing one pointer. The returned key must be released with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_non_sequential(
@@ -443,6 +473,12 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
 ///
 /// On success, the caller owns the buffer pointed to by `*out_data` and must
 /// free it with `ts_buffer_free_f64(*out_data, *out_data_len)`.
+///
+/// # Safety
+///
+/// `handle` and `key` must be live handles created by this library. Every output pointer must be
+/// valid for writing its indicated value. The returned data buffer must be released exactly once
+/// with `ts_buffer_free_f64` using the returned length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_get_single(
     handle: *const TsStoreHandle,
@@ -514,6 +550,12 @@ pub unsafe extern "C" fn ts_store_get_single(
 ///
 /// The caller owns both output buffers and must release them with
 /// `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+///
+/// # Safety
+///
+/// `handle` and `key` must be live handles created by this library. Every output pointer must be
+/// valid for writing its indicated value. Returned buffers must each be released exactly once with
+/// the matching free function and returned length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_get_non_sequential(
     handle: *const TsStoreHandle,
@@ -582,6 +624,12 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
 
 // ---- remove / has / counts / verify ---------------------------------------
 
+/// Remove the time series identified by `key`.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `key` must be a live key handle created by this
+/// library. Neither handle may be concurrently mutated for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_remove(
     handle: *mut TsStoreHandle,
@@ -602,6 +650,12 @@ pub unsafe extern "C" fn ts_store_remove(
     }
 }
 
+/// Report whether the store contains the time series identified by `key`.
+///
+/// # Safety
+///
+/// `handle` and `key` must be live handles created by this library, and `out_present` must be valid
+/// for writing one `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has(
     handle: *const TsStoreHandle,
@@ -629,6 +683,11 @@ pub unsafe extern "C" fn ts_store_has(
     }
 }
 
+/// Return aggregate time-series counts.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. All output pointers must be valid for writing one `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_counts(
     handle: *const TsStoreHandle,
@@ -660,6 +719,11 @@ pub unsafe extern "C" fn ts_store_counts(
     }
 }
 
+/// Verify store integrity and return the number of detected errors.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `out_error_count` must be valid for writing one `u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_verify(
     handle: *const TsStoreHandle,
@@ -682,6 +746,12 @@ pub unsafe extern "C" fn ts_store_verify(
     }
 }
 
+/// Compact the store.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
+/// of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_compact(handle: *mut TsStoreHandle) -> i32 {
     clear_error();
@@ -695,6 +765,12 @@ pub unsafe extern "C" fn ts_store_compact(handle: *mut TsStoreHandle) -> i32 {
     }
 }
 
+/// Flush pending store writes.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
+/// of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
     clear_error();
@@ -746,6 +822,12 @@ unsafe fn build_key_from_attrs(
 /// caller's out-params receive the initial timestamp, resolution, length, and
 /// the 32-byte content hash (written into the `out_data_hash` buffer, which
 /// must have room for 32 bytes). Returns `TS_ERR_NOT_FOUND` if absent.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
+/// `features_json` may be null. Scalar output pointers must be valid for one value and
+/// `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_metadata(
@@ -807,6 +889,11 @@ pub unsafe extern "C" fn ts_store_get_metadata(
 }
 
 /// True iff a SingleTimeSeries with the given attributes exists.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
+/// `features_json` may be null. `out_present` must be valid for writing one `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_by_attrs(
     handle: *const TsStoreHandle,
@@ -840,6 +927,11 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
 
 /// Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
 /// other association still references its content hash.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8,
+/// and `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_remove_by_attrs(
     handle: *mut TsStoreHandle,
@@ -865,7 +957,13 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
 }
 
 /// Fetch a stored array by its 32-byte content hash. On success the caller owns
-/// `*out_data` and must free it with `ts_buffer_free_f64`.
+/// `*out_data` and must free it with `ts_buffer_free_u8`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, `data_hash` must reference 32 readable bytes, and every
+/// output pointer must be valid for writing its indicated value. The returned buffer must be
+/// released exactly once with `ts_buffer_free_u8` using the returned byte length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_get_array_by_hash(
     handle: *const TsStoreHandle,
@@ -941,6 +1039,12 @@ unsafe fn build_typed_key_from_attrs(
 /// Add a forecast. `data_ptr`/`data_len` is the flattened storage array
 /// (Deterministic: `(horizon_count, count)` column-major; DST: the underlying
 /// SingleTimeSeries array). `ts_type`: 2=Deterministic, 3=DeterministicSingleTimeSeries.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8;
+/// optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key` must
+/// be valid for writing one pointer. The returned key must be released with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_forecast(
@@ -1051,6 +1155,13 @@ pub unsafe extern "C" fn ts_store_add_forecast(
 /// Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
 /// `(percentile_count, horizon_count, count)` column-major; `percentiles` is the
 /// percentile vector.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8;
+/// optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their respective
+/// element counts, and `out_key` must be valid for writing one pointer. The returned key must be
+/// released with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_probabilistic(
@@ -1157,6 +1268,14 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
 /// Read `Probabilistic` metadata. Like `ts_store_get_forecast_metadata` but also
 /// returns the percentiles vector in `*out_percentiles` (caller frees with
 /// `ts_buffer_free_f64`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
+/// `features_json` may be null. Scalar output pointers must each be valid for one value,
+/// `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for writing one
+/// pointer. The returned percentile buffer must be released exactly once with
+/// `ts_buffer_free_f64` using the returned length.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
@@ -1235,6 +1354,12 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
 /// Read forecast metadata by attributes. Out-params receive initial timestamp,
 /// resolution, horizon, interval, count, the stored array length, and the
 /// 32-byte content hash (into `out_data_hash`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
+/// `features_json` may be null. Scalar output pointers must each be valid for one value and
+/// `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_metadata(
@@ -1305,6 +1430,11 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 }
 
 /// True iff a time series of `ts_type` with the given attributes exists.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
+/// `features_json` may be null. `out_present` must be valid for writing one `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_typed(
     handle: *const TsStoreHandle,
@@ -1339,6 +1469,11 @@ pub unsafe extern "C" fn ts_store_has_typed(
 }
 
 /// Remove a time series of `ts_type` by attributes.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8,
+/// and `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_remove_typed(
     handle: *mut TsStoreHandle,
@@ -1367,6 +1502,11 @@ pub unsafe extern "C" fn ts_store_remove_typed(
 
 /// Remove all time series, or all for a single owner when `owner_uuid` is
 /// non-null. Returns `TS_OK` on success.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. When non-null, `owner_uuid` must point to a
+/// null-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_clear(
     handle: *mut TsStoreHandle,
@@ -1389,6 +1529,12 @@ pub unsafe extern "C" fn ts_store_clear(
 
 // ---- Free helpers ---------------------------------------------------------
 
+/// Release a key handle returned by this library.
+///
+/// # Safety
+///
+/// `key` must be null or a live key handle returned by this library that has not already been
+/// freed. The key must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_key_free(key: *mut TsKeyHandle) {
     if !key.is_null() {
@@ -1396,6 +1542,12 @@ pub unsafe extern "C" fn ts_key_free(key: *mut TsKeyHandle) {
     }
 }
 
+/// Release an `f64` buffer returned by this library.
+///
+/// # Safety
+///
+/// `ptr` must be null or a buffer returned by this library with exactly `len` elements. It must not
+/// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_buffer_free_f64(ptr: *mut f64, len: u64) {
     if !ptr.is_null() {
@@ -1405,6 +1557,11 @@ pub unsafe extern "C" fn ts_buffer_free_f64(ptr: *mut f64, len: u64) {
 }
 
 /// Free a `u8` buffer returned by `ts_store_get_array_by_hash`.
+///
+/// # Safety
+///
+/// `ptr` must be null or a buffer returned by this library with exactly `len` bytes. It must not
+/// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_buffer_free_u8(ptr: *mut u8, len: u64) {
     if !ptr.is_null() {
@@ -1414,6 +1571,11 @@ pub unsafe extern "C" fn ts_buffer_free_u8(ptr: *mut u8, len: u64) {
 }
 
 /// Free an `i64` buffer returned by `ts_store_get_non_sequential`.
+///
+/// # Safety
+///
+/// `ptr` must be null or a buffer returned by this library with exactly `len` elements. It must not
+/// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_buffer_free_i64(ptr: *mut i64, len: u64) {
     if !ptr.is_null() {
@@ -1429,6 +1591,11 @@ pub unsafe extern "C" fn ts_buffer_free_i64(ptr: *mut i64, len: u64) {
 /// in `*needed`. If `buf_len` is too small, `buf` is filled up to its length
 /// and truncated; the function still returns `TS_OK` and the caller can decide
 /// whether to retry with a larger buffer.
+///
+/// # Safety
+///
+/// `needed` may be null; otherwise it must be valid for writing one `u64`. `buf` may be null when
+/// `buf_len` is zero; otherwise it must reference at least `buf_len` writable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_last_error_message(
     buf: *mut c_char,

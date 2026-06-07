@@ -35,8 +35,8 @@ types are implemented in the Rust core and the C ABI:
 | `Scenarios`                     | Core + C ABI      | Forecast with discrete scenarios                    |
 
 The Python and Julia bindings and the gRPC server currently surface the forecast types only as
-`TimeSeriesType` values and aggregate counts — creating and reading forecast _values_ is a
-Rust-core and C-ABI capability today. See [Forecasts](#forecasts) below.
+`TimeSeriesType` values and aggregate counts — creating and reading forecast _values_ is a Rust-core
+and C-ABI capability today. See [Forecasts](#forecasts) below.
 
 ### `NonSequentialTimeSeries`
 

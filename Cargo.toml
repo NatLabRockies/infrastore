@@ -11,6 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/NatLabRockies/time-series-store"
 
@@ -23,8 +24,8 @@ prost = "0.14"
 prost-types = "0.14"
 sha2 = "0.10"
 thiserror = "1"
-time-series-store-core = { path = "crates/time-series-store-core" }
-time-series-store-proto = { path = "crates/time-series-store-proto" }
+time-series-store-core = { version = "0.1.0", path = "crates/time-series-store-core" }
+time-series-store-proto = { version = "0.1.0", path = "crates/time-series-store-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 tonic = "0.14"
 tonic-prost = "0.14"

@@ -6,15 +6,17 @@ crates and four language bindings, and streamlines review.
 
 ## Pre-commit Checks
 
-There is no automated Git hook in this repository — run the checks manually before every commit:
+The repository uses `cargo-husky` to install a pre-commit hook. The hook runs:
 
 ```bash
 cargo fmt --all -- --check                              # Rust formatting
-cargo clippy --workspace --all-targets -- -D warnings   # Rust linting
-cargo test --workspace                                  # Tests
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+dprint check                                             # Markdown formatting
 ```
 
-If any check fails, fix it before committing. Keep the workspace clippy-clean.
+The hook is installed when `time-series-store-core` is built. If any check fails, the commit is
+blocked. It also runs `shellcheck` when that tool is available. Run
+`cargo test --workspace --all-features` before committing and keep the workspace clippy-clean.
 
 ## Code Formatting
 
@@ -35,7 +37,7 @@ auto-format.
 All code must compile without clippy warnings when run with `-D warnings`:
 
 ```bash
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 The workspace targets Rust edition 2024 (requires Rust 1.95+). Match the idioms of the surrounding
