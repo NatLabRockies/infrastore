@@ -7,7 +7,9 @@ export Store, SingleTimeSeries, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, get_time_series, remove_time_series!,
        has_time_series, get_counts, verify_integrity, compact!,
-       get_metadata, get_array_by_hash, open_store, flush!,
+       get_metadata, get_array_by_hash, open_store, flush!, clear!,
+       add_forecast!, get_forecast_metadata, has_typed, remove_typed!,
+       add_probabilistic!, get_probabilistic_metadata,
        close!
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
@@ -437,6 +439,202 @@ function flush!(store::Store)
                  (Ptr{Cvoid},), store.handle)
     _check(code)
     return nothing
+end
+
+"""Remove all time series (data + metadata) from the store."""
+function clear!(store::Store)
+    code = ccall((:ts_store_clear, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring), store.handle, C_NULL)
+    _check(code)
+    return nothing
+end
+
+# ---- Forecasts -------------------------------------------------------------
+#
+# TimeSeriesType integer codes (must match the Rust `TimeSeriesType` enum):
+const TS_TYPE_SINGLE                       = 0
+const TS_TYPE_NON_SEQUENTIAL               = 1
+const TS_TYPE_DETERMINISTIC                = 2
+const TS_TYPE_DETERMINISTIC_SINGLE         = 3
+const TS_TYPE_PROBABILISTIC                = 4
+const TS_TYPE_SCENARIOS                    = 5
+
+_features_arg(features) = isempty(features) ? C_NULL : JSON.json(features)
+_category_int(c::OwnerCategory) = Int32(Int(c))
+
+"""
+    add_forecast!(store, owner_uuid, owner_type, owner_category, name, ts_type,
+                  initial_timestamp, resolution, horizon, interval, count, flat_values;
+                  features=Dict(), units=nothing, scaling_factor_multiplier=nothing)
+
+Add a forecast. `flat_values` is the flattened storage array (the caller owns the
+window layout); `ts_type` is one of the `TS_TYPE_*` codes.
+"""
+function add_forecast!(
+    store::Store,
+    owner_uuid::AbstractString,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    ts_type::Integer,
+    initial_timestamp::DateTime,
+    resolution::Period,
+    horizon::Period,
+    interval::Period,
+    count::Integer,
+    flat_values::Vector{Float64};
+    features::AbstractDict=Dict{String,Any}(),
+    units::Union{Nothing,AbstractString}=nothing,
+    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+)
+    features_json = _features_arg(features)
+    units_ptr = units === nothing ? C_NULL : String(units)
+    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall(
+        (:ts_store_add_forecast, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int32, Int64, Int64, Int64, Int64,
+         UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
+        Int32(ts_type), _to_unix_ns(initial_timestamp), _resolution_to_ns(resolution),
+        _resolution_to_ns(horizon), _resolution_to_ns(interval), UInt64(count),
+        flat_values, UInt64(length(flat_values)), features_json, units_ptr, scaling_ptr, out_key,
+    )
+    _check(code)
+    return TimeSeriesKey(out_key[])
+end
+
+"""
+    get_forecast_metadata(store, owner_uuid, name, ts_type; resolution, features=Dict())
+
+Return `(; initial_timestamp, resolution, horizon, interval, count, length, data_hash)`.
+"""
+function get_forecast_metadata(
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = _features_arg(features)
+    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
+    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
+    code = ccall(
+        (:ts_store_get_forecast_metadata, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring,
+         Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json,
+        oi, orr, oh, ov, oc, ol, ohash,
+    )
+    _check(code)
+    return (
+        initial_timestamp=_from_unix_ns(oi[]),
+        resolution=Millisecond(div(orr[], 1_000_000)),
+        horizon=Millisecond(div(oh[], 1_000_000)),
+        interval=Millisecond(div(ov[], 1_000_000)),
+        count=Int(oc[]), length=Int(ol[]), data_hash=ohash,
+    )
+end
+
+"""True iff a time series of `ts_type` with the given attributes exists."""
+function has_typed(
+    store::Store, owner_uuid::AbstractString, name::AbstractString, ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = _features_arg(features)
+    out = Ref{Bool}(false)
+    code = ccall(
+        (:ts_store_has_typed, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring, Ref{Bool}),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json, out,
+    )
+    _check(code)
+    return out[]
+end
+
+"""Remove a time series of `ts_type` by attributes."""
+function remove_typed!(
+    store::Store, owner_uuid::AbstractString, name::AbstractString, ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = _features_arg(features)
+    code = ccall(
+        (:ts_store_remove_typed, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json,
+    )
+    _check(code)
+    return nothing
+end
+
+"""Add a Probabilistic forecast (carries a `percentiles` vector)."""
+function add_probabilistic!(
+    store::Store,
+    owner_uuid::AbstractString,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    initial_timestamp::DateTime,
+    resolution::Period,
+    horizon::Period,
+    interval::Period,
+    count::Integer,
+    percentiles::Vector{Float64},
+    flat_values::Vector{Float64};
+    features::AbstractDict=Dict{String,Any}(),
+    units::Union{Nothing,AbstractString}=nothing,
+    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+)
+    features_json = _features_arg(features)
+    units_ptr = units === nothing ? C_NULL : String(units)
+    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall(
+        (:ts_store_add_probabilistic, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64, Int64, Int64, UInt64,
+         Ptr{Float64}, UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
+        _to_unix_ns(initial_timestamp), _resolution_to_ns(resolution),
+        _resolution_to_ns(horizon), _resolution_to_ns(interval), UInt64(count),
+        percentiles, UInt64(length(percentiles)), flat_values, UInt64(length(flat_values)),
+        features_json, units_ptr, scaling_ptr, out_key,
+    )
+    _check(code)
+    return TimeSeriesKey(out_key[])
+end
+
+"""Read Probabilistic metadata; the named tuple also includes `percentiles`."""
+function get_probabilistic_metadata(
+    store::Store, owner_uuid::AbstractString, name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = _features_arg(features)
+    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
+    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
+    op = Ref{Ptr{Float64}}(C_NULL); opl = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_get_probabilistic_metadata, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Int64}, Ref{Int64}, Ref{Int64},
+         Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
+        store.handle, owner_uuid, name, resolution_ns, features_json,
+        oi, orr, oh, ov, oc, ol, ohash, op, opl,
+    )
+    _check(code)
+    np = Int(opl[])
+    percentiles = copy(unsafe_wrap(Array, op[], np; own=false))
+    ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), op[], opl[])
+    return (
+        initial_timestamp=_from_unix_ns(oi[]),
+        resolution=Millisecond(div(orr[], 1_000_000)),
+        horizon=Millisecond(div(oh[], 1_000_000)),
+        interval=Millisecond(div(ov[], 1_000_000)),
+        count=Int(oc[]), length=Int(ol[]), data_hash=ohash, percentiles=percentiles,
+    )
 end
 
 end # module TimeSeriesStore
