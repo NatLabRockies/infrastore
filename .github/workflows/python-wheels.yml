@@ -1,0 +1,56 @@
+# Build (and, on tags, publish) the `time-series-store` Python wheels.
+#
+# The PyO3 crate links libnetcdf + libhdf5; cibuildwheel installs Rust and the
+# system HDF5/NetCDF in `before-all` (see [tool.cibuildwheel] in pyproject.toml)
+# and repairs each wheel to bundle the shared libraries (auditwheel/delocate).
+name: python-wheels
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["crates/time-series-store-py/**", "crates/time-series-store-core/**"]
+  workflow_dispatch:
+
+jobs:
+  wheels:
+    name: wheels ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+    defaults:
+      run:
+        working-directory: crates/time-series-store-py
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2
+        with:
+          package-dir: crates/time-series-store-py
+          output-dir: wheelhouse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: crates/time-series-store-py/wheelhouse/*.whl
+
+  publish:
+    name: publish to PyPI
+    needs: wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: pypi
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

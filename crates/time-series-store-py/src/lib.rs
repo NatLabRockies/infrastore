@@ -1,9 +1,9 @@
 //! PyO3 bindings for `time-series-store`.
 //!
-//! Exposed module name: `time_series`. Top-level surface:
+//! Exposed module name: `time_series_store`. Top-level surface:
 //!
 //! ```python
-//! from time_series import (
+//! from time_series_store import (
 //!     TimeSeriesStore, SingleTimeSeries, TimeSeriesKey,
 //!     TimeSeriesType, OwnerCategory,
 //!     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError, InvalidParameterError,
@@ -25,12 +25,12 @@ use time_series_store_core as core_lib;
 
 // ---- Exceptions -----------------------------------------------------------
 
-create_exception!(time_series, TimeSeriesError, PyException);
-create_exception!(time_series, NotFoundError, TimeSeriesError);
-create_exception!(time_series, DuplicateTimeSeriesError, TimeSeriesError);
-create_exception!(time_series, InvalidParameterError, TimeSeriesError);
-create_exception!(time_series, IntegrityError, TimeSeriesError);
-create_exception!(time_series, ReadOnlyStoreError, TimeSeriesError);
+create_exception!(time_series_store, TimeSeriesError, PyException);
+create_exception!(time_series_store, NotFoundError, TimeSeriesError);
+create_exception!(time_series_store, DuplicateTimeSeriesError, TimeSeriesError);
+create_exception!(time_series_store, InvalidParameterError, TimeSeriesError);
+create_exception!(time_series_store, IntegrityError, TimeSeriesError);
+create_exception!(time_series_store, ReadOnlyStoreError, TimeSeriesError);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -52,7 +52,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
 
 // ---- Enums ----------------------------------------------------------------
 
-#[pyclass(eq, eq_int, name = "TimeSeriesType", module = "time_series", from_py_object)]
+#[pyclass(eq, eq_int, name = "TimeSeriesType", module = "time_series_store", from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PyTimeSeriesType {
     SingleTimeSeries,
@@ -97,7 +97,7 @@ impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
     }
 }
 
-#[pyclass(eq, eq_int, name = "OwnerCategory", module = "time_series", from_py_object)]
+#[pyclass(eq, eq_int, name = "OwnerCategory", module = "time_series_store", from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PyOwnerCategory {
     Component,
@@ -171,7 +171,7 @@ fn features_to_dict<'py>(
 
 // ---- SingleTimeSeries -----------------------------------------------------
 
-#[pyclass(name = "SingleTimeSeries", module = "time_series", from_py_object)]
+#[pyclass(name = "SingleTimeSeries", module = "time_series_store", from_py_object)]
 #[derive(Clone)]
 pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
@@ -225,7 +225,7 @@ impl PySingleTimeSeries {
 
 // ---- TimeSeriesKey --------------------------------------------------------
 
-#[pyclass(name = "TimeSeriesKey", module = "time_series", from_py_object)]
+#[pyclass(name = "TimeSeriesKey", module = "time_series_store", from_py_object)]
 #[derive(Clone)]
 pub struct PyTimeSeriesKey {
     inner: core_lib::TimeSeriesKey,
@@ -274,7 +274,7 @@ impl PyTimeSeriesKey {
 
 // ---- TimeSeriesStore ------------------------------------------------------
 
-#[pyclass(name = "TimeSeriesStore", module = "time_series", unsendable)]
+#[pyclass(name = "TimeSeriesStore", module = "time_series_store", unsendable)]
 pub struct PyStore {
     inner: core_lib::Store,
 }
@@ -523,7 +523,7 @@ fn unused_tz_imports() {
 // ---- Module init ----------------------------------------------------------
 
 #[pymodule]
-fn time_series(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStore>()?;
     m.add_class::<PySingleTimeSeries>()?;
     m.add_class::<PyTimeSeriesKey>()?;

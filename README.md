@@ -86,7 +86,7 @@ pytest ../../python/tests
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series import TimeSeriesStore, SingleTimeSeries, OwnerCategory
+from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory
 
 store = TimeSeriesStore.create(in_memory=True)
 ts = SingleTimeSeries(

@@ -20,4 +20,22 @@ test = ["pytest>=7"]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "time_series"
+module-name = "time_series_store"
+
+# cibuildwheel builds one abi3 wheel per platform (the crate targets abi3-py310).
+# The cdylib links libnetcdf + libhdf5, so the build environment must provide
+# them and the repair step bundles them into the wheel.
+[tool.cibuildwheel]
+build = "cp310-*"
+build-frontend = "build"
+# Install the Rust toolchain and the NetCDF/HDF5 development libraries before
+# building. Tune per platform; on manylinux these may need building from source
+# or a prebuilt (set HDF5_DIR / NETCDF_DIR for the netcdf-sys build script).
+before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
+
+[tool.cibuildwheel.linux]
+before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y && (yum install -y hdf5-devel netcdf-devel || dnf install -y hdf5-devel netcdf-devel || true)"
+
+[tool.cibuildwheel.macos]
+before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y && brew install hdf5 netcdf"
