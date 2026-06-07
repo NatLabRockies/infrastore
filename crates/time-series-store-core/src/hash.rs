@@ -5,37 +5,47 @@
 //! any change here that perturbs those values is a format-breaking change and
 //! must bump [`crate::DATA_FORMAT_VERSION`].
 
-use ndarray::ArrayD;
 use sha2::{Digest, Sha256};
 
+use crate::types::array::{Dtype, TypedArray};
 use crate::types::metadata::{FeatureValue, Features};
 
-/// Tag identifying the element dtype. Currently only f64 is supported.
-const DTYPE_TAG_F64: &[u8] = b"f64\0";
-
-/// Compute the canonical content hash for an `ArrayD<f64>`.
+/// Compute the canonical content hash for a [`TypedArray`].
 ///
-/// Domain: dtype tag → shape (rank then each dim as u64 LE) → elements (each
-/// `f64::to_le_bytes`) in row-major iteration order. NaN values are normalized
-/// to a single canonical quiet-NaN bit pattern before hashing so that
-/// semantically-equal arrays do not collide on payload bits.
-pub fn array_hash(data: &ArrayD<f64>) -> [u8; 32] {
+/// Domain: dtype tag → shape (rank then each dim as u64 LE) → element bytes in
+/// row-major order. For float dtypes, NaN values are normalized to a single
+/// canonical quiet-NaN bit pattern before hashing so semantically-equal arrays
+/// do not collide on payload bits; integer/bool bytes are hashed verbatim.
+/// Identity is therefore `(dtype, shape, content)`: arrays of different dtype or
+/// shape never collide.
+pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(DTYPE_TAG_F64);
+    hasher.update(data.dtype.as_str().as_bytes());
+    hasher.update([0u8]);
 
-    let shape = data.shape();
-    hasher.update((shape.len() as u64).to_le_bytes());
-    for dim in shape {
+    hasher.update((data.shape.len() as u64).to_le_bytes());
+    for dim in &data.shape {
         hasher.update((*dim as u64).to_le_bytes());
     }
 
-    for element in data.iter() {
-        let bits = if element.is_nan() {
-            f64::NAN.to_bits()
-        } else {
-            element.to_bits()
-        };
-        hasher.update(bits.to_le_bytes());
+    match data.dtype {
+        Dtype::F64 => {
+            for c in data.bytes.chunks_exact(8) {
+                let v = f64::from_le_bytes(c.try_into().unwrap());
+                let bits = if v.is_nan() { f64::NAN.to_bits() } else { v.to_bits() };
+                hasher.update(bits.to_le_bytes());
+            }
+        }
+        Dtype::F32 => {
+            for c in data.bytes.chunks_exact(4) {
+                let v = f32::from_le_bytes(c.try_into().unwrap());
+                let bits = if v.is_nan() { f32::NAN.to_bits() } else { v.to_bits() };
+                hasher.update(bits.to_le_bytes());
+            }
+        }
+        Dtype::I64 | Dtype::I32 | Dtype::U64 | Dtype::Bool => {
+            hasher.update(&data.bytes);
+        }
     }
 
     let digest = hasher.finalize();
@@ -104,47 +114,57 @@ pub fn hash_hex(hash: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+
+    fn f64_array(shape: Vec<usize>, values: &[f64]) -> TypedArray {
+        TypedArray::from_f64(shape, values)
+    }
 
     #[test]
     fn equal_arrays_hash_equal() {
-        let a = array![1.0_f64, 2.0, 3.0].into_dyn();
-        let b = array![1.0_f64, 2.0, 3.0].into_dyn();
+        let a = f64_array(vec![3], &[1.0, 2.0, 3.0]);
+        let b = f64_array(vec![3], &[1.0, 2.0, 3.0]);
         assert_eq!(array_hash(&a), array_hash(&b));
     }
 
     #[test]
     fn different_arrays_hash_differ() {
-        let a = array![1.0_f64, 2.0, 3.0].into_dyn();
-        let b = array![1.0_f64, 2.0, 4.0].into_dyn();
+        let a = f64_array(vec![3], &[1.0, 2.0, 3.0]);
+        let b = f64_array(vec![3], &[1.0, 2.0, 4.0]);
         assert_ne!(array_hash(&a), array_hash(&b));
+    }
+
+    #[test]
+    fn different_dtypes_hash_differ() {
+        let f = f64_array(vec![2], &[1.0, 2.0]);
+        // Same logical values stored as i64 must hash differently.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1i64.to_le_bytes());
+        bytes.extend_from_slice(&2i64.to_le_bytes());
+        let i = TypedArray::new(Dtype::I64, vec![2], bytes).unwrap();
+        assert_ne!(array_hash(&f), array_hash(&i));
     }
 
     #[test]
     fn nan_canonicalization() {
-        // Two arrays with NaNs that may or may not have different payload bits
-        // must still hash to the same value.
-        let mut a = array![1.0_f64, f64::NAN, 3.0].into_dyn();
-        let mut b = array![1.0_f64, f64::NAN, 3.0].into_dyn();
-
-        // Inject a different NaN bit pattern into `b`.
+        let a = f64_array(vec![3], &[1.0, f64::NAN, 3.0]);
+        // Inject a different NaN bit pattern into `b` at index 1.
         let alt_nan = f64::from_bits(0x7ff8_0000_0000_0001);
         assert!(alt_nan.is_nan());
-        b[1] = alt_nan;
+        let b = f64_array(vec![3], &[1.0, alt_nan, 3.0]);
 
         assert_eq!(array_hash(&a), array_hash(&b));
-        // Sanity: a and b are still bitwise different at index 1.
-        assert_ne!(a[1].to_bits(), b[1].to_bits());
+        // Sanity: the two are bitwise different at index 1.
+        assert_ne!(a.bytes[8..16], b.bytes[8..16]);
 
         // Mutating an actual value still changes the hash.
-        a[0] = 1.5;
-        assert_ne!(array_hash(&a), array_hash(&b));
+        let c = f64_array(vec![3], &[1.5, alt_nan, 3.0]);
+        assert_ne!(array_hash(&c), array_hash(&b));
     }
 
     #[test]
     fn shape_affects_hash() {
-        let flat = ArrayD::from_shape_vec(vec![4], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-        let square = ArrayD::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let flat = f64_array(vec![4], &[1.0, 2.0, 3.0, 4.0]);
+        let square = f64_array(vec![2, 2], &[1.0, 2.0, 3.0, 4.0]);
         assert_ne!(array_hash(&flat), array_hash(&square));
     }
 

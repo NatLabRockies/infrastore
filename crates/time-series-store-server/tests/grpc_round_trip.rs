@@ -5,10 +5,9 @@ use std::collections::BTreeMap;
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
-use ndarray::ArrayD;
 use time_series_store_core::{
     create_store, FeatureValue, Features, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesType,
+    TimeSeriesData, TimeSeriesType, TypedArray,
 };
 use time_series_store_server::client::RemoteClient;
 use time_series_store_server::service::TimeSeriesStoreService;
@@ -36,11 +35,8 @@ async fn spawn_server(store: Store) -> String {
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
     let initial = Utc.with_ymd_and_hms(initial_year, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data: ArrayD<f64> = ArrayD::from_shape_vec(
-        vec![length],
-        (0..length).map(|i| base + i as f64).collect(),
-    )
-    .unwrap();
+    let values: Vec<f64> = (0..length).map(|i| base + i as f64).collect();
+    let data = TypedArray::from_f64(vec![length], &values);
     SingleTimeSeries::new(initial, resolution, data)
 }
 
@@ -94,8 +90,8 @@ async fn list_and_get_round_trip() {
     let data = client.get_time_series(&keys[0], None).await.unwrap();
     let single = data.as_single().unwrap();
     assert_eq!(single.length, 24);
-    assert_eq!(single.data[0], 100.0);
-    assert_eq!(single.data[23], 123.0);
+    assert_eq!(single.data.to_f64_vec().unwrap()[0], 100.0);
+    assert_eq!(single.data.to_f64_vec().unwrap()[23], 123.0);
 }
 
 #[tokio::test]
@@ -115,7 +111,7 @@ async fn time_range_slicing_over_grpc() {
     assert_eq!(single.length, 3);
     assert_eq!(single.initial_timestamp, start);
     assert_eq!(
-        single.data.iter().copied().collect::<Vec<_>>(),
+        single.data.to_f64_vec().unwrap(),
         vec![102.0, 103.0, 104.0]
     );
 }

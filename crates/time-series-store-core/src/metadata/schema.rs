@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     scaling_factor    TEXT,
     units             TEXT,
     percentiles_json  TEXT,
+    dtype             TEXT    NOT NULL DEFAULT 'f64',
+    element_shape     TEXT,
+    logical_type      TEXT,
     features_hash     BLOB    NOT NULL
 );
 

@@ -1,8 +1,9 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, Duration, Utc};
-use ndarray::ArrayD;
 use serde::{Deserialize, Serialize};
+
+use super::array::TypedArray;
 
 /// Discriminator for the six time series types defined in the spec.
 ///
@@ -51,26 +52,26 @@ impl FromStr for TimeSeriesType {
     }
 }
 
-/// A one-dimensional (in time) array of values at regular intervals.
+/// A time series array at regular intervals.
 ///
-/// The trailing axes of `data` may carry per-timestep vectors (e.g. polynomial
-/// coefficients for a cost curve), so `data` is `ArrayD<f64>` rather than a
-/// 1D array.
+/// `data` is a [`TypedArray`]: its first dimension is time (`length`) and any
+/// trailing dimensions are the per-step element shape (e.g. the 3 coefficients
+/// of a quadratic cost curve). The element dtype is part of the array.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SingleTimeSeries {
     pub initial_timestamp: DateTime<Utc>,
     pub resolution: Duration,
     pub length: usize,
-    pub data: ArrayD<f64>,
+    pub data: TypedArray,
 }
 
 impl SingleTimeSeries {
     pub fn new(
         initial_timestamp: DateTime<Utc>,
         resolution: Duration,
-        data: ArrayD<f64>,
+        data: TypedArray,
     ) -> Self {
-        let length = data.shape().first().copied().unwrap_or(0);
+        let length = data.length();
         Self {
             initial_timestamp,
             resolution,

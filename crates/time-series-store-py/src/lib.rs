@@ -186,9 +186,12 @@ impl PySingleTimeSeries {
         data: PyReadonlyArrayDyn<'_, f64>,
     ) -> PyResult<Self> {
         let resolution = pydelta_to_chrono(&resolution)?;
-        let data: ArrayD<f64> = data.as_array().to_owned();
+        let arr = data.as_array();
+        let shape: Vec<usize> = arr.shape().to_vec();
+        let values: Vec<f64> = arr.iter().copied().collect();
+        let typed = core_lib::TypedArray::from_f64(shape, &values);
         Ok(Self {
-            inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, data),
+            inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed),
         })
     }
 
@@ -208,8 +211,12 @@ impl PySingleTimeSeries {
     }
 
     #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> Bound<'py, PyArrayDyn<f64>> {
-        numpy::PyArray::from_array(py, &self.inner.data)
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
+        let shape = self.inner.data.shape.clone();
+        let values = self.inner.data.to_f64_vec().map_err(InvalidParameterError::new_err)?;
+        let arr = ArrayD::from_shape_vec(shape, values)
+            .map_err(|e| InvalidParameterError::new_err(e.to_string()))?;
+        Ok(numpy::PyArray::from_array(py, &arr))
     }
 
     fn __repr__(&self) -> String {
@@ -218,7 +225,7 @@ impl PySingleTimeSeries {
             self.inner.initial_timestamp,
             self.inner.length,
             self.inner.resolution.num_seconds(),
-            self.inner.data.shape(),
+            self.inner.data.shape,
         )
     }
 }

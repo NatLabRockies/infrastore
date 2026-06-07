@@ -15,7 +15,6 @@ use std::ptr;
 use std::slice;
 
 use chrono::{DateTime, Duration, Utc};
-use ndarray::ArrayD;
 use serde_json::Value;
 use time_series_store_core as core_lib;
 
@@ -243,14 +242,8 @@ pub unsafe extern "C" fn ts_store_add_single(
     };
     let resolution = Duration::nanoseconds(resolution_ns);
     let len = data_len as usize;
-    let values: Vec<f64> = unsafe { slice::from_raw_parts(data_ptr, len) }.to_vec();
-    let array = match ArrayD::from_shape_vec(vec![len], values) {
-        Ok(a) => a,
-        Err(e) => {
-            set_error(format!("data shape error: {e}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
+    let values: &[f64] = unsafe { slice::from_raw_parts(data_ptr, len) };
+    let array = core_lib::TypedArray::from_f64(vec![len], values);
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array);
     let data = core_lib::TimeSeriesData::SingleTimeSeries(single);
 
@@ -326,7 +319,7 @@ pub unsafe extern "C" fn ts_store_get_single(
     let resolution_ns = single.resolution.num_nanoseconds().unwrap_or_else(|| {
         single.resolution.num_seconds() * 1_000_000_000
     });
-    let mut buf: Vec<f64> = single.data.iter().copied().collect();
+    let mut buf: Vec<f64> = single.data.to_f64_vec().unwrap_or_default();
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr();
     std::mem::forget(buf);
@@ -641,7 +634,7 @@ pub unsafe extern "C" fn ts_store_get_array_by_hash(
         Ok(a) => a,
         Err(e) => return map_core_error(e),
     };
-    let mut buf: Vec<f64> = array.iter().copied().collect();
+    let mut buf: Vec<f64> = array.to_f64_vec().unwrap_or_default();
     let len = buf.len() as u64;
     let p = buf.as_mut_ptr();
     std::mem::forget(buf);
@@ -766,14 +759,8 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         }
     };
     let len = data_len as usize;
-    let values: Vec<f64> = unsafe { slice::from_raw_parts(data_ptr, len) }.to_vec();
-    let array = match ArrayD::from_shape_vec(vec![len], values) {
-        Ok(a) => a,
-        Err(e) => {
-            set_error(format!("data shape error: {e}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
+    let values: &[f64] = unsafe { slice::from_raw_parts(data_ptr, len) };
+    let array = core_lib::TypedArray::from_f64(vec![len], values);
 
     match store.inner.add_forecast(
         owner_uuid,
@@ -790,6 +777,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         features,
         units,
         scaling_expr,
+        None,
         None,
     ) {
         Ok(key) => {
@@ -877,14 +865,8 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     let percentiles =
         unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
     let len = data_len as usize;
-    let values: Vec<f64> = unsafe { slice::from_raw_parts(data_ptr, len) }.to_vec();
-    let array = match ArrayD::from_shape_vec(vec![len], values) {
-        Ok(a) => a,
-        Err(e) => {
-            set_error(format!("data shape error: {e}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
+    let values: &[f64] = unsafe { slice::from_raw_parts(data_ptr, len) };
+    let array = core_lib::TypedArray::from_f64(vec![len], values);
 
     match store.inner.add_forecast(
         owner_uuid,
@@ -902,6 +884,7 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         units,
         scaling_expr,
         Some(percentiles),
+        None,
     ) {
         Ok(key) => {
             let handle = Box::new(TsKeyHandle { inner: key });

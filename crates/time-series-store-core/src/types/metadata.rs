@@ -114,4 +114,13 @@ pub struct TimeSeriesMetadata {
     pub units: Option<String>,
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,
+
+    // Physical + logical element typing of the stored array.
+    /// Element dtype of the stored array.
+    pub dtype: super::array::Dtype,
+    /// Per-step element shape (trailing dims after time); empty = scalar.
+    pub element_shape: Vec<usize>,
+    /// Opaque logical-type label for domain reconstruction by the binding
+    /// (e.g. `"QuadraticFunctionData"`); the store never interprets it.
+    pub logical_type: Option<String>,
 }

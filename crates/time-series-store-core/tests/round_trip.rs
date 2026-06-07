@@ -4,20 +4,16 @@
 use std::collections::BTreeMap;
 
 use chrono::{Duration, TimeZone, Utc};
-use ndarray::{array, ArrayD};
 use time_series_store_core::{
     create_store, FeatureValue, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesError, TimeSeriesType,
+    TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
     let initial_timestamp = Utc.with_ymd_and_hms(initial_year, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data: ArrayD<f64> = ArrayD::from_shape_vec(
-        vec![length],
-        (0..length).map(|i| base + i as f64).collect(),
-    )
-    .unwrap();
+    let values: Vec<f64> = (0..length).map(|i| base + i as f64).collect();
+    let data = TypedArray::from_f64(vec![length], &values);
     SingleTimeSeries::new(initial_timestamp, resolution, data)
 }
 
@@ -241,6 +237,7 @@ fn bulk_add_atomic_rollback() {
             features: Features::new(),
             units: None,
             scaling_factor_multiplier: None,
+            logical_type: None,
         },
         AddRequest {
             owner_uuid: "1".into(),
@@ -251,6 +248,7 @@ fn bulk_add_atomic_rollback() {
             features: Features::new(),
             units: None,
             scaling_factor_multiplier: None,
+            logical_type: None,
         },
     ];
     let err = store.add_time_series_bulk(bulk).unwrap_err();
@@ -268,7 +266,7 @@ fn time_range_slicing() {
     let mut store = create_store(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data = array![10.0, 20.0, 30.0, 40.0, 50.0, 60.0].into_dyn();
+    let data = TypedArray::from_f64(vec![6], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
     let s = SingleTimeSeries::new(initial, resolution, data);
 
     let key = store
@@ -292,7 +290,7 @@ fn time_range_slicing() {
     assert_eq!(single.length, 3);
     assert_eq!(single.initial_timestamp, start);
     assert_eq!(
-        single.data.iter().copied().collect::<Vec<_>>(),
+        single.data.to_f64_vec().unwrap(),
         vec![30.0, 40.0, 50.0]
     );
 }
@@ -374,7 +372,7 @@ fn read_only_blocks_writes() {
 fn distinct_resolutions_returned_sorted() {
     let mut store = create_store(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-    let data = array![1.0_f64, 2.0, 3.0].into_dyn();
+    let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
 
     for (i, resolution) in [Duration::hours(1), Duration::minutes(15), Duration::hours(4)]
         .into_iter()

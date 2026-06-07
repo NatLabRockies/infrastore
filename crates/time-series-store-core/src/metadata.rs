@@ -98,13 +98,16 @@ impl MetadataStore {
             Some(p) => Some(serde_json::to_string(p)?),
             None => None,
         };
+        let element_shape_json = serde_json::to_string(&meta.element_shape)?;
 
         let result = tx.execute(
             "INSERT INTO time_series_associations
              (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution_ns, length, horizon_ns, interval_ns, count,
-              timestamps_json, scaling_factor, units, percentiles_json, features_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              timestamps_json, scaling_factor, units, percentiles_json,
+              dtype, element_shape, logical_type, features_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19, ?20)",
             params![
                 meta.owner_uuid,
                 meta.owner_type,
@@ -122,6 +125,9 @@ impl MetadataStore {
                 meta.scaling_factor_multiplier,
                 meta.units,
                 percentiles_json,
+                meta.dtype.as_str(),
+                element_shape_json,
+                meta.logical_type,
                 f_hash.as_slice(),
             ],
         );
@@ -250,7 +256,8 @@ impl MetadataStore {
         let mut sql = String::from(
             "SELECT id, owner_uuid, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution_ns, length, horizon_ns,
-                    interval_ns, count, timestamps_json, scaling_factor, units, percentiles_json
+                    interval_ns, count, timestamps_json, scaling_factor, units, percentiles_json,
+                    dtype, element_shape, logical_type
              FROM time_series_associations WHERE 1=1",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -476,6 +483,9 @@ struct MetaRow {
     scaling_factor: Option<String>,
     units: Option<String>,
     percentiles: Option<Vec<f64>>,
+    dtype: crate::types::array::Dtype,
+    element_shape: Vec<usize>,
+    logical_type: Option<String>,
 }
 
 impl MetaRow {
@@ -498,6 +508,9 @@ impl MetaRow {
             scaling_factor_multiplier: self.scaling_factor,
             units: self.units,
             percentiles: self.percentiles,
+            dtype: self.dtype,
+            element_shape: self.element_shape,
+            logical_type: self.logical_type,
         }
     }
 }
@@ -520,6 +533,9 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let scaling_factor: Option<String> = row.get(14)?;
     let units: Option<String> = row.get(15)?;
     let percentiles_json: Option<String> = row.get(16)?;
+    let dtype_str: String = row.get(17)?;
+    let element_shape_json: Option<String> = row.get(18)?;
+    let logical_type: Option<String> = row.get(19)?;
 
     let owner_category = OwnerCategory::parse(&owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -587,6 +603,28 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             )
         })?;
 
+    let dtype = crate::types::array::Dtype::parse(&dtype_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            17,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid dtype: {dtype_str}"),
+            )),
+        )
+    })?;
+    let element_shape: Vec<usize> = element_shape_json
+        .map(|s| serde_json::from_str::<Vec<usize>>(&s))
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                18,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?
+        .unwrap_or_default();
+
     Ok((
         id,
         MetaRow {
@@ -606,6 +644,9 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             scaling_factor,
             units,
             percentiles,
+            dtype,
+            element_shape,
+            logical_type,
         },
     ))
 }

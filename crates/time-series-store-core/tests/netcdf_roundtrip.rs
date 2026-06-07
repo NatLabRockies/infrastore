@@ -5,20 +5,16 @@
 //! and compaction tombstone behaviours documented in the spec.
 
 use chrono::{Duration, TimeZone, Utc};
-use ndarray::ArrayD;
 use time_series_store_core::{
     create_store, open_store, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData,
+    TimeSeriesData, TypedArray,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
     let initial_timestamp = Utc.with_ymd_and_hms(initial_year, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data: ArrayD<f64> = ArrayD::from_shape_vec(
-        vec![length],
-        (0..length).map(|i| base + i as f64).collect(),
-    )
-    .unwrap();
+    let values: Vec<f64> = (0..length).map(|i| base + i as f64).collect();
+    let data = TypedArray::from_f64(vec![length], &values);
     SingleTimeSeries::new(initial_timestamp, resolution, data)
 }
 
@@ -54,7 +50,7 @@ fn persistent_round_trip() {
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 24);
     assert_eq!(
-        single.data.iter().copied().collect::<Vec<_>>(),
+        single.data.to_f64_vec().unwrap(),
         (0..24).map(|i| 100.0 + i as f64).collect::<Vec<_>>()
     );
 
@@ -107,7 +103,7 @@ fn multiple_resolutions_separate_datasets() {
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        let data = ArrayD::from_shape_vec(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+        let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
 
         for (i, res) in [
             Duration::hours(1),
@@ -148,11 +144,7 @@ fn time_range_slicing_through_netcdf() {
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data = ArrayD::from_shape_vec(
-        vec![10],
-        vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0],
-    )
-    .unwrap();
+    let data = TypedArray::from_f64(vec![10], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]);
     let s = SingleTimeSeries::new(initial, resolution, data);
 
     let key = {
@@ -181,7 +173,7 @@ fn time_range_slicing_through_netcdf() {
     assert_eq!(single.length, 4);
     assert_eq!(single.initial_timestamp, start);
     assert_eq!(
-        single.data.iter().copied().collect::<Vec<_>>(),
+        single.data.to_f64_vec().unwrap(),
         vec![40.0, 50.0, 60.0, 70.0]
     );
 }
@@ -205,11 +197,7 @@ fn spill_into_new_dataset_past_capacity() {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let mut bulk = Vec::with_capacity(total);
         for i in 0..total {
-            let data = ArrayD::from_shape_vec(
-                vec![4],
-                vec![i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0],
-            )
-            .unwrap();
+            let vals = [i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0]; let data = TypedArray::from_f64(vec![4], &vals);
             let s = SingleTimeSeries::new(initial, resolution, data);
             bulk.push(AddRequest {
                 owner_uuid: (i + 1).to_string(),
@@ -220,6 +208,7 @@ fn spill_into_new_dataset_past_capacity() {
                 features: Features::new(),
                 units: None,
                 scaling_factor_multiplier: None,
+                logical_type: None,
             });
         }
         store.add_time_series_bulk(bulk).unwrap();
@@ -239,7 +228,7 @@ fn spill_into_new_dataset_past_capacity() {
     let last = store.get_time_series(&keys[0], None).unwrap();
     let single = last.as_single().unwrap();
     assert_eq!(
-        single.data.iter().copied().collect::<Vec<_>>(),
+        single.data.to_f64_vec().unwrap(),
         vec![
             (total - 1) as f64,
             (total - 1) as f64 + 1.0,
@@ -356,31 +345,41 @@ fn data_format_version_is_recorded() {
 }
 
 #[test]
-fn netcdf_rejects_multidim_data_in_v0() {
+fn netcdf_roundtrips_multidim_element_tuples() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
-    let mut store = create_store(Some(path.as_path()), false).unwrap();
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    // A (4, 3) array — multi-dim per-step value (e.g. quadratic curve coeffs).
-    let data = ArrayD::from_shape_vec(vec![4, 3], (0..12).map(|i| i as f64).collect()).unwrap();
-    let s = SingleTimeSeries::new(initial, resolution, data);
+    // A (4, 3) array — a 3-tuple per step (e.g. quadratic curve coeffs).
+    let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let data = TypedArray::from_f64(vec![4, 3], &values);
+    let s = SingleTimeSeries::new(initial, resolution, data.clone());
 
-    let err = store
-        .add_time_series(
-            "1",
-            "Generator",
-            OwnerCategory::Component,
-            "load",
-            TimeSeriesData::SingleTimeSeries(s),
-            Features::new(),
-            None,
-            None,
-        )
-        .unwrap_err();
-    use time_series_store_core::TimeSeriesError;
-    assert!(matches!(err, TimeSeriesError::InvalidParameter(_)));
+    let key = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let key = store
+            .add_time_series(
+                "1",
+                "Generator",
+                OwnerCategory::Component,
+                "load",
+                TimeSeriesData::SingleTimeSeries(s),
+                Features::new(),
+                None,
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+        key
+    };
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let got = store.get_time_series(&key, None).unwrap();
+    let single = got.as_single().unwrap();
+    assert_eq!(single.data.shape, vec![4, 3]);
+    assert_eq!(single.data, data);
+    assert!(store.verify_integrity().unwrap().ok());
 }
 
 #[test]
@@ -389,7 +388,7 @@ fn golden_hash_pin() {
     // hash domain that perturbs this value is a format-breaking change and
     // must bump DATA_FORMAT_VERSION.
     use time_series_store_core::hash::{array_hash, hash_hex};
-    let data = ArrayD::from_shape_vec(vec![4], vec![0.0_f64, 1.0, 2.0, 3.0]).unwrap();
+    let data = TypedArray::from_f64(vec![4], &[0.0, 1.0, 2.0, 3.0]);
     let h = array_hash(&data);
     let hex = hash_hex(&h);
     assert_eq!(

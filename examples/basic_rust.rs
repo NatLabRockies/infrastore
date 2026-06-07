@@ -4,9 +4,8 @@
 //! Or as a workspace target if exposed.
 
 use chrono::{Duration, TimeZone, Utc};
-use ndarray::ArrayD;
 use time_series_store_core::{
-    create_store, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData,
+    create_store, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,10 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data: ArrayD<f64> = ArrayD::from_shape_vec(
-        vec![24],
-        (0..24).map(|i| 100.0 + i as f64).collect(),
-    )?;
+    let values: Vec<f64> = (0..24).map(|i| 100.0 + i as f64).collect();
+    let data = TypedArray::from_f64(vec![24], &values);
     let ts = SingleTimeSeries::new(initial, resolution, data);
 
     let key = store.add_time_series(

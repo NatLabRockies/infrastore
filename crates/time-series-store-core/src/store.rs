@@ -14,6 +14,7 @@ use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::{
     Features, OwnerCategory, TimeSeriesMetadata,
 };
+use crate::types::array::TypedArray;
 use crate::types::time_series::{SingleTimeSeries, TimeSeriesData, TimeSeriesType};
 
 #[derive(Debug, Clone, Default)]
@@ -80,6 +81,8 @@ pub struct AddRequest {
     pub features: Features,
     pub units: Option<String>,
     pub scaling_factor_multiplier: Option<String>,
+    /// Opaque logical-type label for domain reconstruction (binding-owned).
+    pub logical_type: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -178,6 +181,7 @@ impl Store {
             features,
             units,
             scaling_factor_multiplier,
+            logical_type: None,
         }])
         .map(|mut keys| keys.remove(0))
     }
@@ -203,9 +207,10 @@ impl Store {
             let hash = array_hash(&single.data);
             let resolution_seconds = single.resolution.num_seconds();
             // put_array is idempotent on hash — safe to call before tx commit.
+            // SingleTimeSeries is column-packed (`packed = true`).
             let already_present = self.backend.contains(&hash)?;
             self.backend
-                .put_array(&hash, &single.data, single.length, resolution_seconds)?;
+                .put_array(&hash, &single.data, resolution_seconds, true)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
@@ -228,6 +233,9 @@ impl Store {
                 scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
                 units: item.units.clone(),
                 percentiles: None,
+                dtype: single.data.dtype,
+                element_shape: single.data.element_shape().to_vec(),
+                logical_type: item.logical_type.clone(),
             };
 
             match MetadataStore::insert(&tx, &meta) {
@@ -395,10 +403,7 @@ impl Store {
     /// Fetch the full stored array for a content hash. The metadata-owning
     /// binding resolves a key to its `data_hash`, then calls this to read the
     /// underlying values.
-    pub fn get_array_by_hash(
-        &self,
-        hash: &[u8; 32],
-    ) -> Result<ndarray::ArrayD<f64>> {
+    pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         self.backend.get_array(hash)
     }
 
@@ -408,12 +413,12 @@ impl Store {
 
     /// Add a forecast (`Deterministic` / `DeterministicSingleTimeSeries` / etc.).
     ///
-    /// `data` is the flattened storage array (content-addressed by hash):
-    /// `Deterministic` passes the column-major `(horizon_count, count)` matrix
-    /// flattened to 1-D; `DeterministicSingleTimeSeries` passes the underlying
-    /// `SingleTimeSeries` array (which then dedups against that series). The
-    /// caller owns window semantics; the store only records the forecast
-    /// parameters in metadata.
+    /// `data` is the array in its native shape: `Deterministic` passes the
+    /// `(horizon_count, count)` matrix, `Probabilistic` / `Scenarios` their 3-D
+    /// arrays, and `DeterministicSingleTimeSeries` the underlying 1-D
+    /// `SingleTimeSeries` array (which then dedups against that series). DST is
+    /// column-packed like a SingleTimeSeries; the dense forecast arrays are
+    /// stored as standalone variables.
     #[allow(clippy::too_many_arguments)]
     pub fn add_forecast(
         &mut self,
@@ -427,21 +432,28 @@ impl Store {
         horizon: Duration,
         interval: Duration,
         count: usize,
-        data: ndarray::ArrayD<f64>,
+        data: TypedArray,
         features: Features,
         units: Option<String>,
         scaling_factor_multiplier: Option<String>,
         percentiles: Option<Vec<f64>>,
+        logical_type: Option<String>,
     ) -> Result<TimeSeriesKey> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let length = data.shape().first().copied().unwrap_or(0);
+        let length = data.length();
         let hash = array_hash(&data);
         let resolution_seconds = resolution.num_seconds();
+        // DST stores its underlying 1-D SingleTimeSeries array and is packed;
+        // the dense forecast types are standalone.
+        let packed = matches!(
+            time_series_type,
+            TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries
+        );
         let already_present = self.backend.contains(&hash)?;
         self.backend
-            .put_array(&hash, &data, length, resolution_seconds)?;
+            .put_array(&hash, &data, resolution_seconds, packed)?;
 
         let meta = TimeSeriesMetadata {
             owner_uuid: owner_uuid.to_string(),
@@ -461,6 +473,9 @@ impl Store {
             scaling_factor_multiplier,
             units,
             percentiles,
+            dtype: data.dtype,
+            element_shape: data.element_shape().to_vec(),
+            logical_type,
         };
 
         let tx = self.metadata.transaction()?;

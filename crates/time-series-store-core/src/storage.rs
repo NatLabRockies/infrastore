@@ -6,9 +6,8 @@
 
 use std::ops::Range;
 
-use ndarray::ArrayD;
-
 use crate::error::Result;
+use crate::types::array::TypedArray;
 
 pub mod memory;
 pub mod netcdf;
@@ -40,20 +39,25 @@ impl IntegrityReport {
 /// `Store` layer above drives them through this trait.
 pub trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
-    /// data is reused for content addressing).
+    /// data is reused for content addressing). The array's dtype + shape travel
+    /// with it; `resolution_seconds` keys the packed storage pool.
+    ///
+    /// `packed = true` column-packs the array with other same-shaped arrays (for
+    /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
+    /// multi-dimensional variable (for native forecast arrays).
     fn put_array(
         &mut self,
         hash: &[u8; 32],
-        data: &ArrayD<f64>,
-        length: usize,
+        data: &TypedArray,
         resolution_seconds: i64,
+        packed: bool,
     ) -> Result<()>;
 
     /// Fetch the full array for `hash`.
-    fn get_array(&self, hash: &[u8; 32]) -> Result<ArrayD<f64>>;
+    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
     /// Fetch a slice of the array along axis 0 (the time axis). End is exclusive.
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<ArrayD<f64>>;
+    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
 
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;

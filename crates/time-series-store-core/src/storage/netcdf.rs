@@ -1,31 +1,33 @@
 //! NetCDF4-backed storage backend.
 //!
-//! ## Layout
+//! Two storage modes, both natively typed + fixed-dimension:
 //!
-//! ```text
-//! <file>.nc
-//! ├── attribute  data_format_version = "0.1.0"
-//! └── group      time_series/
-//!     └── group  single/
-//!         ├── var      sts_{length}_{resolution_s}        f64  shape (length, MAX_COLS) chunks (1, MAX_COLS)
-//!         ├── var      sts_{length}_{resolution_s}_h      str  shape (MAX_COLS,)        # hex hashes
-//!         ├── var      sts_{length}_{resolution_s}__1     ...                           # spill dataset
-//!         └── var      sts_{length}_{resolution_s}__1_h   ...
-//! ```
+//! * **Packed** (`packed = true`, used for SingleTimeSeries and the underlying
+//!   array of a DeterministicSingleTimeSeries): many same-shaped arrays are
+//!   column-packed into a dataset `sts_{dtype}_{shape}_{length}_{res}` of shape
+//!   `(length, MAX_COLS, *element_shape)`, chunked `(1, MAX_COLS, *element_shape)`.
+//!   A companion string variable `{name}_h` holds the per-column hex hash
+//!   (empty = free slot). Removal frees a slot; `compact` is a stub because
+//!   NetCDF can't shrink in place.
 //!
-//! v0 supports only 1-D `SingleTimeSeries` data (shape `(length,)`). Multi-dim
-//! per-step values are returned as an `InvalidParameter` error from `put_array`;
-//! the same backend is the natural place to add multi-dim handling later.
+//! * **Standalone** (`packed = false`, used for Deterministic / Probabilistic /
+//!   Scenarios): each array is its own typed multi-dim variable `arr_{hexhash}`
+//!   of shape `[length, k1, ...]`. Removal drops it from the index (the variable
+//!   lingers as dead space until `compact`, since NetCDF can't delete variables).
+//!
+//! `shape` encodes the element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ndarray::ArrayD;
 use netcdf::{Extents, FileMut, Group, GroupMut};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
+use crate::types::array::{Dtype, TypedArray};
 use crate::version::DATA_FORMAT_VERSION;
 
 use super::{CompactionReport, IntegrityReport, StorageBackend};
@@ -35,17 +37,22 @@ pub const MAX_COLS_PER_DATASET: usize = 1000;
 
 const ROOT_GROUP: &str = "time_series";
 const SINGLE_GROUP: &str = "single";
-
-/// Suffix for a data variable's companion hash-string variable.
 const HASH_SUFFIX: &str = "_h";
+const STANDALONE_PREFIX: &str = "arr_";
+
+#[derive(Debug, Clone)]
+enum Location {
+    Packed { dataset: String, col: usize },
+    Standalone { var: String },
+}
 
 #[derive(Debug, Clone)]
 struct DatasetState {
-    data_name: String,
     hash_name: String,
+    dtype: Dtype,
+    element_shape: Vec<usize>,
     length: usize,
     resolution_seconds: i64,
-    /// Hex-encoded hash for each column. `None` means the slot is free.
     columns: Vec<Option<String>>,
 }
 
@@ -58,13 +65,43 @@ impl DatasetState {
     }
 }
 
-#[derive(Debug, Default)]
-struct Index {
-    by_hash: HashMap<[u8; 32], (String, usize)>,
+fn encode_shape(element_shape: &[usize]) -> String {
+    if element_shape.is_empty() {
+        "s".to_string()
+    } else {
+        element_shape
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("x")
+    }
 }
 
-fn dataset_base_name(length: usize, resolution_seconds: i64) -> String {
-    format!("sts_{length}_{resolution_seconds}")
+fn decode_shape(s: &str) -> Result<Vec<usize>> {
+    if s == "s" {
+        return Ok(Vec::new());
+    }
+    s.split('x')
+        .map(|p| {
+            p.parse::<usize>()
+                .map_err(|_| TimeSeriesError::IntegrityError(format!("bad element shape '{s}'")))
+        })
+        .collect()
+}
+
+fn dataset_base_name(
+    dtype: Dtype,
+    element_shape: &[usize],
+    length: usize,
+    resolution_seconds: i64,
+) -> String {
+    format!(
+        "sts_{}_{}_{}_{}",
+        dtype.as_str(),
+        encode_shape(element_shape),
+        length,
+        resolution_seconds
+    )
 }
 
 fn spill_name(base: &str, n: usize) -> String {
@@ -75,156 +112,27 @@ fn spill_name(base: &str, n: usize) -> String {
     }
 }
 
-pub struct NetCdfBackend {
-    inner: Mutex<Inner>,
-}
-
-struct Inner {
-    file: FileMut,
-    path: PathBuf,
-    datasets: HashMap<String, DatasetState>,
-    index: Index,
-}
-
-impl NetCdfBackend {
-    pub fn create(path: &Path) -> Result<Self> {
-        let mut file = netcdf::create(path).map_err(map_nc)?;
-        file.add_attribute("data_format_version", DATA_FORMAT_VERSION)
-            .map_err(map_nc)?;
-        // Create the time_series/single hierarchy up-front.
-        {
-            let mut ts = file.add_group(ROOT_GROUP).map_err(map_nc)?;
-            let _ = ts.add_group(SINGLE_GROUP).map_err(map_nc)?;
-        }
-        Ok(Self {
-            inner: Mutex::new(Inner {
-                file,
-                path: path.to_path_buf(),
-                datasets: HashMap::new(),
-                index: Index::default(),
-            }),
-        })
-    }
-
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = netcdf::append(path).map_err(map_nc)?;
-        let mut backend = Self {
-            inner: Mutex::new(Inner {
-                file,
-                path: path.to_path_buf(),
-                datasets: HashMap::new(),
-                index: Index::default(),
-            }),
-        };
-        backend.rebuild_index()?;
-        Ok(backend)
-    }
-
-    pub fn path(&self) -> PathBuf {
-        let inner = self.inner.lock().expect("mutex poisoned");
-        inner.path.clone()
-    }
-
-    fn rebuild_index(&mut self) -> Result<()> {
-        let inner = self.inner.get_mut().expect("mutex poisoned");
-        // Step 1: read variable names + dim sizes through immutable groups.
-        struct ScanRow {
-            data_name: String,
-            length: usize,
-            num_cols: usize,
-        }
-        let scans: Vec<ScanRow> = inner.with_single(|single| {
-            let mut out = Vec::new();
-            for var in single.variables() {
-                let name = var.name();
-                if name.ends_with(HASH_SUFFIX) {
-                    continue;
-                }
-                let dims = var.dimensions();
-                if dims.len() != 2 {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "variable {name} has {} dims, expected 2",
-                        dims.len()
-                    )));
-                }
-                out.push(ScanRow {
-                    data_name: name,
-                    length: dims[0].len(),
-                    num_cols: dims[1].len(),
-                });
-            }
-            Ok(out)
-        })?;
-
-        for row in scans {
-            let (length_from_name, resolution_seconds) = parse_dataset_name(&row.data_name)?;
-            if length_from_name != row.length {
-                return Err(TimeSeriesError::IntegrityError(format!(
-                    "variable {} length ({}) disagrees with name ({})",
-                    row.data_name, row.length, length_from_name,
-                )));
-            }
-            let hash_name = format!("{}{}", row.data_name, HASH_SUFFIX);
-
-            // Read all hash strings for this dataset in a fresh group borrow.
-            let hash_strings: Vec<String> = inner.with_single(|single| {
-                let v = single.variable(&hash_name).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!(
-                        "missing hash variable {hash_name}"
-                    ))
-                })?;
-                let mut out = Vec::with_capacity(row.num_cols);
-                for i in 0..row.num_cols {
-                    out.push(v.get_string(i).map_err(map_nc)?);
-                }
-                Ok(out)
-            })?;
-
-            let mut columns = Vec::with_capacity(row.num_cols);
-            for (i, s) in hash_strings.into_iter().enumerate() {
-                if s.is_empty() {
-                    columns.push(None);
-                } else {
-                    let hash_bytes = hex_to_hash(&s)?;
-                    inner
-                        .index
-                        .by_hash
-                        .insert(hash_bytes, (row.data_name.clone(), i));
-                    columns.push(Some(s));
-                }
-            }
-            inner.datasets.insert(
-                row.data_name.clone(),
-                DatasetState {
-                    data_name: row.data_name,
-                    hash_name,
-                    length: row.length,
-                    resolution_seconds,
-                    columns,
-                },
-            );
-        }
-        Ok(())
-    }
-}
-
-fn parse_dataset_name(name: &str) -> Result<(usize, i64)> {
+fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, i64)> {
     let core = name.strip_prefix("sts_").ok_or_else(|| {
         TimeSeriesError::IntegrityError(format!("dataset {name} missing 'sts_' prefix"))
     })?;
     let core = core.split("__").next().unwrap();
-    let mut parts = core.splitn(2, '_');
-    let length: usize = parts
-        .next()
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad dataset name {name}")))?
+    let parts: Vec<&str> = core.splitn(4, '_').collect();
+    if parts.len() != 4 {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "bad dataset name {name}"
+        )));
+    }
+    let dtype = Dtype::parse(parts[0])
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad dtype in {name}")))?;
+    let element_shape = decode_shape(parts[1])?;
+    let length: usize = parts[2]
         .parse()
         .map_err(|_| TimeSeriesError::IntegrityError(format!("bad length in {name}")))?;
-    let resolution: i64 = parts
-        .next()
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad dataset name {name}")))?
+    let resolution: i64 = parts[3]
         .parse()
         .map_err(|_| TimeSeriesError::IntegrityError(format!("bad resolution in {name}")))?;
-    Ok((length, resolution))
+    Ok((dtype, element_shape, length, resolution))
 }
 
 fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
@@ -246,8 +154,224 @@ fn map_nc(e: netcdf::Error) -> TimeSeriesError {
     TimeSeriesError::IntegrityError(format!("netcdf: {e}"))
 }
 
+// ---- byte <-> typed Vec conversions ---------------------------------------
+
+macro_rules! vec_from_le {
+    ($bytes:expr, $t:ty, $n:expr) => {
+        $bytes
+            .chunks_exact($n)
+            .map(|c| <$t>::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<$t>>()
+    };
+}
+
+macro_rules! le_from_vec {
+    ($vals:expr) => {
+        $vals
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+}
+
+fn put_typed(
+    var: &mut netcdf::VariableMut<'_>,
+    dtype: Dtype,
+    bytes: &[u8],
+    extents: Extents,
+) -> Result<()> {
+    match dtype {
+        Dtype::F64 => var.put_values(&vec_from_le!(bytes, f64, 8), extents),
+        Dtype::F32 => var.put_values(&vec_from_le!(bytes, f32, 4), extents),
+        Dtype::I64 => var.put_values(&vec_from_le!(bytes, i64, 8), extents),
+        Dtype::I32 => var.put_values(&vec_from_le!(bytes, i32, 4), extents),
+        Dtype::U64 => var.put_values(&vec_from_le!(bytes, u64, 8), extents),
+        Dtype::Bool => var.put_values(bytes, extents),
+    }
+    .map_err(map_nc)
+}
+
+fn get_typed(var: &netcdf::Variable<'_>, dtype: Dtype, extents: Extents) -> Result<Vec<u8>> {
+    Ok(match dtype {
+        Dtype::F64 => le_from_vec!(var.get_values::<f64, _>(extents).map_err(map_nc)?),
+        Dtype::F32 => le_from_vec!(var.get_values::<f32, _>(extents).map_err(map_nc)?),
+        Dtype::I64 => le_from_vec!(var.get_values::<i64, _>(extents).map_err(map_nc)?),
+        Dtype::I32 => le_from_vec!(var.get_values::<i32, _>(extents).map_err(map_nc)?),
+        Dtype::U64 => le_from_vec!(var.get_values::<u64, _>(extents).map_err(map_nc)?),
+        Dtype::Bool => var.get_values::<u8, _>(extents).map_err(map_nc)?,
+    })
+}
+
+fn add_typed_variable(
+    single: &mut GroupMut<'_>,
+    name: &str,
+    dtype: Dtype,
+    dim_names: &[&str],
+    chunks: &[usize],
+) -> Result<()> {
+    macro_rules! add_var {
+        ($t:ty) => {{
+            let mut var = single.add_variable::<$t>(name, dim_names).map_err(map_nc)?;
+            var.set_chunking(chunks).map_err(map_nc)?;
+            var.set_compression(3, true).map_err(map_nc)?;
+        }};
+    }
+    match dtype {
+        Dtype::F64 => add_var!(f64),
+        Dtype::F32 => add_var!(f32),
+        Dtype::I64 => add_var!(i64),
+        Dtype::I32 => add_var!(i32),
+        Dtype::U64 => add_var!(u64),
+        Dtype::Bool => add_var!(u8),
+    }
+    Ok(())
+}
+
+pub struct NetCdfBackend {
+    inner: Mutex<Inner>,
+}
+
+struct Inner {
+    file: FileMut,
+    path: PathBuf,
+    datasets: HashMap<String, DatasetState>,
+    standalone_vars: HashSet<String>,
+    by_hash: HashMap<[u8; 32], Location>,
+}
+
+impl NetCdfBackend {
+    pub fn create(path: &Path) -> Result<Self> {
+        let mut file = netcdf::create(path).map_err(map_nc)?;
+        file.add_attribute("data_format_version", DATA_FORMAT_VERSION)
+            .map_err(map_nc)?;
+        {
+            let mut ts = file.add_group(ROOT_GROUP).map_err(map_nc)?;
+            let _ = ts.add_group(SINGLE_GROUP).map_err(map_nc)?;
+        }
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                file,
+                path: path.to_path_buf(),
+                datasets: HashMap::new(),
+                standalone_vars: HashSet::new(),
+                by_hash: HashMap::new(),
+            }),
+        })
+    }
+
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = netcdf::append(path).map_err(map_nc)?;
+        let mut backend = Self {
+            inner: Mutex::new(Inner {
+                file,
+                path: path.to_path_buf(),
+                datasets: HashMap::new(),
+                standalone_vars: HashSet::new(),
+                by_hash: HashMap::new(),
+            }),
+        };
+        backend.rebuild_index()?;
+        Ok(backend)
+    }
+
+    pub fn path(&self) -> PathBuf {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.path.clone()
+    }
+
+    fn rebuild_index(&mut self) -> Result<()> {
+        let inner = self.inner.get_mut().expect("mutex poisoned");
+
+        // Collect variable names + their column counts (for packed datasets).
+        struct Row {
+            name: String,
+            num_cols: usize,
+            standalone: bool,
+        }
+        let rows: Vec<Row> = inner.with_single(|single| {
+            let mut out = Vec::new();
+            for var in single.variables() {
+                let name = var.name();
+                if name.ends_with(HASH_SUFFIX) {
+                    continue;
+                }
+                if let Some(rest) = name.strip_prefix(STANDALONE_PREFIX) {
+                    let _ = rest;
+                    out.push(Row {
+                        name,
+                        num_cols: 0,
+                        standalone: true,
+                    });
+                } else {
+                    let dims = var.dimensions();
+                    out.push(Row {
+                        name,
+                        num_cols: dims.get(1).map(|d| d.len()).unwrap_or(0),
+                        standalone: false,
+                    });
+                }
+            }
+            Ok(out)
+        })?;
+
+        for row in rows {
+            if row.standalone {
+                let hex = row.name.strip_prefix(STANDALONE_PREFIX).unwrap();
+                let hash = hex_to_hash(hex)?;
+                inner.standalone_vars.insert(row.name.clone());
+                inner
+                    .by_hash
+                    .insert(hash, Location::Standalone { var: row.name });
+                continue;
+            }
+
+            let (dtype, element_shape, length, resolution_seconds) =
+                parse_dataset_name(&row.name)?;
+            let hash_name = format!("{}{}", row.name, HASH_SUFFIX);
+            let hash_strings: Vec<String> = inner.with_single(|single| {
+                let v = single.variable(&hash_name).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing hash variable {hash_name}"))
+                })?;
+                let mut out = Vec::with_capacity(row.num_cols);
+                for i in 0..row.num_cols {
+                    out.push(v.get_string(i).map_err(map_nc)?);
+                }
+                Ok(out)
+            })?;
+
+            let mut columns = Vec::with_capacity(row.num_cols);
+            for (i, s) in hash_strings.into_iter().enumerate() {
+                if s.is_empty() {
+                    columns.push(None);
+                } else {
+                    let hash = hex_to_hash(&s)?;
+                    inner.by_hash.insert(
+                        hash,
+                        Location::Packed {
+                            dataset: row.name.clone(),
+                            col: i,
+                        },
+                    );
+                    columns.push(Some(s));
+                }
+            }
+            inner.datasets.insert(
+                row.name.clone(),
+                DatasetState {
+                    hash_name,
+                    dtype,
+                    element_shape,
+                    length,
+                    resolution_seconds,
+                    columns,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Inner {
-    /// Run `f` against an immutable handle on `time_series/single`.
     fn with_single<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&Group<'_>) -> Result<R>,
@@ -263,7 +387,6 @@ impl Inner {
         f(&single)
     }
 
-    /// Run `f` against a mutable handle on `time_series/single`.
     fn with_single_mut<F, R>(&mut self, f: F) -> Result<R>
     where
         F: FnOnce(&mut GroupMut<'_>) -> Result<R>,
@@ -279,19 +402,24 @@ impl Inner {
         f(&mut single)
     }
 
-    /// Get-or-create the dataset family member to use for the next write.
     fn ensure_writable_dataset(
         &mut self,
+        dtype: Dtype,
+        element_shape: &[usize],
         length: usize,
         resolution_seconds: i64,
     ) -> Result<String> {
-        let base = dataset_base_name(length, resolution_seconds);
-        // Pick existing non-full dataset in this family, deterministically.
+        let base = dataset_base_name(dtype, element_shape, length, resolution_seconds);
         let mut candidates: Vec<(String, bool)> = self
             .datasets
-            .values()
-            .filter(|d| d.length == length && d.resolution_seconds == resolution_seconds)
-            .map(|d| (d.data_name.clone(), d.full()))
+            .iter()
+            .filter(|(_, d)| {
+                d.dtype == dtype
+                    && d.element_shape == element_shape
+                    && d.length == length
+                    && d.resolution_seconds == resolution_seconds
+            })
+            .map(|(n, d)| (n.clone(), d.full()))
             .collect();
         candidates.sort_by_key(|(n, _)| n.clone());
 
@@ -301,32 +429,46 @@ impl Inner {
             }
         }
         let new_name = spill_name(&base, candidates.len());
-        self.create_dataset(&new_name, length, resolution_seconds)?;
+        self.create_dataset(&new_name, dtype, element_shape, length, resolution_seconds)?;
         Ok(new_name)
     }
 
     fn create_dataset(
         &mut self,
         name: &str,
+        dtype: Dtype,
+        element_shape: &[usize],
         length: usize,
         resolution_seconds: i64,
     ) -> Result<()> {
         let dim_time = format!("{name}_t");
         let dim_col = format!("{name}_c");
+        let elem_dims: Vec<(String, usize)> = element_shape
+            .iter()
+            .enumerate()
+            .map(|(i, &sz)| (format!("{name}_e{i}"), sz))
+            .collect();
         let hash_name = format!("{name}{HASH_SUFFIX}");
         let name_owned = name.to_string();
         let hash_name_for_closure = hash_name.clone();
+        let chunks: Vec<usize> = std::iter::once(1usize)
+            .chain(std::iter::once(MAX_COLS_PER_DATASET))
+            .chain(element_shape.iter().copied())
+            .collect();
 
         self.with_single_mut(|single| {
             single.add_dimension(&dim_time, length).map_err(map_nc)?;
             single
                 .add_dimension(&dim_col, MAX_COLS_PER_DATASET)
                 .map_err(map_nc)?;
-            let mut var = single
-                .add_variable::<f64>(&name_owned, &[&dim_time, &dim_col])
-                .map_err(map_nc)?;
-            var.set_chunking(&[1, MAX_COLS_PER_DATASET]).map_err(map_nc)?;
-            var.set_compression(3, true).map_err(map_nc)?;
+            for (dn, sz) in &elem_dims {
+                single.add_dimension(dn, *sz).map_err(map_nc)?;
+            }
+            let mut dim_names: Vec<&str> = vec![&dim_time, &dim_col];
+            for (dn, _) in &elem_dims {
+                dim_names.push(dn);
+            }
+            add_typed_variable(single, &name_owned, dtype, &dim_names, &chunks)?;
             let _h = single
                 .add_string_variable(&hash_name_for_closure, &[&dim_col])
                 .map_err(map_nc)?;
@@ -336,8 +478,9 @@ impl Inner {
         self.datasets.insert(
             name.to_string(),
             DatasetState {
-                data_name: name.to_string(),
                 hash_name,
+                dtype,
+                element_shape: element_shape.to_vec(),
                 length,
                 resolution_seconds,
                 columns: vec![None; MAX_COLS_PER_DATASET],
@@ -345,219 +488,264 @@ impl Inner {
         );
         Ok(())
     }
+
+    fn packed_extents(time: Range<usize>, col: usize, element_shape: &[usize]) -> Extents {
+        let mut ranges: Vec<Range<usize>> = vec![time, col..col + 1];
+        for &k in element_shape {
+            ranges.push(0..k);
+        }
+        ranges.as_slice().into()
+    }
+
+    fn standalone_extents(time: Range<usize>, element_shape: &[usize]) -> Extents {
+        let mut ranges: Vec<Range<usize>> = vec![time];
+        for &k in element_shape {
+            ranges.push(0..k);
+        }
+        ranges.as_slice().into()
+    }
+
+    fn put_packed(
+        &mut self,
+        hash: &[u8; 32],
+        data: &TypedArray,
+        resolution_seconds: i64,
+    ) -> Result<()> {
+        let length = data.length();
+        let element_shape = data.element_shape().to_vec();
+        let dtype = data.dtype;
+
+        let dataset_name =
+            self.ensure_writable_dataset(dtype, &element_shape, length, resolution_seconds)?;
+        let (col_index, hash_name) = {
+            let state = self.datasets.get(&dataset_name).expect("dataset ensured");
+            let col = state.first_free().ok_or_else(|| {
+                TimeSeriesError::IntegrityError("no free slot in newly-ensured dataset".into())
+            })?;
+            (col, state.hash_name.clone())
+        };
+
+        let hex = hash_hex(hash);
+        let bytes = data.bytes.clone();
+        {
+            let dataset_name = dataset_name.clone();
+            let hash_name = hash_name.clone();
+            let hex_c = hex.clone();
+            let element_shape = element_shape.clone();
+            self.with_single_mut(move |single| {
+                let mut data_var = single.variable_mut(&dataset_name).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {dataset_name}"))
+                })?;
+                let extents = Inner::packed_extents(0..length, col_index, &element_shape);
+                put_typed(&mut data_var, dtype, &bytes, extents)?;
+                drop(data_var);
+                let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {hash_name}"))
+                })?;
+                hash_var.put_string(&hex_c, col_index).map_err(map_nc)?;
+                Ok(())
+            })?;
+        }
+        self.datasets
+            .get_mut(&dataset_name)
+            .expect("dataset ensured")
+            .columns[col_index] = Some(hex);
+        self.by_hash.insert(
+            *hash,
+            Location::Packed {
+                dataset: dataset_name,
+                col: col_index,
+            },
+        );
+        Ok(())
+    }
+
+    fn put_standalone(&mut self, hash: &[u8; 32], data: &TypedArray) -> Result<()> {
+        let var = format!("{STANDALONE_PREFIX}{}", hash_hex(hash));
+        // If the variable already exists (live or tombstoned), the content is
+        // identical (content-addressed); just (re)index it.
+        if self.standalone_vars.contains(&var) {
+            self.by_hash
+                .insert(*hash, Location::Standalone { var });
+            return Ok(());
+        }
+        let shape = data.shape.clone();
+        let dtype = data.dtype;
+        let bytes = data.bytes.clone();
+        let var_c = var.clone();
+        self.with_single_mut(move |single| {
+            let dims: Vec<(String, usize)> = shape
+                .iter()
+                .enumerate()
+                .map(|(i, &sz)| (format!("{var_c}_d{i}"), sz))
+                .collect();
+            for (dn, sz) in &dims {
+                single.add_dimension(dn, *sz).map_err(map_nc)?;
+            }
+            let dim_names: Vec<&str> = dims.iter().map(|(n, _)| n.as_str()).collect();
+            add_typed_variable(single, &var_c, dtype, &dim_names, &shape)?;
+            let mut v = single.variable_mut(&var_c).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("missing variable {var_c}"))
+            })?;
+            put_typed(&mut v, dtype, &bytes, Extents::All)?;
+            Ok(())
+        })?;
+        self.standalone_vars.insert(var.clone());
+        self.by_hash.insert(*hash, Location::Standalone { var });
+        Ok(())
+    }
+
+    fn read_locked(&self, hash: &[u8; 32], range: Option<Range<usize>>) -> Result<TypedArray> {
+        let loc = self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)?.clone();
+        match loc {
+            Location::Packed { dataset, col } => {
+                let state = self.datasets.get(&dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                })?;
+                let total = state.length;
+                let range = range.unwrap_or(0..total);
+                if range.start > range.end || range.end > total {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "slice {:?} out of bounds for length {}",
+                        range, total
+                    )));
+                }
+                let out_len = range.end - range.start;
+                let dtype = state.dtype;
+                let element_shape = state.element_shape.clone();
+                let bytes = self.with_single(|single| {
+                    let var = single.variable(&dataset).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("missing variable {dataset}"))
+                    })?;
+                    let extents = Inner::packed_extents(range.clone(), col, &element_shape);
+                    get_typed(&var, dtype, extents)
+                })?;
+                let mut shape = vec![out_len];
+                shape.extend_from_slice(&element_shape);
+                TypedArray::new(dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
+            }
+            Location::Standalone { var } => self.with_single(|single| {
+                let v = single.variable(&var).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {var}"))
+                })?;
+                let full_shape: Vec<usize> = v.dimensions().iter().map(|d| d.len()).collect();
+                let dtype = dtype_of_variable(&v)?;
+                let total = full_shape.first().copied().unwrap_or(0);
+                let range = range.unwrap_or(0..total);
+                if range.start > range.end || range.end > total {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "slice {:?} out of bounds for length {}",
+                        range, total
+                    )));
+                }
+                let element_shape = &full_shape[1.min(full_shape.len())..];
+                let extents = Inner::standalone_extents(range.clone(), element_shape);
+                let bytes = get_typed(&v, dtype, extents)?;
+                let mut shape = vec![range.end - range.start];
+                shape.extend_from_slice(element_shape);
+                TypedArray::new(dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
+            }),
+        }
+    }
+}
+
+/// Map a NetCDF variable's element type back to a [`Dtype`].
+fn dtype_of_variable(var: &netcdf::Variable<'_>) -> Result<Dtype> {
+    use netcdf::types::{FloatType, IntType, NcVariableType};
+    Ok(match var.vartype() {
+        NcVariableType::Float(FloatType::F64) => Dtype::F64,
+        NcVariableType::Float(FloatType::F32) => Dtype::F32,
+        NcVariableType::Int(IntType::I64) => Dtype::I64,
+        NcVariableType::Int(IntType::I32) => Dtype::I32,
+        NcVariableType::Int(IntType::U64) => Dtype::U64,
+        NcVariableType::Int(IntType::U8) => Dtype::Bool,
+        other => {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "unsupported nc variable type {other:?}"
+            )))
+        }
+    })
 }
 
 impl StorageBackend for NetCdfBackend {
     fn put_array(
         &mut self,
         hash: &[u8; 32],
-        data: &ArrayD<f64>,
-        length: usize,
+        data: &TypedArray,
         resolution_seconds: i64,
+        packed: bool,
     ) -> Result<()> {
-        if data.ndim() != 1 {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "v0 NetCdfBackend supports only 1-D SingleTimeSeries data, got shape {:?}",
-                data.shape()
-            )));
-        }
-        if data.shape()[0] != length {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "data length {} disagrees with declared length {}",
-                data.shape()[0],
-                length
-            )));
-        }
-
         let mut inner = self.inner.lock().expect("mutex poisoned");
-
-        if inner.index.by_hash.contains_key(hash) {
+        if inner.by_hash.contains_key(hash) {
             return Ok(());
         }
-
-        let dataset_name = inner.ensure_writable_dataset(length, resolution_seconds)?;
-        let col_index = {
-            let state = inner
-                .datasets
-                .get(&dataset_name)
-                .expect("dataset just ensured");
-            state
-                .first_free()
-                .ok_or_else(|| TimeSeriesError::IntegrityError(
-                    "no free slot in newly-ensured dataset".into(),
-                ))?
-        };
-        let hash_name = inner
-            .datasets
-            .get(&dataset_name)
-            .map(|d| d.hash_name.clone())
-            .expect("dataset just ensured");
-
-        let hex = hash_hex(hash);
-        let values: Vec<f64> = data.iter().copied().collect();
-
-        {
-            let dataset_name = dataset_name.clone();
-            let hash_name = hash_name.clone();
-            let hex_for_closure = hex.clone();
-            inner.with_single_mut(move |single| {
-                let mut data_var = single.variable_mut(&dataset_name).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!(
-                        "missing variable {dataset_name}"
-                    ))
-                })?;
-                let extents: Extents =
-                    [0..length, col_index..col_index + 1].as_slice().into();
-                data_var.put_values(&values, extents).map_err(map_nc)?;
-                drop(data_var);
-
-                let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!(
-                        "missing variable {hash_name}"
-                    ))
-                })?;
-                hash_var.put_string(&hex_for_closure, col_index).map_err(map_nc)?;
-                Ok(())
-            })?;
+        if packed {
+            inner.put_packed(hash, data, resolution_seconds)
+        } else {
+            inner.put_standalone(hash, data)
         }
-
-        let state = inner
-            .datasets
-            .get_mut(&dataset_name)
-            .expect("dataset just ensured");
-        state.columns[col_index] = Some(hex);
-        inner
-            .index
-            .by_hash
-            .insert(*hash, (dataset_name, col_index));
-
-        Ok(())
     }
 
-    fn get_array(&self, hash: &[u8; 32]) -> Result<ArrayD<f64>> {
+    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        let (dataset_name, col_index) = inner
-            .index
-            .by_hash
-            .get(hash)
-            .ok_or(TimeSeriesError::NotFound)?
-            .clone();
-        let length = inner
-            .datasets
-            .get(&dataset_name)
-            .ok_or_else(|| TimeSeriesError::IntegrityError(format!(
-                "dataset {dataset_name} missing from state"
-            )))?
-            .length;
-
-        let values: Vec<f64> = inner.with_single(|single| {
-            let var = single.variable(&dataset_name).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("missing variable {dataset_name}"))
-            })?;
-            let extents: Extents = [0..length, col_index..col_index + 1].as_slice().into();
-            var.get_values::<f64, _>(extents).map_err(map_nc)
-        })?;
-        ArrayD::from_shape_vec(vec![length], values).map_err(|e| {
-            TimeSeriesError::IntegrityError(format!("shape mismatch on read: {e}"))
-        })
+        inner.read_locked(hash, None)
     }
 
-    fn get_slice(
-        &self,
-        hash: &[u8; 32],
-        range: std::ops::Range<usize>,
-    ) -> Result<ArrayD<f64>> {
+    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        let (dataset_name, col_index) = inner
-            .index
-            .by_hash
-            .get(hash)
-            .ok_or(TimeSeriesError::NotFound)?
-            .clone();
-        let total_length = inner
-            .datasets
-            .get(&dataset_name)
-            .ok_or_else(|| TimeSeriesError::IntegrityError(format!(
-                "dataset {dataset_name} missing from state"
-            )))?
-            .length;
-        if range.start > range.end || range.end > total_length {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "slice {:?} out of bounds for length {}",
-                range, total_length
-            )));
-        }
-        let len = range.end - range.start;
-        let start = range.start;
-        let end = range.end;
-        let values: Vec<f64> = inner.with_single(|single| {
-            let var = single.variable(&dataset_name).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("missing variable {dataset_name}"))
-            })?;
-            let extents: Extents = [start..end, col_index..col_index + 1].as_slice().into();
-            var.get_values::<f64, _>(extents).map_err(map_nc)
-        })?;
-        ArrayD::from_shape_vec(vec![len], values).map_err(|e| {
-            TimeSeriesError::IntegrityError(format!("shape mismatch on slice: {e}"))
-        })
+        inner.read_locked(hash, Some(range))
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
-        let entry = inner.index.by_hash.remove(hash);
-        let (dataset_name, col_index) = match entry {
+        let loc = match inner.by_hash.remove(hash) {
             Some(v) => v,
             None => return Ok(()),
         };
-        let length;
-        let hash_name;
-        {
-            let state = inner
-                .datasets
-                .get_mut(&dataset_name)
-                .ok_or_else(|| TimeSeriesError::IntegrityError(format!(
-                    "dataset {dataset_name} missing from state"
-                )))?;
-            length = state.length;
-            hash_name = state.hash_name.clone();
-            if col_index < state.columns.len() {
-                state.columns[col_index] = None;
+        match loc {
+            // Standalone: drop from the index; the variable lingers until compact.
+            Location::Standalone { .. } => Ok(()),
+            Location::Packed { dataset, col } => {
+                let (length, hash_name, dtype, element_shape) = {
+                    let state = inner.datasets.get_mut(&dataset).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                    })?;
+                    if col < state.columns.len() {
+                        state.columns[col] = None;
+                    }
+                    (
+                        state.length,
+                        state.hash_name.clone(),
+                        state.dtype,
+                        state.element_shape.clone(),
+                    )
+                };
+                let row_elems: usize = element_shape.iter().product::<usize>().max(1);
+                let total = length * row_elems;
+                inner.with_single_mut(move |single| {
+                    let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("missing variable {hash_name}"))
+                    })?;
+                    hash_var.put_string("", col).map_err(map_nc)?;
+                    drop(hash_var);
+                    let mut data_var = single.variable_mut(&dataset).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("missing variable {dataset}"))
+                    })?;
+                    let zeros = vec![0u8; total * dtype.size()];
+                    let extents = Inner::packed_extents(0..length, col, &element_shape);
+                    put_typed(&mut data_var, dtype, &zeros, extents)?;
+                    Ok(())
+                })
             }
         }
-        let dataset_name_owned = dataset_name.clone();
-        let hash_name_owned = hash_name.clone();
-        inner.with_single_mut(move |single| {
-            let mut hash_var = single.variable_mut(&hash_name_owned).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!(
-                    "missing variable {hash_name_owned}"
-                ))
-            })?;
-            hash_var.put_string("", col_index).map_err(map_nc)?;
-            drop(hash_var);
-
-            let zeros = vec![0.0_f64; length];
-            let mut data_var = single.variable_mut(&dataset_name_owned).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!(
-                    "missing variable {dataset_name_owned}"
-                ))
-            })?;
-            let extents: Extents =
-                [0..length, col_index..col_index + 1].as_slice().into();
-            data_var.put_values(&zeros, extents).map_err(map_nc)?;
-            Ok(())
-        })?;
-        Ok(())
     }
 
     fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        Ok(inner.index.by_hash.contains_key(hash))
+        Ok(inner.by_hash.contains_key(hash))
     }
 
     fn compact(&mut self) -> Result<CompactionReport> {
-        // v0: count tombstones; reusing slots happens automatically on subsequent
-        // puts via `first_free`. Truly shrinking dimensions requires recreating
-        // datasets, which netcdf-c doesn't do in-place — that's a follow-up.
         let inner = self.inner.lock().expect("mutex poisoned");
         let reclaimed = inner
             .datasets
@@ -573,46 +761,26 @@ impl StorageBackend for NetCdfBackend {
     fn verify(&self) -> Result<IntegrityReport> {
         let inner = self.inner.lock().expect("mutex poisoned");
         let mut errors = Vec::new();
-        let entries: Vec<([u8; 32], String, usize, usize)> = inner
-            .index
-            .by_hash
-            .iter()
-            .map(|(h, (name, col))| {
-                let length = inner.datasets.get(name).map(|d| d.length).unwrap_or(0);
-                (*h, name.clone(), *col, length)
-            })
-            .collect();
-        for (hash, name, col, length) in entries {
-            let res: Result<Vec<f64>> = inner.with_single(|single| {
-                let var = single.variable(&name).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!("missing variable {name}"))
-                })?;
-                let extents: Extents = [0..length, col..col + 1].as_slice().into();
-                var.get_values::<f64, _>(extents).map_err(map_nc)
-            });
-            match res {
-                Ok(values) => match ArrayD::from_shape_vec(vec![length], values) {
-                    Ok(arr) => {
-                        let recomputed = array_hash(&arr);
-                        if recomputed != hash {
-                            errors.push(format!(
-                                "hash mismatch in {name}[{col}]: stored={} computed={}",
-                                hash_hex(&hash),
-                                hash_hex(&recomputed),
-                            ));
-                        }
+        let hashes: Vec<[u8; 32]> = inner.by_hash.keys().copied().collect();
+        for hash in hashes {
+            match inner.read_locked(&hash, None) {
+                Ok(arr) => {
+                    let recomputed = array_hash(&arr);
+                    if recomputed != hash {
+                        errors.push(format!(
+                            "hash mismatch: stored={} computed={}",
+                            hash_hex(&hash),
+                            hash_hex(&recomputed),
+                        ));
                     }
-                    Err(e) => errors.push(format!("shape mismatch: {e}")),
-                },
-                Err(e) => errors.push(format!("read error in {name}[{col}]: {e}")),
+                }
+                Err(e) => errors.push(format!("read error: {e}")),
             }
         }
         Ok(IntegrityReport { errors })
     }
 
     fn flush(&mut self) -> Result<()> {
-        // `nc_sync` flushes buffered writes to disk so the file can be copied
-        // for persistence without closing the handle.
         let inner = self.inner.lock().unwrap();
         inner.file.sync().map_err(map_nc)
     }

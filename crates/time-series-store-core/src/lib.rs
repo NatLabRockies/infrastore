@@ -16,6 +16,7 @@ pub use error::{Result, TimeSeriesError};
 pub use storage::{CompactionReport, IntegrityReport};
 pub use store::{AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts};
 pub use types::{
+    array::{Dtype, TypedArray},
     metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
     key::TimeSeriesKey,
     time_series::{SingleTimeSeries, TimeSeriesData, TimeSeriesType},

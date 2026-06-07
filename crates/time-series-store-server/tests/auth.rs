@@ -3,9 +3,8 @@
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
-use ndarray::ArrayD;
 use time_series_store_core::{
-    create_store, Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData,
+    create_store, Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
 };
 use time_series_store_proto::pb::{
     time_series_store_client::TimeSeriesStoreClient, CountsReq,
@@ -21,8 +20,7 @@ fn make_store() -> Store {
     let mut store = create_store(None, true).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data: ArrayD<f64> =
-        ArrayD::from_shape_vec(vec![3], vec![1.0, 2.0, 3.0]).unwrap();
+    let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
     let s = SingleTimeSeries::new(initial, resolution, data);
     store
         .add_time_series(

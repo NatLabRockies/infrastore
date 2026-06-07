@@ -2,10 +2,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::Range;
 
-use ndarray::{ArrayD, Axis};
-
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
+use crate::types::array::TypedArray;
 
 use super::{CompactionReport, IntegrityReport, StorageBackend};
 
@@ -13,10 +12,10 @@ use super::{CompactionReport, IntegrityReport, StorageBackend};
 ///
 /// Used for `in_memory=true` stores and as the default test backend. Tracks a
 /// "tombstoned" set so the slot-reclamation behaviour can be exercised against
-/// the same surface as the NetCDF backend that lands in M1.
+/// the same surface as the NetCDF backend.
 #[derive(Debug, Default)]
 pub struct MemoryBackend {
-    arrays: HashMap<[u8; 32], ArrayD<f64>>,
+    arrays: HashMap<[u8; 32], TypedArray>,
     tombstoned: HashSet<[u8; 32]>,
 }
 
@@ -30,9 +29,9 @@ impl StorageBackend for MemoryBackend {
     fn put_array(
         &mut self,
         hash: &[u8; 32],
-        data: &ArrayD<f64>,
-        _length: usize,
+        data: &TypedArray,
         _resolution_seconds: i64,
+        _packed: bool,
     ) -> Result<()> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.
         self.tombstoned.remove(hash);
@@ -40,28 +39,34 @@ impl StorageBackend for MemoryBackend {
         Ok(())
     }
 
-    fn get_array(&self, hash: &[u8; 32]) -> Result<ArrayD<f64>> {
+    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         self.arrays
             .get(hash)
             .cloned()
             .ok_or(TimeSeriesError::NotFound)
     }
 
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<ArrayD<f64>> {
-        let array = self
-            .arrays
-            .get(hash)
-            .ok_or(TimeSeriesError::NotFound)?;
-        let len = array.shape().first().copied().unwrap_or(0);
+    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
+        let array = self.arrays.get(hash).ok_or(TimeSeriesError::NotFound)?;
+        let len = array.length();
         if range.start > range.end || range.end > len {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "slice {:?} out of bounds for length {}",
                 range, len
             )));
         }
-        Ok(array
-            .slice_axis(Axis(0), ndarray::Slice::from(range.start..range.end))
-            .to_owned())
+        // Bytes per time step = product(element_shape) * element_size.
+        let row_bytes = array.element_shape().iter().product::<usize>() * array.dtype.size();
+        let bytes = array.bytes[range.start * row_bytes..range.end * row_bytes].to_vec();
+        let mut shape = array.shape.clone();
+        if let Some(first) = shape.first_mut() {
+            *first = range.end - range.start;
+        }
+        Ok(TypedArray {
+            dtype: array.dtype,
+            shape,
+            bytes,
+        })
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {

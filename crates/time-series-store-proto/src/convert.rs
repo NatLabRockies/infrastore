@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use time_series_store_core::{
-    FeatureValue, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TimeSeriesKey,
-    TimeSeriesMetadata, TimeSeriesType,
+    Dtype, FeatureValue, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TimeSeriesKey,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 
 use crate::pb;
@@ -239,6 +239,10 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         units: optional_string(m.units),
         // Probabilistic percentiles are not exposed over the gRPC contract.
         percentiles: None,
+        // Element typing is not yet carried on the gRPC contract; default scalar f64.
+        dtype: Dtype::F64,
+        element_shape: Vec::new(),
+        logical_type: None,
     })
 }
 
@@ -248,8 +252,8 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 /// emits SingleTimeSeries; future variants add their own RPC shapes.
 pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     let TimeSeriesData::SingleTimeSeries(s) = data;
-    let shape = s.data.shape().iter().map(|d| *d as u64).collect();
-    let values = s.data.iter().copied().collect();
+    let shape = s.data.shape.iter().map(|d| *d as u64).collect();
+    let values = s.data.to_f64_vec().unwrap_or_default();
     pb::GetResp {
         initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
         resolution_ns: duration_to_ns(s.resolution),
@@ -264,12 +268,7 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
         .map(|d| d.with_timezone(&Utc))?;
     let resolution = Duration::nanoseconds(resp.resolution_ns);
     let shape: Vec<usize> = resp.shape.iter().map(|d| *d as usize).collect();
-    let data = ndarray::ArrayD::from_shape_vec(shape, resp.values).map_err(|e| {
-        ConvertError::InvalidValue {
-            field: "shape/values",
-            message: e.to_string(),
-        }
-    })?;
+    let data = TypedArray::from_f64(shape, &resp.values);
     Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
         initial_timestamp,
         resolution,
