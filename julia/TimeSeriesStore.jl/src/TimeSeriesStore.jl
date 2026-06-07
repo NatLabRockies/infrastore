@@ -1,9 +1,9 @@
-module TimeSeries
+module TimeSeriesStore
 
 using Dates
 import JSON
 
-export TimeSeriesStore, SingleTimeSeries, TimeSeriesKey,
+export Store, SingleTimeSeries, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, get_time_series, remove_time_series!,
        has_time_series, get_counts, verify_integrity, compact!,
@@ -11,20 +11,43 @@ export TimeSeriesStore, SingleTimeSeries, TimeSeriesKey,
        close!
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
+#
+# Resolution order:
+#   1. `TIME_SERIES_STORE_LIB` environment variable (development override).
+#   2. `TimeSeriesStore_jll` (the BinaryBuilder/Yggdrasil binary) when installed.
+# The JLL is looked up without a hard dependency so this package still loads and
+# works via the env var before the JLL is published to the registry.
 
 const _LIB_REF = Ref{String}("")
 
+function _jll_library_path()
+    pkgid = Base.identify_package("TimeSeriesStore_jll")
+    pkgid === nothing && return ""
+    mod = try
+        Base.require(pkgid)
+    catch
+        return ""
+    end
+    return isdefined(mod, :libtime_series_store_ffi) ?
+           String(getproperty(mod, :libtime_series_store_ffi)) : ""
+end
+
 """
-Path to the cdylib. Set via the `TIME_SERIES_STORE_LIB` environment variable
-when running outside an installed JLL.
+Path to the `libtime_series_store_ffi` cdylib. Override with the
+`TIME_SERIES_STORE_LIB` environment variable (development builds); otherwise the
+`TimeSeriesStore_jll` binary is used.
 """
 function lib_path()
     if !isempty(_LIB_REF[])
         return _LIB_REF[]
     end
     p = get(ENV, "TIME_SERIES_STORE_LIB", "")
+    if isempty(p)
+        p = _jll_library_path()
+    end
     isempty(p) && error(
-        "TIME_SERIES_STORE_LIB env var must point to libtime_series_store_ffi.{dylib,so,dll}"
+        "Could not locate libtime_series_store_ffi. Set the TIME_SERIES_STORE_LIB " *
+        "environment variable to a built cdylib, or install TimeSeriesStore_jll.",
     )
     _LIB_REF[] = p
     return p
@@ -61,7 +84,7 @@ struct IntegrityError           <: TimeSeriesException; msg::String; end
 struct ReadOnlyStoreError       <: TimeSeriesException; msg::String; end
 struct GenericError             <: TimeSeriesException; msg::String; code::Int32; end
 
-Base.showerror(io::IO, e::TimeSeriesException) = print(io, "TimeSeries.", typeof(e).name.name, ": ", e.msg)
+Base.showerror(io::IO, e::TimeSeriesException) = print(io, "TimeSeriesStore.", typeof(e).name.name, ": ", e.msg)
 
 function _last_error_message()
     needed = Ref{UInt64}(0)
@@ -123,16 +146,16 @@ end
 
 # ---- Store ----------------------------------------------------------------
 
-mutable struct TimeSeriesStore
+mutable struct Store
     handle :: Ptr{Cvoid}
-    function TimeSeriesStore(handle::Ptr{Cvoid})
+    function Store(handle::Ptr{Cvoid})
         s = new(handle)
         finalizer(close!, s)
         s
     end
 end
 
-function close!(s::TimeSeriesStore)
+function close!(s::Store)
     if s.handle != C_NULL
         ccall((:ts_store_free, lib_path()), Cvoid, (Ptr{Cvoid},), s.handle)
         s.handle = C_NULL
@@ -140,19 +163,19 @@ function close!(s::TimeSeriesStore)
 end
 
 """
-    TimeSeriesStore(; in_memory=true, path=nothing)
+    Store(; in_memory=true, path=nothing)
 
 Construct a new store. Pass `path` (and `in_memory=false`) to persist to a
 NetCDF file on disk.
 """
-function TimeSeriesStore(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing)
+function Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     cpath = path === nothing ? C_NULL : pointer(String(path))
     code = ccall((:ts_store_create, lib_path()), Int32,
                  (Cstring, Bool, Ref{Ptr{Cvoid}}),
                  cpath, in_memory, out)
     _check(code)
-    return TimeSeriesStore(out[])
+    return Store(out[])
 end
 
 """
@@ -166,7 +189,7 @@ function open_store(path::AbstractString; read_only::Bool=false)
                  (Cstring, Bool, Ref{Ptr{Cvoid}}),
                  path, read_only, out)
     _check(code)
-    return TimeSeriesStore(out[])
+    return Store(out[])
 end
 
 # ---- Operations -----------------------------------------------------------
@@ -195,7 +218,7 @@ end
 typically the stringified UUID).
 """
 function add_time_series!(
-    store::TimeSeriesStore,
+    store::Store,
     owner_uuid::AbstractString,
     owner_type::AbstractString,
     owner_category::OwnerCategory,
@@ -243,7 +266,7 @@ Look up a SingleTimeSeries by attributes and return a named tuple of
 content hash as a `Vector{UInt8}`. Throws `NotFoundError` if absent.
 """
 function get_metadata(
-    store::TimeSeriesStore,
+    store::Store,
     owner_uuid::AbstractString,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
@@ -277,7 +300,7 @@ end
 
 Fetch the full stored array for a 32-byte content hash.
 """
-function get_array_by_hash(store::TimeSeriesStore, data_hash::Vector{UInt8})
+function get_array_by_hash(store::Store, data_hash::Vector{UInt8})
     length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
     out_data = Ref{Ptr{Float64}}(C_NULL)
     out_len = Ref{UInt64}(0)
@@ -298,7 +321,7 @@ end
     has_time_series(store, owner_uuid, name; resolution, features=Dict()) -> Bool
 """
 function has_time_series(
-    store::TimeSeriesStore,
+    store::Store,
     owner_uuid::AbstractString,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
@@ -320,7 +343,7 @@ end
     remove_time_series!(store, owner_uuid, name; resolution, features=Dict())
 """
 function remove_time_series!(
-    store::TimeSeriesStore,
+    store::Store,
     owner_uuid::AbstractString,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
@@ -337,7 +360,7 @@ function remove_time_series!(
     return nothing
 end
 
-function get_time_series(store::TimeSeriesStore, key::TimeSeriesKey)
+function get_time_series(store::Store, key::TimeSeriesKey)
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Int64}(0)
     out_data = Ref{Ptr{Float64}}(C_NULL)
@@ -363,14 +386,14 @@ function get_time_series(store::TimeSeriesStore, key::TimeSeriesKey)
     return SingleTimeSeries(initial, resolution, data)
 end
 
-function remove_time_series!(store::TimeSeriesStore, key::TimeSeriesKey)
+function remove_time_series!(store::Store, key::TimeSeriesKey)
     code = ccall((:ts_store_remove, lib_path()), Int32,
                  (Ptr{Cvoid}, Ptr{Cvoid}), store.handle, key.handle)
     _check(code)
     return nothing
 end
 
-function has_time_series(store::TimeSeriesStore, key::TimeSeriesKey)
+function has_time_series(store::Store, key::TimeSeriesKey)
     out = Ref{Bool}(false)
     code = ccall((:ts_store_has, lib_path()), Int32,
                  (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}),
@@ -379,7 +402,7 @@ function has_time_series(store::TimeSeriesStore, key::TimeSeriesKey)
     return out[]
 end
 
-function get_counts(store::TimeSeriesStore)
+function get_counts(store::Store)
     a = Ref{Int64}(0); b = Ref{Int64}(0); c = Ref{Int64}(0)
     code = ccall((:ts_store_counts, lib_path()), Int32,
                  (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
@@ -388,7 +411,7 @@ function get_counts(store::TimeSeriesStore)
     return (components_with_time_series=a[], static_time_series=b[], forecasts=c[])
 end
 
-function verify_integrity(store::TimeSeriesStore)
+function verify_integrity(store::Store)
     out = Ref{UInt64}(0)
     code = ccall((:ts_store_verify, lib_path()), Int32,
                  (Ptr{Cvoid}, Ref{UInt64}), store.handle, out)
@@ -396,7 +419,7 @@ function verify_integrity(store::TimeSeriesStore)
     return Int(out[])
 end
 
-function compact!(store::TimeSeriesStore)
+function compact!(store::Store)
     code = ccall((:ts_store_compact, lib_path()), Int32,
                  (Ptr{Cvoid},), store.handle)
     _check(code)
@@ -409,11 +432,11 @@ end
 Flush pending writes (NetCDF arrays + SQLite metadata) to disk. After this the
 on-disk `<path>.nc` and `<path>.sqlite` artifacts can be copied for persistence.
 """
-function flush!(store::TimeSeriesStore)
+function flush!(store::Store)
     code = ccall((:ts_store_flush, lib_path()), Int32,
                  (Ptr{Cvoid},), store.handle)
     _check(code)
     return nothing
 end
 
-end # module TimeSeries
+end # module TimeSeriesStore

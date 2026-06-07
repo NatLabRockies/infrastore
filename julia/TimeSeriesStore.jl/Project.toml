@@ -1,5 +1,5 @@
-name = "TimeSeries"
-uuid = "5cf2e85f-f1b8-4d4e-8f6c-9e3d3c4a1b2f"
+name = "TimeSeriesStore"
+uuid = "b68d6f23-0ea7-4418-a199-31459e872613"
 authors = ["Daniel Thom"]
 version = "0.1.0"
 
@@ -8,7 +8,7 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 
 [compat]
-JSON = "0.21"
+JSON = "0.21, 1"
 julia = "1.10"
 
 [extras]

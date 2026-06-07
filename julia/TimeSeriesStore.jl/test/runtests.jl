@@ -1,9 +1,9 @@
 using Test
 using Dates
-using TimeSeries
+using TimeSeriesStore
 
-@testset "TimeSeries.jl smoke" begin
-    store = TimeSeriesStore(in_memory=true)
+@testset "TimeSeriesStore.jl smoke" begin
+    store = Store(in_memory=true)
 
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
@@ -33,11 +33,11 @@ using TimeSeries
     remove_time_series!(store, key)
     @test has_time_series(store, key) == false
 
-    @test_throws TimeSeries.NotFoundError get_time_series(store, key)
+    @test_throws TimeSeriesStore.NotFoundError get_time_series(store, key)
 end
 
 @testset "attribute-based metadata + hash access" begin
-    store = TimeSeriesStore(in_memory=true)
+    store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1)
     resolution = Hour(1)
     values = collect(100.0:123.0)
@@ -63,21 +63,21 @@ end
 
     remove_time_series!(store, owner, "load"; resolution=resolution, features=feats)
     @test !has_time_series(store, owner, "load"; resolution=resolution, features=feats)
-    @test_throws TimeSeries.NotFoundError get_metadata(store, owner, "load";
+    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, owner, "load";
                                                        resolution=resolution, features=feats)
 end
 
-@testset "TimeSeries.jl persistent round-trip" begin
+@testset "TimeSeriesStore.jl persistent round-trip" begin
     mktempdir() do dir
         path = joinpath(dir, "store.nc")
-        let store = TimeSeriesStore(in_memory=false, path=path)
+        let store = Store(in_memory=false, path=path)
             ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:12.0))
             add_time_series!(store, "1", "Generator", Component, "load", ts)
             flush!(store)
-            TimeSeries.close!(store)
+            TimeSeriesStore.close!(store)
         end
 
-        store = TimeSeries.open_store(path; read_only=true)
+        store = TimeSeriesStore.open_store(path; read_only=true)
         try
             counts = get_counts(store)
             @test counts.static_time_series == 1
@@ -85,7 +85,7 @@ end
             @test meta.length == 12
             @test get_array_by_hash(store, meta.data_hash) == collect(1.0:12.0)
         finally
-            TimeSeries.close!(store)
+            TimeSeriesStore.close!(store)
         end
     end
 end

@@ -28,7 +28,7 @@ crates/
   time-series-store-py/      # PyO3 bindings, abi3-py310 wheel
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
 proto/                       # .proto sources
-julia/TimeSeries.jl/         # Julia package wrapping the C ABI
+julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI (TimeSeriesStore.jl)
 python/tests/                # pytest suite
 examples/                    # Sample server config
 ```
@@ -109,13 +109,13 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ```sh
 cargo build -p time-series-store-ffi --release
 export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
-julia --project=julia/TimeSeries.jl -e 'using Pkg; Pkg.instantiate()'
-julia --project=julia/TimeSeries.jl julia/TimeSeries.jl/test/runtests.jl
+julia --project=julia/TimeSeriesStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.jl
 ```
 
 ```julia
-using Dates, TimeSeries
-store = TimeSeriesStore(in_memory=true)
+using Dates, TimeSeriesStore
+store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0))
 key = add_time_series!(store, "42", "Generator", Component, "load", ts;
                        features=Dict("model_year" => 2030), units="MW")
