@@ -652,6 +652,287 @@ pub unsafe extern "C" fn ts_store_get_array_by_hash(
     TS_OK
 }
 
+// ---- Forecasts (Deterministic / DeterministicSingleTimeSeries / ...) -------
+
+fn ts_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
+    use core_lib::TimeSeriesType as T;
+    Some(match i {
+        0 => T::SingleTimeSeries,
+        1 => T::NonSequentialTimeSeries,
+        2 => T::Deterministic,
+        3 => T::DeterministicSingleTimeSeries,
+        4 => T::Probabilistic,
+        5 => T::Scenarios,
+        _ => return None,
+    })
+}
+
+unsafe fn build_typed_key_from_attrs(
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    ts_type: i32,
+    resolution_ns: i64,
+    features_json: *const c_char,
+) -> Result<core_lib::TimeSeriesKey, i32> {
+    let time_series_type = match ts_type_from_int(ts_type) {
+        Some(t) => t,
+        None => {
+            set_error(format!("invalid time_series_type {ts_type}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let mut key = unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }?;
+    key.time_series_type = time_series_type;
+    Ok(key)
+}
+
+/// Add a forecast. `data_ptr`/`data_len` is the flattened storage array
+/// (Deterministic: `(horizon_count, count)` column-major; DST: the underlying
+/// SingleTimeSeries array). `ts_type`: 2=Deterministic, 3=DeterministicSingleTimeSeries.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_add_forecast(
+    handle: *mut TsStoreHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    ts_type: i32,
+    initial_ts_unix_ns: i64,
+    resolution_ns: i64,
+    horizon_ns: i64,
+    interval_ns: i64,
+    count: u64,
+    data_ptr: *const f64,
+    data_len: u64,
+    features_json: *const c_char,
+    units: *const c_char,
+    scaling_expr: *const c_char,
+    out_key: *mut *mut TsKeyHandle,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_key.is_null() || data_ptr.is_null() {
+        set_error("a required pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let time_series_type = match ts_type_from_int(ts_type) {
+        Some(t) => t,
+        None => {
+            set_error(format!("invalid time_series_type {ts_type}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let owner_type = match unsafe { cstr_to_str(owner_type) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let name = match unsafe { cstr_to_str(name) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let owner_category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let units = match unsafe { cstr_to_optional_string(units) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let scaling_expr = match unsafe { cstr_to_optional_string(scaling_expr) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let features = match unsafe { parse_features_json(features_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let initial_timestamp = match unix_ns_to_datetime(initial_ts_unix_ns) {
+        Some(d) => d,
+        None => {
+            set_error(format!("invalid initial_ts_unix_ns: {initial_ts_unix_ns}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let len = data_len as usize;
+    let values: Vec<f64> = unsafe { slice::from_raw_parts(data_ptr, len) }.to_vec();
+    let array = match ArrayD::from_shape_vec(vec![len], values) {
+        Ok(a) => a,
+        Err(e) => {
+            set_error(format!("data shape error: {e}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+
+    match store.inner.add_forecast(
+        owner_uuid,
+        owner_type,
+        owner_category,
+        name,
+        time_series_type,
+        initial_timestamp,
+        Duration::nanoseconds(resolution_ns),
+        Duration::nanoseconds(horizon_ns),
+        Duration::nanoseconds(interval_ns),
+        count as usize,
+        array,
+        features,
+        units,
+        scaling_expr,
+    ) {
+        Ok(key) => {
+            let handle = Box::new(TsKeyHandle { inner: key });
+            unsafe { *out_key = Box::into_raw(handle) };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Read forecast metadata by attributes. Out-params receive initial timestamp,
+/// resolution, horizon, interval, count, the stored array length, and the
+/// 32-byte content hash (into `out_data_hash`).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_get_forecast_metadata(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    ts_type: i32,
+    resolution_ns: i64,
+    features_json: *const c_char,
+    out_initial_ts_unix_ns: *mut i64,
+    out_resolution_ns: *mut i64,
+    out_horizon_ns: *mut i64,
+    out_interval_ns: *mut i64,
+    out_count: *mut u64,
+    out_length: *mut u64,
+    out_data_hash: *mut u8,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_initial_ts_unix_ns.is_null()
+        || out_resolution_ns.is_null()
+        || out_horizon_ns.is_null()
+        || out_interval_ns.is_null()
+        || out_count.is_null()
+        || out_length.is_null()
+        || out_data_hash.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe {
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    let meta = match store.inner.get_metadata(&key) {
+        Ok(m) => m,
+        Err(e) => return map_core_error(e),
+    };
+    let initial_ns = match meta.initial_timestamp.and_then(datetime_to_unix_ns) {
+        Some(n) => n,
+        None => {
+            set_error("forecast metadata missing initial_timestamp");
+            return TS_ERR_INTEGRITY;
+        }
+    };
+    let dur_ns = |d: Option<Duration>| {
+        d.map(|x| {
+            x.num_nanoseconds()
+                .unwrap_or_else(|| x.num_seconds() * 1_000_000_000)
+        })
+        .unwrap_or(0)
+    };
+    unsafe {
+        *out_initial_ts_unix_ns = initial_ns;
+        *out_resolution_ns = dur_ns(meta.resolution);
+        *out_horizon_ns = dur_ns(meta.horizon);
+        *out_interval_ns = dur_ns(meta.interval);
+        *out_count = meta.count.unwrap_or(0) as u64;
+        *out_length = meta.length.unwrap_or(0) as u64;
+        ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
+    }
+    TS_OK
+}
+
+/// True iff a time series of `ts_type` with the given attributes exists.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_has_typed(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    ts_type: i32,
+    resolution_ns: i64,
+    features_json: *const c_char,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_present.is_null() {
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe {
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    match store.inner.has_time_series(&key) {
+        Ok(b) => {
+            unsafe { *out_present = b };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Remove a time series of `ts_type` by attributes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_remove_typed(
+    handle: *mut TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    ts_type: i32,
+    resolution_ns: i64,
+    features_json: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let key = match unsafe {
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    match store.inner.remove_time_series(&key) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Remove all time series, or all for a single owner when `owner_uuid` is
 /// non-null. Returns `TS_OK` on success.
 #[unsafe(no_mangle)]

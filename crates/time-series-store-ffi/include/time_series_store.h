@@ -137,6 +137,69 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle,
                                    uint64_t *out_data_len);
 
 /**
+ * Add a forecast. `data_ptr`/`data_len` is the flattened storage array
+ * (Deterministic: `(horizon_count, count)` column-major; DST: the underlying
+ * SingleTimeSeries array). `ts_type`: 2=Deterministic, 3=DeterministicSingleTimeSeries.
+ */
+int32_t ts_store_add_forecast(struct TsStore *handle,
+                              const char *owner_uuid,
+                              const char *owner_type,
+                              int32_t owner_category,
+                              const char *name,
+                              int32_t ts_type,
+                              int64_t initial_ts_unix_ns,
+                              int64_t resolution_ns,
+                              int64_t horizon_ns,
+                              int64_t interval_ns,
+                              uint64_t count,
+                              const double *data_ptr,
+                              uint64_t data_len,
+                              const char *features_json,
+                              const char *units,
+                              const char *scaling_expr,
+                              struct TsKey **out_key);
+
+/**
+ * Read forecast metadata by attributes. Out-params receive initial timestamp,
+ * resolution, horizon, interval, count, the stored array length, and the
+ * 32-byte content hash (into `out_data_hash`).
+ */
+int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
+                                       const char *owner_uuid,
+                                       const char *name,
+                                       int32_t ts_type,
+                                       int64_t resolution_ns,
+                                       const char *features_json,
+                                       int64_t *out_initial_ts_unix_ns,
+                                       int64_t *out_resolution_ns,
+                                       int64_t *out_horizon_ns,
+                                       int64_t *out_interval_ns,
+                                       uint64_t *out_count,
+                                       uint64_t *out_length,
+                                       uint8_t *out_data_hash);
+
+/**
+ * True iff a time series of `ts_type` with the given attributes exists.
+ */
+int32_t ts_store_has_typed(const struct TsStore *handle,
+                           const char *owner_uuid,
+                           const char *name,
+                           int32_t ts_type,
+                           int64_t resolution_ns,
+                           const char *features_json,
+                           bool *out_present);
+
+/**
+ * Remove a time series of `ts_type` by attributes.
+ */
+int32_t ts_store_remove_typed(struct TsStore *handle,
+                              const char *owner_uuid,
+                              const char *name,
+                              int32_t ts_type,
+                              int64_t resolution_ns,
+                              const char *features_json);
+
+/**
  * Remove all time series, or all for a single owner when `owner_uuid` is
  * non-null. Returns `TS_OK` on success.
  */

@@ -405,6 +405,83 @@ impl Store {
         self.metadata.list_keys_for_owner(owner_uuid)
     }
 
+    /// Add a forecast (`Deterministic` / `DeterministicSingleTimeSeries` / etc.).
+    ///
+    /// `data` is the flattened storage array (content-addressed by hash):
+    /// `Deterministic` passes the column-major `(horizon_count, count)` matrix
+    /// flattened to 1-D; `DeterministicSingleTimeSeries` passes the underlying
+    /// `SingleTimeSeries` array (which then dedups against that series). The
+    /// caller owns window semantics; the store only records the forecast
+    /// parameters in metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_forecast(
+        &mut self,
+        owner_uuid: &str,
+        owner_type: &str,
+        owner_category: OwnerCategory,
+        name: &str,
+        time_series_type: TimeSeriesType,
+        initial_timestamp: chrono::DateTime<chrono::Utc>,
+        resolution: Duration,
+        horizon: Duration,
+        interval: Duration,
+        count: usize,
+        data: ndarray::ArrayD<f64>,
+        features: Features,
+        units: Option<String>,
+        scaling_factor_multiplier: Option<String>,
+    ) -> Result<TimeSeriesKey> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let length = data.shape().first().copied().unwrap_or(0);
+        let hash = array_hash(&data);
+        let resolution_seconds = resolution.num_seconds();
+        let already_present = self.backend.contains(&hash)?;
+        self.backend
+            .put_array(&hash, &data, length, resolution_seconds)?;
+
+        let meta = TimeSeriesMetadata {
+            owner_uuid: owner_uuid.to_string(),
+            owner_type: owner_type.to_string(),
+            owner_category,
+            time_series_type,
+            name: name.to_string(),
+            data_hash: hash,
+            initial_timestamp: Some(initial_timestamp),
+            resolution: Some(resolution),
+            length: Some(length),
+            horizon: Some(horizon),
+            interval: Some(interval),
+            count: Some(count),
+            timestamps: None,
+            features: features.clone(),
+            scaling_factor_multiplier,
+            units,
+        };
+
+        let tx = self.metadata.transaction()?;
+        match MetadataStore::insert(&tx, &meta) {
+            Ok(_) => {
+                tx.commit()?;
+                Ok(TimeSeriesKey {
+                    owner_uuid: owner_uuid.to_string(),
+                    time_series_type,
+                    name: name.to_string(),
+                    resolution: Some(resolution),
+                    features,
+                })
+            }
+            Err(e) => {
+                drop(tx);
+                if !already_present {
+                    let _ = self.backend.remove_array(&hash);
+                }
+                Err(e)
+            }
+        }
+    }
+
     pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool> {
         match self.metadata.get_by_key(key) {
             Ok(_) => Ok(true),
@@ -426,10 +503,16 @@ impl Store {
     }
 
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts> {
+        let forecasts = self.metadata.count_by_type(TimeSeriesType::Deterministic)?
+            + self
+                .metadata
+                .count_by_type(TimeSeriesType::DeterministicSingleTimeSeries)?
+            + self.metadata.count_by_type(TimeSeriesType::Probabilistic)?
+            + self.metadata.count_by_type(TimeSeriesType::Scenarios)?;
         Ok(TimeSeriesCounts {
             components_with_time_series: self.metadata.count_distinct_owners()?,
             static_time_series: self.metadata.count_by_type(TimeSeriesType::SingleTimeSeries)?,
-            forecasts: 0,
+            forecasts,
         })
     }
 
