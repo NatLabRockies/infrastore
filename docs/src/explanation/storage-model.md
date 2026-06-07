@@ -1,0 +1,130 @@
+# Storage Model
+
+A persistent store is **two files that travel together**:
+
+```text
+system.nc          # NetCDF4 — the numerical arrays
+system.nc.sqlite   # SQLite  — the metadata associations
+```
+
+The sidecar path is derived by appending `.sqlite` to the NetCDF file name. This page explains the
+split and how the two halves stay consistent. For the exact bytes, dataset names, and table columns,
+see the [On-Disk File Format reference](../reference/file-format.md).
+
+## Why Split Arrays From Metadata
+
+Arrays and metadata pull in opposite directions:
+
+| Concern        | Arrays                             | Metadata                                  |
+| -------------- | ---------------------------------- | ----------------------------------------- |
+| Size           | Large (thousands of values each)   | Small (a row plus a few feature rows)     |
+| Access pattern | Bulk read by content               | Filtered queries by owner, name, features |
+| Mutation       | Append-mostly, dedup-on-write      | Insert / delete with constraints          |
+| Best tool      | NetCDF4 (chunked, compressed HDF5) | SQLite (indexes, transactions)            |
+
+Forcing both into one format would compromise one of them. Instead, each lives where it is
+strongest, and the `Store` layer coordinates them.
+
+## The Array Side: NetCDF4
+
+Arrays are grouped under `time_series/single/` in the NetCDF file. Series that share a **length**
+and a **resolution** are packed together as columns of a single 2-D dataset named
+`sts_{length}_{resolution_seconds}`, with shape `(length, 1000)`:
+
+```mermaid
+flowchart TB
+    subgraph ds["dataset sts_8760_3600  shape (8760, 1000)"]
+        direction LR
+        C0["col 0<br/>series A"]
+        C1["col 1<br/>series B"]
+        C2["col 2<br/>(free)"]
+        CN["col 999<br/>(free)"]
+    end
+    H["companion sts_8760_3600_h<br/>1000 hash strings"]
+    C0 -.hash.-> H
+    C1 -.hash.-> H
+
+    style C0 fill:#28a745,color:#fff
+    style C1 fill:#28a745,color:#fff
+    style C2 fill:#6c757d,color:#fff
+    style CN fill:#6c757d,color:#fff
+    style H fill:#6f42c1,color:#fff
+```
+
+Key design choices:
+
+- **Columns are series, rows are timesteps.** Chunking is `(1, 1000)`, so reading one timestep
+  across all components is contiguous on disk — the layout favors "give me hour 4,000 for every
+  generator."
+- **A companion string variable holds the hashes.** For each data variable `sts_…` there is a
+  sibling `sts_…_h` of the same column count. Slot `i` holds the SHA-256 hex of column `i`'s array,
+  or an empty string if the slot is free. This is the on-disk index that the backend rebuilds on
+  open.
+- **Datasets spill at 1,000 columns.** When a `(length, resolution)` family fills its 1,000 columns,
+  the next write creates `sts_{length}_{resolution}__1`, then `__2`, and so on.
+- **Compression is on.** Data variables use zlib level 3 with shuffle.
+
+The [Storage Backend design](../reference/file-format.md#netcdf-layout) reference gives the precise
+naming and dimension scheme.
+
+## The Metadata Side: SQLite
+
+The sidecar holds two tables:
+
+- **`time_series_associations`** — one row per `(owner, name, resolution, features)` association,
+  including the `data_hash` that links it to a NetCDF column, plus temporal fields, units, and the
+  scaling expression.
+- **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
+  a `value_kind` discriminator.
+
+A unique index over `(owner_uuid, time_series_type, name, resolution_ns, features_hash)` enforces
+the [key uniqueness](./data-model.md#keys) invariant at the database level. Indexes on `data_hash`,
+`owner_uuid`, and `resolution_ns` keep lookups fast.
+
+## Keeping the Two Files Consistent
+
+Because a write touches both files, `Store` follows a careful ordering so a failure cannot leave a
+dangling reference:
+
+```mermaid
+sequenceDiagram
+    participant C as add_time_series
+    participant B as NetCDF backend
+    participant M as SQLite (tx)
+    C->>B: put_array(hash, data)  (idempotent on hash)
+    Note over C,B: array write is staged; remembered for rollback
+    C->>M: BEGIN; INSERT association
+    alt insert succeeds
+        C->>M: COMMIT
+        C-->>C: return TimeSeriesKey
+    else insert fails (e.g. duplicate)
+        C->>M: ROLLBACK (drop tx)
+        C->>B: remove_array(staged hashes)
+        C-->>C: return Err
+    end
+```
+
+- **Array first, metadata second.** `put_array` is idempotent — calling it with an already-present
+  hash is a no-op — so staging the array before committing metadata is safe.
+- **Metadata commit is the point of no return.** If the SQLite insert fails (most commonly a
+  `DuplicateTimeSeries` constraint violation), the transaction rolls back and any array column
+  staged _in this call_ is removed, returning the store to its prior state.
+- **Bulk writes are all-or-nothing.** `add_time_series_bulk` stages every array and inserts every
+  association in one transaction; any error rolls the whole batch back.
+
+On delete, the order reverses and is reference-counted: the association rows are removed inside a
+transaction, then an array column is only zeroed/freed if no remaining association references that
+hash. This is what lets two keys [share one array](./content-addressing.md) safely.
+
+## Persistence and Copying
+
+The NetCDF backend buffers writes. Call `flush()` (which issues `nc_sync`) before copying the files
+for backup or archival; afterward both `system.nc` and `system.nc.sqlite` can be copied as a pair
+without closing the handle. The two files must always be kept together — neither is usable alone.
+
+## Compaction
+
+Deleting a series frees its column slot but does not shrink the NetCDF dataset. The freed slot is
+transparently reused by the next compatible write (`first_free`). `compact()` reports how many slots
+are reclaimable; v0 does not physically shrink datasets, because netcdf-c cannot resize a dimension
+in place — that is a follow-up. See [`compact`](../reference/rust-api.md#store).

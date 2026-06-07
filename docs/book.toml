@@ -1,0 +1,51 @@
+[book]
+authors = ["time-series-store Contributors"]
+language = "en"
+src = "src"
+title = "time-series-store Documentation"
+description = "Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings"
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/NatLabRockies/time-series-store"
+edit-url-template = "https://github.com/NatLabRockies/time-series-store/edit/main/docs/{path}"
+site-url = "/time-series-store/"
+cname = ""
+additional-css = ["custom.css", "pagetoc.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "pagetoc.js"]
+
+[output.html.print]
+enable = true
+
+[output.html.fold]
+enable = true
+level = 0
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.playground]
+editable = false
+copyable = true
+copy-js = true
+line-numbers = true
+
+[preprocessor.links]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html.redirect]
