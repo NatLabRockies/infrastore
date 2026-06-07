@@ -67,8 +67,8 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
     ) -> Result<Response<ListResp>, Status> {
         let req = request.into_inner();
         let mut filter = ListFilter::new();
-        if let Some(id) = req.owner_id {
-            filter = filter.owner_id(id);
+        if let Some(uuid) = req.owner_uuid {
+            filter = filter.owner_uuid(uuid);
         }
         if let Some(t) = req.owner_type {
             filter = filter.owner_type(t);
@@ -134,7 +134,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         let req = request.into_inner();
         let store = self.store.lock().await;
         let keys = store
-            .get_time_series_keys(req.owner_id)
+            .get_time_series_keys(&req.owner_uuid)
             .map_err(map_err)?;
         Ok(Response::new(KeysResp {
             keys: keys.iter().map(time_series_store_proto::convert::key_to_pb).collect(),

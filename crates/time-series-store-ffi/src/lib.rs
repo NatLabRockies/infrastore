@@ -163,7 +163,7 @@ pub unsafe extern "C" fn ts_store_free(handle: *mut TsStoreHandle) {
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_single(
     handle: *mut TsStoreHandle,
-    owner_id: i64,
+    owner_uuid: *const c_char,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -192,6 +192,13 @@ pub unsafe extern "C" fn ts_store_add_single(
         set_error("data_ptr is null");
         return TS_ERR_NULL_POINTER;
     }
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("owner_uuid is invalid");
+            return c;
+        }
+    };
     let owner_type = match unsafe { cstr_to_str(owner_type) } {
         Ok(s) => s,
         Err(c) => {
@@ -248,7 +255,7 @@ pub unsafe extern "C" fn ts_store_add_single(
     let data = core_lib::TimeSeriesData::SingleTimeSeries(single);
 
     match store.inner.add_time_series(
-        owner_id,
+        owner_uuid,
         owner_type,
         owner_category,
         name,
@@ -460,6 +467,213 @@ pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
     }
 }
 
+// ---- Attribute-based metadata access --------------------------------------
+//
+// The Julia `RustTimeSeriesStore` works in terms of (owner_uuid, name,
+// resolution, features) rather than opaque key handles, so these entry points
+// build a `TimeSeriesKey` internally and route to the core store. v0 only
+// resolves SingleTimeSeries.
+
+unsafe fn build_key_from_attrs(
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    resolution_ns: i64,
+    features_json: *const c_char,
+) -> Result<core_lib::TimeSeriesKey, i32> {
+    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }.inspect_err(|_| {
+        set_error("owner_uuid is invalid");
+    })?;
+    let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
+        set_error("name is invalid");
+    })?;
+    let features = unsafe { parse_features_json(features_json) }?;
+    let resolution = if resolution_ns <= 0 {
+        None
+    } else {
+        Some(Duration::nanoseconds(resolution_ns))
+    };
+    Ok(core_lib::TimeSeriesKey {
+        owner_uuid: owner_uuid.to_string(),
+        time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
+        name: name.to_string(),
+        resolution,
+        features,
+    })
+}
+
+/// Look up a SingleTimeSeries metadata record by attributes. On success the
+/// caller's out-params receive the initial timestamp, resolution, length, and
+/// the 32-byte content hash (written into the `out_data_hash` buffer, which
+/// must have room for 32 bytes). Returns `TS_ERR_NOT_FOUND` if absent.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_get_metadata(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    resolution_ns: i64,
+    features_json: *const c_char,
+    out_initial_ts_unix_ns: *mut i64,
+    out_resolution_ns: *mut i64,
+    out_length: *mut u64,
+    out_data_hash: *mut u8,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_initial_ts_unix_ns.is_null()
+        || out_resolution_ns.is_null()
+        || out_length.is_null()
+        || out_data_hash.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) } {
+        Ok(k) => k,
+        Err(code) => return code,
+    };
+    let meta = match store.inner.get_metadata(&key) {
+        Ok(m) => m,
+        Err(e) => return map_core_error(e),
+    };
+    let initial_ns = match meta.initial_timestamp.and_then(datetime_to_unix_ns) {
+        Some(n) => n,
+        None => {
+            set_error("metadata missing or out-of-range initial_timestamp");
+            return TS_ERR_INTEGRITY;
+        }
+    };
+    let res_ns = match meta.resolution {
+        Some(r) => r
+            .num_nanoseconds()
+            .unwrap_or_else(|| r.num_seconds() * 1_000_000_000),
+        None => 0,
+    };
+    unsafe {
+        *out_initial_ts_unix_ns = initial_ns;
+        *out_resolution_ns = res_ns;
+        *out_length = meta.length.unwrap_or(0) as u64;
+        ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
+    }
+    TS_OK
+}
+
+/// True iff a SingleTimeSeries with the given attributes exists.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_has_by_attrs(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    resolution_ns: i64,
+    features_json: *const c_char,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_present.is_null() {
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) } {
+        Ok(k) => k,
+        Err(code) => return code,
+    };
+    match store.inner.has_time_series(&key) {
+        Ok(b) => {
+            unsafe { *out_present = b };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
+/// other association still references its content hash.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_remove_by_attrs(
+    handle: *mut TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    resolution_ns: i64,
+    features_json: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) } {
+        Ok(k) => k,
+        Err(code) => return code,
+    };
+    match store.inner.remove_time_series(&key) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Fetch a stored array by its 32-byte content hash. On success the caller owns
+/// `*out_data` and must free it with `ts_buffer_free_f64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_get_array_by_hash(
+    handle: *const TsStoreHandle,
+    data_hash: *const u8,
+    out_data: *mut *mut f64,
+    out_data_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if data_hash.is_null() || out_data.is_null() || out_data_len.is_null() {
+        set_error("a pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let mut hash = [0u8; 32];
+    unsafe { ptr::copy_nonoverlapping(data_hash, hash.as_mut_ptr(), 32) };
+    let array = match store.inner.get_array_by_hash(&hash) {
+        Ok(a) => a,
+        Err(e) => return map_core_error(e),
+    };
+    let mut buf: Vec<f64> = array.iter().copied().collect();
+    let len = buf.len() as u64;
+    let p = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    unsafe {
+        *out_data = p;
+        *out_data_len = len;
+    }
+    TS_OK
+}
+
+/// Remove all time series, or all for a single owner when `owner_uuid` is
+/// non-null. Returns `TS_OK` on success.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_clear(
+    handle: *mut TsStoreHandle,
+    owner_uuid: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let owner = match unsafe { cstr_to_optional_string(owner_uuid) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    match store.inner.clear_time_series(owner.as_deref()) {
+        Ok(_) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
 // ---- Free helpers ---------------------------------------------------------
 
 #[unsafe(no_mangle)]
@@ -551,9 +765,10 @@ unsafe fn parse_features_json(json: *const c_char) -> Result<core_lib::Features,
                     return Err(TS_ERR_INVALID_PARAMETER);
                 }
             }
+            Value::String(s) => core_lib::FeatureValue::Str(s.clone()),
             other => {
                 set_error(format!(
-                    "feature {k}: must be int/float/bool, got {}",
+                    "feature {k}: must be int/float/bool/string, got {}",
                     type_name(other)
                 ));
                 return Err(TS_ERR_INVALID_PARAMETER);

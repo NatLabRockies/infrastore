@@ -51,7 +51,7 @@ fn fixture_store() -> Store {
     features.insert("model_year".into(), FeatureValue::Int(2030));
     store
         .add_time_series(
-            42,
+            "42",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -64,7 +64,7 @@ fn fixture_store() -> Store {
     let s2 = series(2024, 24, 5.0);
     store
         .add_time_series(
-            43,
+            "43",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -89,7 +89,7 @@ async fn list_and_get_round_trip() {
     assert_eq!(metas.len(), 2);
 
     // Fetch by key.
-    let keys = client.get_time_series_keys(42).await.unwrap();
+    let keys = client.get_time_series_keys("42".to_string()).await.unwrap();
     assert_eq!(keys.len(), 1);
     let data = client.get_time_series(&keys[0], None).await.unwrap();
     let single = data.as_single().unwrap();
@@ -103,7 +103,7 @@ async fn time_range_slicing_over_grpc() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(42).await.unwrap();
+    let keys = client.get_time_series_keys("42".to_string()).await.unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
@@ -132,7 +132,7 @@ async fn list_filter_by_features_subset() {
         .await
         .unwrap();
     assert_eq!(metas.len(), 1);
-    assert_eq!(metas[0].owner_id, 42);
+    assert_eq!(metas[0].owner_uuid, "42");
 }
 
 #[tokio::test]
@@ -153,7 +153,7 @@ async fn counts_resolutions_has_verify() {
         .unwrap();
     assert_eq!(resolutions_typed, vec![Duration::hours(1)]);
 
-    let keys = client.get_time_series_keys(42).await.unwrap();
+    let keys = client.get_time_series_keys("42".to_string()).await.unwrap();
     let present = client.has_time_series(&keys[0]).await.unwrap();
     assert!(present);
 
@@ -167,7 +167,7 @@ async fn missing_key_returns_not_found() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let bogus_key = time_series_store_core::TimeSeriesKey {
-        owner_id: 999,
+        owner_uuid: "999".into(),
         time_series_type: TimeSeriesType::SingleTimeSeries,
         name: "load".into(),
         resolution: Some(Duration::hours(1)),

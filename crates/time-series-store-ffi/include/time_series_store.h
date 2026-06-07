@@ -50,7 +50,7 @@ void ts_store_free(struct TsStore *handle);
  * release with `ts_key_free`.
  */
 int32_t ts_store_add_single(struct TsStore *handle,
-                            int64_t owner_id,
+                            const char *owner_uuid,
                             const char *owner_type,
                             int32_t owner_category,
                             const char *name,
@@ -90,6 +90,57 @@ int32_t ts_store_verify(const struct TsStore *handle, uint64_t *out_error_count)
 int32_t ts_store_compact(struct TsStore *handle);
 
 int32_t ts_store_flush(struct TsStore *handle);
+
+/**
+ * Look up a SingleTimeSeries metadata record by attributes. On success the
+ * caller's out-params receive the initial timestamp, resolution, length, and
+ * the 32-byte content hash (written into the `out_data_hash` buffer, which
+ * must have room for 32 bytes). Returns `TS_ERR_NOT_FOUND` if absent.
+ */
+int32_t ts_store_get_metadata(const struct TsStore *handle,
+                              const char *owner_uuid,
+                              const char *name,
+                              int64_t resolution_ns,
+                              const char *features_json,
+                              int64_t *out_initial_ts_unix_ns,
+                              int64_t *out_resolution_ns,
+                              uint64_t *out_length,
+                              uint8_t *out_data_hash);
+
+/**
+ * True iff a SingleTimeSeries with the given attributes exists.
+ */
+int32_t ts_store_has_by_attrs(const struct TsStore *handle,
+                              const char *owner_uuid,
+                              const char *name,
+                              int64_t resolution_ns,
+                              const char *features_json,
+                              bool *out_present);
+
+/**
+ * Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
+ * other association still references its content hash.
+ */
+int32_t ts_store_remove_by_attrs(struct TsStore *handle,
+                                 const char *owner_uuid,
+                                 const char *name,
+                                 int64_t resolution_ns,
+                                 const char *features_json);
+
+/**
+ * Fetch a stored array by its 32-byte content hash. On success the caller owns
+ * `*out_data` and must free it with `ts_buffer_free_f64`.
+ */
+int32_t ts_store_get_array_by_hash(const struct TsStore *handle,
+                                   const uint8_t *data_hash,
+                                   double **out_data,
+                                   uint64_t *out_data_len);
+
+/**
+ * Remove all time series, or all for a single owner when `owner_uuid` is
+ * non-null. Returns `TS_OK` on success.
+ */
+int32_t ts_store_clear(struct TsStore *handle, const char *owner_uuid);
 
 void ts_key_free(struct TsKey *key);
 

@@ -77,6 +77,12 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
                 hasher.update(b"b");
                 hasher.update([*v as u8]);
             }
+            FeatureValue::Str(v) => {
+                hasher.update(b"s");
+                let v_bytes = v.as_bytes();
+                hasher.update((v_bytes.len() as u64).to_le_bytes());
+                hasher.update(v_bytes);
+            }
         }
     }
 

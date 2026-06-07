@@ -30,14 +30,14 @@ def test_in_memory_round_trip():
     store = TimeSeriesStore.create(in_memory=True)
     s = make_series()
     key = store.add_time_series(
-        owner_id=42,
+        owner_uuid="42",
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         name="load",
         time_series=s,
         units="MW",
     )
-    assert key.owner_id == 42
+    assert key.owner_uuid == "42"
     assert key.time_series_type == TimeSeriesType.SingleTimeSeries
 
     got = store.get_time_series(key)
@@ -52,7 +52,7 @@ def test_persistent_round_trip(tmp_path):
 
     store = TimeSeriesStore.create(path=str(path), in_memory=False)
     key = store.add_time_series(
-        owner_id=1,
+        owner_uuid="1",
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         name="load",
@@ -62,7 +62,7 @@ def test_persistent_round_trip(tmp_path):
     del store  # drop file handle
 
     reopened = TimeSeriesStore.open(path=str(path), read_only=True)
-    keys = reopened.get_time_series_keys(1)
+    keys = reopened.get_time_series_keys("1")
     assert len(keys) == 1
     got = reopened.get_time_series(keys[0])
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
@@ -77,7 +77,7 @@ def test_features_disambiguate_keys():
     s2 = make_series(base=100.0)
 
     store.add_time_series(
-        owner_id=1,
+        owner_uuid="1",
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         name="load",
@@ -85,7 +85,7 @@ def test_features_disambiguate_keys():
         features={"model_year": 2030, "is_baseline": True},
     )
     store.add_time_series(
-        owner_id=1,
+        owner_uuid="1",
         owner_type="Generator",
         owner_category=OwnerCategory.Component,
         name="load",
@@ -93,7 +93,7 @@ def test_features_disambiguate_keys():
         features={"model_year": 2035},
     )
 
-    all_rows = store.list_time_series(owner_id=1)
+    all_rows = store.list_time_series(owner_uuid="1")
     assert len(all_rows) == 2
 
     only_2035 = store.list_time_series(features={"model_year": 2035})

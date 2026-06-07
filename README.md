@@ -37,10 +37,29 @@ examples/                    # Sample server config
 
 ## Prerequisites
 
-System libraries (macOS via `brew`, equivalent on Linux):
+System libraries (macOS via `brew`):
 
 ```sh
-brew install netcdf protobuf maturin
+brew install hdf5 netcdf protobuf maturin
+```
+
+`hdf5` is a transitive dependency of `netcdf`, but the `hdf5-metno-sys` build
+script does not always locate it on its own. If `cargo build` fails with
+`Unable to locate HDF5 root directory and/or headers`, point it at the Homebrew
+install explicitly:
+
+```sh
+export HDF5_DIR="$(brew --prefix hdf5)"
+```
+
+Add that line to your shell profile to make it permanent.
+
+On Linux (Debian/Ubuntu), install the equivalent packages:
+
+```sh
+sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
+# if the build script can't find HDF5:
+export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial
 ```
 
 The cdylib tests need a Python interpreter (3.10+) and Julia (1.10+).

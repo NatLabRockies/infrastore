@@ -18,7 +18,7 @@ use crate::types::time_series::{SingleTimeSeries, TimeSeriesData, TimeSeriesType
 
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
-    pub owner_id: Option<i64>,
+    pub owner_uuid: Option<String>,
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
@@ -30,8 +30,8 @@ impl ListFilter {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn owner_id(mut self, id: i64) -> Self {
-        self.owner_id = Some(id);
+    pub fn owner_uuid(mut self, uuid: impl Into<String>) -> Self {
+        self.owner_uuid = Some(uuid.into());
         self
     }
     pub fn owner_type(mut self, t: impl Into<String>) -> Self {
@@ -59,7 +59,7 @@ impl ListFilter {
 impl From<ListFilter> for MetadataFilter {
     fn from(value: ListFilter) -> Self {
         MetadataFilter {
-            owner_id: value.owner_id,
+            owner_uuid: value.owner_uuid,
             owner_type: value.owner_type,
             time_series_type: value.time_series_type,
             name: value.name,
@@ -72,7 +72,7 @@ impl From<ListFilter> for MetadataFilter {
 /// Single item in a bulk add.
 #[derive(Debug, Clone)]
 pub struct AddRequest {
-    pub owner_id: i64,
+    pub owner_uuid: String,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
     pub name: String,
@@ -160,7 +160,7 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     pub fn add_time_series(
         &mut self,
-        owner_id: i64,
+        owner_uuid: &str,
         owner_type: &str,
         owner_category: OwnerCategory,
         name: &str,
@@ -170,7 +170,7 @@ impl Store {
         scaling_factor_multiplier: Option<String>,
     ) -> Result<TimeSeriesKey> {
         self.add_time_series_bulk(vec![AddRequest {
-            owner_id,
+            owner_uuid: owner_uuid.to_string(),
             owner_type: owner_type.to_string(),
             owner_category,
             name: name.to_string(),
@@ -211,7 +211,7 @@ impl Store {
             }
 
             let meta = TimeSeriesMetadata {
-                owner_id: item.owner_id,
+                owner_uuid: item.owner_uuid.clone(),
                 owner_type: item.owner_type.clone(),
                 owner_category: item.owner_category,
                 time_series_type: TimeSeriesType::SingleTimeSeries,
@@ -232,7 +232,7 @@ impl Store {
             match MetadataStore::insert(&tx, &meta) {
                 Ok(_) => {
                     keys.push(TimeSeriesKey {
-                        owner_id: item.owner_id,
+                        owner_uuid: item.owner_uuid.clone(),
                         time_series_type: TimeSeriesType::SingleTimeSeries,
                         name: item.name.clone(),
                         resolution: Some(single.resolution),
@@ -279,14 +279,14 @@ impl Store {
         Ok(())
     }
 
-    /// Remove every time series for `owner_id`. Returns the count removed.
-    pub fn clear_time_series(&mut self, owner_id: Option<i64>) -> Result<usize> {
+    /// Remove every time series for `owner_uuid`. Returns the count removed.
+    pub fn clear_time_series(&mut self, owner_uuid: Option<&str>) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.transaction()?;
-        let removed = match owner_id {
-            Some(id) => MetadataStore::delete_by_owner(&tx, id)?,
+        let removed = match owner_uuid {
+            Some(uuid) => MetadataStore::delete_by_owner(&tx, uuid)?,
             None => MetadataStore::delete_all(&tx)?,
         };
         let count = removed.len();
@@ -384,8 +384,25 @@ impl Store {
         self.metadata.list(&filter.into())
     }
 
-    pub fn get_time_series_keys(&self, owner_id: i64) -> Result<Vec<TimeSeriesKey>> {
-        self.metadata.list_keys_for_owner(owner_id)
+    /// Look up the full metadata record for a key. Errors with `NotFound` if no
+    /// association matches. Used by external bindings (e.g. the Julia
+    /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
+    pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
+        self.metadata.get_by_key(key)
+    }
+
+    /// Fetch the full stored array for a content hash. The metadata-owning
+    /// binding resolves a key to its `data_hash`, then calls this to read the
+    /// underlying values.
+    pub fn get_array_by_hash(
+        &self,
+        hash: &[u8; 32],
+    ) -> Result<ndarray::ArrayD<f64>> {
+        self.backend.get_array(hash)
+    }
+
+    pub fn get_time_series_keys(&self, owner_uuid: &str) -> Result<Vec<TimeSeriesKey>> {
+        self.metadata.list_keys_for_owner(owner_uuid)
     }
 
     pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool> {

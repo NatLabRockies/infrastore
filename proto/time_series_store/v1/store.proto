@@ -37,6 +37,7 @@ message FeatureValue {
     int64  int_value   = 1;
     double float_value = 2;
     bool   bool_value  = 3;
+    string str_value   = 4;
   }
 }
 
@@ -45,7 +46,7 @@ message Features {
 }
 
 message TimeSeriesKey {
-  int64           owner_id          = 1;
+  string          owner_uuid        = 1;
   TimeSeriesType  time_series_type  = 2;
   string          name              = 3;
   // Resolution in nanoseconds. 0 = unset (e.g. NonSequentialTimeSeries).
@@ -54,7 +55,7 @@ message TimeSeriesKey {
 }
 
 message TimeSeriesMetadata {
-  int64           owner_id                       = 1;
+  string          owner_uuid                     = 1;
   string          owner_type                     = 2;
   OwnerCategory   owner_category                 = 3;
   TimeSeriesType  time_series_type               = 4;
@@ -76,7 +77,7 @@ message TimeSeriesMetadata {
 // ---- ListTimeSeries ----
 
 message ListReq {
-  optional int64           owner_id          = 1;
+  optional string          owner_uuid        = 1;
   optional string          owner_type        = 2;
   optional TimeSeriesType  time_series_type  = 3;
   optional string          name              = 4;
@@ -106,7 +107,7 @@ message GetResp {
 // ---- GetTimeSeriesKeys ----
 
 message KeysReq {
-  int64 owner_id = 1;
+  string owner_uuid = 1;
 }
 message KeysResp {
   repeated TimeSeriesKey keys = 1;

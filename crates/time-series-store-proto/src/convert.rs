@@ -80,6 +80,7 @@ impl From<&FeatureValue> for pb::FeatureValue {
             FeatureValue::Int(i) => pb::feature_value::Value::IntValue(*i),
             FeatureValue::Float(f) => pb::feature_value::Value::FloatValue(*f),
             FeatureValue::Bool(b) => pb::feature_value::Value::BoolValue(*b),
+            FeatureValue::Str(s) => pb::feature_value::Value::StrValue(s.clone()),
         };
         pb::FeatureValue { value: Some(v) }
     }
@@ -92,6 +93,7 @@ impl TryFrom<pb::FeatureValue> for FeatureValue {
             Some(pb::feature_value::Value::IntValue(i)) => Ok(FeatureValue::Int(i)),
             Some(pb::feature_value::Value::FloatValue(f)) => Ok(FeatureValue::Float(f)),
             Some(pb::feature_value::Value::BoolValue(b)) => Ok(FeatureValue::Bool(b)),
+            Some(pb::feature_value::Value::StrValue(s)) => Ok(FeatureValue::Str(s)),
             None => Err(ConvertError::MissingField("FeatureValue.value")),
         }
     }
@@ -117,7 +119,7 @@ pub fn features_from_pb(f: pb::Features) -> Result<Features, ConvertError> {
 
 pub fn key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
     pb::TimeSeriesKey {
-        owner_id: k.owner_id,
+        owner_uuid: k.owner_uuid.clone(),
         time_series_type: pb::TimeSeriesType::from(k.time_series_type) as i32,
         name: k.name.clone(),
         resolution_ns: k.resolution.map(duration_to_ns).unwrap_or(0),
@@ -142,7 +144,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> 
         None => Features::new(),
     };
     Ok(TimeSeriesKey {
-        owner_id: k.owner_id,
+        owner_uuid: k.owner_uuid,
         time_series_type: TimeSeriesType::from(ts_type),
         name: k.name,
         resolution,
@@ -152,7 +154,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> 
 
 pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
     pb::TimeSeriesMetadata {
-        owner_id: m.owner_id,
+        owner_uuid: m.owner_uuid.clone(),
         owner_type: m.owner_type.clone(),
         owner_category: pb::OwnerCategory::from(m.owner_category) as i32,
         time_series_type: pb::TimeSeriesType::from(m.time_series_type) as i32,
@@ -219,7 +221,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
     };
 
     Ok(TimeSeriesMetadata {
-        owner_id: m.owner_id,
+        owner_uuid: m.owner_uuid,
         owner_type: m.owner_type,
         owner_category: OwnerCategory::from(owner_category),
         time_series_type: TimeSeriesType::from(ts_type),

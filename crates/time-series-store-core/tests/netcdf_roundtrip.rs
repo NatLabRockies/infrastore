@@ -32,7 +32,7 @@ fn persistent_round_trip() {
         let s = series(2024, 24, 100.0);
         store
             .add_time_series(
-                42,
+                "42",
                 "Generator",
                 OwnerCategory::Component,
                 "load",
@@ -48,7 +48,7 @@ fn persistent_round_trip() {
 
     // Reopen and read back.
     let store = open_store(path.as_path(), true).unwrap();
-    let keys = store.get_time_series_keys(42).unwrap();
+    let keys = store.get_time_series_keys("42").unwrap();
     assert_eq!(keys.len(), 1);
     let got = store.get_time_series(&keys[0], None).unwrap();
     let single = got.as_single().unwrap();
@@ -70,7 +70,7 @@ fn deduplication_persists() {
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let s = series(2024, 24, 7.0);
-        for owner in [1, 2, 3] {
+        for owner in ["1", "2", "3"] {
             store
                 .add_time_series(
                     owner,
@@ -120,7 +120,7 @@ fn multiple_resolutions_separate_datasets() {
             let s = SingleTimeSeries::new(initial, res, data.clone());
             store
                 .add_time_series(
-                    (i + 1) as i64,
+                    &(i + 1).to_string(),
                     "Generator",
                     OwnerCategory::Component,
                     "load",
@@ -159,7 +159,7 @@ fn time_range_slicing_through_netcdf() {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = store
             .add_time_series(
-                1,
+                "1",
                 "Generator",
                 OwnerCategory::Component,
                 "load",
@@ -212,7 +212,7 @@ fn spill_into_new_dataset_past_capacity() {
             .unwrap();
             let s = SingleTimeSeries::new(initial, resolution, data);
             bulk.push(AddRequest {
-                owner_id: i as i64 + 1,
+                owner_uuid: (i + 1).to_string(),
                 owner_type: "Generator".into(),
                 owner_category: OwnerCategory::Component,
                 name: "load".into(),
@@ -233,7 +233,7 @@ fn spill_into_new_dataset_past_capacity() {
 
     // Quick spot-check: the very last one — which must have spilled — reads back.
     let keys = store
-        .get_time_series_keys(total as i64)
+        .get_time_series_keys(&total.to_string())
         .unwrap();
     assert_eq!(keys.len(), 1);
     let last = store.get_time_series(&keys[0], None).unwrap();
@@ -270,7 +270,7 @@ fn compact_reports_tombstones_and_slot_is_reused() {
 
     let k1 = store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -282,7 +282,7 @@ fn compact_reports_tombstones_and_slot_is_reused() {
         .unwrap();
     let _k2 = store
         .add_time_series(
-            2,
+            "2",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -294,7 +294,7 @@ fn compact_reports_tombstones_and_slot_is_reused() {
         .unwrap();
     let _k3 = store
         .add_time_series(
-            3,
+            "3",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -318,7 +318,7 @@ fn compact_reports_tombstones_and_slot_is_reused() {
     let s4 = series(2024, 8, 500.0);
     store
         .add_time_series(
-            4,
+            "4",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -369,7 +369,7 @@ fn netcdf_rejects_multidim_data_in_v0() {
 
     let err = store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",

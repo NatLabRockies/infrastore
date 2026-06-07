@@ -7,6 +7,7 @@ export TimeSeriesStore, SingleTimeSeries, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, get_time_series, remove_time_series!,
        has_time_series, get_counts, verify_integrity, compact!,
+       get_metadata, get_array_by_hash, open_store, flush!,
        close!
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
@@ -187,12 +188,15 @@ function _resolution_to_ns(p::Period)
 end
 
 """
-    add_time_series!(store, owner_id, owner_type, owner_category, name, ts;
+    add_time_series!(store, owner_uuid, owner_type, owner_category, name, ts;
                      features=Dict(), units=nothing, scaling_factor_multiplier=nothing)
+
+`owner_uuid` identifies the owning component / supplemental attribute (a string,
+typically the stringified UUID).
 """
 function add_time_series!(
     store::TimeSeriesStore,
-    owner_id::Integer,
+    owner_uuid::AbstractString,
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     name::AbstractString,
@@ -211,10 +215,10 @@ function add_time_series!(
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_store_add_single, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int64, Int64,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64,
          Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle,
-        Int64(owner_id),
+        owner_uuid,
         owner_type,
         Int32(Int(owner_category)),
         name,
@@ -229,6 +233,108 @@ function add_time_series!(
     )
     _check(code)
     return TimeSeriesKey(out_key[])
+end
+
+"""
+    get_metadata(store, owner_uuid, name; resolution, features=Dict())
+
+Look up a SingleTimeSeries by attributes and return a named tuple of
+`(initial_timestamp, resolution, length, data_hash)`. `data_hash` is the 32-byte
+content hash as a `Vector{UInt8}`. Throws `NotFoundError` if absent.
+"""
+function get_metadata(
+    store::TimeSeriesStore,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    out_initial = Ref{Int64}(0)
+    out_resolution = Ref{Int64}(0)
+    out_length = Ref{UInt64}(0)
+    out_hash = Vector{UInt8}(undef, 32)
+    code = ccall(
+        (:ts_store_get_metadata, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring,
+         Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}),
+        store.handle, owner_uuid, name, resolution_ns, features_json,
+        out_initial, out_resolution, out_length, out_hash,
+    )
+    _check(code)
+    res_ms = div(out_resolution[], 1_000_000)
+    return (
+        initial_timestamp=_from_unix_ns(out_initial[]),
+        resolution=Millisecond(res_ms),
+        length=Int(out_length[]),
+        data_hash=out_hash,
+    )
+end
+
+"""
+    get_array_by_hash(store, data_hash) -> Vector{Float64}
+
+Fetch the full stored array for a 32-byte content hash.
+"""
+function get_array_by_hash(store::TimeSeriesStore, data_hash::Vector{UInt8})
+    length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
+    out_data = Ref{Ptr{Float64}}(C_NULL)
+    out_len = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_get_array_by_hash, lib_path()), Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
+        store.handle, data_hash, out_data, out_len,
+    )
+    _check(code)
+    n = Int(out_len[])
+    raw = unsafe_wrap(Array, out_data[], n; own=false)
+    result = copy(raw)
+    ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_data[], out_len[])
+    return result
+end
+
+"""
+    has_time_series(store, owner_uuid, name; resolution, features=Dict()) -> Bool
+"""
+function has_time_series(
+    store::TimeSeriesStore,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    out = Ref{Bool}(false)
+    code = ccall(
+        (:ts_store_has_by_attrs, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Bool}),
+        store.handle, owner_uuid, name, resolution_ns, features_json, out,
+    )
+    _check(code)
+    return out[]
+end
+
+"""
+    remove_time_series!(store, owner_uuid, name; resolution, features=Dict())
+"""
+function remove_time_series!(
+    store::TimeSeriesStore,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    code = ccall(
+        (:ts_store_remove_by_attrs, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring),
+        store.handle, owner_uuid, name, resolution_ns, features_json,
+    )
+    _check(code)
+    return nothing
 end
 
 function get_time_series(store::TimeSeriesStore, key::TimeSeriesKey)
@@ -292,6 +398,19 @@ end
 
 function compact!(store::TimeSeriesStore)
     code = ccall((:ts_store_compact, lib_path()), Int32,
+                 (Ptr{Cvoid},), store.handle)
+    _check(code)
+    return nothing
+end
+
+"""
+    flush!(store)
+
+Flush pending writes (NetCDF arrays + SQLite metadata) to disk. After this the
+on-disk `<path>.nc` and `<path>.sqlite` artifacts can be copied for persistence.
+"""
+function flush!(store::TimeSeriesStore)
+    code = ccall((:ts_store_flush, lib_path()), Int32,
                  (Ptr{Cvoid},), store.handle)
     _check(code)
     return nothing

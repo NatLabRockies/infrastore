@@ -36,11 +36,12 @@ impl FromStr for OwnerCategory {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FeatureValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(String),
 }
 
 impl Eq for FeatureValue {}
@@ -67,6 +68,10 @@ impl std::hash::Hash for FeatureValue {
                 2u8.hash(state);
                 v.hash(state);
             }
+            FeatureValue::Str(v) => {
+                3u8.hash(state);
+                v.hash(state);
+            }
         }
     }
 }
@@ -77,6 +82,7 @@ impl FeatureValue {
             FeatureValue::Int(_) => "int",
             FeatureValue::Float(_) => "float",
             FeatureValue::Bool(_) => "bool",
+            FeatureValue::Str(_) => "str",
         }
     }
 }
@@ -87,7 +93,7 @@ pub type Features = BTreeMap<String, FeatureValue>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeSeriesMetadata {
-    pub owner_id: i64,
+    pub owner_uuid: String,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,

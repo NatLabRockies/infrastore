@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ts = SingleTimeSeries::new(initial, resolution, data);
 
     let key = store.add_time_series(
-        42,
+        "42",
         "Generator",
         OwnerCategory::Component,
         "load",

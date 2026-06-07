@@ -611,7 +611,9 @@ impl StorageBackend for NetCdfBackend {
     }
 
     fn flush(&mut self) -> Result<()> {
-        // The `netcdf` crate flushes on Drop / explicit close.
-        Ok(())
+        // `nc_sync` flushes buffered writes to disk so the file can be copied
+        // for persistence without closing the handle.
+        let inner = self.inner.lock().unwrap();
+        inner.file.sync().map_err(map_nc)
     }
 }

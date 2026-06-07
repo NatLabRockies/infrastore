@@ -20,7 +20,7 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyDelta, PyFloat, PyInt};
+use pyo3::types::{PyAny, PyBool, PyDict, PyDelta, PyFloat, PyInt, PyString};
 use time_series_store_core as core_lib;
 
 // ---- Exceptions -----------------------------------------------------------
@@ -142,9 +142,12 @@ fn feature_value_from_py(value: &Bound<'_, PyAny>) -> PyResult<core_lib::Feature
     } else if value.is_instance_of::<PyFloat>() {
         let f: f64 = value.extract()?;
         Ok(core_lib::FeatureValue::Float(f))
+    } else if value.is_instance_of::<PyString>() {
+        let s: String = value.extract()?;
+        Ok(core_lib::FeatureValue::Str(s))
     } else {
         Err(InvalidParameterError::new_err(format!(
-            "feature values must be int, float, or bool; got {}",
+            "feature values must be int, float, bool, or str; got {}",
             value.get_type().name()?
         )))
     }
@@ -160,6 +163,7 @@ fn features_to_dict<'py>(
             core_lib::FeatureValue::Int(i) => dict.set_item(k, *i)?,
             core_lib::FeatureValue::Float(f) => dict.set_item(k, *f)?,
             core_lib::FeatureValue::Bool(b) => dict.set_item(k, *b)?,
+            core_lib::FeatureValue::Str(s) => dict.set_item(k, s)?,
         }
     }
     Ok(dict)
@@ -230,8 +234,8 @@ pub struct PyTimeSeriesKey {
 #[pymethods]
 impl PyTimeSeriesKey {
     #[getter]
-    fn owner_id(&self) -> i64 {
-        self.inner.owner_id
+    fn owner_uuid(&self) -> String {
+        self.inner.owner_uuid.clone()
     }
 
     #[getter]
@@ -259,8 +263,8 @@ impl PyTimeSeriesKey {
 
     fn __repr__(&self) -> String {
         format!(
-            "TimeSeriesKey(owner_id={}, time_series_type={:?}, name={:?}, features={:?})",
-            self.inner.owner_id,
+            "TimeSeriesKey(owner_uuid={:?}, time_series_type={:?}, name={:?}, features={:?})",
+            self.inner.owner_uuid,
             self.inner.time_series_type.as_str(),
             self.inner.name,
             self.inner.features,
@@ -310,16 +314,16 @@ impl PyStore {
 
     /// Add a time series.
     ///
-    /// `features` is a `dict[str, int|float|bool]`. `units` and
+    /// `features` is a `dict[str, int|float|bool|str]`. `units` and
     /// `scaling_factor_multiplier` are optional strings.
     #[pyo3(signature = (
-        owner_id, owner_type, owner_category, name, time_series,
+        owner_uuid, owner_type, owner_category, name, time_series,
         features=None, units=None, scaling_factor_multiplier=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
-        owner_id: i64,
+        owner_uuid: &str,
         owner_type: &str,
         owner_category: PyOwnerCategory,
         name: &str,
@@ -332,7 +336,7 @@ impl PyStore {
         let key = self
             .inner
             .add_time_series(
-                owner_id,
+                owner_uuid,
                 owner_type,
                 owner_category.into(),
                 name,
@@ -349,9 +353,11 @@ impl PyStore {
         self.inner.remove_time_series(&key.inner).map_err(map_err)
     }
 
-    #[pyo3(signature = (owner_id=None))]
-    fn clear_time_series(&mut self, owner_id: Option<i64>) -> PyResult<usize> {
-        self.inner.clear_time_series(owner_id).map_err(map_err)
+    #[pyo3(signature = (owner_uuid=None))]
+    fn clear_time_series(&mut self, owner_uuid: Option<String>) -> PyResult<usize> {
+        self.inner
+            .clear_time_series(owner_uuid.as_deref())
+            .map_err(map_err)
     }
 
     /// Fetch a SingleTimeSeries by key. `time_range`, if given, is a tuple of
@@ -371,17 +377,17 @@ impl PyStore {
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
-    /// `owner_id`, `owner_type`, `time_series_type`, `name`, `length`,
+    /// `owner_uuid`, `owner_type`, `time_series_type`, `name`, `length`,
     /// `resolution_seconds`, `features`, `units`, `scaling_factor_multiplier`.
     #[pyo3(signature = (
-        owner_id=None, owner_type=None, time_series_type=None,
+        owner_uuid=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_time_series<'py>(
         &self,
         py: Python<'py>,
-        owner_id: Option<i64>,
+        owner_uuid: Option<String>,
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
@@ -389,8 +395,8 @@ impl PyStore {
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let mut filter = core_lib::ListFilter::new();
-        if let Some(id) = owner_id {
-            filter = filter.owner_id(id);
+        if let Some(uuid) = owner_uuid {
+            filter = filter.owner_uuid(uuid);
         }
         if let Some(t) = owner_type {
             filter = filter.owner_type(t);
@@ -411,7 +417,7 @@ impl PyStore {
         let mut out = Vec::with_capacity(metas.len());
         for m in &metas {
             let d = PyDict::new(py);
-            d.set_item("owner_id", m.owner_id)?;
+            d.set_item("owner_uuid", &m.owner_uuid)?;
             d.set_item("owner_type", &m.owner_type)?;
             d.set_item("owner_category", m.owner_category.as_str())?;
             d.set_item("time_series_type", m.time_series_type.as_str())?;
@@ -436,10 +442,10 @@ impl PyStore {
         Ok(out)
     }
 
-    fn get_time_series_keys(&self, owner_id: i64) -> PyResult<Vec<PyTimeSeriesKey>> {
+    fn get_time_series_keys(&self, owner_uuid: &str) -> PyResult<Vec<PyTimeSeriesKey>> {
         Ok(self
             .inner
-            .get_time_series_keys(owner_id)
+            .get_time_series_keys(owner_uuid)
             .map_err(map_err)?
             .into_iter()
             .map(|k| PyTimeSeriesKey { inner: k })

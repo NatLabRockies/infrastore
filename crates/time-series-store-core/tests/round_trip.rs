@@ -34,7 +34,7 @@ fn add_and_get_round_trip() {
 
     let key = store
         .add_time_series(
-            42,
+            "42",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -60,7 +60,7 @@ fn duplicate_key_rejected() {
 
     store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -73,7 +73,7 @@ fn duplicate_key_rejected() {
 
     let err = store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -94,7 +94,7 @@ fn features_disambiguate_keys() {
 
     store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -106,7 +106,7 @@ fn features_disambiguate_keys() {
         .unwrap();
     store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -117,12 +117,12 @@ fn features_disambiguate_keys() {
         )
         .unwrap();
 
-    let all = store.list_time_series(ListFilter::new().owner_id(1)).unwrap();
+    let all = store.list_time_series(ListFilter::new().owner_uuid("1")).unwrap();
     assert_eq!(all.len(), 2);
 
     // Subset filter — only the 2035 row.
     let only_2035 = store
-        .list_time_series(ListFilter::new().owner_id(1).features(features_with_year(2035)))
+        .list_time_series(ListFilter::new().owner_uuid("1").features(features_with_year(2035)))
         .unwrap();
     assert_eq!(only_2035.len(), 1);
     assert_eq!(only_2035[0].features, features_with_year(2035));
@@ -136,7 +136,7 @@ fn deduplication_via_content_addressing() {
 
     store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -148,7 +148,7 @@ fn deduplication_via_content_addressing() {
         .unwrap();
     store
         .add_time_series(
-            2,
+            "2",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -174,7 +174,7 @@ fn remove_keeps_array_when_other_refs_exist() {
 
     let k1 = store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -186,7 +186,7 @@ fn remove_keeps_array_when_other_refs_exist() {
         .unwrap();
     let k2 = store
         .add_time_series(
-            2,
+            "2",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -219,7 +219,7 @@ fn bulk_add_atomic_rollback() {
 
     store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -233,7 +233,7 @@ fn bulk_add_atomic_rollback() {
     // Bulk: first item succeeds, second collides with the existing (1,"load",None,{}).
     let bulk = vec![
         AddRequest {
-            owner_id: 2,
+            owner_uuid: "2".into(),
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
             name: "load".into(),
@@ -243,7 +243,7 @@ fn bulk_add_atomic_rollback() {
             scaling_factor_multiplier: None,
         },
         AddRequest {
-            owner_id: 1,
+            owner_uuid: "1".into(),
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
             name: "load".into(),
@@ -258,7 +258,7 @@ fn bulk_add_atomic_rollback() {
 
     // The first item must have been rolled back: owner 2 has nothing.
     let rows = store
-        .list_time_series(ListFilter::new().owner_id(2))
+        .list_time_series(ListFilter::new().owner_uuid("2"))
         .unwrap();
     assert!(rows.is_empty(), "rollback failed: {:?}", rows);
 }
@@ -273,7 +273,7 @@ fn time_range_slicing() {
 
     let key = store
         .add_time_series(
-            1,
+            "1",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -302,7 +302,7 @@ fn clear_by_owner() {
     let mut store = create_store(None, true).unwrap();
     let s = series(2024, 12, 1.0);
 
-    for owner in [1, 2, 3] {
+    for owner in ["1", "2", "3"] {
         store
             .add_time_series(
                 owner,
@@ -320,7 +320,7 @@ fn clear_by_owner() {
         store.get_time_series_counts().unwrap().static_time_series,
         3
     );
-    let removed = store.clear_time_series(Some(2)).unwrap();
+    let removed = store.clear_time_series(Some("2")).unwrap();
     assert_eq!(removed, 1);
     let remaining = store
         .list_time_series(ListFilter::new().time_series_type(TimeSeriesType::SingleTimeSeries))
@@ -340,7 +340,7 @@ fn read_only_blocks_writes() {
         let s = series(2024, 12, 1.0);
         store
             .add_time_series(
-                1,
+                "1",
                 "Generator",
                 OwnerCategory::Component,
                 "load",
@@ -357,7 +357,7 @@ fn read_only_blocks_writes() {
     let s = series(2024, 12, 1.0);
     let err = ro
         .add_time_series(
-            2,
+            "2",
             "Generator",
             OwnerCategory::Component,
             "load",
@@ -383,7 +383,7 @@ fn distinct_resolutions_returned_sorted() {
         let s = SingleTimeSeries::new(initial, resolution, data.clone());
         store
             .add_time_series(
-                i as i64 + 1,
+                &(i + 1).to_string(),
                 "Generator",
                 OwnerCategory::Component,
                 "load",

@@ -23,7 +23,7 @@ pub struct MetadataStore {
 
 #[derive(Debug, Default, Clone)]
 pub struct MetadataFilter {
-    pub owner_id: Option<i64>,
+    pub owner_uuid: Option<String>,
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
@@ -97,12 +97,12 @@ impl MetadataStore {
 
         let result = tx.execute(
             "INSERT INTO time_series_associations
-             (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
+             (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution_ns, length, horizon_ns, interval_ns, count,
               timestamps_json, scaling_factor, units, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
-                meta.owner_id,
+                meta.owner_uuid,
                 meta.owner_type,
                 meta.owner_category.as_str(),
                 meta.time_series_type.as_str(),
@@ -126,7 +126,7 @@ impl MetadataStore {
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // The unique index covers (owner_id, time_series_type, name,
+                // The unique index covers (owner_uuid, time_series_type, name,
                 // resolution_ns, features_hash). Surface the spec error.
                 return Err(TimeSeriesError::DuplicateTimeSeries);
             }
@@ -134,16 +134,23 @@ impl MetadataStore {
         };
 
         for (k, v) in &meta.features {
-            let (kind, vi, vf, vb): (&str, Option<i64>, Option<f64>, Option<i64>) = match v {
-                FeatureValue::Int(i) => ("int", Some(*i), None, None),
-                FeatureValue::Float(f) => ("float", None, Some(*f), None),
-                FeatureValue::Bool(b) => ("bool", None, None, Some(*b as i64)),
+            let (kind, vi, vf, vb, vs): (
+                &str,
+                Option<i64>,
+                Option<f64>,
+                Option<i64>,
+                Option<&str>,
+            ) = match v {
+                FeatureValue::Int(i) => ("int", Some(*i), None, None, None),
+                FeatureValue::Float(f) => ("float", None, Some(*f), None, None),
+                FeatureValue::Bool(b) => ("bool", None, None, Some(*b as i64), None),
+                FeatureValue::Str(s) => ("str", None, None, None, Some(s.as_str())),
             };
             tx.execute(
                 "INSERT INTO features
-                 (association_id, key, value_kind, value_int, value_float, value_bool)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, k, kind, vi, vf, vb],
+                 (association_id, key, value_kind, value_int, value_float, value_bool, value_str)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, k, kind, vi, vf, vb, vs],
             )?;
         }
 
@@ -158,14 +165,14 @@ impl MetadataStore {
         let resolution_ns = key.resolution.map(duration_to_ns);
         let mut stmt = tx.prepare(
             "SELECT id, data_hash FROM time_series_associations
-             WHERE owner_id = ?1 AND time_series_type = ?2 AND name = ?3
+             WHERE owner_uuid = ?1 AND time_series_type = ?2 AND name = ?3
                AND ((?4 IS NULL AND resolution_ns IS NULL) OR resolution_ns = ?4)
                AND features_hash = ?5",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
             .query_map(
                 params![
-                    key.owner_id,
+                    key.owner_uuid,
                     key.time_series_type.as_str(),
                     key.name,
                     resolution_ns,
@@ -190,20 +197,20 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// Delete all associations for `owner_id`. Returns the data_hashes of removed rows.
-    pub fn delete_by_owner(tx: &Transaction<'_>, owner_id: i64) -> Result<Vec<[u8; 32]>> {
+    /// Delete all associations for `owner_uuid`. Returns the data_hashes of removed rows.
+    pub fn delete_by_owner(tx: &Transaction<'_>, owner_uuid: &str) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
             tx,
-            "SELECT data_hash FROM time_series_associations WHERE owner_id = ?1",
-            params![owner_id],
+            "SELECT data_hash FROM time_series_associations WHERE owner_uuid = ?1",
+            params![owner_uuid],
         )?;
         let hashes = bytes_list
             .into_iter()
             .filter_map(|bytes| bytes_to_hash32(&bytes))
             .collect::<Vec<_>>();
         tx.execute(
-            "DELETE FROM time_series_associations WHERE owner_id = ?1",
-            params![owner_id],
+            "DELETE FROM time_series_associations WHERE owner_uuid = ?1",
+            params![owner_uuid],
         )?;
         Ok(hashes)
     }
@@ -236,15 +243,15 @@ impl MetadataStore {
         // Build a SELECT with the always-on columns; layer on optional WHERE
         // clauses using sqlite's parameter binding.
         let mut sql = String::from(
-            "SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
+            "SELECT id, owner_uuid, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution_ns, length, horizon_ns,
                     interval_ns, count, timestamps_json, scaling_factor, units
              FROM time_series_associations WHERE 1=1",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(owner_id) = filter.owner_id {
-            sql.push_str(" AND owner_id = ?");
-            params_vec.push(Box::new(owner_id));
+        if let Some(ref owner_uuid) = filter.owner_uuid {
+            sql.push_str(" AND owner_uuid = ?");
+            params_vec.push(Box::new(owner_uuid.clone()));
         }
         if let Some(ref owner_type) = filter.owner_type {
             sql.push_str(" AND owner_type = ?");
@@ -285,15 +292,15 @@ impl MetadataStore {
         Ok(out)
     }
 
-    pub fn list_keys_for_owner(&self, owner_id: i64) -> Result<Vec<TimeSeriesKey>> {
+    pub fn list_keys_for_owner(&self, owner_uuid: &str) -> Result<Vec<TimeSeriesKey>> {
         let metas = self.list(&MetadataFilter {
-            owner_id: Some(owner_id),
+            owner_uuid: Some(owner_uuid.to_string()),
             ..Default::default()
         })?;
         Ok(metas
             .into_iter()
             .map(|m| TimeSeriesKey {
-                owner_id: m.owner_id,
+                owner_uuid: m.owner_uuid,
                 time_series_type: m.time_series_type,
                 name: m.name,
                 resolution: m.resolution,
@@ -304,7 +311,7 @@ impl MetadataStore {
 
     pub fn get_by_key(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
-            owner_id: Some(key.owner_id),
+            owner_uuid: Some(key.owner_uuid.clone()),
             time_series_type: Some(key.time_series_type),
             name: Some(key.name.clone()),
             resolution: key.resolution,
@@ -366,7 +373,7 @@ impl MetadataStore {
 
     pub fn count_distinct_owners(&self) -> Result<i64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT owner_id) FROM time_series_associations",
+            "SELECT COUNT(DISTINCT owner_uuid) FROM time_series_associations",
             [],
             |r| r.get(0),
         )?;
@@ -379,7 +386,7 @@ impl MetadataStore {
 
     fn fetch_features(&self, association_id: i64) -> Result<Features> {
         let mut stmt = self.conn.prepare(
-            "SELECT key, value_kind, value_int, value_float, value_bool
+            "SELECT key, value_kind, value_int, value_float, value_bool, value_str
              FROM features WHERE association_id = ?1 ORDER BY key",
         )?;
         let rows = stmt
@@ -390,6 +397,7 @@ impl MetadataStore {
                     "int" => FeatureValue::Int(row.get::<_, i64>(2)?),
                     "float" => FeatureValue::Float(row.get::<_, f64>(3)?),
                     "bool" => FeatureValue::Bool(row.get::<_, i64>(4)? != 0),
+                    "str" => FeatureValue::Str(row.get::<_, String>(5)?),
                     _ => {
                         return Err(rusqlite::Error::FromSqlConversionFailure(
                             1,
@@ -447,7 +455,7 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
-    owner_id: i64,
+    owner_uuid: String,
     owner_type: String,
     owner_category: OwnerCategory,
     time_series_type: TimeSeriesType,
@@ -467,7 +475,7 @@ struct MetaRow {
 impl MetaRow {
     fn into_metadata(self, features: Features) -> TimeSeriesMetadata {
         TimeSeriesMetadata {
-            owner_id: self.owner_id,
+            owner_uuid: self.owner_uuid,
             owner_type: self.owner_type,
             owner_category: self.owner_category,
             time_series_type: self.time_series_type,
@@ -489,7 +497,7 @@ impl MetaRow {
 
 fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let id: i64 = row.get(0)?;
-    let owner_id: i64 = row.get(1)?;
+    let owner_uuid: String = row.get(1)?;
     let owner_type: String = row.get(2)?;
     let owner_category: String = row.get(3)?;
     let time_series_type: String = row.get(4)?;
@@ -563,7 +571,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     Ok((
         id,
         MetaRow {
-            owner_id,
+            owner_uuid,
             owner_type,
             owner_category,
             time_series_type: ts_type,
