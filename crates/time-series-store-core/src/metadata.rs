@@ -1,6 +1,6 @@
 //! SQLite-backed metadata store.
 //!
-//! Stores [`TimeSeriesMetadata`] records and the (owner_id, type, name,
+//! Stores [`TimeSeriesMetadata`] records and the (owner_uuid, type, name,
 //! resolution, features) uniqueness invariant.
 
 pub mod schema;

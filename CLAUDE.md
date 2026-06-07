@@ -87,7 +87,8 @@ export HDF5_DIR="$(brew --prefix hdf5)"
 On Linux (Debian/Ubuntu): `sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler` (set
 `HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial` if the build script can't find HDF5).
 
-The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so `cargo build
+The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
+`cargo build
 --workspace` can link the PyO3 cdylib without `maturin`. On Linux those flags are inert.
 
 ## Bindings
@@ -111,8 +112,8 @@ julia --project=julia/TimeSeries.jl -e 'using Pkg; Pkg.instantiate()'
 julia --project=julia/TimeSeries.jl julia/TimeSeries.jl/test/runtests.jl
 ```
 
-The FFI crate generates `time_series_store.h` via `cbindgen`; keep the checked-in header in sync with
-the `extern "C"` surface in `time-series-store-ffi/src/lib.rs`.
+The FFI crate generates `time_series_store.h` via `cbindgen`; keep the checked-in header in sync
+with the `extern "C"` surface in `time-series-store-ffi/src/lib.rs`.
 
 ## Server
 

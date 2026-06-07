@@ -53,13 +53,13 @@ code.
 The workspace is a single core crate plus four binding crates that wrap it. Keep that dependency
 direction: bindings depend on `time-series-store-core`, never the reverse.
 
-| Crate                       | Role                                                          |
-| --------------------------- | ------------------------------------------------------------ |
-| `time-series-store-core`    | Types, NetCDF + SQLite storage, hashing, public Rust API     |
-| `time-series-store-proto`   | Protobuf service definition, tonic codegen, conversions      |
-| `time-series-store-server`  | gRPC server binary + Rust client                             |
-| `time-series-store-py`      | PyO3 bindings (abi3-py310 wheel)                             |
-| `time-series-store-ffi`     | C ABI cdylib consumed by the Julia binding                   |
+| Crate                      | Role                                                     |
+| -------------------------- | -------------------------------------------------------- |
+| `time-series-store-core`   | Types, NetCDF + SQLite storage, hashing, public Rust API |
+| `time-series-store-proto`  | Protobuf service definition, tonic codegen, conversions  |
+| `time-series-store-server` | gRPC server binary + Rust client                         |
+| `time-series-store-py`     | PyO3 bindings (abi3-py310 wheel)                         |
+| `time-series-store-ffi`    | C ABI cdylib consumed by the Julia binding               |
 
 Shared dependency versions are declared once in the root `Cargo.toml` `[workspace.dependencies]`.
 Reference them from member crates with `{ workspace = true }` rather than pinning a version locally.
@@ -70,13 +70,13 @@ The defining constraint of this repo: a single core feature is exposed through f
 you add or change something in the core public API, propagate it through every binding before
 considering the work done.
 
-| Surface       | Location                                       | Notes                                              |
-| ------------- | ---------------------------------------------- | -------------------------------------------------- |
-| Core Rust API | `time-series-store-core/src/store.rs`          | The source of truth                                |
+| Surface       | Location                                                                            | Notes                                          |
+| ------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Core Rust API | `time-series-store-core/src/store.rs`                                               | The source of truth                            |
 | gRPC          | `proto/`, `time-series-store-proto/src/`, `time-series-store-server/src/service.rs` | Read-only server; writes need local filesystem |
-| Rust client   | `time-series-store-server/src/client.rs`       | Mirrors the gRPC surface                           |
-| Python        | `time-series-store-py/src/lib.rs`              | PyO3; keep `python/tests/` in sync                |
-| Julia / FFI   | `time-series-store-ffi/src/lib.rs`, `julia/TimeSeries.jl/src/` | C ABI; regenerate the header (below) |
+| Rust client   | `time-series-store-server/src/client.rs`                                            | Mirrors the gRPC surface                       |
+| Python        | `time-series-store-py/src/lib.rs`                                                   | PyO3; keep `python/tests/` in sync             |
+| Julia / FFI   | `time-series-store-ffi/src/lib.rs`, `julia/TimeSeries.jl/src/`                      | C ABI; regenerate the header (below)           |
 
 ### Proto / gRPC changes
 
@@ -88,8 +88,8 @@ considering the work done.
 
 ### FFI / Julia changes
 
-The `extern "C"` surface in `time-series-store-ffi/src/lib.rs` is the contract for the Julia binding.
-After changing it:
+The `extern "C"` surface in `time-series-store-ffi/src/lib.rs` is the contract for the Julia
+binding. After changing it:
 
 1. Regenerate `include/time_series_store.h` via `cbindgen` and keep the checked-in header in sync.
 2. Update the Julia wrapper in `julia/TimeSeries.jl/src/` and its tests.
@@ -125,9 +125,10 @@ pub enum TimeSeriesError {
 
 - Use `#[from]` for foreign errors that map cleanly (`std::io::Error`, `rusqlite::Error`,
   `serde_json::Error`).
-- **Reserved-but-unimplemented behavior** (e.g. the five time-series types beyond `SingleTimeSeries`,
-  or multi-dim per-step values in the NetCDF backend) must return `InvalidParameter`, never silently
-  mis-handle input. This preserves the v0 forward-compatibility contract.
+- **Reserved-but-unimplemented behavior** (e.g. the five time-series types beyond
+  `SingleTimeSeries`, or multi-dim per-step values in the NetCDF backend) must return
+  `InvalidParameter`, never silently mis-handle input. This preserves the v0 forward-compatibility
+  contract.
 
 ### Test code
 
@@ -168,7 +169,7 @@ interpolated strings:
 ```rust
 use tracing::{info, warn};
 
-info!(owner_id, name, "added time series");
+info!(owner_uuid, name, "added time series");
 ```
 
 Enable debug logging with:
@@ -180,8 +181,8 @@ RUST_LOG=time_series_store_server=debug cargo run -p time-series-store-server  #
 
 ## Configuration Priority
 
-For the server, CLI arguments override config-file values. Resolve in that order and document any new
-option in `examples/server.toml`.
+For the server, CLI arguments override config-file values. Resolve in that order and document any
+new option in `examples/server.toml`.
 
 ## Summary Checklist
 

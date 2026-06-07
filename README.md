@@ -1,22 +1,20 @@
 # time-series-store
 
-Rust library for managing time-series data in power-systems / energy
-simulations. Persistence is split between numerical arrays in NetCDF4 and
-metadata associations in SQLite. Bindings: native Rust, gRPC server + Rust
-client, Python (via PyO3), Julia (via C ABI).
+Rust library for managing time-series data in power-systems / energy simulations. Persistence is
+split between numerical arrays in NetCDF4 and metadata associations in SQLite. Bindings: native
+Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI).
 
-Spec: [NatLabRockies/time-series-store#1](https://github.com/NatLabRockies/time-series-store/issues/1).
+Spec:
+[NatLabRockies/time-series-store#1](https://github.com/NatLabRockies/time-series-store/issues/1).
 
 ## v0 scope
 
-- **SingleTimeSeries** is the only time-series type implemented end-to-end.
-  Slots for the other five (NonSequentialTimeSeries, Deterministic,
-  DeterministicSingleTimeSeries, Probabilistic, Scenarios) are reserved in the
-  metadata schema and the `TimeSeriesType` enum so they can land later without
+- **SingleTimeSeries** is the only time-series type implemented end-to-end. Slots for the other five
+  (NonSequentialTimeSeries, Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios)
+  are reserved in the metadata schema and the `TimeSeriesType` enum so they can land later without
   breaking changes.
-- 1-D `data` only. Multi-dim per-step values (e.g. quadratic-curve coefficients)
-  are accepted by the in-memory backend but rejected with `InvalidParameter` by
-  the NetCDF backend.
+- 1-D `data` only. Multi-dim per-step values (e.g. quadratic-curve coefficients) are accepted by the
+  in-memory backend but rejected with `InvalidParameter` by the NetCDF backend.
 - Read-only gRPC server. Writes require local filesystem access.
 - Auth: `none` (default) or `api_key` via the `x-api-key` header.
 
@@ -43,10 +41,9 @@ System libraries (macOS via `brew`):
 brew install hdf5 netcdf protobuf maturin
 ```
 
-`hdf5` is a transitive dependency of `netcdf`, but the `hdf5-metno-sys` build
-script does not always locate it on its own. If `cargo build` fails with
-`Unable to locate HDF5 root directory and/or headers`, point it at the Homebrew
-install explicitly:
+`hdf5` is a transitive dependency of `netcdf`, but the `hdf5-metno-sys` build script does not always
+locate it on its own. If `cargo build` fails with
+`Unable to locate HDF5 root directory and/or headers`, point it at the Homebrew install explicitly:
 
 ```sh
 export HDF5_DIR="$(brew --prefix hdf5)"
@@ -73,8 +70,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
-`cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux,
-those flags are inert.
+`cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux, those flags are
+inert.
 
 ## Python bindings
 
@@ -98,7 +95,7 @@ ts = SingleTimeSeries(
     np.arange(24, dtype=np.float64) + 100,
 )
 key = store.add_time_series(
-    owner_id=42, owner_type="Generator",
+    owner_uuid="42", owner_type="Generator",
     owner_category=OwnerCategory.Component,
     name="load", time_series=ts,
     features={"model_year": 2030}, units="MW",
@@ -120,7 +117,7 @@ julia --project=julia/TimeSeries.jl julia/TimeSeries.jl/test/runtests.jl
 using Dates, TimeSeries
 store = TimeSeriesStore(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0))
-key = add_time_series!(store, 42, "Generator", Component, "load", ts;
+key = add_time_series!(store, "42", "Generator", Component, "load", ts;
                        features=Dict("model_year" => 2030), units="MW")
 got = get_time_series(store, key)
 @assert got.data == ts.data
@@ -134,30 +131,29 @@ cp examples/server.toml my_server.toml
 cargo run -p time-series-store-server -- --config my_server.toml
 ```
 
-`auth = "api_key"` requires at least one entry in `keys`. Clients must send the
-chosen key in the `x-api-key` header.
+`auth = "api_key"` requires at least one entry in `keys`. Clients must send the chosen key in the
+`x-api-key` header.
 
 ## Storage format
 
-NetCDF file with attribute `data_format_version = "0.1.0"` and group
-`time_series/single/`. Each compacted dataset is named
-`sts_{length}_{resolution_seconds}` with shape `(length, 1000)` and chunking
-`(1, 1000)` (per-timestep reads across all components are contiguous).
-A sibling string variable `<dataset>_h` holds the SHA-256 hex hash for each
-column; an empty string marks a free slot.
+NetCDF file with attribute `data_format_version = "0.1.0"` and group `time_series/single/`. Each
+compacted dataset is named `sts_{length}_{resolution_seconds}` with shape `(length, 1000)` and
+chunking `(1, 1000)` (per-timestep reads across all components are contiguous). A sibling string
+variable `<dataset>_h` holds the SHA-256 hex hash for each column; an empty string marks a free
+slot.
 
-Metadata lives in a sidecar SQLite file at `<path>.sqlite`. Two artifacts ship
-together; an `archive` helper that bundles them is post-v0.
+Metadata lives in a sidecar SQLite file at `<path>.sqlite`. Two artifacts ship together; an
+`archive` helper that bundles them is post-v0.
 
 ## Open questions resolved for v0
 
-| | Decision |
-|---|---|
-| Compaction trigger | Explicit `Store::compact()` only |
-| Server auth | `none` default, `api_key` implemented, `oauth` deferred |
-| `scaling_factor_multiplier` | Stored as opaque TEXT (e.g. `"x * 1.05"`); not evaluated |
-| Units | `Option<String>` free-form label, no dimensional analysis |
-| NetCDF chunking | `(1, num_arrays)` — per-timestep reads contiguous |
+|                             | Decision                                                  |
+| --------------------------- | --------------------------------------------------------- |
+| Compaction trigger          | Explicit `Store::compact()` only                          |
+| Server auth                 | `none` default, `api_key` implemented, `oauth` deferred   |
+| `scaling_factor_multiplier` | Stored as opaque TEXT (e.g. `"x * 1.05"`); not evaluated  |
+| Units                       | `Option<String>` free-form label, no dimensional analysis |
+| NetCDF chunking             | `(1, num_arrays)` — per-timestep reads contiguous         |
 
 ## Status
 
