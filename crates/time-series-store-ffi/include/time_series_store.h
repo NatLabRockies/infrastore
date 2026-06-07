@@ -160,6 +160,50 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               struct TsKey **out_key);
 
 /**
+ * Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
+ * `(percentile_count, horizon_count, count)` column-major; `percentiles` is the
+ * percentile vector.
+ */
+int32_t ts_store_add_probabilistic(struct TsStore *handle,
+                                   const char *owner_uuid,
+                                   const char *owner_type,
+                                   int32_t owner_category,
+                                   const char *name,
+                                   int64_t initial_ts_unix_ns,
+                                   int64_t resolution_ns,
+                                   int64_t horizon_ns,
+                                   int64_t interval_ns,
+                                   uint64_t count,
+                                   const double *percentiles_ptr,
+                                   uint64_t percentiles_len,
+                                   const double *data_ptr,
+                                   uint64_t data_len,
+                                   const char *features_json,
+                                   const char *units,
+                                   const char *scaling_expr,
+                                   struct TsKey **out_key);
+
+/**
+ * Read `Probabilistic` metadata. Like `ts_store_get_forecast_metadata` but also
+ * returns the percentiles vector in `*out_percentiles` (caller frees with
+ * `ts_buffer_free_f64`).
+ */
+int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
+                                            const char *owner_uuid,
+                                            const char *name,
+                                            int64_t resolution_ns,
+                                            const char *features_json,
+                                            int64_t *out_initial_ts_unix_ns,
+                                            int64_t *out_resolution_ns,
+                                            int64_t *out_horizon_ns,
+                                            int64_t *out_interval_ns,
+                                            uint64_t *out_count,
+                                            uint64_t *out_length,
+                                            uint8_t *out_data_hash,
+                                            double **out_percentiles,
+                                            uint64_t *out_percentiles_len);
+
+/**
  * Read forecast metadata by attributes. Out-params receive initial timestamp,
  * resolution, horizon, interval, count, the stored array length, and the
  * 32-byte content hash (into `out_data_hash`).

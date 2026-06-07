@@ -237,6 +237,8 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         features,
         scaling_factor_multiplier: optional_string(m.scaling_factor_multiplier),
         units: optional_string(m.units),
+        // Probabilistic percentiles are not exposed over the gRPC contract.
+        percentiles: None,
     })
 }
 

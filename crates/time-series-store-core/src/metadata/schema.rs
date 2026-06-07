@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     timestamps_json   TEXT,
     scaling_factor    TEXT,
     units             TEXT,
+    percentiles_json  TEXT,
     features_hash     BLOB    NOT NULL
 );
 

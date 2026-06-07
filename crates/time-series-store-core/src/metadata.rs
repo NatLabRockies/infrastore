@@ -94,13 +94,17 @@ impl MetadataStore {
             Some(ts) => Some(serde_json::to_string(ts)?),
             None => None,
         };
+        let percentiles_json = match &meta.percentiles {
+            Some(p) => Some(serde_json::to_string(p)?),
+            None => None,
+        };
 
         let result = tx.execute(
             "INSERT INTO time_series_associations
              (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution_ns, length, horizon_ns, interval_ns, count,
-              timestamps_json, scaling_factor, units, features_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+              timestamps_json, scaling_factor, units, percentiles_json, features_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 meta.owner_uuid,
                 meta.owner_type,
@@ -117,6 +121,7 @@ impl MetadataStore {
                 timestamps_json,
                 meta.scaling_factor_multiplier,
                 meta.units,
+                percentiles_json,
                 f_hash.as_slice(),
             ],
         );
@@ -245,7 +250,7 @@ impl MetadataStore {
         let mut sql = String::from(
             "SELECT id, owner_uuid, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution_ns, length, horizon_ns,
-                    interval_ns, count, timestamps_json, scaling_factor, units
+                    interval_ns, count, timestamps_json, scaling_factor, units, percentiles_json
              FROM time_series_associations WHERE 1=1",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -470,6 +475,7 @@ struct MetaRow {
     timestamps: Option<Vec<DateTime<Utc>>>,
     scaling_factor: Option<String>,
     units: Option<String>,
+    percentiles: Option<Vec<f64>>,
 }
 
 impl MetaRow {
@@ -491,6 +497,7 @@ impl MetaRow {
             features,
             scaling_factor_multiplier: self.scaling_factor,
             units: self.units,
+            percentiles: self.percentiles,
         }
     }
 }
@@ -512,6 +519,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let timestamps_json: Option<String> = row.get(13)?;
     let scaling_factor: Option<String> = row.get(14)?;
     let units: Option<String> = row.get(15)?;
+    let percentiles_json: Option<String> = row.get(16)?;
 
     let owner_category = OwnerCategory::parse(&owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -568,6 +576,17 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             )
         })?;
 
+    let percentiles = percentiles_json
+        .map(|s| serde_json::from_str::<Vec<f64>>(&s))
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
+
     Ok((
         id,
         MetaRow {
@@ -586,6 +605,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             timestamps,
             scaling_factor,
             units,
+            percentiles,
         },
     ))
 }

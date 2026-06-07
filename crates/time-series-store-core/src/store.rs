@@ -227,6 +227,7 @@ impl Store {
                 features: item.features.clone(),
                 scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
                 units: item.units.clone(),
+                percentiles: None,
             };
 
             match MetadataStore::insert(&tx, &meta) {
@@ -430,6 +431,7 @@ impl Store {
         features: Features,
         units: Option<String>,
         scaling_factor_multiplier: Option<String>,
+        percentiles: Option<Vec<f64>>,
     ) -> Result<TimeSeriesKey> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -458,6 +460,7 @@ impl Store {
             features: features.clone(),
             scaling_factor_multiplier,
             units,
+            percentiles,
         };
 
         let tx = self.metadata.transaction()?;

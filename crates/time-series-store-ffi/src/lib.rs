@@ -790,6 +790,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         features,
         units,
         scaling_expr,
+        None,
     ) {
         Ok(key) => {
             let handle = Box::new(TsKeyHandle { inner: key });
@@ -798,6 +799,195 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         }
         Err(e) => map_core_error(e),
     }
+}
+
+/// Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
+/// `(percentile_count, horizon_count, count)` column-major; `percentiles` is the
+/// percentile vector.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_add_probabilistic(
+    handle: *mut TsStoreHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    initial_ts_unix_ns: i64,
+    resolution_ns: i64,
+    horizon_ns: i64,
+    interval_ns: i64,
+    count: u64,
+    percentiles_ptr: *const f64,
+    percentiles_len: u64,
+    data_ptr: *const f64,
+    data_len: u64,
+    features_json: *const c_char,
+    units: *const c_char,
+    scaling_expr: *const c_char,
+    out_key: *mut *mut TsKeyHandle,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_key.is_null() || data_ptr.is_null() || percentiles_ptr.is_null() {
+        set_error("a required pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let owner_type = match unsafe { cstr_to_str(owner_type) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let name = match unsafe { cstr_to_str(name) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let owner_category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let units = match unsafe { cstr_to_optional_string(units) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let scaling_expr = match unsafe { cstr_to_optional_string(scaling_expr) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let features = match unsafe { parse_features_json(features_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let initial_timestamp = match unix_ns_to_datetime(initial_ts_unix_ns) {
+        Some(d) => d,
+        None => {
+            set_error(format!("invalid initial_ts_unix_ns: {initial_ts_unix_ns}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let percentiles =
+        unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
+    let len = data_len as usize;
+    let values: Vec<f64> = unsafe { slice::from_raw_parts(data_ptr, len) }.to_vec();
+    let array = match ArrayD::from_shape_vec(vec![len], values) {
+        Ok(a) => a,
+        Err(e) => {
+            set_error(format!("data shape error: {e}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+
+    match store.inner.add_forecast(
+        owner_uuid,
+        owner_type,
+        owner_category,
+        name,
+        core_lib::TimeSeriesType::Probabilistic,
+        initial_timestamp,
+        Duration::nanoseconds(resolution_ns),
+        Duration::nanoseconds(horizon_ns),
+        Duration::nanoseconds(interval_ns),
+        count as usize,
+        array,
+        features,
+        units,
+        scaling_expr,
+        Some(percentiles),
+    ) {
+        Ok(key) => {
+            let handle = Box::new(TsKeyHandle { inner: key });
+            unsafe { *out_key = Box::into_raw(handle) };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Read `Probabilistic` metadata. Like `ts_store_get_forecast_metadata` but also
+/// returns the percentiles vector in `*out_percentiles` (caller frees with
+/// `ts_buffer_free_f64`).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    resolution_ns: i64,
+    features_json: *const c_char,
+    out_initial_ts_unix_ns: *mut i64,
+    out_resolution_ns: *mut i64,
+    out_horizon_ns: *mut i64,
+    out_interval_ns: *mut i64,
+    out_count: *mut u64,
+    out_length: *mut u64,
+    out_data_hash: *mut u8,
+    out_percentiles: *mut *mut f64,
+    out_percentiles_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_percentiles.is_null() || out_percentiles_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe {
+        build_typed_key_from_attrs(
+            owner_uuid,
+            name,
+            4, // Probabilistic
+            resolution_ns,
+            features_json,
+        )
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    let meta = match store.inner.get_metadata(&key) {
+        Ok(m) => m,
+        Err(e) => return map_core_error(e),
+    };
+    let initial_ns = match meta.initial_timestamp.and_then(datetime_to_unix_ns) {
+        Some(n) => n,
+        None => {
+            set_error("forecast metadata missing initial_timestamp");
+            return TS_ERR_INTEGRITY;
+        }
+    };
+    let dur_ns = |d: Option<Duration>| {
+        d.map(|x| {
+            x.num_nanoseconds()
+                .unwrap_or_else(|| x.num_seconds() * 1_000_000_000)
+        })
+        .unwrap_or(0)
+    };
+    let mut pct: Vec<f64> = meta.percentiles.unwrap_or_default();
+    let pct_len = pct.len() as u64;
+    let pct_ptr = pct.as_mut_ptr();
+    std::mem::forget(pct);
+    unsafe {
+        *out_initial_ts_unix_ns = initial_ns;
+        *out_resolution_ns = dur_ns(meta.resolution);
+        *out_horizon_ns = dur_ns(meta.horizon);
+        *out_interval_ns = dur_ns(meta.interval);
+        *out_count = meta.count.unwrap_or(0) as u64;
+        *out_length = meta.length.unwrap_or(0) as u64;
+        ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
+        *out_percentiles = pct_ptr;
+        *out_percentiles_len = pct_len;
+    }
+    TS_OK
 }
 
 /// Read forecast metadata by attributes. Out-params receive initial timestamp,

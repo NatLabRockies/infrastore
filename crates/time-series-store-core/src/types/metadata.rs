@@ -91,7 +91,7 @@ impl FeatureValue {
 /// free, which matters for hashing and the metadata uniqueness constraint.
 pub type Features = BTreeMap<String, FeatureValue>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimeSeriesMetadata {
     pub owner_uuid: String,
     pub owner_type: String,
@@ -112,4 +112,6 @@ pub struct TimeSeriesMetadata {
     pub features: Features,
     pub scaling_factor_multiplier: Option<String>,
     pub units: Option<String>,
+    /// Percentiles for a `Probabilistic` forecast; `None` for other types.
+    pub percentiles: Option<Vec<f64>>,
 }
