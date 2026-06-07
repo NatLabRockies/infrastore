@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS features (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc ON time_series_associations
     (owner_uuid, time_series_type, name, resolution_ns, features_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_null_resolution ON time_series_associations
+    (owner_uuid, time_series_type, name, COALESCE(resolution_ns, -9223372036854775808), features_hash);
 
 CREATE INDEX IF NOT EXISTS ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_uuid);

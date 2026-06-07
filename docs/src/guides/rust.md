@@ -134,6 +134,43 @@ let meta = store.get_metadata(&key)?;
 let array = store.get_array_by_hash(&meta.data_hash)?;
 ```
 
+## Forecasts
+
+Forecast types are written with `add_forecast`. You flatten the forecast into a 1-D, column-major
+array (the [data model](../explanation/data-model.md#forecasts) lists the conventional shapes per
+type); the store content-addresses it and records the windowing parameters:
+
+```rust
+use time_series_store_core::TimeSeriesType;
+
+// A Deterministic forecast: horizon_count rows × count windows, flattened column-major.
+let (horizon_count, count) = (24, 7);
+let flat: Vec<f64> = /* horizon_count * count values, column-major */ vec![0.0; horizon_count * count];
+let data = ArrayD::from_shape_vec(vec![flat.len()], flat)?;
+
+let key = store.add_forecast(
+    "42", "Generator", OwnerCategory::Component, "load_forecast",
+    TimeSeriesType::Deterministic,
+    initial, Duration::hours(1),      // initial_timestamp, resolution
+    Duration::hours(24),              // horizon
+    Duration::hours(24),              // interval
+    count,
+    data, Features::new(),
+    Some("MW".into()), None,
+    None,                             // percentiles (Some(vec) for Probabilistic)
+)?;
+```
+
+Forecasts are **not** returned by `get_time_series` (it reconstructs `SingleTimeSeries` only). Read
+one through the low-level path — `get_metadata` exposes `horizon`, `interval`, `count`, and
+`percentiles`, and `get_array_by_hash` returns the flattened values for you to reshape:
+
+```rust
+let meta = store.get_metadata(&key)?;
+let flat = store.get_array_by_hash(&meta.data_hash)?;
+let matrix = flat.into_shape_with_order((meta.length.unwrap() / count, count))?;
+```
+
 ## Remove and Maintain
 
 ```rust

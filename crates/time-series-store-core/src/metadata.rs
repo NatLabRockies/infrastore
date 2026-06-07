@@ -8,7 +8,7 @@ pub mod schema;
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
@@ -44,8 +44,8 @@ impl MetadataStore {
 
     pub fn open_path(path: &Path, read_only: bool) -> Result<Self> {
         let conn = if read_only {
-            let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+            let flags =
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
             Connection::open_with_flags(path, flags)?
         } else {
             Connection::open(path)?
@@ -228,8 +228,11 @@ impl MetadataStore {
 
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Transaction<'_>) -> Result<Vec<[u8; 32]>> {
-        let bytes_list: Vec<Vec<u8>> =
-            collect_data_hashes(tx, "SELECT data_hash FROM time_series_associations", params![])?;
+        let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
+            tx,
+            "SELECT data_hash FROM time_series_associations",
+            params![],
+        )?;
         let hashes = bytes_list
             .into_iter()
             .filter_map(|bytes| bytes_to_hash32(&bytes))
@@ -282,8 +285,10 @@ impl MetadataStore {
             params_vec.push(Box::new(duration_to_ns(resolution)));
         }
 
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref() as &dyn rusqlite::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows: Vec<(i64, MetaRow)> = stmt
@@ -296,9 +301,10 @@ impl MetadataStore {
             let features = self.fetch_features(id)?;
             // Optional features-subset filter, in-memory.
             if let Some(ref required) = filter.features
-                && !is_subset(required, &features) {
-                    continue;
-                }
+                && !is_subset(required, &features)
+            {
+                continue;
+            }
             out.push(partial.into_metadata(features));
         }
         Ok(out)
@@ -341,10 +347,7 @@ impl MetadataStore {
         }
     }
 
-    pub fn distinct_resolutions(
-        &self,
-        ts_type: Option<TimeSeriesType>,
-    ) -> Result<Vec<Duration>> {
+    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Duration>> {
         let mut sql = String::from(
             "SELECT DISTINCT resolution_ns FROM time_series_associations
              WHERE resolution_ns IS NOT NULL",
@@ -355,8 +358,10 @@ impl MetadataStore {
             params_vec.push(Box::new(t.as_str().to_string()));
         }
         sql.push_str(" ORDER BY resolution_ns ASC");
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref() as &dyn rusqlite::ToSql).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -429,7 +434,8 @@ impl MetadataStore {
 }
 
 fn duration_to_ns(d: Duration) -> i64 {
-    d.num_nanoseconds().unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
+    d.num_nanoseconds()
+        .unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
 }
 
 fn ns_to_duration(ns: i64) -> Duration {
@@ -574,33 +580,21 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
         .map(|s| DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&Utc)))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let timestamps = timestamps_json
         .map(|s| serde_json::from_str::<Vec<DateTime<Utc>>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                13,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let percentiles = percentiles_json
         .map(|s| serde_json::from_str::<Vec<f64>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                16,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(16, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let dtype = crate::types::array::Dtype::parse(&dtype_str).ok_or_else(|| {
@@ -617,11 +611,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
         .map(|s| serde_json::from_str::<Vec<usize>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                18,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(e))
         })?
         .unwrap_or_default();
 
@@ -662,4 +652,3 @@ pub fn references_to_in_tx(tx: &Transaction<'_>, data_hash: &[u8; 32]) -> Result
     )?;
     Ok(count)
 }
-

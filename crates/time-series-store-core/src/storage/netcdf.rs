@@ -10,8 +10,8 @@
 //!   (empty = free slot). Removal frees a slot; `compact` is a stub because
 //!   NetCDF can't shrink in place.
 //!
-//! * **Standalone** (`packed = false`, used for Deterministic / Probabilistic /
-//!   Scenarios): each array is its own typed multi-dim variable `arr_{hexhash}`
+//! * **Standalone** (`packed = false`, used for NonSequentialTimeSeries and
+//!   native forecasts): each array is its own typed multi-dim variable `arr_{hexhash}`
 //!   of shape `[length, k1, ...]`. Removal drops it from the index (the variable
 //!   lingers as dead space until `compact`, since NetCDF can't delete variables).
 //!
@@ -325,8 +325,7 @@ impl NetCdfBackend {
                 continue;
             }
 
-            let (dtype, element_shape, length, resolution_seconds) =
-                parse_dataset_name(&row.name)?;
+            let (dtype, element_shape, length, resolution_seconds) = parse_dataset_name(&row.name)?;
             let hash_name = format!("{}{}", row.name, HASH_SUFFIX);
             let hash_strings: Vec<String> = inner.with_single(|single| {
                 let v = single.variable(&hash_name).ok_or_else(|| {
@@ -565,8 +564,7 @@ impl Inner {
         // If the variable already exists (live or tombstoned), the content is
         // identical (content-addressed); just (re)index it.
         if self.standalone_vars.contains(&var) {
-            self.by_hash
-                .insert(*hash, Location::Standalone { var });
+            self.by_hash.insert(*hash, Location::Standalone { var });
             return Ok(());
         }
         let shape = data.shape.clone();
@@ -596,7 +594,11 @@ impl Inner {
     }
 
     fn read_locked(&self, hash: &[u8; 32], range: Option<Range<usize>>) -> Result<TypedArray> {
-        let loc = self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)?.clone();
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
         match loc {
             Location::Packed { dataset, col } => {
                 let state = self.datasets.get(&dataset).ok_or_else(|| {
@@ -662,7 +664,7 @@ fn dtype_of_variable(var: &netcdf::Variable<'_>) -> Result<Dtype> {
         other => {
             return Err(TimeSeriesError::IntegrityError(format!(
                 "unsupported nc variable type {other:?}"
-            )))
+            )));
         }
     })
 }

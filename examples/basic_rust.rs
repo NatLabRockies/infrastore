@@ -5,7 +5,7 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    create_store, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
+    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

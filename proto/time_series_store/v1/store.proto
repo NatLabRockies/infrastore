@@ -102,6 +102,8 @@ message GetResp {
   uint64             length                     = 3;
   repeated uint64    shape                      = 4;
   repeated double    values                     = 5;
+  TimeSeriesType     time_series_type            = 6;
+  repeated string    timestamps_rfc3339          = 7;
 }
 
 // ---- GetTimeSeriesKeys ----

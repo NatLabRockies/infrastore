@@ -87,10 +87,14 @@ impl Store {
 - **`verify_integrity`** — Recomputes each stored array's hash and reports mismatches.
 - **`flush`** — Issues `nc_sync` so the files can be copied for persistence without closing.
 
-### Forecasts (reserved)
+### Forecasts
 
-The forecast surface exists but its types are not implemented end-to-end in v0. `add_forecast`
-records forecast parameters (`horizon`, `interval`, `count`) alongside a flattened storage array:
+The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
+`Scenarios`) are written with `add_forecast`. The forecast values are flattened to a 1-D,
+column-major `data` array that is content-addressed like any other array; the windowing parameters
+(`horizon`, `interval`, `count`, and for `Probabilistic` the `percentiles`) are recorded in
+metadata. The store does not interpret the array layout — the caller flattens on write and reshapes
+on read.
 
 ```rust
 #[allow(clippy::too_many_arguments)]
@@ -102,8 +106,24 @@ pub fn add_forecast(
     horizon: Duration, interval: Duration, count: usize,
     data: ArrayD<f64>, features: Features,
     units: Option<String>, scaling_factor_multiplier: Option<String>,
+    percentiles: Option<Vec<f64>>,
 ) -> Result<TimeSeriesKey>;
 ```
+
+Conventional column-major layouts (flattened to 1-D for storage):
+
+| Type                            | `data` shape (before flattening)              | `percentiles` |
+| ------------------------------- | --------------------------------------------- | ------------- |
+| `Deterministic`                 | `(horizon_count, count)`                      | `None`        |
+| `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array (dedups) | `None`        |
+| `Probabilistic`                 | `(percentile_count, horizon_count, count)`    | the vector    |
+| `Scenarios`                     | `(scenario_count, horizon_count, count)`      | `None`        |
+
+**Reading forecasts:** `get_time_series` reconstructs `SingleTimeSeries` only and returns
+`InvalidParameter` for forecast types. Read a forecast through the low-level pair instead — resolve
+its [`TimeSeriesMetadata`](#timeseriesmetadata) with `get_metadata` (it carries `horizon`,
+`interval`, `count`, and `percentiles`), then fetch the flattened array with
+`get_array_by_hash(&meta.data_hash)` and reshape it yourself.
 
 ## Types
 
@@ -138,17 +158,32 @@ impl SingleTimeSeries {
 
 `length` is derived from `data.shape()[0]` by `new`.
 
+### `NonSequentialTimeSeries`
+
+```rust
+pub struct NonSequentialTimeSeries {
+    pub timestamps: Vec<DateTime<Utc>>,
+    pub length: usize,
+    pub data: TypedArray,
+}
+```
+
+`new` validates that timestamps are strictly increasing and match the data length.
+
 ### `TimeSeriesData`
 
 ```rust
 pub enum TimeSeriesData {
     SingleTimeSeries(SingleTimeSeries),
-    // forecast variants reserved for later milestones
+    NonSequentialTimeSeries(NonSequentialTimeSeries),
+    // No forecast variants: forecasts are written with `add_forecast` and read
+    // via `get_metadata` + `get_array_by_hash`, not through this enum.
 }
 
 impl TimeSeriesData {
     pub fn time_series_type(&self) -> TimeSeriesType;
     pub fn as_single(&self) -> Option<&SingleTimeSeries>;
+    pub fn as_non_sequential(&self) -> Option<&NonSequentialTimeSeries>;
 }
 ```
 
@@ -188,7 +223,7 @@ canonicalizes `NaN` for hashing and equality.
 The full record returned by `list_time_series` and `get_metadata`: owner fields, `time_series_type`,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `scaling_factor_multiplier`,
-and `units`.
+`units`, and `percentiles: Option<Vec<f64>>` (set for `Probabilistic` forecasts).
 
 ### `ListFilter`
 

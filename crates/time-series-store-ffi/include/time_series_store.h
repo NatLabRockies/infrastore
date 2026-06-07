@@ -59,6 +59,27 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             struct TsKey **out_key);
 
 /**
+ * Add a NonSequentialTimeSeries to the store.
+ */
+int32_t ts_store_add_non_sequential(struct TsStore *handle,
+                                    const char *owner_uuid,
+                                    const char *owner_type,
+                                    int32_t owner_category,
+                                    const char *name,
+                                    const int64_t *timestamps_unix_ns,
+                                    uint64_t timestamps_len,
+                                    int32_t dtype,
+                                    uint64_t ndims,
+                                    const uint64_t *dims_ptr,
+                                    const uint8_t *data_ptr,
+                                    uint64_t data_byte_len,
+                                    const char *logical_type,
+                                    const char *features_json,
+                                    const char *units,
+                                    const char *scaling_expr,
+                                    struct TsKey **out_key);
+
+/**
  * Fetch a SingleTimeSeries by key.
  *
  * On success, the caller owns the buffer pointed to by `*out_data` and must
@@ -70,6 +91,20 @@ int32_t ts_store_get_single(const struct TsStore *handle,
                             int64_t *out_resolution_ns,
                             double **out_data,
                             uint64_t *out_data_len);
+
+/**
+ * Fetch a NonSequentialTimeSeries by key.
+ *
+ * The caller owns both output buffers and must release them with
+ * `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+ */
+int32_t ts_store_get_non_sequential(const struct TsStore *handle,
+                                    const struct TsKey *key,
+                                    int64_t **out_timestamps,
+                                    uint64_t *out_timestamps_len,
+                                    int32_t *out_dtype,
+                                    uint8_t **out_data,
+                                    uint64_t *out_data_byte_len);
 
 int32_t ts_store_remove(struct TsStore *handle, const struct TsKey *key);
 
@@ -254,6 +289,11 @@ void ts_buffer_free_f64(double *ptr, uint64_t len);
  * Free a `u8` buffer returned by `ts_store_get_array_by_hash`.
  */
 void ts_buffer_free_u8(uint8_t *ptr, uint64_t len);
+
+/**
+ * Free an `i64` buffer returned by `ts_store_get_non_sequential`.
+ */
+void ts_buffer_free_i64(int64_t *ptr, uint64_t len);
 
 /**
  * Copy the thread-local error message into `buf` (UTF-8, null-terminated).

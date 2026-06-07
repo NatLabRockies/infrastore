@@ -76,6 +76,12 @@ string** if that column is free.
 This companion variable is the on-disk index. When a store is opened, the backend scans every
 `sts_…_h`, decodes the non-empty hashes, and rebuilds its in-memory `hash → (dataset, column)` map.
 
+### Standalone arrays
+
+`NonSequentialTimeSeries` values and native forecast arrays are stored as standalone variables named
+`arr_{hex_hash}` in the `time_series/single` group. Explicit irregular timestamps are stored in the
+association's `timestamps_json` metadata field.
+
 ### Free slots, deletion, and compaction
 
 - A **free** column is marked by an empty string in the hash variable.
@@ -88,8 +94,12 @@ This companion variable is the on-disk index. When a store is opened, the backen
 ### v0 data constraints
 
 The NetCDF backend stores **rank-1 `f64` arrays only**. The element dtype is fixed at `f64`. Writing
-a multi-dimensional per-step array is rejected with `InvalidParameter`. Only `SingleTimeSeries` data
-(the `single/` group) is produced in v0; the schema leaves room for forecast groups later.
+a multi-dimensional per-step array is rejected with `InvalidParameter`. All array data — both
+`SingleTimeSeries` values and the **flattened forecast arrays** (`Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) — lives in the same `single/` group
+`sts_…` datasets; forecasts comply with the rank-1 rule by being flattened to 1-D before storage,
+and the `time_series_type` is recorded only in metadata (see
+[Data Model](../explanation/data-model.md#forecasts)).
 
 ## SQLite Schema
 
@@ -112,12 +122,13 @@ One row per association between an owner and a stored array.
 | `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for types without one                |
 | `resolution_ns`     | INTEGER | Resolution in nanoseconds; `NULL` if unset                   |
 | `length`            | INTEGER | Number of timesteps                                          |
-| `horizon_ns`        | INTEGER | Forecast horizon (reserved)                                  |
-| `interval_ns`       | INTEGER | Forecast interval (reserved)                                 |
-| `count`             | INTEGER | Forecast window count (reserved)                             |
+| `horizon_ns`        | INTEGER | Forecast horizon, nanoseconds; `NULL` for non-forecasts      |
+| `interval_ns`       | INTEGER | Forecast interval, nanoseconds; `NULL` for non-forecasts     |
+| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts              |
 | `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (non-sequential, reserved) |
 | `scaling_factor`    | TEXT    | Opaque scaling expression, stored verbatim, never evaluated  |
 | `units`             | TEXT    | Free-form units label                                        |
+| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else   |
 | `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                           |
 
 ### `features`

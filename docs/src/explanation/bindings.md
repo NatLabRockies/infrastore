@@ -102,3 +102,21 @@ for fan-out reads of an existing store. See the [gRPC Server guide](../guides/se
 
 A file written by Python reads identically from Julia, Rust, or the server, because none of the
 bindings reimplement storage — they all funnel through the one core.
+
+## Feature Coverage Varies by Binding
+
+The bindings funnel through one core, but they do not all expose the same _surface_ yet.
+Both static series types are available everywhere. [Forecasts](./data-model.md#forecasts) are newer
+and so far reach only the layers closest to the core:
+
+| Capability                 | Rust core | C ABI / Julia FFI | Python | Julia wrapper | gRPC        |
+| -------------------------- | --------- | ----------------- | ------ | ------------- | ----------- |
+| `SingleTimeSeries` r/w     | ✅        | ✅                | ✅     | ✅            | read-only   |
+| `NonSequentialTimeSeries` r/w | ✅     | ✅                | ✅     | ✅            | read-only   |
+| Create forecasts           | ✅        | ✅                | ❌     | ❌            | ❌          |
+| Read forecast values       | ✅        | ✅                | ❌     | ❌            | ❌          |
+| Forecast metadata / counts | ✅        | ✅                | counts | counts        | list/counts |
+
+The Python and Julia _bindings_ surface forecast types only as enum values and counts even though
+the C ABI underneath Julia already implements them — wrapping the forecast FFI calls in
+`TimeSeries.jl` and adding forecast methods to the PyO3 module are the remaining steps.

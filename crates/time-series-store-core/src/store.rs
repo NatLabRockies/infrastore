@@ -6,16 +6,16 @@ use chrono::Duration;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
-use crate::metadata::{references_to_in_tx, MetadataFilter, MetadataStore};
+use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
 use crate::storage::{
     CompactionReport, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
-use crate::types::key::TimeSeriesKey;
-use crate::types::metadata::{
-    Features, OwnerCategory, TimeSeriesMetadata,
-};
 use crate::types::array::TypedArray;
-use crate::types::time_series::{SingleTimeSeries, TimeSeriesData, TimeSeriesType};
+use crate::types::key::TimeSeriesKey;
+use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
+use crate::types::time_series::{
+    NonSequentialTimeSeries, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
@@ -123,9 +123,7 @@ impl Store {
             });
         }
         let nc_path = path.ok_or_else(|| {
-            TimeSeriesError::InvalidParameter(
-                "path is required when in_memory=false".into(),
-            )
+            TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
         })?;
         let sqlite_path = sidecar_sqlite_path(nc_path);
         let metadata = MetadataStore::open_path(&sqlite_path, false)?;
@@ -188,10 +186,7 @@ impl Store {
 
     /// Bulk insert. All-or-nothing: any error rolls back every association
     /// and array put performed in this call.
-    pub fn add_time_series_bulk(
-        &mut self,
-        items: Vec<AddRequest>,
-    ) -> Result<Vec<TimeSeriesKey>> {
+    pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -201,52 +196,99 @@ impl Store {
         let tx = self.metadata.transaction()?;
         let mut keys = Vec::with_capacity(items.len());
 
-        for item in items.iter() {
-            let TimeSeriesData::SingleTimeSeries(single) = &item.data;
+        for item in &items {
+            let (hash, resolution_seconds, packed, meta, key) = match &item.data {
+                TimeSeriesData::SingleTimeSeries(single) => {
+                    let hash = array_hash(&single.data);
+                    (
+                        hash,
+                        single.resolution.num_seconds(),
+                        true,
+                        TimeSeriesMetadata {
+                            owner_uuid: item.owner_uuid.clone(),
+                            owner_type: item.owner_type.clone(),
+                            owner_category: item.owner_category,
+                            time_series_type: TimeSeriesType::SingleTimeSeries,
+                            name: item.name.clone(),
+                            data_hash: hash,
+                            initial_timestamp: Some(single.initial_timestamp),
+                            resolution: Some(single.resolution),
+                            length: Some(single.length),
+                            horizon: None,
+                            interval: None,
+                            count: None,
+                            timestamps: None,
+                            features: item.features.clone(),
+                            scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
+                            units: item.units.clone(),
+                            percentiles: None,
+                            dtype: single.data.dtype,
+                            element_shape: single.data.element_shape().to_vec(),
+                            logical_type: item.logical_type.clone(),
+                        },
+                        TimeSeriesKey {
+                            owner_uuid: item.owner_uuid.clone(),
+                            time_series_type: TimeSeriesType::SingleTimeSeries,
+                            name: item.name.clone(),
+                            resolution: Some(single.resolution),
+                            features: item.features.clone(),
+                        },
+                    )
+                }
+                TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
+                    validate_non_sequential(non_sequential)?;
+                    let hash = array_hash(&non_sequential.data);
+                    (
+                        hash,
+                        0,
+                        false,
+                        TimeSeriesMetadata {
+                            owner_uuid: item.owner_uuid.clone(),
+                            owner_type: item.owner_type.clone(),
+                            owner_category: item.owner_category,
+                            time_series_type: TimeSeriesType::NonSequentialTimeSeries,
+                            name: item.name.clone(),
+                            data_hash: hash,
+                            initial_timestamp: None,
+                            resolution: None,
+                            length: Some(non_sequential.length),
+                            horizon: None,
+                            interval: None,
+                            count: None,
+                            timestamps: Some(non_sequential.timestamps.clone()),
+                            features: item.features.clone(),
+                            scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
+                            units: item.units.clone(),
+                            percentiles: None,
+                            dtype: non_sequential.data.dtype,
+                            element_shape: non_sequential.data.element_shape().to_vec(),
+                            logical_type: item.logical_type.clone(),
+                        },
+                        TimeSeriesKey {
+                            owner_uuid: item.owner_uuid.clone(),
+                            time_series_type: TimeSeriesType::NonSequentialTimeSeries,
+                            name: item.name.clone(),
+                            resolution: None,
+                            features: item.features.clone(),
+                        },
+                    )
+                }
+            };
+            let data = match &item.data {
+                TimeSeriesData::SingleTimeSeries(single) => &single.data,
+                TimeSeriesData::NonSequentialTimeSeries(non_sequential) => &non_sequential.data,
+            };
 
-            let hash = array_hash(&single.data);
-            let resolution_seconds = single.resolution.num_seconds();
-            // put_array is idempotent on hash — safe to call before tx commit.
-            // SingleTimeSeries is column-packed (`packed = true`).
             let already_present = self.backend.contains(&hash)?;
             self.backend
-                .put_array(&hash, &single.data, resolution_seconds, true)?;
+                .put_array(&hash, data, resolution_seconds, packed)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
 
-            let meta = TimeSeriesMetadata {
-                owner_uuid: item.owner_uuid.clone(),
-                owner_type: item.owner_type.clone(),
-                owner_category: item.owner_category,
-                time_series_type: TimeSeriesType::SingleTimeSeries,
-                name: item.name.clone(),
-                data_hash: hash,
-                initial_timestamp: Some(single.initial_timestamp),
-                resolution: Some(single.resolution),
-                length: Some(single.length),
-                horizon: None,
-                interval: None,
-                count: None,
-                timestamps: None,
-                features: item.features.clone(),
-                scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
-                units: item.units.clone(),
-                percentiles: None,
-                dtype: single.data.dtype,
-                element_shape: single.data.element_shape().to_vec(),
-                logical_type: item.logical_type.clone(),
-            };
-
             match MetadataStore::insert(&tx, &meta) {
                 Ok(_) => {
-                    keys.push(TimeSeriesKey {
-                        owner_uuid: item.owner_uuid.clone(),
-                        time_series_type: TimeSeriesType::SingleTimeSeries,
-                        name: item.name.clone(),
-                        resolution: Some(single.resolution),
-                        features: item.features.clone(),
-                    });
+                    keys.push(key);
                 }
                 Err(e) => {
                     // Rollback metadata via Drop; also undo any array puts we
@@ -326,9 +368,7 @@ impl Store {
                     )
                 })?;
                 let resolution = meta.resolution.ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "SingleTimeSeries missing resolution".into(),
-                    )
+                    TimeSeriesError::IntegrityError("SingleTimeSeries missing resolution".into())
                 })?;
                 let length = meta.length.ok_or_else(|| {
                     TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
@@ -341,9 +381,7 @@ impl Store {
                     }
                     Some((start, end)) => {
                         if end < start {
-                            return Err(TimeSeriesError::InvalidParameter(
-                                "end < start".into(),
-                            ));
+                            return Err(TimeSeriesError::InvalidParameter("end < start".into()));
                         }
                         let resolution_ns = resolution.num_nanoseconds().ok_or_else(|| {
                             TimeSeriesError::InvalidParameter(
@@ -356,21 +394,20 @@ impl Store {
                             )
                         })?;
                         let start_idx = (total_ns / resolution_ns).max(0) as usize;
-                        let end_total_ns =
-                            (end - initial).num_nanoseconds().ok_or_else(|| {
-                                TimeSeriesError::InvalidParameter(
-                                    "time range overflows i64 nanoseconds".into(),
-                                )
-                            })?;
-                        let end_idx = ((end_total_ns + resolution_ns - 1) / resolution_ns)
-                            .max(0) as usize;
+                        let end_total_ns = (end - initial).num_nanoseconds().ok_or_else(|| {
+                            TimeSeriesError::InvalidParameter(
+                                "time range overflows i64 nanoseconds".into(),
+                            )
+                        })?;
+                        let end_idx =
+                            ((end_total_ns + resolution_ns - 1) / resolution_ns).max(0) as usize;
                         let start_idx = start_idx.min(length);
                         let end_idx = end_idx.min(length).max(start_idx);
                         let data = self
                             .backend
                             .get_slice(&meta.data_hash, start_idx..end_idx)?;
-                        let new_initial = initial
-                            + Duration::nanoseconds(start_idx as i64 * resolution_ns);
+                        let new_initial =
+                            initial + Duration::nanoseconds(start_idx as i64 * resolution_ns);
                         (data, new_initial, end_idx - start_idx)
                     }
                 };
@@ -381,6 +418,40 @@ impl Store {
                     length: sliced_length,
                     data,
                 }))
+            }
+            TimeSeriesType::NonSequentialTimeSeries => {
+                let timestamps = meta.timestamps.ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "NonSequentialTimeSeries missing timestamps".into(),
+                    )
+                })?;
+                let length = meta.length.ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("NonSequentialTimeSeries missing length".into())
+                })?;
+                if timestamps.len() != length {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "NonSequentialTimeSeries has {} timestamps but length {length}",
+                        timestamps.len()
+                    )));
+                }
+
+                let (data, timestamps) = match time_range {
+                    None => (self.backend.get_array(&meta.data_hash)?, timestamps),
+                    Some((start, end)) => {
+                        if end < start {
+                            return Err(TimeSeriesError::InvalidParameter("end < start".into()));
+                        }
+                        let start_idx = timestamps.partition_point(|t| *t < start);
+                        let end_idx = timestamps.partition_point(|t| *t < end);
+                        let data = self
+                            .backend
+                            .get_slice(&meta.data_hash, start_idx..end_idx)?;
+                        (data, timestamps[start_idx..end_idx].to_vec())
+                    }
+                };
+                let series = NonSequentialTimeSeries::new(timestamps, data)
+                    .map_err(TimeSeriesError::IntegrityError)?;
+                Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
             other => Err(TimeSeriesError::InvalidParameter(format!(
                 "time series type {} not supported in v0",
@@ -529,7 +600,12 @@ impl Store {
             + self.metadata.count_by_type(TimeSeriesType::Scenarios)?;
         Ok(TimeSeriesCounts {
             components_with_time_series: self.metadata.count_distinct_owners()?,
-            static_time_series: self.metadata.count_by_type(TimeSeriesType::SingleTimeSeries)?,
+            static_time_series: self
+                .metadata
+                .count_by_type(TimeSeriesType::SingleTimeSeries)?
+                + self
+                    .metadata
+                    .count_by_type(TimeSeriesType::NonSequentialTimeSeries)?,
             forecasts,
         })
     }
@@ -548,6 +624,20 @@ impl Store {
     pub fn flush(&mut self) -> Result<()> {
         self.backend.flush()
     }
+}
+
+fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
+    if series.timestamps.len() != series.data.length() || series.length != series.data.length() {
+        return Err(TimeSeriesError::InvalidParameter(
+            "timestamp count, length, and data length must match".into(),
+        ));
+    }
+    if series.timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(TimeSeriesError::InvalidParameter(
+            "timestamps must be strictly increasing".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn sidecar_sqlite_path(nc_path: &Path) -> PathBuf {

@@ -4,7 +4,7 @@
 //!
 //! ```python
 //! from time_series_store import (
-//!     TimeSeriesStore, SingleTimeSeries, TimeSeriesKey,
+//!     TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
 //!     TimeSeriesType, OwnerCategory,
 //!     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError, InvalidParameterError,
 //!     IntegrityError, ReadOnlyStoreError,
@@ -20,7 +20,7 @@ use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDict, PyDelta, PyFloat, PyInt, PyString};
+use pyo3::types::{PyAny, PyBool, PyDelta, PyDict, PyFloat, PyInt, PyString};
 use time_series_store_core as core_lib;
 
 // ---- Exceptions -----------------------------------------------------------
@@ -52,7 +52,13 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
 
 // ---- Enums ----------------------------------------------------------------
 
-#[pyclass(eq, eq_int, name = "TimeSeriesType", module = "time_series_store", from_py_object)]
+#[pyclass(
+    eq,
+    eq_int,
+    name = "TimeSeriesType",
+    module = "time_series_store",
+    from_py_object
+)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PyTimeSeriesType {
     SingleTimeSeries,
@@ -97,7 +103,13 @@ impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
     }
 }
 
-#[pyclass(eq, eq_int, name = "OwnerCategory", module = "time_series_store", from_py_object)]
+#[pyclass(
+    eq,
+    eq_int,
+    name = "OwnerCategory",
+    module = "time_series_store",
+    from_py_object
+)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PyOwnerCategory {
     Component,
@@ -171,7 +183,11 @@ fn features_to_dict<'py>(
 
 // ---- SingleTimeSeries -----------------------------------------------------
 
-#[pyclass(name = "SingleTimeSeries", module = "time_series_store", from_py_object)]
+#[pyclass(
+    name = "SingleTimeSeries",
+    module = "time_series_store",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
@@ -213,7 +229,11 @@ impl PySingleTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
         let shape = self.inner.data.shape.clone();
-        let values = self.inner.data.to_f64_vec().map_err(InvalidParameterError::new_err)?;
+        let values = self
+            .inner
+            .data
+            .to_f64_vec()
+            .map_err(InvalidParameterError::new_err)?;
         let arr = ArrayD::from_shape_vec(shape, values)
             .map_err(|e| InvalidParameterError::new_err(e.to_string()))?;
         Ok(numpy::PyArray::from_array(py, &arr))
@@ -226,6 +246,62 @@ impl PySingleTimeSeries {
             self.inner.length,
             self.inner.resolution.num_seconds(),
             self.inner.data.shape,
+        )
+    }
+}
+
+// ---- NonSequentialTimeSeries ----------------------------------------------
+
+#[pyclass(
+    name = "NonSequentialTimeSeries",
+    module = "time_series_store",
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyNonSequentialTimeSeries {
+    inner: core_lib::NonSequentialTimeSeries,
+}
+
+#[pymethods]
+impl PyNonSequentialTimeSeries {
+    #[new]
+    fn new(timestamps: Vec<DateTime<Utc>>, data: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Self> {
+        let arr = data.as_array();
+        let shape: Vec<usize> = arr.shape().to_vec();
+        let values: Vec<f64> = arr.iter().copied().collect();
+        let typed = core_lib::TypedArray::from_f64(shape, &values);
+        let inner = core_lib::NonSequentialTimeSeries::new(timestamps, typed)
+            .map_err(InvalidParameterError::new_err)?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn timestamps(&self) -> Vec<DateTime<Utc>> {
+        self.inner.timestamps.clone()
+    }
+
+    #[getter]
+    fn length(&self) -> usize {
+        self.inner.length
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
+        let shape = self.inner.data.shape.clone();
+        let values = self
+            .inner
+            .data
+            .to_f64_vec()
+            .map_err(InvalidParameterError::new_err)?;
+        let arr = ArrayD::from_shape_vec(shape, values)
+            .map_err(|e| InvalidParameterError::new_err(e.to_string()))?;
+        Ok(numpy::PyArray::from_array(py, &arr))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "NonSequentialTimeSeries(length={}, shape={:?})",
+            self.inner.length, self.inner.data.shape,
         )
     }
 }
@@ -334,12 +410,21 @@ impl PyStore {
         owner_type: &str,
         owner_category: PyOwnerCategory,
         name: &str,
-        time_series: PySingleTimeSeries,
+        time_series: &Bound<'_, PyAny>,
         features: Option<&Bound<'_, PyDict>>,
         units: Option<String>,
         scaling_factor_multiplier: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
+        let data = if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
+            core_lib::TimeSeriesData::SingleTimeSeries(single.inner)
+        } else if let Ok(non_sequential) = time_series.extract::<PyNonSequentialTimeSeries>() {
+            core_lib::TimeSeriesData::NonSequentialTimeSeries(non_sequential.inner)
+        } else {
+            return Err(InvalidParameterError::new_err(
+                "time_series must be SingleTimeSeries or NonSequentialTimeSeries",
+            ));
+        };
         let key = self
             .inner
             .add_time_series(
@@ -347,7 +432,7 @@ impl PyStore {
                 owner_type,
                 owner_category.into(),
                 name,
-                core_lib::TimeSeriesData::SingleTimeSeries(time_series.inner),
+                data,
                 features,
                 units,
                 scaling_factor_multiplier,
@@ -367,20 +452,27 @@ impl PyStore {
             .map_err(map_err)
     }
 
-    /// Fetch a SingleTimeSeries by key. `time_range`, if given, is a tuple of
+    /// Fetch a static time series by key. `time_range`, if given, is a tuple of
     /// `(start: datetime, end: datetime)` with end exclusive.
     #[pyo3(signature = (key, time_range=None))]
     fn get_time_series(
         &self,
+        py: Python<'_>,
         key: &PyTimeSeriesKey,
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
-    ) -> PyResult<PySingleTimeSeries> {
+    ) -> PyResult<Py<PyAny>> {
         let data = self
             .inner
             .get_time_series(&key.inner, time_range)
             .map_err(map_err)?;
-        let core_lib::TimeSeriesData::SingleTimeSeries(s) = data;
-        Ok(PySingleTimeSeries { inner: s })
+        match data {
+            core_lib::TimeSeriesData::SingleTimeSeries(s) => {
+                Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
+            }
+            core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
+                Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
+            }
+        }
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
@@ -429,14 +521,17 @@ impl PyStore {
             d.set_item("owner_category", m.owner_category.as_str())?;
             d.set_item("time_series_type", m.time_series_type.as_str())?;
             d.set_item("name", &m.name)?;
-            d.set_item(
-                "data_hash",
-                core_lib::hash::hash_hex(&m.data_hash),
-            )?;
+            d.set_item("data_hash", core_lib::hash::hash_hex(&m.data_hash))?;
             d.set_item("length", m.length)?;
+            d.set_item("resolution_seconds", m.resolution.map(|r| r.num_seconds()))?;
             d.set_item(
-                "resolution_seconds",
-                m.resolution.map(|r| r.num_seconds()),
+                "timestamps",
+                m.timestamps.as_ref().map(|timestamps| {
+                    timestamps
+                        .iter()
+                        .map(DateTime::to_rfc3339)
+                        .collect::<Vec<_>>()
+                }),
             )?;
             d.set_item("features", features_to_dict(py, &m.features)?)?;
             d.set_item("units", m.units.clone())?;
@@ -533,6 +628,7 @@ fn unused_tz_imports() {
 fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStore>()?;
     m.add_class::<PySingleTimeSeries>()?;
+    m.add_class::<PyNonSequentialTimeSeries>()?;
     m.add_class::<PyTimeSeriesKey>()?;
     m.add_class::<PyTimeSeriesType>()?;
     m.add_class::<PyOwnerCategory>()?;

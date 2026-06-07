@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    create_store, FeatureValue, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray,
+    FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
+    TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -113,12 +113,18 @@ fn features_disambiguate_keys() {
         )
         .unwrap();
 
-    let all = store.list_time_series(ListFilter::new().owner_uuid("1")).unwrap();
+    let all = store
+        .list_time_series(ListFilter::new().owner_uuid("1"))
+        .unwrap();
     assert_eq!(all.len(), 2);
 
     // Subset filter — only the 2035 row.
     let only_2035 = store
-        .list_time_series(ListFilter::new().owner_uuid("1").features(features_with_year(2035)))
+        .list_time_series(
+            ListFilter::new()
+                .owner_uuid("1")
+                .features(features_with_year(2035)),
+        )
         .unwrap();
     assert_eq!(only_2035.len(), 1);
     assert_eq!(only_2035[0].features, features_with_year(2035));
@@ -289,10 +295,7 @@ fn time_range_slicing() {
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 3);
     assert_eq!(single.initial_timestamp, start);
-    assert_eq!(
-        single.data.to_f64_vec().unwrap(),
-        vec![30.0, 40.0, 50.0]
-    );
+    assert_eq!(single.data.to_f64_vec().unwrap(), vec![30.0, 40.0, 50.0]);
 }
 
 #[test]
@@ -374,9 +377,13 @@ fn distinct_resolutions_returned_sorted() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
 
-    for (i, resolution) in [Duration::hours(1), Duration::minutes(15), Duration::hours(4)]
-        .into_iter()
-        .enumerate()
+    for (i, resolution) in [
+        Duration::hours(1),
+        Duration::minutes(15),
+        Duration::hours(4),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let s = SingleTimeSeries::new(initial, resolution, data.clone());
         store
@@ -402,4 +409,97 @@ fn distinct_resolutions_returned_sorted() {
             Duration::hours(4)
         ]
     );
+}
+
+#[test]
+fn non_sequential_round_trip_and_time_slice() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let timestamps = vec![
+        initial,
+        initial + Duration::hours(3),
+        initial + Duration::hours(4),
+        initial + Duration::days(2),
+    ];
+    let data = TypedArray::from_f64(vec![4], &[10.0, 20.0, 30.0, 40.0]);
+    let series = NonSequentialTimeSeries::new(timestamps.clone(), data).unwrap();
+    let key = store
+        .add_time_series(
+            "irregular",
+            "Generator",
+            OwnerCategory::Component,
+            "availability",
+            TimeSeriesData::NonSequentialTimeSeries(series),
+            Features::new(),
+            Some("MW".into()),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        key.time_series_type,
+        TimeSeriesType::NonSequentialTimeSeries
+    );
+    assert_eq!(key.resolution, None);
+    let metadata = store.get_metadata(&key).unwrap();
+    assert_eq!(metadata.timestamps, Some(timestamps.clone()));
+    assert_eq!(metadata.resolution, None);
+
+    let got = store
+        .get_time_series(
+            &key,
+            Some((initial + Duration::hours(2), initial + Duration::days(1))),
+        )
+        .unwrap();
+    let irregular = got.as_non_sequential().unwrap();
+    assert_eq!(irregular.timestamps, timestamps[1..3]);
+    assert_eq!(irregular.data.to_f64_vec().unwrap(), vec![20.0, 30.0]);
+
+    let counts = store.get_time_series_counts().unwrap();
+    assert_eq!(counts.static_time_series, 1);
+    assert!(
+        store
+            .get_resolutions(Some(TimeSeriesType::NonSequentialTimeSeries))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn non_sequential_validates_timestamps() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let data = TypedArray::from_f64(vec![2], &[1.0, 2.0]);
+    assert!(NonSequentialTimeSeries::new(vec![initial], data.clone()).is_err());
+    assert!(NonSequentialTimeSeries::new(vec![initial, initial], data).is_err());
+}
+
+#[test]
+fn duplicate_non_sequential_key_is_rejected() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    for values in [[1.0, 2.0], [3.0, 4.0]] {
+        let series = NonSequentialTimeSeries::new(
+            vec![initial, initial + Duration::hours(1)],
+            TypedArray::from_f64(vec![2], &values),
+        )
+        .unwrap();
+        let result = store.add_time_series(
+            "1",
+            "Generator",
+            OwnerCategory::Component,
+            "events",
+            TimeSeriesData::NonSequentialTimeSeries(series),
+            Features::new(),
+            None,
+            None,
+        );
+        if values[0] == 1.0 {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result.unwrap_err(),
+                TimeSeriesError::DuplicateTimeSeries
+            ));
+        }
+    }
 }

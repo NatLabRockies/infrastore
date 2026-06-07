@@ -118,6 +118,20 @@ message VerifyReq  {}
 message VerifyResp { repeated string errors = 1; }
 ```
 
+## Forecasts Over gRPC
+
+The service is read-only and was not extended for forecast _values_. Forecast associations created
+through the [Rust core](./rust-api.md#forecasts) or [C ABI](./c-abi.md#forecasts) do appear in
+`ListTimeSeries` — `TimeSeriesMetadata` already carries `horizon_ns`, `interval_ns`, and `count`,
+and `GetCounts` includes them in `forecasts`. Two caveats:
+
+- **`percentiles` is not on the wire.** `Probabilistic` percentiles are dropped in the gRPC
+  conversion, so they are not returned to clients.
+- **`GetTimeSeries` does not fetch forecast values.** It reconstructs `SingleTimeSeries` or
+  `NonSequentialTimeSeries` and returns `InvalidArgument` for forecast types. Irregular responses
+  set `time_series_type` and `timestamps_rfc3339`. Read forecast arrays through a local store or the
+  C ABI instead.
+
 ## Authentication
 
 When the server is configured with `method = "api_key"`, clients must send the key in the

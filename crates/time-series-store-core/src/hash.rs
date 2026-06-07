@@ -32,14 +32,22 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
         Dtype::F64 => {
             for c in data.bytes.chunks_exact(8) {
                 let v = f64::from_le_bytes(c.try_into().unwrap());
-                let bits = if v.is_nan() { f64::NAN.to_bits() } else { v.to_bits() };
+                let bits = if v.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    v.to_bits()
+                };
                 hasher.update(bits.to_le_bytes());
             }
         }
         Dtype::F32 => {
             for c in data.bytes.chunks_exact(4) {
                 let v = f32::from_le_bytes(c.try_into().unwrap());
-                let bits = if v.is_nan() { f32::NAN.to_bits() } else { v.to_bits() };
+                let bits = if v.is_nan() {
+                    f32::NAN.to_bits()
+                } else {
+                    v.to_bits()
+                };
                 hasher.update(bits.to_le_bytes());
             }
         }

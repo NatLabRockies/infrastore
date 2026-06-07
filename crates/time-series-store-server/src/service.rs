@@ -9,10 +9,9 @@ use time_series_store_proto::convert::{
     features_from_pb, key_from_pb, metadata_to_pb, time_series_data_to_get_resp,
 };
 use time_series_store_proto::pb::{
-    self,
+    self, CountsReq, CountsResp, GetReq, GetResp, HasReq, HasResp, KeysReq, KeysResp, ListReq,
+    ListResp, ResolutionsReq, ResolutionsResp, VerifyReq, VerifyResp,
     time_series_store_server::{TimeSeriesStore as TimeSeriesStoreSvc, TimeSeriesStoreServer},
-    CountsReq, CountsResp, GetReq, GetResp, HasReq, HasResp, KeysReq, KeysResp, ListReq, ListResp,
-    ResolutionsReq, ResolutionsResp, VerifyReq, VerifyResp,
 };
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -48,7 +47,9 @@ fn map_err(e: TimeSeriesError) -> Status {
         TimeSeriesError::IntegrityError(m) => Status::data_loss(m),
         TimeSeriesError::ReadOnlyStore => Status::failed_precondition("store is read-only"),
         TimeSeriesError::ConnectionError(m) => Status::unavailable(m),
-        TimeSeriesError::IncompatibleForecast => Status::failed_precondition("incompatible forecast"),
+        TimeSeriesError::IncompatibleForecast => {
+            Status::failed_precondition("incompatible forecast")
+        }
         TimeSeriesError::Io(e) => Status::internal(format!("io: {e}")),
         TimeSeriesError::Sqlite(e) => Status::internal(format!("sqlite: {e}")),
         TimeSeriesError::Serde(e) => Status::internal(format!("serde: {e}")),
@@ -74,9 +75,8 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
             filter = filter.owner_type(t);
         }
         if let Some(t) = req.time_series_type {
-            let pb_t = pb::TimeSeriesType::try_from(t).map_err(|_| {
-                Status::invalid_argument(format!("unknown time_series_type {t}"))
-            })?;
+            let pb_t = pb::TimeSeriesType::try_from(t)
+                .map_err(|_| Status::invalid_argument(format!("unknown time_series_type {t}")))?;
             filter = filter.time_series_type(TimeSeriesType::from(pb_t));
         }
         if let Some(name) = req.name {
@@ -96,10 +96,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         }))
     }
 
-    async fn get_time_series(
-        &self,
-        request: Request<GetReq>,
-    ) -> Result<Response<GetResp>, Status> {
+    async fn get_time_series(&self, request: Request<GetReq>) -> Result<Response<GetResp>, Status> {
         let req = request.into_inner();
         let key = req
             .key
@@ -117,9 +114,11 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
                 Some((start, end))
             }
             (None, None) => None,
-            _ => return Err(Status::invalid_argument(
-                "start_rfc3339 and end_rfc3339 must be supplied together",
-            )),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "start_rfc3339 and end_rfc3339 must be supplied together",
+                ));
+            }
         };
 
         let store = self.store.lock().await;
@@ -137,7 +136,10 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
             .get_time_series_keys(&req.owner_uuid)
             .map_err(map_err)?;
         Ok(Response::new(KeysResp {
-            keys: keys.iter().map(time_series_store_proto::convert::key_to_pb).collect(),
+            keys: keys
+                .iter()
+                .map(time_series_store_proto::convert::key_to_pb)
+                .collect(),
         }))
     }
 
@@ -159,7 +161,10 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         Ok(Response::new(ResolutionsResp {
             resolution_ns: durations
                 .iter()
-                .map(|d| d.num_nanoseconds().unwrap_or(d.num_seconds() * 1_000_000_000))
+                .map(|d| {
+                    d.num_nanoseconds()
+                        .unwrap_or(d.num_seconds() * 1_000_000_000)
+                })
                 .collect(),
         }))
     }
@@ -177,10 +182,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         }))
     }
 
-    async fn has_time_series(
-        &self,
-        request: Request<HasReq>,
-    ) -> Result<Response<HasResp>, Status> {
+    async fn has_time_series(&self, request: Request<HasReq>) -> Result<Response<HasResp>, Status> {
         let req = request.into_inner();
         let key = req
             .key

@@ -21,22 +21,28 @@ uniqueness constraint; `owner_type` and `owner_category` are descriptive.
 
 ## Time-Series Types
 
-The spec defines six time-series types. They are all present in the `TimeSeriesType` enum and the
-metadata schema, but **only `SingleTimeSeries` is implemented end to end in v0**:
+The data model defines six time-series types, all present in the `TimeSeriesType` enum and the
+metadata schema. Both static series types are implemented across every interface; the four forecast
+types are implemented in the Rust core and the C ABI:
 
-| Type                            | v0 status | Description                                           |
-| ------------------------------- | --------- | ----------------------------------------------------- |
-| `SingleTimeSeries`              | **Full**  | One array sampled at a fixed resolution               |
-| `NonSequentialTimeSeries`       | Reserved  | Values at explicit, irregular timestamps              |
-| `Deterministic`                 | Reserved  | A forecast: one window per forecast issue time        |
-| `DeterministicSingleTimeSeries` | Reserved  | A forecast view over an underlying `SingleTimeSeries` |
-| `Probabilistic`                 | Reserved  | Forecast with probability bands                       |
-| `Scenarios`                     | Reserved  | Forecast with discrete scenarios                      |
+| Type                            | Where implemented | Description                                         |
+| ------------------------------- | ----------------- | --------------------------------------------------- |
+| `SingleTimeSeries`              | All interfaces    | One array sampled at a fixed resolution             |
+| `NonSequentialTimeSeries`       | All interfaces    | Values at explicit, irregular timestamps            |
+| `Deterministic`                 | Core + C ABI      | Forecast: a `(horizon × count)` window matrix       |
+| `DeterministicSingleTimeSeries` | Core + C ABI      | Forecast view over an underlying `SingleTimeSeries` |
+| `Probabilistic`                 | Core + C ABI      | Forecast with percentile bands                      |
+| `Scenarios`                     | Core + C ABI      | Forecast with discrete scenarios                    |
 
-Reserving the slots now means the metadata schema, the hashing domain, and the public APIs already
-accept these types, so adding them later does not change the on-disk format. See
-[`add_forecast`](../reference/rust-api.md#forecasts-reserved) for the forecast-parameter plumbing
-that is already in place.
+The Python and Julia bindings and the gRPC server currently surface the forecast types only as
+`TimeSeriesType` values and aggregate counts — creating and reading forecast _values_ is a
+Rust-core and C-ABI capability today. See [Forecasts](#forecasts) below.
+
+### `NonSequentialTimeSeries`
+
+A `NonSequentialTimeSeries` pairs each value with an explicit UTC timestamp. Timestamps must be
+strictly increasing and their count must match the data length. Its values are stored as a
+standalone NetCDF array; timestamps are stored with the association metadata.
 
 ### `SingleTimeSeries`
 
@@ -58,6 +64,26 @@ values are stored. v0 stores **1-D values only** (one scalar per timestep). The 
 (`ArrayD<f64>`) can carry trailing axes for per-step vectors such as cost-curve coefficients, but
 the NetCDF backend rejects anything other than rank-1 with an `InvalidParameter` error. That
 dimension is reserved for a later milestone.
+
+### Forecasts
+
+The four forecast types share one storage strategy: the forecast values are **flattened to a 1-D,
+column-major array** and stored content-addressed like any other array, while the windowing
+parameters live in metadata. A forecast association records `horizon` (the span each window covers),
+`interval` (the spacing between successive window start times), `count` (the number of windows), and
+— for `Probabilistic` — a `percentiles` vector.
+
+| Type                            | Conventional array shape                   | Extra metadata |
+| ------------------------------- | ------------------------------------------ | -------------- |
+| `Deterministic`                 | `(horizon_count, count)`                   | —              |
+| `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array       | —              |
+| `Probabilistic`                 | `(percentile_count, horizon_count, count)` | `percentiles`  |
+| `Scenarios`                     | `(scenario_count, horizon_count, count)`   | —              |
+
+The store does not interpret the layout — the caller flattens on write and reshapes on read, and a
+`DeterministicSingleTimeSeries` deduplicates against the static series it forecasts. Forecasts are
+read through the low-level metadata + array path rather than `get_time_series`; see the
+[Rust API](../reference/rust-api.md#forecasts) and [C ABI](../reference/c-abi.md#forecasts).
 
 ## Features
 

@@ -105,6 +105,19 @@ SingleTimeSeries(
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> timedelta`, `length -> int`,
 `data -> numpy.ndarray[float64]`. The NetCDF backend accepts 1-D `data` only.
 
+## `NonSequentialTimeSeries`
+
+```python
+NonSequentialTimeSeries(
+    timestamps: list[datetime],
+    data: numpy.ndarray,
+)
+```
+
+Read-only properties: `timestamps`, `length`, and `data`. Timestamps must be timezone-aware,
+strictly increasing, and match the first data dimension. `get_time_series` returns this class for a
+non-sequential key.
+
 ## `TimeSeriesKey`
 
 Returned by `add_time_series` and `get_time_series_keys`; not constructed directly. Read-only
@@ -131,6 +144,15 @@ TimeSeriesType.Scenarios
 OwnerCategory.Component
 OwnerCategory.SupplementalAttribute
 ```
+
+## Forecasts
+
+The `TimeSeriesType` enum includes the four forecast types, and
+[`get_time_series_counts`](#timeseriesstore) reports them under `forecasts`. The Python binding does
+**not** yet expose creating or reading forecast values — there is no `add_forecast`, and
+`list_time_series` does not surface the `horizon`/`interval`/`count`/`percentiles` fields. Forecast
+values are currently a [Rust-core](./rust-api.md#forecasts) and [C-ABI](./c-abi.md#forecasts)
+capability.
 
 ## Exceptions
 

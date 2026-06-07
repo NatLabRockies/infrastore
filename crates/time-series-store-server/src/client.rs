@@ -13,8 +13,8 @@ use time_series_store_proto::convert::{
     features_to_pb, get_resp_to_time_series_data, key_from_pb, key_to_pb, metadata_from_pb,
 };
 use time_series_store_proto::pb::{
-    self, time_series_store_client::TimeSeriesStoreClient, CountsReq, GetReq, HasReq, KeysReq,
-    ListReq, ResolutionsReq, VerifyReq,
+    self, CountsReq, GetReq, HasReq, KeysReq, ListReq, ResolutionsReq, VerifyReq,
+    time_series_store_client::TimeSeriesStoreClient,
 };
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -82,9 +82,11 @@ impl RemoteClient {
             .into_inner();
         let mut out = Vec::with_capacity(resp.metadata.len());
         for m in resp.metadata {
-            out.push(metadata_from_pb(m).map_err(|e| {
-                TimeSeriesError::IntegrityError(format!("metadata convert: {e}"))
-            })?);
+            out.push(
+                metadata_from_pb(m).map_err(|e| {
+                    TimeSeriesError::IntegrityError(format!("metadata convert: {e}"))
+                })?,
+            );
         }
         Ok(out)
     }
@@ -122,9 +124,10 @@ impl RemoteClient {
             .into_inner();
         let mut out = Vec::with_capacity(resp.keys.len());
         for k in resp.keys {
-            out.push(key_from_pb(k).map_err(|e| {
-                TimeSeriesError::IntegrityError(format!("key convert: {e}"))
-            })?);
+            out.push(
+                key_from_pb(k)
+                    .map_err(|e| TimeSeriesError::IntegrityError(format!("key convert: {e}")))?,
+            );
         }
         Ok(out)
     }

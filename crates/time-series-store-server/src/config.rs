@@ -49,7 +49,10 @@ impl AuthSection {
             "none" => Ok(()),
             "api_key" => {
                 if self.keys.is_empty() {
-                    Err("authentication.method = \"api_key\" requires at least one entry in keys".into())
+                    Err(
+                        "authentication.method = \"api_key\" requires at least one entry in keys"
+                            .into(),
+                    )
                 } else {
                     Ok(())
                 }

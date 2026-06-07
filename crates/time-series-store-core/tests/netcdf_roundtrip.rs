@@ -6,8 +6,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    create_store, open_store, Features, ListFilter, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TypedArray,
+    Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, TimeSeriesData,
+    TypedArray, create_store, open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -85,10 +85,7 @@ fn deduplication_persists() {
 
     let store = open_store(path.as_path(), true).unwrap();
     // Three associations exist…
-    assert_eq!(
-        store.list_time_series(ListFilter::new()).unwrap().len(),
-        3
-    );
+    assert_eq!(store.list_time_series(ListFilter::new()).unwrap().len(), 3);
     // …but verify_integrity reads each only once at the array level — the
     // single underlying column hashes correctly.
     let report = store.verify_integrity().unwrap();
@@ -144,7 +141,10 @@ fn time_range_slicing_through_netcdf() {
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let data = TypedArray::from_f64(vec![10], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]);
+    let data = TypedArray::from_f64(
+        vec![10],
+        &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0],
+    );
     let s = SingleTimeSeries::new(initial, resolution, data);
 
     let key = {
@@ -197,7 +197,8 @@ fn spill_into_new_dataset_past_capacity() {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let mut bulk = Vec::with_capacity(total);
         for i in 0..total {
-            let vals = [i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0]; let data = TypedArray::from_f64(vec![4], &vals);
+            let vals = [i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0];
+            let data = TypedArray::from_f64(vec![4], &vals);
             let s = SingleTimeSeries::new(initial, resolution, data);
             bulk.push(AddRequest {
                 owner_uuid: (i + 1).to_string(),
@@ -221,9 +222,7 @@ fn spill_into_new_dataset_past_capacity() {
     assert_eq!(counts.static_time_series as usize, total);
 
     // Quick spot-check: the very last one — which must have spilled — reads back.
-    let keys = store
-        .get_time_series_keys(&total.to_string())
-        .unwrap();
+    let keys = store.get_time_series_keys(&total.to_string()).unwrap();
     assert_eq!(keys.len(), 1);
     let last = store.get_time_series(&keys[0], None).unwrap();
     let single = last.as_single().unwrap();
@@ -392,8 +391,45 @@ fn golden_hash_pin() {
     let h = array_hash(&data);
     let hex = hash_hex(&h);
     assert_eq!(
-        hex,
-        "f85b4f66e62c7c51f9c82d01eabed7fb5e3b5217a69296aaaff876e1144dd841",
+        hex, "f85b4f66e62c7c51f9c82d01eabed7fb5e3b5217a69296aaaff876e1144dd841",
         "golden hash drifted; bump DATA_FORMAT_VERSION if intentional",
     );
+}
+
+#[test]
+fn non_sequential_persistent_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let timestamps = vec![
+        initial,
+        initial + Duration::minutes(7),
+        initial + Duration::days(3),
+    ];
+    let data = TypedArray::from_f64(vec![3], &[1.5, 2.5, 3.5]);
+    let key = {
+        let mut store = create_store(Some(&path), false).unwrap();
+        let series = NonSequentialTimeSeries::new(timestamps.clone(), data.clone()).unwrap();
+        let key = store
+            .add_time_series(
+                "1",
+                "Generator",
+                OwnerCategory::Component,
+                "events",
+                TimeSeriesData::NonSequentialTimeSeries(series),
+                Features::new(),
+                None,
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+        key
+    };
+
+    let store = open_store(&path, true).unwrap();
+    let got = store.get_time_series(&key, None).unwrap();
+    let irregular = got.as_non_sequential().unwrap();
+    assert_eq!(irregular.timestamps, timestamps);
+    assert_eq!(irregular.data, data);
+    assert!(store.verify_integrity().unwrap().ok());
 }

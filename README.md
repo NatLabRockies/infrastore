@@ -9,10 +9,8 @@ Spec:
 
 ## v0 scope
 
-- **SingleTimeSeries** is the only time-series type implemented end-to-end. Slots for the other five
-  (NonSequentialTimeSeries, Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios)
-  are reserved in the metadata schema and the `TimeSeriesType` enum so they can land later without
-  breaking changes.
+- **SingleTimeSeries** and **NonSequentialTimeSeries** are implemented end-to-end. The four forecast
+  types are implemented in the Rust core and C ABI.
 - 1-D `data` only. Multi-dim per-step values (e.g. quadratic-curve coefficients) are accepted by the
   in-memory backend but rejected with `InvalidParameter` by the NetCDF backend.
 - Read-only gRPC server. Writes require local filesystem access.

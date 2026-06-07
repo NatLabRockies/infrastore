@@ -44,7 +44,7 @@ pub trait StorageBackend: Send + Sync {
     ///
     /// `packed = true` column-packs the array with other same-shaped arrays (for
     /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
-    /// multi-dimensional variable (for native forecast arrays).
+    /// multi-dimensional variable (for irregular series and native forecasts).
     fn put_array(
         &mut self,
         hash: &[u8; 32],

@@ -3,7 +3,7 @@ module TimeSeriesStore
 using Dates
 import JSON
 
-export Store, SingleTimeSeries, TimeSeriesKey,
+export Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, get_time_series, remove_time_series!,
        has_time_series, get_counts, verify_integrity, compact!,
@@ -160,6 +160,24 @@ end
 SingleTimeSeries(initial, resolution, data::AbstractArray) =
     SingleTimeSeries(initial, resolution, data, nothing)
 
+# ---- Non-sequential time series -------------------------------------------
+
+struct NonSequentialTimeSeries
+    timestamps  :: Vector{DateTime}
+    "Values: a 1-D vector with one value per timestamp."
+    data        :: AbstractVector
+    "Opaque logical-type tag for the binding to reconstruct domain objects."
+    logical_type :: Union{Nothing,String}
+
+    function NonSequentialTimeSeries(timestamps, data, logical_type=nothing)
+        length(timestamps) == length(data) ||
+            throw(InvalidParameterError("timestamp count must match data length"))
+        all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
+            throw(InvalidParameterError("timestamps must be strictly increasing"))
+        new(Vector{DateTime}(timestamps), data, logical_type)
+    end
+end
+
 # ---- Keys -----------------------------------------------------------------
 
 mutable struct TimeSeriesKey
@@ -301,6 +319,42 @@ function add_time_series!(
     return TimeSeriesKey(out_key[])
 end
 
+function add_time_series!(
+    store::Store,
+    owner_uuid::AbstractString,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    ts::NonSequentialTimeSeries;
+    features::AbstractDict=Dict{String,Any}(),
+    units::Union{Nothing,AbstractString}=nothing,
+    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+)
+    timestamps = Int64[_to_unix_ns(timestamp) for timestamp in ts.timestamps]
+    dtype = _dtype_code(eltype(ts.data))
+    dims = UInt64[length(ts.data)]
+    bytes = _row_major_bytes(ts.data)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    units_ptr = units === nothing ? C_NULL : pointer(String(units))
+    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL :
+                  pointer(String(scaling_factor_multiplier))
+    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall(
+        (:ts_store_add_non_sequential, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Ptr{Int64}, UInt64,
+         Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
+         Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        store.handle, owner_uuid, owner_type, Int32(Int(owner_category)), name,
+        timestamps, UInt64(length(timestamps)), dtype, UInt64(1), dims, bytes,
+        UInt64(length(bytes)), logical_ptr, features_json, units_ptr, scaling_ptr,
+        out_key,
+    )
+    _check(code)
+    return TimeSeriesKey(out_key[])
+end
+
 """
     get_metadata(store, owner_uuid, name; resolution, features=Dict())
 
@@ -432,6 +486,42 @@ function get_time_series(store::Store, key::TimeSeriesKey)
     res_ms = div(res_ns, 1_000_000)
     resolution = Millisecond(res_ms)
     return SingleTimeSeries(initial, resolution, data)
+end
+
+function get_time_series(
+    ::Type{NonSequentialTimeSeries},
+    store::Store,
+    key::TimeSeriesKey,
+)
+    out_timestamps = Ref{Ptr{Int64}}(C_NULL)
+    out_timestamps_len = Ref{UInt64}(0)
+    out_dtype = Ref{Int32}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_data_len = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_get_non_sequential, lib_path()), Int32,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Int32},
+         Ref{Ptr{UInt8}}, Ref{UInt64}),
+        store.handle, key.handle, out_timestamps, out_timestamps_len, out_dtype,
+        out_data, out_data_len,
+    )
+    _check(code)
+
+    timestamp_ns = copy(unsafe_wrap(
+        Array, out_timestamps[], Int(out_timestamps_len[]); own=false,
+    ))
+    ccall(
+        (:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64),
+        out_timestamps[], out_timestamps_len[],
+    )
+    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+    ccall(
+        (:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64),
+        out_data[], out_data_len[],
+    )
+    dtype = _julia_dtype(out_dtype[])
+    values = collect(reinterpret(dtype, bytes))
+    return NonSequentialTimeSeries(_from_unix_ns.(timestamp_ns), values)
 end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)

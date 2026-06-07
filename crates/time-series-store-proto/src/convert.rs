@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use time_series_store_core::{
-    Dtype, FeatureValue, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TimeSeriesKey,
-    TimeSeriesMetadata, TimeSeriesType, TypedArray,
+    Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
+    TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 
 use crate::pb;
@@ -15,7 +15,10 @@ pub enum ConvertError {
     #[error("missing required field: {0}")]
     MissingField(&'static str),
     #[error("invalid value for {field}: {message}")]
-    InvalidValue { field: &'static str, message: String },
+    InvalidValue {
+        field: &'static str,
+        message: String,
+    },
     #[error("data_hash must be exactly 32 bytes, got {0}")]
     BadHashLen(usize),
     #[error("invalid RFC3339 timestamp: {0}")]
@@ -175,21 +178,17 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .map(|ts| ts.iter().map(|t| t.to_rfc3339()).collect())
             .unwrap_or_default(),
         features: Some(features_to_pb(&m.features)),
-        scaling_factor_multiplier: m
-            .scaling_factor_multiplier
-            .clone()
-            .unwrap_or_default(),
+        scaling_factor_multiplier: m.scaling_factor_multiplier.clone().unwrap_or_default(),
         units: m.units.clone().unwrap_or_default(),
     }
 }
 
 pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata, ConvertError> {
-    let owner_category = pb::OwnerCategory::try_from(m.owner_category).map_err(|_| {
-        ConvertError::InvalidValue {
+    let owner_category =
+        pb::OwnerCategory::try_from(m.owner_category).map_err(|_| ConvertError::InvalidValue {
             field: "owner_category",
             message: format!("unknown enum value {}", m.owner_category),
-        }
-    })?;
+        })?;
     let ts_type = pb::TimeSeriesType::try_from(m.time_series_type).map_err(|_| {
         ConvertError::InvalidValue {
             field: "time_series_type",
@@ -209,9 +208,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         Some(
             m.timestamps_rfc3339
                 .iter()
-                .map(|s| {
-                    DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))
-                })
+                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
                 .collect::<Result<Vec<_>, _>>()?,
         )
     };
@@ -248,39 +245,79 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 
 // ---- TimeSeriesData (for GetResp body construction) ----
 
-/// Encode a [`TimeSeriesData`] into the wire-shape used by `GetResp`. v0 only
-/// emits SingleTimeSeries; future variants add their own RPC shapes.
+/// Encode a [`TimeSeriesData`] into the wire-shape used by `GetResp`.
 pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
-    let TimeSeriesData::SingleTimeSeries(s) = data;
-    let shape = s.data.shape.iter().map(|d| *d as u64).collect();
-    let values = s.data.to_f64_vec().unwrap_or_default();
-    pb::GetResp {
-        initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
-        resolution_ns: duration_to_ns(s.resolution),
-        length: s.length as u64,
-        shape,
-        values,
+    match data {
+        TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
+            initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
+            resolution_ns: duration_to_ns(s.resolution),
+            length: s.length as u64,
+            shape: s.data.shape.iter().map(|d| *d as u64).collect(),
+            values: s.data.to_f64_vec().unwrap_or_default(),
+            time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
+            timestamps_rfc3339: Vec::new(),
+        },
+        TimeSeriesData::NonSequentialTimeSeries(s) => pb::GetResp {
+            initial_timestamp_rfc3339: String::new(),
+            resolution_ns: 0,
+            length: s.length as u64,
+            shape: s.data.shape.iter().map(|d| *d as u64).collect(),
+            values: s.data.to_f64_vec().unwrap_or_default(),
+            time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
+            timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
+        },
     }
 }
 
 pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData, ConvertError> {
-    let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
-        .map(|d| d.with_timezone(&Utc))?;
-    let resolution = Duration::nanoseconds(resp.resolution_ns);
+    let ts_type = pb::TimeSeriesType::try_from(resp.time_series_type).map_err(|_| {
+        ConvertError::InvalidValue {
+            field: "time_series_type",
+            message: format!("unknown enum value {}", resp.time_series_type),
+        }
+    })?;
     let shape: Vec<usize> = resp.shape.iter().map(|d| *d as usize).collect();
     let data = TypedArray::from_f64(shape, &resp.values);
-    Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
-        initial_timestamp,
-        resolution,
-        length: resp.length as usize,
-        data,
-    }))
+    match ts_type {
+        pb::TimeSeriesType::SingleTimeSeries => {
+            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
+                .map(|d| d.with_timezone(&Utc))?;
+            Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
+                initial_timestamp,
+                resolution: Duration::nanoseconds(resp.resolution_ns),
+                length: resp.length as usize,
+                data,
+            }))
+        }
+        pb::TimeSeriesType::NonSequentialTimeSeries => {
+            let timestamps = resp
+                .timestamps_rfc3339
+                .iter()
+                .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+                .collect::<Result<Vec<_>, _>>()?;
+            let series = NonSequentialTimeSeries::new(timestamps, data).map_err(|message| {
+                ConvertError::InvalidValue {
+                    field: "timestamps_rfc3339",
+                    message,
+                }
+            })?;
+            Ok(TimeSeriesData::NonSequentialTimeSeries(series))
+        }
+        other => Err(ConvertError::InvalidValue {
+            field: "time_series_type",
+            message: format!(
+                "{} cannot be returned by GetTimeSeries",
+                other.as_str_name()
+            ),
+        }),
+    }
 }
 
 // ---- Helpers ----
 
 fn duration_to_ns(d: Duration) -> i64 {
-    d.num_nanoseconds().unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
+    d.num_nanoseconds()
+        .unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
 }
 
 fn optional_ns(ns: i64) -> Option<Duration> {
@@ -292,19 +329,11 @@ fn optional_ns(ns: i64) -> Option<Duration> {
 }
 
 fn optional_usize(v: u64) -> Option<usize> {
-    if v == 0 {
-        None
-    } else {
-        Some(v as usize)
-    }
+    if v == 0 { None } else { Some(v as usize) }
 }
 
 fn optional_string(s: String) -> Option<String> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn parse_optional_rfc3339(s: &str) -> Result<Option<DateTime<Utc>>, ConvertError> {

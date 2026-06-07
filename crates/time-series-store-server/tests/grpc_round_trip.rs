@@ -6,8 +6,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    create_store, FeatureValue, Features, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesType, TypedArray,
+    FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store,
+    TimeSeriesData, TimeSeriesType, TypedArray, create_store,
 };
 use time_series_store_server::client::RemoteClient;
 use time_series_store_server::service::TimeSeriesStoreService;
@@ -110,10 +110,7 @@ async fn time_range_slicing_over_grpc() {
     let single = data.as_single().unwrap();
     assert_eq!(single.length, 3);
     assert_eq!(single.initial_timestamp, start);
-    assert_eq!(
-        single.data.to_f64_vec().unwrap(),
-        vec![102.0, 103.0, 104.0]
-    );
+    assert_eq!(single.data.to_f64_vec().unwrap(), vec![102.0, 103.0, 104.0]);
 }
 
 #[tokio::test]
@@ -170,5 +167,51 @@ async fn missing_key_returns_not_found() {
         features: Features::new(),
     };
     let err = client.get_time_series(&bogus_key, None).await.unwrap_err();
-    assert!(matches!(err, time_series_store_core::TimeSeriesError::NotFound));
+    assert!(matches!(
+        err,
+        time_series_store_core::TimeSeriesError::NotFound
+    ));
+}
+
+#[tokio::test]
+async fn non_sequential_round_trip_over_grpc() {
+    let mut store = fixture_store();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let timestamps = vec![
+        initial,
+        initial + Duration::hours(5),
+        initial + Duration::days(2),
+    ];
+    let series = NonSequentialTimeSeries::new(
+        timestamps.clone(),
+        TypedArray::from_f64(vec![3], &[4.0, 5.0, 6.0]),
+    )
+    .unwrap();
+    store
+        .add_time_series(
+            "44",
+            "Generator",
+            OwnerCategory::Component,
+            "events",
+            TimeSeriesData::NonSequentialTimeSeries(series),
+            Features::new(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+    let keys = client.get_time_series_keys("44".to_string()).await.unwrap();
+    assert_eq!(keys[0].resolution, None);
+    let got = client
+        .get_time_series(
+            &keys[0],
+            Some((initial + Duration::hours(1), initial + Duration::days(3))),
+        )
+        .await
+        .unwrap();
+    let irregular = got.as_non_sequential().unwrap();
+    assert_eq!(irregular.timestamps, timestamps[1..]);
+    assert_eq!(irregular.data.to_f64_vec().unwrap(), vec![5.0, 6.0]);
 }

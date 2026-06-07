@@ -36,6 +36,23 @@ using TimeSeriesStore
     @test_throws TimeSeriesStore.NotFoundError get_time_series(store, key)
 end
 
+@testset "non-sequential round-trip" begin
+    store = Store(in_memory=true)
+    timestamps = [
+        DateTime(2024, 1, 1),
+        DateTime(2024, 1, 1, 4),
+        DateTime(2024, 1, 3),
+    ]
+    series = NonSequentialTimeSeries(timestamps, Int64[10, 20, 30])
+    key = add_time_series!(
+        store, "irregular", "Generator", Component, "events", series,
+    )
+    got = get_time_series(NonSequentialTimeSeries, store, key)
+    @test got.timestamps == timestamps
+    @test got.data == Int64[10, 20, 30]
+    @test get_counts(store).static_time_series == 1
+end
+
 @testset "attribute-based metadata + hash access" begin
     store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1)

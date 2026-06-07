@@ -68,6 +68,12 @@ int32_t ts_store_remove(struct TsStore *handle, const struct TsKey *key);
 int32_t ts_store_has(const struct TsStore *handle, const struct TsKey *key, bool *out_present);
 ```
 
+## NonSequentialTimeSeries
+
+`ts_store_add_non_sequential` accepts an `int64_t` Unix-nanosecond timestamp for each value and a
+typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and byte buffers; release
+them with `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+
 ## Attribute-Based Access
 
 Resolve a series by its attributes instead of a key handle. `resolution_ns = 0` means unset.
@@ -94,10 +100,18 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *
 `ts_store_get_metadata` + `ts_store_get_array_by_hash` is the read path used by bindings that
 maintain their own key objects (such as an IS.jl-side store).
 
-## Forecasts (Reserved)
+## Forecasts
 
-The forecast surface is present in the ABI but the underlying types are not implemented end-to-end
-in v0. `ts_type`: `2 = Deterministic`, `3 = DeterministicSingleTimeSeries`.
+The forecast types are created and read through the C ABI. `ts_type` is the `TimeSeriesType`
+discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
+`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. Forecast values are
+passed as a flattened, column-major `f64` array (see the
+[data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
+the windowing parameters in metadata and does not interpret the layout.
+
+`ts_store_add_forecast` handles the non-probabilistic types (`Deterministic`,
+`DeterministicSingleTimeSeries`, `Scenarios`); `ts_store_add_probabilistic` adds the percentile
+vector for `Probabilistic`:
 
 ```c
 int32_t ts_store_add_forecast(struct TsStore *handle,
@@ -109,6 +123,22 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               const char *features_json, const char *units, const char *scaling_expr,
                               struct TsKey **out_key);
 
+int32_t ts_store_add_probabilistic(struct TsStore *handle,
+                                   const char *owner_uuid, const char *owner_type,
+                                   int32_t owner_category, const char *name,
+                                   int64_t initial_ts_unix_ns, int64_t resolution_ns,
+                                   int64_t horizon_ns, int64_t interval_ns, uint64_t count,
+                                   const double *percentiles_ptr, uint64_t percentiles_len,
+                                   const double *data_ptr, uint64_t data_len,
+                                   const char *features_json, const char *units,
+                                   const char *scaling_expr, struct TsKey **out_key);
+```
+
+Read forecast metadata by attributes, then fetch the flattened array with
+`ts_store_get_array_by_hash` and reshape it. `ts_store_get_probabilistic_metadata` additionally
+returns the percentile vector (free it with `ts_buffer_free_f64`):
+
+```c
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        const char *owner_uuid, const char *name, int32_t ts_type,
                                        int64_t resolution_ns, const char *features_json,
@@ -116,6 +146,15 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        int64_t *out_horizon_ns, int64_t *out_interval_ns,
                                        uint64_t *out_count, uint64_t *out_length,
                                        uint8_t *out_data_hash);
+
+int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
+                                             const char *owner_uuid, const char *name,
+                                             int64_t resolution_ns, const char *features_json,
+                                             int64_t *out_initial_ts_unix_ns,
+                                             int64_t *out_resolution_ns, int64_t *out_horizon_ns,
+                                             int64_t *out_interval_ns, uint64_t *out_count,
+                                             uint64_t *out_length, uint8_t *out_data_hash,
+                                             double **out_percentiles, uint64_t *out_percentiles_len);
 
 int32_t ts_store_has_typed(const struct TsStore *handle, const char *owner_uuid, const char *name,
                            int32_t ts_type, int64_t resolution_ns, const char *features_json,

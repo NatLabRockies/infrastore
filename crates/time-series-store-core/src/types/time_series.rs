@@ -7,9 +7,8 @@ use super::array::TypedArray;
 
 /// Discriminator for the six time series types defined in the spec.
 ///
-/// Only `SingleTimeSeries` carries a runtime variant in [`TimeSeriesData`]
-/// for v0; the other variants exist so the metadata schema and APIs accept
-/// them as future extension points.
+/// Static series carry runtime variants in [`TimeSeriesData`]. Forecast types
+/// use the forecast-specific store API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TimeSeriesType {
     SingleTimeSeries,
@@ -66,11 +65,7 @@ pub struct SingleTimeSeries {
 }
 
 impl SingleTimeSeries {
-    pub fn new(
-        initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
-        data: TypedArray,
-    ) -> Self {
+    pub fn new(initial_timestamp: DateTime<Utc>, resolution: Duration, data: TypedArray) -> Self {
         let length = data.length();
         Self {
             initial_timestamp,
@@ -81,25 +76,63 @@ impl SingleTimeSeries {
     }
 }
 
-/// Runtime variant container so future forecast types can be added without
-/// breaking the public API.
+/// A time series array at explicit, irregular timestamps.
+///
+/// Timestamps must be strictly increasing and the timestamp count must equal
+/// the first dimension of `data`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NonSequentialTimeSeries {
+    pub timestamps: Vec<DateTime<Utc>>,
+    pub length: usize,
+    pub data: TypedArray,
+}
+
+impl NonSequentialTimeSeries {
+    pub fn new(timestamps: Vec<DateTime<Utc>>, data: TypedArray) -> Result<Self, String> {
+        let length = data.length();
+        if timestamps.len() != length {
+            return Err(format!(
+                "timestamp count {} does not match data length {length}",
+                timestamps.len()
+            ));
+        }
+        if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("timestamps must be strictly increasing".to_string());
+        }
+        Ok(Self {
+            timestamps,
+            length,
+            data,
+        })
+    }
+}
+
+/// Runtime variant container for static time-series types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimeSeriesData {
     SingleTimeSeries(SingleTimeSeries),
-    // NonSequentialTimeSeries(...), Deterministic(...), Probabilistic(...),
-    // Scenarios(...) — added in later milestones.
+    NonSequentialTimeSeries(NonSequentialTimeSeries),
 }
 
 impl TimeSeriesData {
     pub fn time_series_type(&self) -> TimeSeriesType {
         match self {
             TimeSeriesData::SingleTimeSeries(_) => TimeSeriesType::SingleTimeSeries,
+            TimeSeriesData::NonSequentialTimeSeries(_) => TimeSeriesType::NonSequentialTimeSeries,
         }
     }
 
     pub fn as_single(&self) -> Option<&SingleTimeSeries> {
         match self {
             TimeSeriesData::SingleTimeSeries(s) => Some(s),
+            TimeSeriesData::NonSequentialTimeSeries(_) => None,
+        }
+    }
+
+    pub fn as_non_sequential(&self) -> Option<&NonSequentialTimeSeries> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(_) => None,
+            TimeSeriesData::NonSequentialTimeSeries(s) => Some(s),
         }
     }
 }

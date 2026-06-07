@@ -14,6 +14,7 @@ from time_series_store import (
     OwnerCategory,
     ReadOnlyStoreError,
     SingleTimeSeries,
+    NonSequentialTimeSeries,
     TimeSeriesStore,
     TimeSeriesType,
 )
@@ -199,3 +200,36 @@ def test_numpy_array_received_as_ndarray():
     assert isinstance(arr, np.ndarray)
     assert arr.dtype == np.float64
     assert arr.shape == (24,)
+
+
+def test_non_sequential_round_trip_and_slice():
+    store = TimeSeriesStore.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    timestamps = [
+        initial,
+        initial + timedelta(hours=4),
+        initial + timedelta(days=2),
+    ]
+    series = NonSequentialTimeSeries(timestamps, np.array([10.0, 20.0, 30.0]))
+    key = store.add_time_series(
+        "irregular", "Generator", OwnerCategory.Component, "events", series,
+    )
+
+    assert key.time_series_type == TimeSeriesType.NonSequentialTimeSeries
+    assert key.resolution is None
+    got = store.get_time_series(
+        key,
+        time_range=(initial + timedelta(hours=1), initial + timedelta(days=3)),
+    )
+    assert isinstance(got, NonSequentialTimeSeries)
+    assert got.timestamps == timestamps[1:]
+    np.testing.assert_array_equal(np.asarray(got.data), np.array([20.0, 30.0]))
+
+
+def test_non_sequential_rejects_invalid_timestamps():
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(InvalidParameterError):
+        NonSequentialTimeSeries(
+            [initial, initial],
+            np.array([1.0, 2.0]),
+        )

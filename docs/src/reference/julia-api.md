@@ -35,6 +35,12 @@ struct SingleTimeSeries
     data              :: Vector{Float64}
 end
 
+struct NonSequentialTimeSeries
+    timestamps  :: Vector{DateTime}
+    data        :: AbstractVector
+    logical_type :: Union{Nothing,String}
+end
+
 mutable struct TimeSeriesStore
     handle :: Ptr{Cvoid}
 end
@@ -68,6 +74,7 @@ add_time_series!(
 ) -> TimeSeriesKey
 
 get_time_series(store::TimeSeriesStore, key::TimeSeriesKey) -> SingleTimeSeries
+get_time_series(NonSequentialTimeSeries, store, key) -> NonSequentialTimeSeries
 ```
 
 `owner_uuid` is a string — typically the stringified IS.jl UUID. `features` is serialized to JSON
@@ -111,6 +118,13 @@ compact!(store) -> Nothing
 flush!(store) -> Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
 close!(store) -> Nothing
 ```
+
+## Forecasts
+
+`get_counts` reports forecast associations under `forecasts`, but the Julia binding does **not** yet
+wrap creating or reading forecast values — the underlying C ABI does. To work with `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios` forecasts today, use the
+[Rust core](./rust-api.md#forecasts) or call the [C ABI](./c-abi.md#forecasts) directly.
 
 ## Errors
 

@@ -4,11 +4,9 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    create_store, Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
+    Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray, create_store,
 };
-use time_series_store_proto::pb::{
-    time_series_store_client::TimeSeriesStoreClient, CountsReq,
-};
+use time_series_store_proto::pb::{CountsReq, time_series_store_client::TimeSeriesStoreClient};
 use time_series_store_server::auth::ApiKeyInterceptor;
 use time_series_store_server::service::TimeSeriesStoreService;
 use tokio::net::TcpListener;
@@ -97,10 +95,6 @@ async fn correct_key_succeeds() {
             Ok(req)
         },
     );
-    let resp = client
-        .get_counts(CountsReq {})
-        .await
-        .unwrap()
-        .into_inner();
+    let resp = client.get_counts(CountsReq {}).await.unwrap().into_inner();
     assert_eq!(resp.static_time_series, 1);
 }

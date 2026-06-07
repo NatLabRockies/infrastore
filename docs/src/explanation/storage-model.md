@@ -67,13 +67,18 @@ Key design choices:
 The [Storage Backend design](../reference/file-format.md#netcdf-layout) reference gives the precise
 naming and dimension scheme.
 
+[Forecasts](./data-model.md#forecasts) reuse this exact machinery: their values are flattened to a
+1-D array and stored as a column in the same `sts_…` datasets. Nothing on the array side
+distinguishes a forecast from a static series — the forecast windowing parameters live entirely in
+metadata.
+
 ## The Metadata Side: SQLite
 
 The sidecar holds two tables:
 
 - **`time_series_associations`** — one row per `(owner, name, resolution, features)` association,
-  including the `data_hash` that links it to a NetCDF column, plus temporal fields, units, and the
-  scaling expression.
+  including the `data_hash` that links it to a NetCDF column, plus temporal fields, forecast
+  parameters (`horizon`, `interval`, `count`, `percentiles`), units, and the scaling expression.
 - **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
   a `value_kind` discriminator.
 

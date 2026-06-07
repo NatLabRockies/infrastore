@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::path::PathBuf;
 use std::ptr;
 use std::slice;
@@ -72,7 +72,9 @@ unsafe fn cstr_to_str<'a>(p: *const c_char) -> Result<&'a str, i32> {
     if p.is_null() {
         return Err(TS_ERR_NULL_POINTER);
     }
-    unsafe { CStr::from_ptr(p) }.to_str().map_err(|_| TS_ERR_INVALID_UTF8)
+    unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .map_err(|_| TS_ERR_INVALID_UTF8)
 }
 
 unsafe fn cstr_to_optional_string(p: *const c_char) -> Result<Option<String>, i32> {
@@ -305,11 +307,133 @@ pub unsafe extern "C" fn ts_store_add_single(
     };
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
-            let handle = Box::new(TsKeyHandle { inner: keys.remove(0) });
+            let handle = Box::new(TsKeyHandle {
+                inner: keys.remove(0),
+            });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
         }
         Err(e) => map_core_error(e),
+    }
+}
+
+// ---- add_non_sequential --------------------------------------------------
+
+/// Add a NonSequentialTimeSeries to the store.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_add_non_sequential(
+    handle: *mut TsStoreHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ns: *const i64,
+    timestamps_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+    scaling_expr: *const c_char,
+    out_key: *mut *mut TsKeyHandle,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_key.is_null() || timestamps_unix_ns.is_null() || data_ptr.is_null() {
+        set_error("an input or output pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let owner_type = match unsafe { cstr_to_str(owner_type) } {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let name = match unsafe { cstr_to_str(name) } {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let owner_category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let timestamps = match unsafe {
+        slice::from_raw_parts(timestamps_unix_ns, timestamps_len as usize)
+            .iter()
+            .map(|&ns| unix_ns_to_datetime(ns).ok_or(ns))
+            .collect::<std::result::Result<Vec<_>, _>>()
+    } {
+        Ok(timestamps) => timestamps,
+        Err(ns) => {
+            set_error(format!("invalid timestamp unix nanoseconds: {ns}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
+    {
+        Ok(array) => array,
+        Err(code) => return code,
+    };
+    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array) {
+        Ok(series) => series,
+        Err(error) => {
+            set_error(error);
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let features = match unsafe { parse_features_json(features_json) } {
+        Ok(features) => features,
+        Err(code) => return code,
+    };
+    let units = match unsafe { cstr_to_optional_string(units) } {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let scaling_factor_multiplier = match unsafe { cstr_to_optional_string(scaling_expr) } {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let request = core_lib::AddRequest {
+        owner_uuid: owner_uuid.to_string(),
+        owner_type: owner_type.to_string(),
+        owner_category,
+        name: name.to_string(),
+        data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
+        features,
+        units,
+        scaling_factor_multiplier,
+        logical_type,
+    };
+    match store.inner.add_time_series_bulk(vec![request]) {
+        Ok(mut keys) => {
+            unsafe {
+                *out_key = Box::into_raw(Box::new(TsKeyHandle {
+                    inner: keys.remove(0),
+                }))
+            };
+            TS_OK
+        }
+        Err(error) => map_core_error(error),
     }
 }
 
@@ -355,7 +479,13 @@ pub unsafe extern "C" fn ts_store_get_single(
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
-    let core_lib::TimeSeriesData::SingleTimeSeries(single) = data;
+    let single = match data {
+        core_lib::TimeSeriesData::SingleTimeSeries(single) => single,
+        core_lib::TimeSeriesData::NonSequentialTimeSeries(_) => {
+            set_error("key does not identify a SingleTimeSeries");
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
     let initial_ns = match datetime_to_unix_ns(single.initial_timestamp) {
         Some(n) => n,
         None => {
@@ -363,9 +493,10 @@ pub unsafe extern "C" fn ts_store_get_single(
             return TS_ERR_INTEGRITY;
         }
     };
-    let resolution_ns = single.resolution.num_nanoseconds().unwrap_or_else(|| {
-        single.resolution.num_seconds() * 1_000_000_000
-    });
+    let resolution_ns = single
+        .resolution
+        .num_nanoseconds()
+        .unwrap_or_else(|| single.resolution.num_seconds() * 1_000_000_000);
     let mut buf: Vec<f64> = single.data.to_f64_vec().unwrap_or_default();
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr();
@@ -375,6 +506,76 @@ pub unsafe extern "C" fn ts_store_get_single(
         *out_resolution_ns = resolution_ns;
         *out_data = ptr;
         *out_data_len = len;
+    }
+    TS_OK
+}
+
+/// Fetch a NonSequentialTimeSeries by key.
+///
+/// The caller owns both output buffers and must release them with
+/// `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_get_non_sequential(
+    handle: *const TsStoreHandle,
+    key: *const TsKeyHandle,
+    out_timestamps: *mut *mut i64,
+    out_timestamps_len: *mut u64,
+    out_dtype: *mut i32,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(store) => store,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let key = match unsafe { key.as_ref() } {
+        Some(key) => key,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_timestamps.is_null()
+        || out_timestamps_len.is_null()
+        || out_dtype.is_null()
+        || out_data.is_null()
+        || out_data_byte_len.is_null()
+    {
+        return TS_ERR_NULL_POINTER;
+    }
+    let series = match store.inner.get_time_series(&key.inner, None) {
+        Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(series)) => series,
+        Ok(core_lib::TimeSeriesData::SingleTimeSeries(_)) => {
+            set_error("key does not identify a NonSequentialTimeSeries");
+            return TS_ERR_INVALID_PARAMETER;
+        }
+        Err(error) => return map_core_error(error),
+    };
+    let mut timestamps = match series
+        .timestamps
+        .iter()
+        .map(|timestamp| datetime_to_unix_ns(*timestamp).ok_or(TS_ERR_INTEGRITY))
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(timestamps) => timestamps,
+        Err(code) => {
+            set_error("timestamp out of i64 nanosecond range");
+            return code;
+        }
+    };
+    let timestamps_len = timestamps.len() as u64;
+    let timestamps_ptr = timestamps.as_mut_ptr();
+    std::mem::forget(timestamps);
+
+    let dtype = series.data.dtype.code();
+    let mut bytes = series.data.bytes;
+    let data_byte_len = bytes.len() as u64;
+    let data_ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    unsafe {
+        *out_timestamps = timestamps_ptr;
+        *out_timestamps_len = timestamps_len;
+        *out_dtype = dtype;
+        *out_data = data_ptr;
+        *out_data_byte_len = data_byte_len;
     }
     TS_OK
 }
@@ -573,7 +774,8 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) } {
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }
+    {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -622,7 +824,8 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     if out_present.is_null() {
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) } {
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }
+    {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -650,7 +853,8 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) } {
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }
+    {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1203,6 +1407,15 @@ pub unsafe extern "C" fn ts_buffer_free_f64(ptr: *mut f64, len: u64) {
 /// Free a `u8` buffer returned by `ts_store_get_array_by_hash`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_buffer_free_u8(ptr: *mut u8, len: u64) {
+    if !ptr.is_null() {
+        let len = len as usize;
+        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+    }
+}
+
+/// Free an `i64` buffer returned by `ts_store_get_non_sequential`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_buffer_free_i64(ptr: *mut i64, len: u64) {
     if !ptr.is_null() {
         let len = len as usize;
         unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
