@@ -231,6 +231,177 @@ fn numpy_from_typed<'py>(
     shaped.call_method0("copy")
 }
 
+// ---- Deterministic --------------------------------------------------------
+
+#[pyclass(name = "Deterministic", module = "time_series_store", from_py_object)]
+#[derive(Clone)]
+pub struct PyDeterministic {
+    inner: core_lib::Deterministic,
+}
+
+#[pymethods]
+impl PyDeterministic {
+    #[getter]
+    fn initial_timestamp(&self) -> DateTime<Utc> {
+        self.inner.initial_timestamp
+    }
+
+    #[getter]
+    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.resolution)
+    }
+
+    #[getter]
+    fn horizon<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.horizon)
+    }
+
+    #[getter]
+    fn interval<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.interval)
+    }
+
+    #[getter]
+    fn count(&self) -> usize {
+        self.inner.count
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Deterministic(initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, shape={:?})",
+            self.inner.initial_timestamp,
+            self.inner.count,
+            self.inner.horizon.num_seconds(),
+            self.inner.interval.num_seconds(),
+            self.inner.resolution.num_seconds(),
+            self.inner.data.shape,
+        )
+    }
+}
+
+// ---- Probabilistic --------------------------------------------------------
+
+#[pyclass(name = "Probabilistic", module = "time_series_store", from_py_object)]
+#[derive(Clone)]
+pub struct PyProbabilistic {
+    inner: core_lib::Probabilistic,
+}
+
+#[pymethods]
+impl PyProbabilistic {
+    #[getter]
+    fn initial_timestamp(&self) -> DateTime<Utc> {
+        self.inner.initial_timestamp
+    }
+
+    #[getter]
+    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.resolution)
+    }
+
+    #[getter]
+    fn horizon<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.horizon)
+    }
+
+    #[getter]
+    fn interval<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.interval)
+    }
+
+    #[getter]
+    fn count(&self) -> usize {
+        self.inner.count
+    }
+
+    #[getter]
+    fn percentiles(&self) -> Vec<f64> {
+        self.inner.percentiles.clone()
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Probabilistic(initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, percentiles={:?}, shape={:?})",
+            self.inner.initial_timestamp,
+            self.inner.count,
+            self.inner.horizon.num_seconds(),
+            self.inner.interval.num_seconds(),
+            self.inner.resolution.num_seconds(),
+            self.inner.percentiles,
+            self.inner.data.shape,
+        )
+    }
+}
+
+// ---- Scenarios ------------------------------------------------------------
+
+#[pyclass(name = "Scenarios", module = "time_series_store", from_py_object)]
+#[derive(Clone)]
+pub struct PyScenarios {
+    inner: core_lib::Scenarios,
+}
+
+#[pymethods]
+impl PyScenarios {
+    #[getter]
+    fn initial_timestamp(&self) -> DateTime<Utc> {
+        self.inner.initial_timestamp
+    }
+
+    #[getter]
+    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.resolution)
+    }
+
+    #[getter]
+    fn horizon<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.horizon)
+    }
+
+    #[getter]
+    fn interval<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
+        chrono_to_pydelta(py, self.inner.interval)
+    }
+
+    #[getter]
+    fn count(&self) -> usize {
+        self.inner.count
+    }
+
+    #[getter]
+    fn scenario_count(&self) -> usize {
+        self.inner.scenario_count
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Scenarios(initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, scenario_count={}, shape={:?})",
+            self.inner.initial_timestamp,
+            self.inner.count,
+            self.inner.horizon.num_seconds(),
+            self.inner.interval.num_seconds(),
+            self.inner.resolution.num_seconds(),
+            self.inner.scenario_count,
+            self.inner.data.shape,
+        )
+    }
+}
+
 // ---- SingleTimeSeries -----------------------------------------------------
 
 #[pyclass(
@@ -469,6 +640,72 @@ impl PyStore {
         Ok(PyTimeSeriesKey { inner: key })
     }
 
+    /// Add a forecast (`Deterministic` / `DeterministicSingleTimeSeries` / `Probabilistic` /
+    /// `Scenarios`).
+    ///
+    /// `data` is a numpy array in the canonical shape for `time_series_type`:
+    /// - `Deterministic`: `[H, count, *E]`
+    /// - `Probabilistic`: `[num_percentiles, H, count, *E]`
+    /// - `Scenarios`: `[scenario_count, H, count, *E]`
+    /// - `DeterministicSingleTimeSeries`: `[total_len, *E]` (underlying STS array)
+    ///
+    /// `features` is an optional `dict[str, int|float|bool|str]`. `percentiles` is
+    /// required for `Probabilistic`.
+    #[pyo3(signature = (
+        owner_uuid, owner_type, owner_category, name, time_series_type,
+        initial_timestamp, resolution, horizon, interval, count, data,
+        features=None, units=None, scaling_factor_multiplier=None,
+        percentiles=None, logical_type=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_forecast(
+        &mut self,
+        owner_uuid: &str,
+        owner_type: &str,
+        owner_category: PyOwnerCategory,
+        name: &str,
+        time_series_type: PyTimeSeriesType,
+        initial_timestamp: DateTime<Utc>,
+        resolution: Bound<'_, PyDelta>,
+        horizon: Bound<'_, PyDelta>,
+        interval: Bound<'_, PyDelta>,
+        count: usize,
+        data: &Bound<'_, PyAny>,
+        features: Option<&Bound<'_, PyDict>>,
+        units: Option<String>,
+        scaling_factor_multiplier: Option<String>,
+        percentiles: Option<Vec<f64>>,
+        logical_type: Option<String>,
+    ) -> PyResult<PyTimeSeriesKey> {
+        let resolution = pydelta_to_chrono(&resolution)?;
+        let horizon = pydelta_to_chrono(&horizon)?;
+        let interval = pydelta_to_chrono(&interval)?;
+        let typed = typed_array_from_numpy(data)?;
+        let features = features_from_dict(features)?;
+        let key = self
+            .inner
+            .add_forecast(
+                owner_uuid,
+                owner_type,
+                owner_category.into(),
+                name,
+                time_series_type.into(),
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count,
+                typed,
+                features,
+                units,
+                scaling_factor_multiplier,
+                percentiles,
+                logical_type,
+            )
+            .map_err(map_err)?;
+        Ok(PyTimeSeriesKey { inner: key })
+    }
+
     fn remove_time_series(&mut self, key: &PyTimeSeriesKey) -> PyResult<()> {
         self.inner.remove_time_series(&key.inner).map_err(map_err)
     }
@@ -500,13 +737,14 @@ impl PyStore {
             core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
                 Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
             }
-            // Forecast types are not yet wrapped by Python bindings.
-            core_lib::TimeSeriesData::Deterministic(_)
-            | core_lib::TimeSeriesData::Probabilistic(_)
-            | core_lib::TimeSeriesData::Scenarios(_) => {
-                Err(pyo3::exceptions::PyNotImplementedError::new_err(
-                    "forecast types are not yet exposed through Python bindings",
-                ))
+            core_lib::TimeSeriesData::Deterministic(d) => {
+                Ok(Py::new(py, PyDeterministic { inner: d })?.into_any())
+            }
+            core_lib::TimeSeriesData::Probabilistic(p) => {
+                Ok(Py::new(py, PyProbabilistic { inner: p })?.into_any())
+            }
+            core_lib::TimeSeriesData::Scenarios(s) => {
+                Ok(Py::new(py, PyScenarios { inner: s })?.into_any())
             }
         }
     }
@@ -665,6 +903,9 @@ fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStore>()?;
     m.add_class::<PySingleTimeSeries>()?;
     m.add_class::<PyNonSequentialTimeSeries>()?;
+    m.add_class::<PyDeterministic>()?;
+    m.add_class::<PyProbabilistic>()?;
+    m.add_class::<PyScenarios>()?;
     m.add_class::<PyTimeSeriesKey>()?;
     m.add_class::<PyTimeSeriesType>()?;
     m.add_class::<PyOwnerCategory>()?;
