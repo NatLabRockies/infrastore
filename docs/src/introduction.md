@@ -59,18 +59,8 @@ flowchart TB
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
 - **Designed for power-systems data** — The data model maps onto
-  [InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl) owners,
+  [InfrastructureSystems.jl](https://github.com/NLR-Sienna/InfrastructureSystems.jl) owners,
   categories, and time-series concepts
-
-## v0 Scope
-
-**`SingleTimeSeries`** and **`NonSequentialTimeSeries`** — regular and explicitly timestamped static
-series — are implemented end to end across every interface (Rust, Python, Julia, and the gRPC
-server). The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
-`Scenarios`) can be **read** across the Rust core, the C ABI, Python, Julia, and gRPC, and
-**written** (`add_forecast`) across the Rust core, the C ABI, Python, and Julia; forecast writes are
-not exposed over the read-only gRPC server. The on-disk format is version `0.2.0`. See
-[Data Model](./explanation/data-model.md) for the full picture.
 
 ## Who Should Read This
 
