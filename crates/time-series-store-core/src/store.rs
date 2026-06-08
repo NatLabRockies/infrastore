@@ -388,6 +388,11 @@ impl Store {
                                 "resolution overflows i64 nanoseconds".into(),
                             )
                         })?;
+                        if resolution_ns <= 0 {
+                            return Err(TimeSeriesError::InvalidParameter(
+                                "resolution must be positive".into(),
+                            ));
+                        }
                         let total_ns = (start - initial).num_nanoseconds().ok_or_else(|| {
                             TimeSeriesError::InvalidParameter(
                                 "time range overflows i64 nanoseconds".into(),
@@ -399,8 +404,16 @@ impl Store {
                                 "time range overflows i64 nanoseconds".into(),
                             )
                         })?;
-                        let end_idx =
-                            ((end_total_ns + resolution_ns - 1) / resolution_ns).max(0) as usize;
+                        // Ceiling division of a non-negative numerator. Written as
+                        // `(n - 1) / d + 1` rather than `(n + d - 1) / d` so a
+                        // far-future `end` (where `end_total_ns` is near `i64::MAX`)
+                        // cannot overflow the addition. Non-positive numerators map
+                        // to index 0.
+                        let end_idx = if end_total_ns <= 0 {
+                            0
+                        } else {
+                            ((end_total_ns - 1) / resolution_ns + 1) as usize
+                        };
                         let start_idx = start_idx.min(length);
                         let end_idx = end_idx.min(length).max(start_idx);
                         let data = self
