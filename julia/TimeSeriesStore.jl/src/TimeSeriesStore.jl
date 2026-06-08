@@ -10,6 +10,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
        get_metadata, get_array_by_hash, open_store, flush!, clear!,
        add_forecast!, get_forecast_metadata, has_typed, remove_typed!,
        add_probabilistic!, get_probabilistic_metadata,
+       get_deterministic, get_probabilistic, get_scenarios,
        close!
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
@@ -828,6 +829,258 @@ function get_probabilistic_metadata(
         horizon=Millisecond(div(oh[], 1_000_000)),
         interval=Millisecond(div(ov[], 1_000_000)),
         count=Int(oc[]), length=Int(ol[]), data_hash=ohash, percentiles=percentiles,
+    )
+end
+
+# ---- Forecast data reads ---------------------------------------------------
+#
+# All three functions call `ts_store_get_forecast` and return named tuples
+# with the data array reshaped to the canonical Julia (column-major) layout
+# that is the inverse of `_row_major_bytes`.
+#
+# Canonical row-major shapes from FORECAST_READ_SPEC.md:
+#   Deterministic  [H, count, *E]
+#   Probabilistic  [P, H, count, *E]
+#   Scenarios      [scenario_count, H, count, *E]
+#
+# Since Rust stores row-major bytes and Julia is column-major, we need to
+# reverse the dim order when reinterpreting and then permute axes back:
+# the same transform used in `get_array_nd`.
+
+# Internal helper: issue the ccall and return raw out-param values.
+function _get_forecast_raw(
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    features_json = _features_arg(features)
+
+    time_range_present = time_range !== nothing
+    range_start_ns = time_range_present ? _to_unix_ns(time_range[1]) : Int64(0)
+    range_end_ns   = time_range_present ? _to_unix_ns(time_range[2]) : Int64(0)
+
+    out_initial   = Ref{Int64}(0)
+    out_res       = Ref{Int64}(0)
+    out_horizon   = Ref{Int64}(0)
+    out_interval  = Ref{Int64}(0)
+    out_count     = Ref{UInt64}(0)
+    out_scen      = Ref{UInt64}(0)
+    out_ndims     = Ref{UInt64}(0)
+    out_dims      = Ref{Ptr{UInt64}}(C_NULL)
+    out_dtype     = Ref{Int32}(0)
+    out_data      = Ref{Ptr{UInt8}}(C_NULL)
+    out_byte_len  = Ref{UInt64}(0)
+    out_pct       = Ref{Ptr{Float64}}(C_NULL)
+    out_pct_len   = Ref{UInt64}(0)
+
+    code = ccall(
+        (:ts_store_get_forecast, lib_path()), Int32,
+        (Ptr{Cvoid},   # handle
+         Cstring,      # owner_uuid
+         Cstring,      # name
+         Int32,        # ts_type
+         Int64,        # resolution_ns
+         Cstring,      # features_json
+         Bool,         # time_range_present
+         Int64,        # time_range_start_ns
+         Int64,        # time_range_end_ns
+         Ref{Int64},   # out_initial_ts_unix_ns
+         Ref{Int64},   # out_resolution_ns
+         Ref{Int64},   # out_horizon_ns
+         Ref{Int64},   # out_interval_ns
+         Ref{UInt64},  # out_count
+         Ref{UInt64},  # out_scenario_count
+         Ref{UInt64},  # out_ndims
+         Ref{Ptr{UInt64}},  # out_dims
+         Ref{Int32},   # out_dtype
+         Ref{Ptr{UInt8}},   # out_data
+         Ref{UInt64},  # out_data_byte_len
+         Ref{Ptr{Float64}}, # out_percentiles
+         Ref{UInt64}), # out_percentiles_len
+        store.handle,
+        owner_uuid,
+        name,
+        Int32(ts_type),
+        resolution_ns,
+        features_json,
+        time_range_present,
+        range_start_ns,
+        range_end_ns,
+        out_initial,
+        out_res,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_scen,
+        out_ndims,
+        out_dims,
+        out_dtype,
+        out_data,
+        out_byte_len,
+        out_pct,
+        out_pct_len,
+    )
+    _check(code)
+
+    # Copy dims and free FFI buffer.
+    nd = Int(out_ndims[])
+    dims_raw = unsafe_wrap(Array, out_dims[], nd; own=false)
+    dims = Int.(copy(dims_raw))
+    ccall((:ts_buffer_free_u64, lib_path()), Cvoid, (Ptr{UInt64}, UInt64), out_dims[], out_ndims[])
+
+    # Copy data bytes and free FFI buffer.
+    n_bytes = Int(out_byte_len[])
+    bytes_raw = unsafe_wrap(Array, out_data[], n_bytes; own=false)
+    bytes = copy(bytes_raw)
+    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_byte_len[])
+
+    # Percentiles (Probabilistic only; null for others).
+    np = Int(out_pct_len[])
+    percentiles = if np > 0 && out_pct[] != C_NULL
+        p = copy(unsafe_wrap(Array, out_pct[], np; own=false))
+        ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_pct[], out_pct_len[])
+        p
+    else
+        Float64[]
+    end
+
+    # Decode scalars.
+    initial_timestamp = _from_unix_ns(out_initial[])
+    resolution_out    = Millisecond(div(out_res[], 1_000_000))
+    horizon_out       = Millisecond(div(out_horizon[], 1_000_000))
+    interval_out      = Millisecond(div(out_interval[], 1_000_000))
+    count_out         = Int(out_count[])
+    scenario_count    = Int(out_scen[])
+
+    return (
+        initial_timestamp = initial_timestamp,
+        resolution        = resolution_out,
+        horizon           = horizon_out,
+        interval          = interval_out,
+        count             = count_out,
+        scenario_count    = scenario_count,
+        dims              = dims,
+        bytes             = bytes,
+        dtype_code        = out_dtype[],
+        percentiles       = percentiles,
+    )
+end
+
+# Helper: decode raw forecast bytes into a properly-shaped Julia array.
+# `dims` is in row-major order [d0, d1, ...]; we reconstruct the column-major
+# Julia array as the inverse of `_row_major_bytes`.
+function _decode_forecast_array(bytes::Vector{UInt8}, dtype_code::Int32, dims::Vector{Int})
+    T = _julia_dtype(dtype_code)
+    flat = collect(reinterpret(T, bytes))
+    n = length(dims)
+    n <= 1 && return reshape(flat, dims...)
+    # Row-major → column-major: reshape with reversed dims, then permute axes.
+    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, n)))
+end
+
+"""
+    get_deterministic(store, owner_uuid, name; resolution, features, time_range) -> NamedTuple
+
+Fetch a `Deterministic` forecast and return a named tuple:
+`(; initial_timestamp, resolution, horizon, interval, count, data)`.
+
+`data` is an N-dimensional Julia array with canonical shape
+`(H, count, element_dims...)` where `H = horizon / resolution`.
+
+Pass `time_range = (start::DateTime, end::DateTime)` (exclusive end) to select
+a window sub-range per the InfrastructureSystems.jl convention.
+"""
+function get_deterministic(
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(
+        store, owner_uuid, name, TS_TYPE_DETERMINISTIC;
+        resolution=resolution, features=features, time_range=time_range,
+    )
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    return (
+        initial_timestamp = r.initial_timestamp,
+        resolution        = r.resolution,
+        horizon           = r.horizon,
+        interval          = r.interval,
+        count             = r.count,
+        data              = data,
+    )
+end
+
+"""
+    get_probabilistic(store, owner_uuid, name; resolution, features, time_range) -> NamedTuple
+
+Fetch a `Probabilistic` forecast and return a named tuple:
+`(; initial_timestamp, resolution, horizon, interval, count, percentiles, data)`.
+
+`data` is an N-dimensional Julia array with canonical shape
+`(num_percentiles, H, count, element_dims...)`.
+"""
+function get_probabilistic(
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(
+        store, owner_uuid, name, TS_TYPE_PROBABILISTIC;
+        resolution=resolution, features=features, time_range=time_range,
+    )
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    return (
+        initial_timestamp = r.initial_timestamp,
+        resolution        = r.resolution,
+        horizon           = r.horizon,
+        interval          = r.interval,
+        count             = r.count,
+        percentiles       = r.percentiles,
+        data              = data,
+    )
+end
+
+"""
+    get_scenarios(store, owner_uuid, name; resolution, features, time_range) -> NamedTuple
+
+Fetch a `Scenarios` forecast and return a named tuple:
+`(; initial_timestamp, resolution, horizon, interval, count, scenario_count, data)`.
+
+`data` is an N-dimensional Julia array with canonical shape
+`(scenario_count, H, count, element_dims...)`.
+"""
+function get_scenarios(
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(
+        store, owner_uuid, name, TS_TYPE_SCENARIOS;
+        resolution=resolution, features=features, time_range=time_range,
+    )
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    return (
+        initial_timestamp = r.initial_timestamp,
+        resolution        = r.resolution,
+        horizon           = r.horizon,
+        interval          = r.interval,
+        count             = r.count,
+        scenario_count    = r.scenario_count,
+        data              = data,
     )
 end
 

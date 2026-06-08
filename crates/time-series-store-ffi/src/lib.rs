@@ -1528,6 +1528,277 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     TS_OK
 }
 
+/// Fetch a forecast by attributes and return the full data array plus metadata.
+///
+/// Reads a `Deterministic`, `Probabilistic`, or `Scenarios` forecast (DST is
+/// synthesized into `Deterministic`). On success, the caller owns two heap
+/// buffers and must free them with the matching deallocators:
+///
+/// - `*out_data` (byte buffer, `*out_data_byte_len` bytes) —
+///   free with `ts_buffer_free_u8(*out_data, *out_data_byte_len)`.
+/// - `*out_dims` (array of `u64`, `*out_ndims` elements) —
+///   free with `ts_buffer_free_u64(*out_dims, *out_ndims)`.
+/// - `*out_percentiles` (`f64` array, `*out_percentiles_len` elements) —
+///   non-NULL only for `Probabilistic`; free with
+///   `ts_buffer_free_f64(*out_percentiles, *out_percentiles_len)`.
+///
+/// **Optional time-range / window selection:** when `time_range_present` is
+/// `true`, only the windows whose start timestamp falls in
+/// `[time_range_start_ns, time_range_end_ns)` are returned. Pass
+/// `time_range_present = false` to retrieve all windows.
+///
+/// # Safety
+///
+/// - `handle` must be a live, non-null store handle created by this library.
+///   No concurrent mutation is permitted for the duration of the call.
+/// - `owner_uuid`, `name` must point to valid, null-terminated UTF-8 strings
+///   for the duration of the call; `features_json` may be null.
+/// - All `out_*` scalar pointers must be valid for writing one value each.
+/// - `out_dims` must be valid for writing one pointer; the returned pointer
+///   must be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
+/// - `out_data` must be valid for writing one pointer; the returned pointer
+///   must be freed exactly once with `ts_buffer_free_u8` using
+///   `*out_data_byte_len`.
+/// - `out_percentiles` must be valid for writing one pointer; when the result
+///   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
+///   to 0, so no free is needed. When non-null it must be freed exactly once
+///   with `ts_buffer_free_f64` using `*out_percentiles_len`.
+/// - All returned heap buffers are invalidated after their matching free call
+///   and must not be used afterwards.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_get_forecast(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    ts_type: i32,
+    resolution_ns: i64,
+    features_json: *const c_char,
+    time_range_present: bool,
+    time_range_start_ns: i64,
+    time_range_end_ns: i64,
+    // scalar metadata outputs
+    out_initial_ts_unix_ns: *mut i64,
+    out_resolution_ns: *mut i64,
+    out_horizon_ns: *mut i64,
+    out_interval_ns: *mut i64,
+    out_count: *mut u64,
+    out_scenario_count: *mut u64, // Scenarios only; 0 for other types
+    // array shape outputs (dims buffer)
+    out_ndims: *mut u64,
+    out_dims: *mut *mut u64,
+    // raw byte output
+    out_dtype: *mut i32,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    // percentiles (Probabilistic only; null + 0 for other types)
+    out_percentiles: *mut *mut f64,
+    out_percentiles_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    // Null-check all output pointers.
+    if out_initial_ts_unix_ns.is_null()
+        || out_resolution_ns.is_null()
+        || out_horizon_ns.is_null()
+        || out_interval_ns.is_null()
+        || out_count.is_null()
+        || out_scenario_count.is_null()
+        || out_ndims.is_null()
+        || out_dims.is_null()
+        || out_dtype.is_null()
+        || out_data.is_null()
+        || out_data_byte_len.is_null()
+        || out_percentiles.is_null()
+        || out_percentiles_len.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe {
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    let time_range = if time_range_present {
+        let start = match unix_ns_to_datetime(time_range_start_ns) {
+            Some(d) => d,
+            None => {
+                set_error(format!(
+                    "invalid time_range_start_ns: {time_range_start_ns}"
+                ));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        let end = match unix_ns_to_datetime(time_range_end_ns) {
+            Some(d) => d,
+            None => {
+                set_error(format!("invalid time_range_end_ns: {time_range_end_ns}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        Some((start, end))
+    } else {
+        None
+    };
+    let data = match store.inner.get_time_series(&key, time_range) {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+
+    // Helper: convert Duration to nanoseconds.
+    let dur_to_ns = |d: Duration| {
+        d.num_nanoseconds()
+            .unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
+    };
+
+    match data {
+        core_lib::TimeSeriesData::Deterministic(det) => {
+            let initial_ns = match datetime_to_unix_ns(det.initial_timestamp) {
+                Some(n) => n,
+                None => {
+                    set_error("initial_timestamp out of i64 nanosecond range");
+                    return TS_ERR_INTEGRITY;
+                }
+            };
+            let mut dims: Vec<u64> = det.data.shape.iter().map(|&d| d as u64).collect();
+            let ndims = dims.len() as u64;
+            let dims_ptr = dims.as_mut_ptr();
+            std::mem::forget(dims);
+
+            let dtype = det.data.dtype.code();
+            let mut bytes = det.data.bytes;
+            let byte_len = bytes.len() as u64;
+            let data_ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+
+            unsafe {
+                *out_initial_ts_unix_ns = initial_ns;
+                *out_resolution_ns = dur_to_ns(det.resolution);
+                *out_horizon_ns = dur_to_ns(det.horizon);
+                *out_interval_ns = dur_to_ns(det.interval);
+                *out_count = det.count as u64;
+                *out_scenario_count = 0;
+                *out_ndims = ndims;
+                *out_dims = dims_ptr;
+                *out_dtype = dtype;
+                *out_data = data_ptr;
+                *out_data_byte_len = byte_len;
+                *out_percentiles = std::ptr::null_mut();
+                *out_percentiles_len = 0;
+            }
+            TS_OK
+        }
+        core_lib::TimeSeriesData::Probabilistic(prob) => {
+            let initial_ns = match datetime_to_unix_ns(prob.initial_timestamp) {
+                Some(n) => n,
+                None => {
+                    set_error("initial_timestamp out of i64 nanosecond range");
+                    return TS_ERR_INTEGRITY;
+                }
+            };
+            let mut dims: Vec<u64> = prob.data.shape.iter().map(|&d| d as u64).collect();
+            let ndims = dims.len() as u64;
+            let dims_ptr = dims.as_mut_ptr();
+            std::mem::forget(dims);
+
+            let dtype = prob.data.dtype.code();
+            let mut bytes = prob.data.bytes;
+            let byte_len = bytes.len() as u64;
+            let data_ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+
+            let mut pct = prob.percentiles;
+            let pct_len = pct.len() as u64;
+            let pct_ptr = pct.as_mut_ptr();
+            std::mem::forget(pct);
+
+            unsafe {
+                *out_initial_ts_unix_ns = initial_ns;
+                *out_resolution_ns = dur_to_ns(prob.resolution);
+                *out_horizon_ns = dur_to_ns(prob.horizon);
+                *out_interval_ns = dur_to_ns(prob.interval);
+                *out_count = prob.count as u64;
+                *out_scenario_count = 0;
+                *out_ndims = ndims;
+                *out_dims = dims_ptr;
+                *out_dtype = dtype;
+                *out_data = data_ptr;
+                *out_data_byte_len = byte_len;
+                *out_percentiles = pct_ptr;
+                *out_percentiles_len = pct_len;
+            }
+            TS_OK
+        }
+        core_lib::TimeSeriesData::Scenarios(scen) => {
+            let initial_ns = match datetime_to_unix_ns(scen.initial_timestamp) {
+                Some(n) => n,
+                None => {
+                    set_error("initial_timestamp out of i64 nanosecond range");
+                    return TS_ERR_INTEGRITY;
+                }
+            };
+            let scenario_count = scen.scenario_count;
+
+            let mut dims: Vec<u64> = scen.data.shape.iter().map(|&d| d as u64).collect();
+            let ndims = dims.len() as u64;
+            let dims_ptr = dims.as_mut_ptr();
+            std::mem::forget(dims);
+
+            let dtype = scen.data.dtype.code();
+            let mut bytes = scen.data.bytes;
+            let byte_len = bytes.len() as u64;
+            let data_ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+
+            unsafe {
+                *out_initial_ts_unix_ns = initial_ns;
+                *out_resolution_ns = dur_to_ns(scen.resolution);
+                *out_horizon_ns = dur_to_ns(scen.horizon);
+                *out_interval_ns = dur_to_ns(scen.interval);
+                *out_count = scen.count as u64;
+                *out_scenario_count = scenario_count as u64;
+                *out_ndims = ndims;
+                *out_dims = dims_ptr;
+                *out_dtype = dtype;
+                *out_data = data_ptr;
+                *out_data_byte_len = byte_len;
+                *out_percentiles = std::ptr::null_mut();
+                *out_percentiles_len = 0;
+            }
+            TS_OK
+        }
+        other => {
+            set_error(format!(
+                "key identifies a {} time series; use the matching read function",
+                other.time_series_type().as_str()
+            ));
+            TS_ERR_INVALID_PARAMETER
+        }
+    }
+}
+
+/// Release a `u64` dims buffer returned by `ts_store_get_forecast`.
+///
+/// # Safety
+///
+/// `ptr` must be null or a buffer returned by this library with exactly `len` elements. It must not
+/// have been freed previously and must not be used after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_buffer_free_u64(ptr: *mut u64, len: u64) {
+    if !ptr.is_null() {
+        let len = len as usize;
+        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+    }
+}
+
 /// True iff a time series of `ts_type` with the given attributes exists.
 ///
 /// # Safety

@@ -436,6 +436,78 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        uint8_t *out_data_hash);
 
 /**
+ * Fetch a forecast by attributes and return the full data array plus metadata.
+ *
+ * Reads a `Deterministic`, `Probabilistic`, or `Scenarios` forecast (DST is
+ * synthesized into `Deterministic`). On success, the caller owns two heap
+ * buffers and must free them with the matching deallocators:
+ *
+ * - `*out_data` (byte buffer, `*out_data_byte_len` bytes) —
+ *   free with `ts_buffer_free_u8(*out_data, *out_data_byte_len)`.
+ * - `*out_dims` (array of `u64`, `*out_ndims` elements) —
+ *   free with `ts_buffer_free_u64(*out_dims, *out_ndims)`.
+ * - `*out_percentiles` (`f64` array, `*out_percentiles_len` elements) —
+ *   non-NULL only for `Probabilistic`; free with
+ *   `ts_buffer_free_f64(*out_percentiles, *out_percentiles_len)`.
+ *
+ * **Optional time-range / window selection:** when `time_range_present` is
+ * `true`, only the windows whose start timestamp falls in
+ * `[time_range_start_ns, time_range_end_ns)` are returned. Pass
+ * `time_range_present = false` to retrieve all windows.
+ *
+ * # Safety
+ *
+ * - `handle` must be a live, non-null store handle created by this library.
+ *   No concurrent mutation is permitted for the duration of the call.
+ * - `owner_uuid`, `name` must point to valid, null-terminated UTF-8 strings
+ *   for the duration of the call; `features_json` may be null.
+ * - All `out_*` scalar pointers must be valid for writing one value each.
+ * - `out_dims` must be valid for writing one pointer; the returned pointer
+ *   must be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
+ * - `out_data` must be valid for writing one pointer; the returned pointer
+ *   must be freed exactly once with `ts_buffer_free_u8` using
+ *   `*out_data_byte_len`.
+ * - `out_percentiles` must be valid for writing one pointer; when the result
+ *   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
+ *   to 0, so no free is needed. When non-null it must be freed exactly once
+ *   with `ts_buffer_free_f64` using `*out_percentiles_len`.
+ * - All returned heap buffers are invalidated after their matching free call
+ *   and must not be used afterwards.
+ */
+int32_t ts_store_get_forecast(const struct TsStore *handle,
+                              const char *owner_uuid,
+                              const char *name,
+                              int32_t ts_type,
+                              int64_t resolution_ns,
+                              const char *features_json,
+                              bool time_range_present,
+                              int64_t time_range_start_ns,
+                              int64_t time_range_end_ns,
+                              int64_t *out_initial_ts_unix_ns,
+                              int64_t *out_resolution_ns,
+                              int64_t *out_horizon_ns,
+                              int64_t *out_interval_ns,
+                              uint64_t *out_count,
+                              uint64_t *out_scenario_count,
+                              uint64_t *out_ndims,
+                              uint64_t **out_dims,
+                              int32_t *out_dtype,
+                              uint8_t **out_data,
+                              uint64_t *out_data_byte_len,
+                              double **out_percentiles,
+                              uint64_t *out_percentiles_len);
+
+/**
+ * Release a `u64` dims buffer returned by `ts_store_get_forecast`.
+ *
+ * # Safety
+ *
+ * `ptr` must be null or a buffer returned by this library with exactly `len` elements. It must not
+ * have been freed previously and must not be used after this call.
+ */
+void ts_buffer_free_u64(uint64_t *ptr, uint64_t len);
+
+/**
  * True iff a time series of `ts_type` with the given attributes exists.
  *
  * # Safety
