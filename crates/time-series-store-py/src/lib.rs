@@ -15,12 +15,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, TimeZone, Utc};
-use ndarray::ArrayD;
-use numpy::{PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyDelta, PyDict, PyFloat, PyInt, PyString};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyDelta, PyDict, PyFloat, PyInt, PyString};
 use time_series_store_core as core_lib;
 
 // ---- Exceptions -----------------------------------------------------------
@@ -181,6 +179,58 @@ fn features_to_dict<'py>(
     Ok(dict)
 }
 
+// ---- numpy dtype mapping --------------------------------------------------
+
+fn dtype_from_numpy_name(name: &str) -> PyResult<core_lib::Dtype> {
+    Ok(match name {
+        "float64" => core_lib::Dtype::F64,
+        "float32" => core_lib::Dtype::F32,
+        "int64" => core_lib::Dtype::I64,
+        "int32" => core_lib::Dtype::I32,
+        "uint64" => core_lib::Dtype::U64,
+        "bool" => core_lib::Dtype::Bool,
+        other => {
+            return Err(InvalidParameterError::new_err(format!(
+                "unsupported numpy dtype '{other}' (expected float64/float32/int64/int32/uint64/bool)"
+            )));
+        }
+    })
+}
+
+fn numpy_name(dtype: core_lib::Dtype) -> &'static str {
+    match dtype {
+        core_lib::Dtype::F64 => "float64",
+        core_lib::Dtype::F32 => "float32",
+        core_lib::Dtype::I64 => "int64",
+        core_lib::Dtype::I32 => "int32",
+        core_lib::Dtype::U64 => "uint64",
+        core_lib::Dtype::Bool => "bool",
+    }
+}
+
+/// Build a [`TypedArray`] from any numpy array: dtype from `.dtype.name`, shape
+/// from `.shape`, and C-order (row-major) bytes from `.tobytes()`.
+fn typed_array_from_numpy(data: &Bound<'_, PyAny>) -> PyResult<core_lib::TypedArray> {
+    let shape: Vec<usize> = data.getattr("shape")?.extract()?;
+    let dtype_name: String = data.getattr("dtype")?.getattr("name")?.extract()?;
+    let dtype = dtype_from_numpy_name(&dtype_name)?;
+    let bytes: Vec<u8> = data.call_method0("tobytes")?.extract()?;
+    core_lib::TypedArray::new(dtype, shape, bytes).map_err(InvalidParameterError::new_err)
+}
+
+/// Reconstruct a numpy array (owned, writable) from a [`TypedArray`].
+fn numpy_from_typed<'py>(
+    py: Python<'py>,
+    arr: &core_lib::TypedArray,
+) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let buf = PyBytes::new(py, &arr.bytes);
+    let flat = np.call_method1("frombuffer", (buf, numpy_name(arr.dtype)))?;
+    let shaped = flat.call_method1("reshape", (arr.shape.clone(),))?;
+    // frombuffer is read-only; hand back a writable copy.
+    shaped.call_method0("copy")
+}
+
 // ---- SingleTimeSeries -----------------------------------------------------
 
 #[pyclass(
@@ -199,13 +249,10 @@ impl PySingleTimeSeries {
     fn new(
         initial_timestamp: DateTime<Utc>,
         resolution: Bound<'_, PyDelta>,
-        data: PyReadonlyArrayDyn<'_, f64>,
+        data: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
         let resolution = pydelta_to_chrono(&resolution)?;
-        let arr = data.as_array();
-        let shape: Vec<usize> = arr.shape().to_vec();
-        let values: Vec<f64> = arr.iter().copied().collect();
-        let typed = core_lib::TypedArray::from_f64(shape, &values);
+        let typed = typed_array_from_numpy(data)?;
         Ok(Self {
             inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed),
         })
@@ -227,16 +274,8 @@ impl PySingleTimeSeries {
     }
 
     #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let shape = self.inner.data.shape.clone();
-        let values = self
-            .inner
-            .data
-            .to_f64_vec()
-            .map_err(InvalidParameterError::new_err)?;
-        let arr = ArrayD::from_shape_vec(shape, values)
-            .map_err(|e| InvalidParameterError::new_err(e.to_string()))?;
-        Ok(numpy::PyArray::from_array(py, &arr))
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
     }
 
     fn __repr__(&self) -> String {
@@ -265,11 +304,8 @@ pub struct PyNonSequentialTimeSeries {
 #[pymethods]
 impl PyNonSequentialTimeSeries {
     #[new]
-    fn new(timestamps: Vec<DateTime<Utc>>, data: PyReadonlyArrayDyn<'_, f64>) -> PyResult<Self> {
-        let arr = data.as_array();
-        let shape: Vec<usize> = arr.shape().to_vec();
-        let values: Vec<f64> = arr.iter().copied().collect();
-        let typed = core_lib::TypedArray::from_f64(shape, &values);
+    fn new(timestamps: Vec<DateTime<Utc>>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::NonSequentialTimeSeries::new(timestamps, typed)
             .map_err(InvalidParameterError::new_err)?;
         Ok(Self { inner })
@@ -286,16 +322,8 @@ impl PyNonSequentialTimeSeries {
     }
 
     #[getter]
-    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let shape = self.inner.data.shape.clone();
-        let values = self
-            .inner
-            .data
-            .to_f64_vec()
-            .map_err(InvalidParameterError::new_err)?;
-        let arr = ArrayD::from_shape_vec(shape, values)
-            .map_err(|e| InvalidParameterError::new_err(e.to_string()))?;
-        Ok(numpy::PyArray::from_array(py, &arr))
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        numpy_from_typed(py, &self.inner.data)
     }
 
     fn __repr__(&self) -> String {

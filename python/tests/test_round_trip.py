@@ -233,3 +233,17 @@ def test_non_sequential_rejects_invalid_timestamps():
             [initial, initial],
             np.array([1.0, 2.0]),
         )
+
+
+def test_dtype_round_trip():
+    """Non-float64 numpy dtypes round-trip with their dtype preserved."""
+    store = TimeSeriesStore.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    res = timedelta(hours=1)
+
+    for dtype in (np.int64, np.int32, np.float32, np.uint64):
+        s = SingleTimeSeries(initial, res, np.array([1, 2, 3], dtype=dtype))
+        key = store.add_time_series("o", "Generator", OwnerCategory.Component, f"ts_{dtype.__name__}", s)
+        arr = np.asarray(store.get_time_series(key).data)
+        assert arr.dtype == dtype
+        assert arr.tolist() == [1, 2, 3]
