@@ -20,10 +20,10 @@ export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib 
 using Dates, TimeSeriesStore
 ```
 
-Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `OwnerCategory`
-(`Component`, `SupplementalAttribute`), the `add_time_series!` / `get_time_series` / `get_metadata`
-family, and the forecast functions (`add_forecast!`, `add_probabilistic!`, …). The store type is
-named **`Store`**.
+Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
+(`Deterministic`, `Probabilistic`, `Scenarios`), `OwnerCategory` (`Component`,
+`SupplementalAttribute`), the `add_time_series!` / `get_time_series` / `get_metadata` family, and
+`transform_single_time_series!`. The store type is named **`Store`**.
 
 ## Open or Create a Store
 
@@ -43,15 +43,16 @@ The store is finalized automatically, but you can release it eagerly with `close
 ## Add a Series
 
 ```julia
-ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0))
+# `name` ("load") is a required field on the struct; pass
+# scaling_factor_multiplier=... for the optional scaling expression.
+ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
 
 key = add_time_series!(
     store,
     "42",
     "Generator",
     Component,
-    "load",
-    ts;
+    ts;                                   # name / scaling_factor_multiplier come from ts
     features = Dict("model_year" => 2030),
     units = "MW",
 )
@@ -94,40 +95,72 @@ meta = get_metadata(
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
+# get_time_series itself resolves by attributes too (pass the type as the first argument):
+got = get_time_series(SingleTimeSeries, store, "42", "load"; resolution = Hour(1))
+
 present = has_time_series(store, "42", "load"; resolution = Hour(1))
 remove_time_series!(store, "42", "load"; resolution = Hour(1))
 ```
 
-`has_time_series` and `remove_time_series!` also accept a `TimeSeriesKey` directly.
+`get_time_series`, `has_time_series`, and `remove_time_series!` all accept either a `TimeSeriesKey`
+or `(owner_uuid, name; resolution, features)` attributes — the conventions are interchangeable for
+every time series type, static or forecast.
 
 ## Forecasts
 
-`TimeSeriesStore.jl` wraps the forecast API. Pass forecast values as a native `AbstractArray` in the
-type's logical shape (the wrapper derives the dtype and dims and serializes the buffer row-major)
-and the `TimeSeriesType` integer code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`,
-`5 = Scenarios`); `add_probabilistic!` carries the percentile vector for `Probabilistic`:
+`TimeSeriesStore.jl` exposes `Deterministic`, `Probabilistic`, and `Scenarios` structs that wrap a
+native `AbstractArray` in the type's logical shape (the wrapper derives the dtype and dims and
+serializes the buffer row-major). Construct one and add it through the generic `add_time_series!`:
 
 ```julia
 data = zeros(Float64, 24, 7)   # (horizon_count, count)
-key = add_forecast!(
+fc = Deterministic(DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, data, "load_fc")
+key = add_time_series!(
     store,
     "42",
     "Generator",
     Component,
-    "load_fc",
-    2,
-    DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24),
-    7,
-    data;
+    fc;                         # name / scaling_factor_multiplier come from fc
     units = "MW",
 )
 
-fc = get_deterministic(store, "42", "load_fc"; resolution = Hour(1))
-values = fc.data   # Float64 matrix, shape (24, 7)
+got = get_time_series(Deterministic, store, "42", "load_fc"; resolution = Hour(1))
+values = got.data   # Float64 matrix, shape (24, 7)
+
+# Same forecast, read by the key returned from add_time_series! — forecasts and
+# static series both support the key-based and attribute-based conventions.
+got_by_key = get_time_series(Deterministic, store, key)
+```
+
+`Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data)` carries
+the percentile vector, and
+`Scenarios(initial_timestamp, resolution, horizon, interval, count, data)` takes `scenario_count`
+from `data`'s leading axis. Read the corresponding type back with
+`get_time_series(Probabilistic, …)` / `get_time_series(Scenarios, …)`; requesting `Deterministic`
+also returns a transformed `DeterministicSingleTimeSeries` (synthesized).
+
+A `DeterministicSingleTimeSeries` is not added directly — derive one from every stored
+`SingleTimeSeries` with `transform_single_time_series!(store, horizon::Period, interval::Period)`,
+which returns the number transformed:
+
+```julia
+n = transform_single_time_series!(store, Hour(24), Hour(24))
+```
+
+`transform_single_time_series!` returns no keys, so to read a derived forecast by key, enumerate the
+owner's keys with `get_time_series_keys(store, owner_uuid)` and use `key_info`, whose
+`time_series_type` is the actual Julia type — pass it straight to `get_time_series` (a
+`DeterministicSingleTimeSeries` reads back as a `Deterministic`):
+
+```julia
+for k in get_time_series_keys(store, "42")
+    info = key_info(k)
+    series = get_time_series(info.time_series_type, store, k)
+end
 ```
 
 `has_typed` and `remove_typed!` operate on forecast types by `ts_type`. The low-level
-`get_forecast_metadata` + `get_array_by_hash` path is still available for raw access. See the
+`get_metadata` + `get_array_by_hash` path is still available for raw access. See the
 [Julia API reference](../reference/julia-api.md#forecasts).
 
 ## Store-Wide Operations
@@ -153,7 +186,7 @@ reference them module-qualified. Catch broadly or narrowly:
 
 ```julia
 try
-    add_time_series!(store, "42", "Generator", Component, "load", ts)
+    add_time_series!(store, "42", "Generator", Component, ts)
 catch e
     if e isa TimeSeriesStore.DuplicateTimeSeriesError
         @warn "already present"

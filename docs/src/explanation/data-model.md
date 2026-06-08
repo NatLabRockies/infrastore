@@ -23,8 +23,11 @@ association's uniqueness constraint; `owner_type` and `owner_category` are descr
 
 The data model defines six time-series types, all present in the `TimeSeriesType` enum and the
 metadata schema. Both static series types are implemented across every interface. The four forecast
-types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC, and writing
-(`add_forecast`) across the Rust core, C ABI, Python, and Julia (gRPC stays read-only):
+types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
+forecasts are written through the generic `add_time_series` across the Rust core, Python, and Julia
+(the C ABI keeps the per-type `ts_store_add_forecast` / `ts_store_add_probabilistic` transport
+functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
+`transform_single_time_series` (gRPC stays read-only):
 
 | Type                            | Where implemented | Description                                         |
 | ------------------------------- | ----------------- | --------------------------------------------------- |
@@ -35,10 +38,12 @@ types support reading values across the Rust core, the C ABI, Python, Julia, and
 | `Probabilistic`                 | All interfaces    | Forecast with percentile bands                      |
 | `Scenarios`                     | All interfaces    | Forecast with discrete scenarios                    |
 
-Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC; writing
-forecasts (`add_forecast`) is available in the Rust core, the C ABI, Python, and Julia. The
-read-only gRPC server serves forecast reads but does not accept writes. See [Forecasts](#forecasts)
-below.
+Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
+dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
+`Scenarios` object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
+`ts_store_add_forecast` / `ts_store_add_probabilistic` transport; a `DeterministicSingleTimeSeries`
+is produced by `transform_single_time_series`. The read-only gRPC server serves forecast reads but
+does not accept writes. See [Forecasts](#forecasts) below.
 
 ### `NonSequentialTimeSeries`
 
@@ -90,13 +95,17 @@ successive window start times), `count` (the number of windows), and — for `Pr
 | `Scenarios`                     | `(scenario_count, horizon_count, count)`   | —              |
 
 The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
-native-shape `TypedArray`; the C ABI takes a row-major byte buffer with explicit dims, and the Julia
-wrapper accepts a native array and serializes it row-major), and a `DeterministicSingleTimeSeries`
-deduplicates against the static series it forecasts. Forecast values read back through the
-high-level path — `get_time_series` returns a forecast object in the Rust core, Python, and over
-gRPC, and Julia exposes `get_deterministic` / `get_probabilistic` / `get_scenarios` — while the
-low-level metadata + array path remains available for raw access. See the
-[Rust API](../reference/rust-api.md#forecasts) and [C ABI](../reference/c-abi.md#forecasts).
+native-shape `TypedArray` inside a `Deterministic` / `Probabilistic` / `Scenarios` object; the C ABI
+takes a row-major byte buffer with explicit dims, and the Julia wrapper accepts a native array and
+serializes it row-major), and a `DeterministicSingleTimeSeries` deduplicates against the static
+series it forecasts. A `DeterministicSingleTimeSeries` is not added directly — it is derived from
+every stored `SingleTimeSeries` by `transform_single_time_series` (Rust core, C ABI, Python, Julia),
+sharing the underlying array. Forecast values read back through the high-level path —
+`get_time_series` returns a forecast object in the Rust core, Python, and over gRPC, and Julia
+exposes `get_time_series(Deterministic, …)` / `get_time_series(Probabilistic, …)` /
+`get_time_series(Scenarios, …)` — while the low-level metadata + array path remains available for
+raw access. See the [Rust API](../reference/rust-api.md#forecasts) and
+[C ABI](../reference/c-abi.md#forecasts).
 
 ## Features
 

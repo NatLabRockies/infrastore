@@ -1091,6 +1091,40 @@ fn ts_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
     })
 }
 
+/// Inverse of [`ts_type_from_int`]: the integer discriminant for a
+/// `TimeSeriesType` (must stay in sync with that mapping).
+fn ts_type_to_int(t: core_lib::TimeSeriesType) -> i32 {
+    use core_lib::TimeSeriesType as T;
+    match t {
+        T::SingleTimeSeries => 0,
+        T::NonSequentialTimeSeries => 1,
+        T::Deterministic => 2,
+        T::DeterministicSingleTimeSeries => 3,
+        T::Probabilistic => 4,
+        T::Scenarios => 5,
+    }
+}
+
+/// Write `s` (NUL-terminated, truncated to `cap - 1` bytes) into `buf`, always
+/// reporting the full byte length through `out_len`. Safe to call with a null /
+/// zero-capacity buffer to probe the required length first.
+///
+/// # Safety
+///
+/// `out_len` must be valid for writing one `u64`. When `buf` is non-null it must
+/// be valid for writing `cap` bytes.
+unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) {
+    let bytes = s.as_bytes();
+    unsafe {
+        *out_len = bytes.len() as u64;
+        if !buf.is_null() && cap > 0 {
+            let n = bytes.len().min((cap - 1) as usize);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
+            *buf.add(n) = 0;
+        }
+    }
+}
+
 unsafe fn build_typed_key_from_attrs(
     owner_uuid: *const c_char,
     name: *const c_char,
@@ -1110,9 +1144,11 @@ unsafe fn build_typed_key_from_attrs(
     Ok(key)
 }
 
-/// Add a forecast. `data_ptr`/`data_len` is the flattened storage array
-/// (Deterministic: `(horizon_count, count)` column-major; DST: the underlying
-/// SingleTimeSeries array). `ts_type`: 2=Deterministic, 3=DeterministicSingleTimeSeries.
+/// Add a dense forecast. `data_ptr`/`data_byte_len` is the flattened storage
+/// array (Deterministic: `[H, count, *E]`; Scenarios: `[scenario_count, H,
+/// count, *E]`). `ts_type` must be 2=Deterministic or 5=Scenarios;
+/// `DeterministicSingleTimeSeries` is not directly addable and is derived from a
+/// stored `SingleTimeSeries` via `ts_store_transform_single_time_series`.
 ///
 /// # Safety
 ///
@@ -1209,26 +1245,68 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         Err(c) => return c,
     };
 
-    match store.inner.add_forecast(
-        owner_uuid,
-        owner_type,
+    let resolution = Duration::milliseconds(resolution_ms);
+    let horizon = Duration::milliseconds(horizon_ms);
+    let interval = Duration::milliseconds(interval_ms);
+    let data = match time_series_type {
+        core_lib::TimeSeriesType::Deterministic => match core_lib::Deterministic::new(
+            initial_timestamp,
+            resolution,
+            horizon,
+            interval,
+            count as usize,
+            array,
+        ) {
+            Ok(d) => core_lib::TimeSeriesData::Deterministic(d),
+            Err(e) => {
+                set_error(e);
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        },
+        core_lib::TimeSeriesType::Scenarios => {
+            let scenario_count = array.shape.first().copied().unwrap_or(0);
+            match core_lib::Scenarios::new(
+                initial_timestamp,
+                resolution,
+                horizon,
+                interval,
+                count as usize,
+                scenario_count,
+                array,
+            ) {
+                Ok(s) => core_lib::TimeSeriesData::Scenarios(s),
+                Err(e) => {
+                    set_error(e);
+                    return TS_ERR_INVALID_PARAMETER;
+                }
+            }
+        }
+        other => {
+            set_error(format!(
+                "ts_store_add_forecast supports Deterministic and Scenarios; {other:?} \
+                 is not directly addable (DeterministicSingleTimeSeries is derived via \
+                 ts_store_transform_single_time_series)"
+            ));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+
+    let req = core_lib::AddRequest {
+        owner_uuid: owner_uuid.to_string(),
+        owner_type: owner_type.to_string(),
         owner_category,
-        name,
-        time_series_type,
-        initial_timestamp,
-        Duration::milliseconds(resolution_ms),
-        Duration::milliseconds(horizon_ms),
-        Duration::milliseconds(interval_ms),
-        count as usize,
-        array,
+        name: name.to_string(),
+        data,
         features,
         units,
-        scaling_expr,
-        None,
+        scaling_factor_multiplier: scaling_expr,
         logical_type,
-    ) {
-        Ok(key) => {
-            let handle = Box::new(TsKeyHandle { inner: key });
+    };
+    match store.inner.add_time_series_bulk(vec![req]) {
+        Ok(mut keys) => {
+            let handle = Box::new(TsKeyHandle {
+                inner: keys.remove(0),
+            });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
         }
@@ -1332,27 +1410,74 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         Err(c) => return c,
     };
 
-    match store.inner.add_forecast(
-        owner_uuid,
-        owner_type,
-        owner_category,
-        name,
-        core_lib::TimeSeriesType::Probabilistic,
+    let prob = match core_lib::Probabilistic::new(
         initial_timestamp,
         Duration::milliseconds(resolution_ms),
         Duration::milliseconds(horizon_ms),
         Duration::milliseconds(interval_ms),
         count as usize,
+        percentiles,
         array,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            set_error(e);
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let req = core_lib::AddRequest {
+        owner_uuid: owner_uuid.to_string(),
+        owner_type: owner_type.to_string(),
+        owner_category,
+        name: name.to_string(),
+        data: core_lib::TimeSeriesData::Probabilistic(prob),
         features,
         units,
-        scaling_expr,
-        Some(percentiles),
+        scaling_factor_multiplier: scaling_expr,
         logical_type,
-    ) {
-        Ok(key) => {
-            let handle = Box::new(TsKeyHandle { inner: key });
+    };
+    match store.inner.add_time_series_bulk(vec![req]) {
+        Ok(mut keys) => {
+            let handle = Box::new(TsKeyHandle {
+                inner: keys.remove(0),
+            });
             unsafe { *out_key = Box::into_raw(handle) };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Derive `DeterministicSingleTimeSeries` forecasts from the stored
+/// `SingleTimeSeries` associations (see `Store::transform_single_time_series`).
+/// Writes the number of series transformed to `*out_count`.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `out_count` must be valid
+/// for writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_transform_single_time_series(
+    handle: *mut TsStoreHandle,
+    horizon_ms: i64,
+    interval_ms: i64,
+    out_count: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_count.is_null() {
+        set_error("a required pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.transform_single_time_series(
+        Duration::milliseconds(horizon_ms),
+        Duration::milliseconds(interval_ms),
+    ) {
+        Ok(n) => {
+            unsafe { *out_count = n as u64 };
             TS_OK
         }
         Err(e) => map_core_error(e),
@@ -1635,7 +1760,52 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
+    unsafe {
+        emit_forecast_data(
+            data,
+            out_initial_ts_unix_ms,
+            out_resolution_ms,
+            out_horizon_ms,
+            out_interval_ms,
+            out_count,
+            out_scenario_count,
+            out_ndims,
+            out_dims,
+            out_dtype,
+            out_data,
+            out_data_byte_len,
+            out_percentiles,
+            out_percentiles_len,
+        )
+    }
+}
 
+/// Shared emitter: write a forecast `TimeSeriesData` value into the C out-params
+/// used by [`ts_store_get_forecast`] and [`ts_store_get_forecast_by_key`].
+///
+/// # Safety
+///
+/// All out pointers must be non-null and valid for writing their indicated
+/// values (the callers null-check them). The returned `out_dims`, `out_data`,
+/// and (for `Probabilistic`) `out_percentiles` buffers are heap-allocated and
+/// must be released by the caller with the matching `ts_buffer_free_*` function.
+#[allow(clippy::too_many_arguments)]
+unsafe fn emit_forecast_data(
+    data: core_lib::TimeSeriesData,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_horizon_ms: *mut i64,
+    out_interval_ms: *mut i64,
+    out_count: *mut u64,
+    out_scenario_count: *mut u64,
+    out_ndims: *mut u64,
+    out_dims: *mut *mut u64,
+    out_dtype: *mut i32,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    out_percentiles: *mut *mut f64,
+    out_percentiles_len: *mut u64,
+) -> i32 {
     // Helper: convert Duration to milliseconds.
     let dur_to_ms = |d: Duration| d.num_milliseconds();
 
@@ -1763,6 +1933,392 @@ pub unsafe extern "C" fn ts_store_get_forecast(
             TS_ERR_INVALID_PARAMETER
         }
     }
+}
+
+/// Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
+/// `DeterministicSingleTimeSeries` synthesized into a `Deterministic`) by key.
+///
+/// This is the key-based counterpart to [`ts_store_get_forecast`]: the time
+/// series type comes from `key` rather than an explicit `ts_type` argument. The
+/// outputs and buffer-ownership rules are identical to [`ts_store_get_forecast`].
+///
+/// # Safety
+///
+/// - `handle` and `key` must be live handles created by this library; no
+///   concurrent mutation is permitted for the duration of the call.
+/// - All `out_*` scalar pointers must be valid for writing one value each.
+/// - `out_dims` must be valid for writing one pointer; the returned pointer must
+///   be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
+/// - `out_data` must be valid for writing one pointer; the returned pointer must
+///   be freed exactly once with `ts_buffer_free_u8` using `*out_data_byte_len`.
+/// - `out_percentiles` must be valid for writing one pointer; when the result is
+///   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
+///   to 0, so no free is needed. When non-null it must be freed exactly once
+///   with `ts_buffer_free_f64` using `*out_percentiles_len`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_get_forecast_by_key(
+    handle: *const TsStoreHandle,
+    key: *const TsKeyHandle,
+    time_range_present: bool,
+    time_range_start_ms: i64,
+    time_range_end_ms: i64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_horizon_ms: *mut i64,
+    out_interval_ms: *mut i64,
+    out_count: *mut u64,
+    out_scenario_count: *mut u64,
+    out_ndims: *mut u64,
+    out_dims: *mut *mut u64,
+    out_dtype: *mut i32,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+    out_percentiles: *mut *mut f64,
+    out_percentiles_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let key = match unsafe { key.as_ref() } {
+        Some(k) => k,
+        None => {
+            set_error("key handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_initial_ts_unix_ms.is_null()
+        || out_resolution_ms.is_null()
+        || out_horizon_ms.is_null()
+        || out_interval_ms.is_null()
+        || out_count.is_null()
+        || out_scenario_count.is_null()
+        || out_ndims.is_null()
+        || out_dims.is_null()
+        || out_dtype.is_null()
+        || out_data.is_null()
+        || out_data_byte_len.is_null()
+        || out_percentiles.is_null()
+        || out_percentiles_len.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let time_range = if time_range_present {
+        let start = match unix_ms_to_datetime(time_range_start_ms) {
+            Some(d) => d,
+            None => {
+                set_error(format!(
+                    "invalid time_range_start_ms: {time_range_start_ms}"
+                ));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        let end = match unix_ms_to_datetime(time_range_end_ms) {
+            Some(d) => d,
+            None => {
+                set_error(format!("invalid time_range_end_ms: {time_range_end_ms}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        Some((start, end))
+    } else {
+        None
+    };
+    let data = match store.inner.get_time_series(&key.inner, time_range) {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe {
+        emit_forecast_data(
+            data,
+            out_initial_ts_unix_ms,
+            out_resolution_ms,
+            out_horizon_ms,
+            out_interval_ms,
+            out_count,
+            out_scenario_count,
+            out_ndims,
+            out_dims,
+            out_dtype,
+            out_data,
+            out_data_byte_len,
+            out_percentiles,
+            out_percentiles_len,
+        )
+    }
+}
+
+/// Construct a `TimeSeriesKey` handle from attributes `(owner_uuid, name,
+/// ts_type, resolution, features)`.
+///
+/// The returned key can be passed to the key-based read functions (e.g.
+/// [`ts_store_get_single`], [`ts_store_get_non_sequential`],
+/// [`ts_store_get_forecast_by_key`]); it lets an attribute-addressed caller
+/// reuse the key-based read path without an `add`/lookup round trip.
+/// `resolution_ms <= 0` means "unspecified".
+///
+/// # Safety
+///
+/// `owner_uuid` and `name` must point to valid, null-terminated UTF-8 strings.
+/// `features_json`, when non-null, must be a null-terminated UTF-8 JSON object.
+/// `out_key` must be valid for writing one pointer. The returned key must be
+/// released exactly once with `ts_key_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_make_key_from_attrs(
+    owner_uuid: *const c_char,
+    name: *const c_char,
+    ts_type: i32,
+    resolution_ms: i64,
+    features_json: *const c_char,
+    out_key: *mut *mut TsKeyHandle,
+) -> i32 {
+    clear_error();
+    if out_key.is_null() {
+        set_error("out_key pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let key = match unsafe {
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    let handle = Box::new(TsKeyHandle { inner: key });
+    unsafe { *out_key = Box::into_raw(handle) };
+    TS_OK
+}
+
+/// List every time series key associated with `owner_uuid`. On success
+/// `*out_keys` points to an array of `*out_len` owned key handles (one per
+/// association, including derived `DeterministicSingleTimeSeries` rows), each
+/// usable with the key-based read functions.
+///
+/// Ownership is two-tiered: free every individual `TsKey` with `ts_key_free`,
+/// then free the array buffer itself with `ts_keys_buffer_free`. When the owner
+/// has no series, `*out_keys` is set to null and `*out_len` to 0 (no free
+/// needed).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `owner_uuid` a null-terminated UTF-8
+/// string. `out_keys` must be valid for writing one pointer and `out_len` for
+/// writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_get_time_series_keys(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    out_keys: *mut *mut *mut TsKeyHandle,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_keys.is_null() || out_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("owner_uuid is invalid");
+            return c;
+        }
+    };
+    let keys = match store.inner.get_time_series_keys(owner_uuid) {
+        Ok(k) => k,
+        Err(e) => return map_core_error(e),
+    };
+    let mut handles: Vec<*mut TsKeyHandle> = keys
+        .into_iter()
+        .map(|k| Box::into_raw(Box::new(TsKeyHandle { inner: k })))
+        .collect();
+    // Keep capacity == length so `ts_keys_buffer_free` can reconstruct the Vec.
+    handles.shrink_to_fit();
+    let len = handles.len() as u64;
+    let ptr = if handles.is_empty() {
+        ptr::null_mut()
+    } else {
+        let p = handles.as_mut_ptr();
+        std::mem::forget(handles);
+        p
+    };
+    unsafe {
+        *out_keys = ptr;
+        *out_len = len;
+    }
+    TS_OK
+}
+
+/// Free the key-handle array returned by `ts_store_get_time_series_keys`.
+///
+/// This releases only the array buffer, not the keys it held: transfer each
+/// `TsKey` out first (the Julia binding wraps each in a finalized object) and
+/// release them individually with `ts_key_free`.
+///
+/// # Safety
+///
+/// `ptr` must be null or an array returned by `ts_store_get_time_series_keys`
+/// with exactly `len` elements, not previously freed. It must not be used after
+/// this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_keys_buffer_free(ptr: *mut *mut TsKeyHandle, len: u64) {
+    if !ptr.is_null() {
+        let len = len as usize;
+        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+    }
+}
+
+/// Serialize a key's `Features` map to a JSON object string of plain scalar
+/// values (the same shape `parse_features_json` accepts), so it round-trips back
+/// through the attribute-addressed entry points. An empty map serializes to
+/// `"{}"`.
+fn features_to_json(features: &core_lib::Features) -> String {
+    let mut map = serde_json::Map::with_capacity(features.len());
+    for (k, v) in features {
+        let jv = match v {
+            core_lib::FeatureValue::Int(i) => Value::from(*i),
+            core_lib::FeatureValue::Float(f) => Value::from(*f),
+            core_lib::FeatureValue::Bool(b) => Value::from(*b),
+            core_lib::FeatureValue::Str(s) => Value::from(s.clone()),
+        };
+        map.insert(k.clone(), jv);
+    }
+    Value::Object(map).to_string()
+}
+
+/// Read the attributes of a key handle: its time series type code (see
+/// `ts_type_from_int`), resolution in milliseconds (`0` when unset), the owner
+/// UUID and name strings, and the features as a JSON object string (`"{}"` when
+/// empty — the same shape the attribute-addressed entry points accept).
+///
+/// Strings follow the probe-then-fetch convention: call with `owner_buf` /
+/// `name_buf` / `features_buf` null (and capacities `0`) to learn the required
+/// lengths via the matching `out_*_len`, then call again with buffers of at
+/// least `len + 1` bytes. Each returned string is NUL-terminated and truncated
+/// to its capacity; the reported length is always the untruncated byte length.
+///
+/// # Safety
+///
+/// `key` must be a live key handle created by this library. `out_type`,
+/// `out_resolution_ms`, `out_owner_len`, `out_name_len`, and `out_features_len`
+/// must each be valid for writing one value. `owner_buf` / `name_buf` /
+/// `features_buf` may be null; when non-null they must be valid for writing
+/// `owner_cap` / `name_cap` / `features_cap` bytes respectively.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_key_attributes(
+    key: *const TsKeyHandle,
+    out_type: *mut i32,
+    out_resolution_ms: *mut i64,
+    owner_buf: *mut c_char,
+    owner_cap: u64,
+    out_owner_len: *mut u64,
+    name_buf: *mut c_char,
+    name_cap: u64,
+    out_name_len: *mut u64,
+    features_buf: *mut c_char,
+    features_cap: u64,
+    out_features_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let key = match unsafe { key.as_ref() } {
+        Some(k) => k,
+        None => {
+            set_error("key handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_type.is_null()
+        || out_resolution_ms.is_null()
+        || out_owner_len.is_null()
+        || out_name_len.is_null()
+        || out_features_len.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let k = &key.inner;
+    unsafe {
+        *out_type = ts_type_to_int(k.time_series_type);
+        *out_resolution_ms = k.resolution.map(|r| r.num_milliseconds()).unwrap_or(0);
+        write_str_out(&k.owner_uuid, owner_buf, owner_cap, out_owner_len);
+        write_str_out(&k.name, name_buf, name_cap, out_name_len);
+        write_str_out(
+            &features_to_json(&k.features),
+            features_buf,
+            features_cap,
+            out_features_len,
+        );
+    }
+    TS_OK
+}
+
+/// Read an association's `name` and `scaling_factor_multiplier` by key, resolved
+/// through the stored metadata (`Store::get_metadata`). This surfaces the
+/// per-association attributes that are not carried on the key itself — the read
+/// path uses it to populate the returned time series object.
+///
+/// Both strings use the probe-then-fetch convention (see [`ts_key_attributes`]).
+/// An absent `scaling_factor_multiplier` reports length 0.
+///
+/// # Safety
+///
+/// `handle` and `key` must be live handles created by this library.
+/// `out_name_len` and `out_scaling_len` must each be valid for writing one
+/// `u64`. `name_buf` / `scaling_buf` may be null; when non-null they must be
+/// valid for writing `name_cap` / `scaling_cap` bytes respectively.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_get_association(
+    handle: *const TsStoreHandle,
+    key: *const TsKeyHandle,
+    name_buf: *mut c_char,
+    name_cap: u64,
+    out_name_len: *mut u64,
+    scaling_buf: *mut c_char,
+    scaling_cap: u64,
+    out_scaling_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let key = match unsafe { key.as_ref() } {
+        Some(k) => k,
+        None => {
+            set_error("key handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_name_len.is_null() || out_scaling_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let meta = match store.inner.get_metadata(&key.inner) {
+        Ok(m) => m,
+        Err(e) => return map_core_error(e),
+    };
+    let scaling = meta.scaling_factor_multiplier.unwrap_or_default();
+    unsafe {
+        write_str_out(&meta.name, name_buf, name_cap, out_name_len);
+        write_str_out(&scaling, scaling_buf, scaling_cap, out_scaling_len);
+    }
+    TS_OK
 }
 
 /// Release a `u64` dims buffer returned by `ts_store_get_forecast`.

@@ -133,10 +133,42 @@ int32_t ts_store_remove_by_attrs(struct TsStore *handle,
 int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *data_hash,
                                    int32_t *out_dtype,
                                    uint8_t **out_data, uint64_t *out_byte_len); /* ts_buffer_free_u8 */
+
+/* Build a key handle from attributes for any ts_type, so an attribute-addressed
+   caller can reuse the key-based readers (ts_store_get_single,
+   ts_store_get_non_sequential, ts_store_get_forecast_by_key). resolution_ms <= 0
+   means unset. The returned key is owned; free it with ts_key_free. */
+int32_t ts_make_key_from_attrs(const char *owner_uuid, const char *name, int32_t ts_type,
+                               int64_t resolution_ms, const char *features_json,
+                               struct TsKey **out_key);
+
+/* List every key for owner_uuid (one per association, including derived
+   DeterministicSingleTimeSeries rows). Ownership is two-tiered: free each TsKey
+   with ts_key_free, then free the array with ts_keys_buffer_free. An owner with
+   no series yields *out_keys = NULL and *out_len = 0. */
+int32_t ts_store_get_time_series_keys(const struct TsStore *handle, const char *owner_uuid,
+                                      struct TsKey ***out_keys, uint64_t *out_len);
+void    ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
+
+/* Inspect an opaque key: type code, resolution (0 = unset), owner UUID, name,
+   and features (a JSON object string, "{}" when empty — the shape the
+   attribute-addressed entry points accept). Strings use probe-then-fetch — pass
+   NULL buffers / 0 caps to read the required lengths, then call again with
+   len+1-byte buffers. */
+int32_t ts_key_attributes(const struct TsKey *key,
+                          int32_t *out_type, int64_t *out_resolution_ms,
+                          char *owner_buf, uint64_t owner_cap, uint64_t *out_owner_len,
+                          char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
+                          char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
 ```
 
 `ts_store_get_metadata` + `ts_store_get_array_by_hash` is the read path used by bindings that
 maintain their own key objects (such as an InfrastructureSystems.jl-side store).
+`ts_make_key_from_attrs` bridges the two addressing styles: it materializes a `TsKey` from
+attributes that the key-based read functions accept directly. `ts_store_get_time_series_keys`
+enumerates an owner's keys (the only way to obtain a key for a transform-derived
+`DeterministicSingleTimeSeries`), and `ts_key_attributes` reads back an opaque key's type, name,
+features, and addressing so the caller can pick the matching key-based reader.
 
 ## Forecasts
 
@@ -146,11 +178,18 @@ discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Det
 dtype-generic raw little-endian byte buffers with explicit dimensions — the same `dtype`, `ndims`,
 `dims_ptr`, `data_ptr`, `data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
-the windowing parameters in metadata and does not interpret the layout.
+the windowing parameters in metadata and does not interpret the layout. A
+`DeterministicSingleTimeSeries` (`3`) is read like any other forecast but cannot be written through
+`ts_store_add_forecast` — it is derived via `ts_store_transform_single_time_series`.
 
-`ts_store_add_forecast` handles the non-probabilistic types (`Deterministic`,
-`DeterministicSingleTimeSeries`, `Scenarios`); `ts_store_add_probabilistic` adds the percentile
-vector for `Probabilistic`:
+The C ABI keeps these per-type add functions as low-level transport (the higher-level bindings layer
+the generic `add_time_series` over them). `ts_store_add_forecast` accepts only `ts_type`
+`2 =
+Deterministic` or `5 = Scenarios`; `ts_store_add_probabilistic` adds the percentile vector for
+`Probabilistic`. `DeterministicSingleTimeSeries` (`3`) is **not** addable through
+`ts_store_add_forecast` — it errors and directs you to `ts_store_transform_single_time_series`,
+which derives a `DeterministicSingleTimeSeries` from every stored `SingleTimeSeries` (sharing the
+backing array) and writes the number transformed to `*out_count`:
 
 ```c
 int32_t ts_store_add_forecast(struct TsStore *handle,
@@ -175,6 +214,10 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    const char *logical_type,     /* optional */
                                    const char *features_json, const char *units,
                                    const char *scaling_expr, struct TsKey **out_key);
+
+int32_t ts_store_transform_single_time_series(struct TsStore *handle,
+                                              int64_t horizon_ms, int64_t interval_ms,
+                                              uint64_t *out_count);
 ```
 
 `ts_store_get_forecast` is the forecast read function: it resolves a `Deterministic`,
@@ -199,6 +242,25 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
                               int32_t *out_dtype,
                               uint8_t **out_data, uint64_t *out_data_byte_len, /* ts_buffer_free_u8 */
                               double **out_percentiles, uint64_t *out_percentiles_len); /* ts_buffer_free_f64 */
+```
+
+`ts_store_get_forecast_by_key` is the key-based counterpart: it takes a `TsKey` handle (the type
+comes from the key) instead of the `owner_uuid, name, ts_type, resolution_ms, features_json`
+arguments, and produces identical outputs with the same buffer-ownership rules. Because the key
+names the exact stored type there is no DST→`Deterministic` fallback (a
+`DeterministicSingleTimeSeries` key still decodes as a `Deterministic`).
+
+```c
+int32_t ts_store_get_forecast_by_key(const struct TsStore *handle, const struct TsKey *key,
+                                     bool time_range_present,
+                                     int64_t time_range_start_ms, int64_t time_range_end_ms,
+                                     int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
+                                     int64_t *out_horizon_ms, int64_t *out_interval_ms,
+                                     uint64_t *out_count, uint64_t *out_scenario_count,
+                                     uint64_t *out_ndims, uint64_t **out_dims, /* ts_buffer_free_u64 */
+                                     int32_t *out_dtype,
+                                     uint8_t **out_data, uint64_t *out_data_byte_len, /* ts_buffer_free_u8 */
+                                     double **out_percentiles, uint64_t *out_percentiles_len); /* ts_buffer_free_f64 */
 ```
 
 The metadata-only accessors read the windowing parameters and content hash without decoding the

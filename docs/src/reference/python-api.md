@@ -17,8 +17,7 @@ from time_series_store import (
 
 > **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, `int64`,
 > `int32`, `uint64`, or `bool`; whatever dtype is given round-trips unchanged. Multi-dimensional
-> arrays (a per-step element shape) are supported via the NumPy array's shape. The `logical_type`
-> label is exposed on [`add_forecast`](#forecasts) but not on `add_time_series` for static series.
+> arrays (a per-step element shape) are supported via the NumPy array's shape.
 
 ## `TimeSeriesStore`
 
@@ -50,32 +49,15 @@ def add_time_series(
     owner_uuid: str,
     owner_type: str,
     owner_category: OwnerCategory,
-    name: str,
-    time_series: SingleTimeSeries | NonSequentialTimeSeries,
+    time_series: SingleTimeSeries | NonSequentialTimeSeries
+        | Deterministic | Probabilistic | Scenarios,
     features: dict[str, int | float | bool | str] | None = None,
     units: str | None = None,
-    scaling_factor_multiplier: str | None = None,
 ) -> TimeSeriesKey: ...
+# `name` and `scaling_factor_multiplier` come from the time_series object
+# (e.g. SingleTimeSeries(..., name=...)), not from this call.
 
-def add_forecast(
-    self,
-    owner_uuid: str,
-    owner_type: str,
-    owner_category: OwnerCategory,
-    name: str,
-    time_series_type: TimeSeriesType,
-    initial_timestamp: datetime,
-    resolution: timedelta,
-    horizon: timedelta,
-    interval: timedelta,
-    count: int,
-    data: numpy.ndarray,
-    features: dict[str, int | float | bool | str] | None = None,
-    units: str | None = None,
-    scaling_factor_multiplier: str | None = None,
-    percentiles: list[float] | None = None,
-    logical_type: str | None = None,
-) -> TimeSeriesKey: ...
+def transform_single_time_series(self, horizon: timedelta, interval: timedelta) -> int: ...
 
 def get_time_series(
     self,
@@ -107,10 +89,11 @@ def flush(self) -> None: ...
 
 #### Return shapes
 
-- **`add_time_series`** accepts a `SingleTimeSeries` or a `NonSequentialTimeSeries`;
-  **`add_forecast`** writes a forecast (`Deterministic` / `DeterministicSingleTimeSeries` /
-  `Probabilistic` / `Scenarios`) — see [Forecasts](#forecasts). **`get_time_series`** returns
-  whichever matches the stored type.
+- **`add_time_series`** accepts a `SingleTimeSeries`, a `NonSequentialTimeSeries`, or a dense
+  forecast object (`Deterministic` / `Probabilistic` / `Scenarios`) — see [Forecasts](#forecasts).
+  **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
+  `SingleTimeSeries` and returns the count transformed. **`get_time_series`** returns whichever
+  matches the stored type.
 - **`list_time_series`** returns a list of dicts, each with the keys: `owner_uuid`, `owner_type`,
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`,
   `resolution_seconds`, `timestamps`, `features`, `units`, `scaling_factor_multiplier`. `timestamps`
@@ -129,12 +112,17 @@ SingleTimeSeries(
     initial_timestamp: datetime,
     resolution: timedelta,
     data: numpy.ndarray,   # shape (length,) or (length, k1, ...)
+    name: str,
+    scaling_factor_multiplier: str | None = None,
 )
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> timedelta`, `length -> int`,
-`data -> numpy.ndarray`. The array's dtype (one of `float64`, `float32`, `int64`, `int32`, `uint64`,
-`bool`) and per-step element shape are preserved through a round-trip.
+`data -> numpy.ndarray`, `name -> str`, `scaling_factor_multiplier -> str | None`. `name` is a
+required association attribute (the same array may be stored under different names);
+`scaling_factor_multiplier` is optional. Both are read off the object by `add_time_series` and
+populated on `get_time_series`. The array's dtype (one of `float64`, `float32`, `int64`, `int32`,
+`uint64`, `bool`) and per-step element shape are preserved through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
@@ -142,12 +130,14 @@ Read-only properties: `initial_timestamp -> datetime`, `resolution -> timedelta`
 NonSequentialTimeSeries(
     timestamps: list[datetime],
     data: numpy.ndarray,
+    name: str,
+    scaling_factor_multiplier: str | None = None,
 )
 ```
 
-Read-only properties: `timestamps`, `length`, and `data`. Timestamps must be timezone-aware,
-strictly increasing, and match the first data dimension. `get_time_series` returns this class for a
-non-sequential key.
+Read-only properties: `timestamps`, `length`, `data`, `name`, and `scaling_factor_multiplier`.
+Timestamps must be timezone-aware, strictly increasing, and match the first data dimension.
+`get_time_series` returns this class for a non-sequential key.
 
 ## `TimeSeriesKey`
 
@@ -178,25 +168,44 @@ OwnerCategory.SupplementalAttribute
 
 ## Forecasts
 
-Forecasts are written with [`add_forecast`](#methods) and read back through `get_time_series`, which
-returns a `Deterministic`, `Probabilistic`, or `Scenarios` object depending on the stored type (a
-`DeterministicSingleTimeSeries` is synthesized into a `Deterministic` on read).
+Dense forecasts are constructed as `Deterministic`, `Probabilistic`, or `Scenarios` objects and then
+passed to [`add_time_series`](#methods). They are read back through `get_time_series`, which returns
+the matching object depending on the stored type (a `DeterministicSingleTimeSeries` is synthesized
+into a `Deterministic` on read). A `DeterministicSingleTimeSeries` is not added directly — derive
+one from stored `SingleTimeSeries` with [`transform_single_time_series`](#methods).
 [`get_time_series_counts`](#timeseriesstore) reports the forecast total under `forecasts`.
 
-`data` is a NumPy array in the canonical shape for the `time_series_type`, where `H` is
-`horizon / resolution`:
+```python
+ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
+key = store.add_time_series("42", "Generator", OwnerCategory.Component, ts, units="MW")
+```
 
-| `time_series_type`              | `data` shape                       | `percentiles` |
-| ------------------------------- | ---------------------------------- | ------------- |
-| `Deterministic`                 | `[H, count, *element_shape]`       | omit          |
-| `Probabilistic`                 | `[len(percentiles), H, count, *E]` | required      |
-| `Scenarios`                     | `[scenario_count, H, count, *E]`   | omit          |
-| `DeterministicSingleTimeSeries` | `[total_len, *E]` (underlying STS) | omit          |
+`data` is a NumPy array in the canonical shape for the forecast type, where `H` is
+`horizon / resolution`. Every forecast also takes a required `name` and optional
+`scaling_factor_multiplier` (after `data`), exposed as read-only properties:
+
+| Type            | `data` shape                       | extra constructor arg                 |
+| --------------- | ---------------------------------- | ------------------------------------- |
+| `Deterministic` | `[H, count, *element_shape]`       | —                                     |
+| `Probabilistic` | `[len(percentiles), H, count, *E]` | `percentiles`                         |
+| `Scenarios`     | `[scenario_count, H, count, *E]`   | `scenario_count` is taken from `data` |
 
 ### `Deterministic`
 
-Returned by `get_time_series` for a deterministic forecast; not constructed directly. Read-only
-properties:
+```python
+Deterministic(
+    initial_timestamp: datetime,
+    resolution: timedelta,
+    horizon: timedelta,
+    interval: timedelta,
+    count: int,
+    data: numpy.ndarray,
+    name: str,
+    scaling_factor_multiplier: str | None = None,
+)
+```
+
+Read-only properties:
 
 ```python
 forecast.initial_timestamp -> datetime
@@ -205,9 +214,25 @@ forecast.horizon           -> timedelta
 forecast.interval          -> timedelta
 forecast.count             -> int
 forecast.data              -> numpy.ndarray
+forecast.name              -> str
+forecast.scaling_factor_multiplier -> str | None
 ```
 
 ### `Probabilistic`
+
+```python
+Probabilistic(
+    initial_timestamp: datetime,
+    resolution: timedelta,
+    horizon: timedelta,
+    interval: timedelta,
+    count: int,
+    percentiles: list[float],
+    data: numpy.ndarray,
+    name: str,
+    scaling_factor_multiplier: str | None = None,
+)
+```
 
 Same properties as `Deterministic`, plus:
 
@@ -216,6 +241,19 @@ forecast.percentiles -> list[float]
 ```
 
 ### `Scenarios`
+
+```python
+Scenarios(
+    initial_timestamp: datetime,
+    resolution: timedelta,
+    horizon: timedelta,
+    interval: timedelta,
+    count: int,
+    data: numpy.ndarray,   # leading axis is scenario_count
+    name: str,
+    scaling_factor_multiplier: str | None = None,
+)
+```
 
 Same properties as `Deterministic`, plus:
 

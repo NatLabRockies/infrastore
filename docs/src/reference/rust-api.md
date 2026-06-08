@@ -52,6 +52,12 @@ impl Store {
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> Result<TimeSeriesData>;
 
+    pub fn transform_single_time_series(
+        &mut self,
+        horizon: Duration,
+        interval: Duration,
+    ) -> Result<usize>;
+
     pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()>;
     pub fn clear_time_series(&mut self, owner_uuid: Option<&str>) -> Result<usize>;
 
@@ -74,10 +80,16 @@ impl Store {
 
 ### Method notes
 
-- **`add_time_series`** — Accepts a `SingleTimeSeries` or `NonSequentialTimeSeries` (wrapped in
-  `TimeSeriesData`). Hashes the array, stores it (deduplicating on the hash), inserts a metadata
-  association, and returns its key. Errors with `DuplicateTimeSeries` if the key already exists or
-  `ReadOnlyStore` on a read-only store. It is a convenience wrapper over `add_time_series_bulk`.
+- **`add_time_series`** — Accepts any [`TimeSeriesData`](#timeseriesdata) variant —
+  `SingleTimeSeries`, `NonSequentialTimeSeries`, or a dense forecast (`Deterministic`,
+  `Probabilistic`, `Scenarios`). Hashes the array, stores it (deduplicating on the hash), inserts a
+  metadata association, and returns its key. Errors with `DuplicateTimeSeries` if the key already
+  exists or `ReadOnlyStore` on a read-only store. It is a convenience wrapper over
+  `add_time_series_bulk`.
+- **`transform_single_time_series`** — Derives a `DeterministicSingleTimeSeries` from every stored
+  `SingleTimeSeries`, sharing the underlying array (with `count` derived from the series length),
+  and returns the number of series transformed. This is the only way to create a
+  `DeterministicSingleTimeSeries`; it is never added directly.
 - **`add_time_series_bulk`** — All-or-nothing: every array put and association insert in the call
   commits together or rolls back together.
 - **`get_time_series`** — Reconstructs the stored type as a [`TimeSeriesData`](#timeseriesdata)
@@ -93,36 +105,40 @@ impl Store {
 
 ### Forecasts
 
-The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
-`Scenarios`) are written with `add_forecast`. `data` is a [`TypedArray`](#typedarray-and-dtype) in
-its native shape; the windowing parameters (`horizon`, `interval`, `count`, and for `Probabilistic`
-the `percentiles`) plus an optional `logical_type` are recorded in metadata. Dense forecast arrays
-(`Deterministic` / `Probabilistic` / `Scenarios`) are stored as standalone NetCDF variables; a
-`DeterministicSingleTimeSeries` stores the underlying `SingleTimeSeries` array (column-packed) and
-dedups against that series.
+Dense forecasts (`Deterministic`, `Probabilistic`, `Scenarios`) are written through the generic
+[`add_time_series`](#store) by wrapping the corresponding object in a
+[`TimeSeriesData`](#timeseriesdata) variant. Build the object with its `new` constructor — each
+holds a [`TypedArray`](#typedarray-and-dtype) in its native shape, and the constructor validates the
+shape against the windowing parameters (`horizon`, `interval`, `count`, and for `Probabilistic` the
+`percentiles`):
 
 ```rust
-#[allow(clippy::too_many_arguments)]
-pub fn add_forecast(
-    &mut self,
-    owner_uuid: &str, owner_type: &str, owner_category: OwnerCategory, name: &str,
-    time_series_type: TimeSeriesType,
-    initial_timestamp: DateTime<Utc>, resolution: Duration,
-    horizon: Duration, interval: Duration, count: usize,
-    data: TypedArray, features: Features,
-    units: Option<String>, scaling_factor_multiplier: Option<String>,
-    percentiles: Option<Vec<f64>>, logical_type: Option<String>,
-) -> Result<TimeSeriesKey>;
+use time_series_store_core::{Deterministic, TimeSeriesData};
+
+let forecast = Deterministic::new(
+    initial_timestamp, resolution, horizon, interval, count, data,
+)?;
+let key = store.add_time_series(
+    owner_uuid, owner_type, OwnerCategory::Component, name,
+    TimeSeriesData::Deterministic(forecast),
+    features, units, scaling_factor_multiplier,
+)?;
 ```
+
+Dense forecast arrays (`Deterministic` / `Probabilistic` / `Scenarios`) are stored as standalone
+NetCDF variables. A `DeterministicSingleTimeSeries` is **not** added directly: call
+`transform_single_time_series(horizon, interval)` to derive one from every stored `SingleTimeSeries`
+(it shares the backing column-packed array, derives `count` from the series length, and dedups
+against that series).
 
 Conventional array shapes:
 
-| Type                            | `data` shape                                  | `percentiles` |
-| ------------------------------- | --------------------------------------------- | ------------- |
-| `Deterministic`                 | `(horizon_count, count)`                      | `None`        |
-| `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array (dedups) | `None`        |
-| `Probabilistic`                 | `(percentile_count, horizon_count, count)`    | the vector    |
-| `Scenarios`                     | `(scenario_count, horizon_count, count)`      | `None`        |
+| Type                            | `data` shape                                  | extra metadata |
+| ------------------------------- | --------------------------------------------- | -------------- |
+| `Deterministic`                 | `[H, count, *E]`                              | —              |
+| `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array (dedups) | —              |
+| `Probabilistic`                 | `[percentile_count, H, count, *E]`            | `percentiles`  |
+| `Scenarios`                     | `[scenario_count, H, count, *E]`              | —              |
 
 **Reading forecasts:** `get_time_series` reconstructs all forecast types, returning the matching
 [`TimeSeriesData`](#timeseriesdata) variant — `Deterministic`, `Probabilistic`, or `Scenarios`. A

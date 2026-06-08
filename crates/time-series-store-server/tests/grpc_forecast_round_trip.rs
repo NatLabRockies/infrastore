@@ -1,6 +1,6 @@
 //! gRPC integration tests for forecast read path (Deterministic / Probabilistic / Scenarios).
 //!
-//! Each test builds a store via `add_forecast`, spins up a tonic server, drives
+//! Each test builds a store via `add_time_series`, spins up a tonic server, drives
 //! it through `RemoteClient::get_time_series`, and asserts the full-fidelity
 //! round-trip including a `time_range` window-selection read.
 
@@ -8,7 +8,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Features, OwnerCategory, Store, TimeSeriesType, TypedArray, create_store,
+    Deterministic, Features, OwnerCategory, Probabilistic, Scenarios, Store, TimeSeriesData,
+    TypedArray, create_store,
 };
 use time_series_store_server::client::RemoteClient;
 use time_series_store_server::service::TimeSeriesStoreService;
@@ -39,79 +40,66 @@ fn seq_f64(shape: Vec<usize>, base: f64) -> TypedArray {
     TypedArray::from_f64(shape, &vals)
 }
 
-fn add_det_forecast(store: &mut Store) {
-    // shape [H=4, count=6, elem] — scalar, 6 windows, 4-step horizon, 2h interval
-    let data = seq_f64(vec![4, 6], 1.0);
+fn add_time_series(store: &mut Store, owner: &str, data: TimeSeriesData) {
     store
-        .add_forecast(
-            "det-owner",
+        .add_time_series(
+            owner,
             "Generator",
             OwnerCategory::Component,
             "price",
-            TimeSeriesType::Deterministic,
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-            Duration::hours(1),
-            Duration::hours(4),
-            Duration::hours(2),
-            6,
             data,
             Features::new(),
             None,
             None,
-            None,
-            None,
         )
         .unwrap();
+}
+
+fn add_det_forecast(store: &mut Store) {
+    // shape [H=4, count=6, elem] — scalar, 6 windows, 4-step horizon, 2h interval
+    let data = seq_f64(vec![4, 6], 1.0);
+    let det = Deterministic::new(
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        Duration::hours(1),
+        Duration::hours(4),
+        Duration::hours(2),
+        6,
+        data,
+    )
+    .unwrap();
+    add_time_series(store, "det-owner", TimeSeriesData::Deterministic(det));
 }
 
 fn add_prob_forecast(store: &mut Store) {
     // shape [P=3, H=4, count=5] — 3 percentiles, 4-step horizon, 5 windows
     let data = seq_f64(vec![3, 4, 5], 10.0);
-    store
-        .add_forecast(
-            "prob-owner",
-            "Generator",
-            OwnerCategory::Component,
-            "price",
-            TimeSeriesType::Probabilistic,
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-            Duration::hours(1),
-            Duration::hours(4),
-            Duration::hours(2),
-            5,
-            data,
-            Features::new(),
-            None,
-            None,
-            Some(vec![10.0, 50.0, 90.0]),
-            None,
-        )
-        .unwrap();
+    let prob = Probabilistic::new(
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        Duration::hours(1),
+        Duration::hours(4),
+        Duration::hours(2),
+        5,
+        vec![10.0, 50.0, 90.0],
+        data,
+    )
+    .unwrap();
+    add_time_series(store, "prob-owner", TimeSeriesData::Probabilistic(prob));
 }
 
 fn add_scen_forecast(store: &mut Store) {
     // shape [S=4, H=3, count=5] — 4 scenarios, 3-step horizon, 5 windows
     let data = seq_f64(vec![4, 3, 5], 20.0);
-    store
-        .add_forecast(
-            "scen-owner",
-            "Generator",
-            OwnerCategory::Component,
-            "price",
-            TimeSeriesType::Scenarios,
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-            Duration::hours(1),
-            Duration::hours(3),
-            Duration::hours(2),
-            5,
-            data,
-            Features::new(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+    let scen = Scenarios::new(
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        Duration::hours(1),
+        Duration::hours(3),
+        Duration::hours(2),
+        5,
+        4,
+        data,
+    )
+    .unwrap();
+    add_time_series(store, "scen-owner", TimeSeriesData::Scenarios(scen));
 }
 
 // ---- Deterministic ----

@@ -315,9 +315,11 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle,
                                    uint64_t *out_byte_len);
 
 /**
- * Add a forecast. `data_ptr`/`data_len` is the flattened storage array
- * (Deterministic: `(horizon_count, count)` column-major; DST: the underlying
- * SingleTimeSeries array). `ts_type`: 2=Deterministic, 3=DeterministicSingleTimeSeries.
+ * Add a dense forecast. `data_ptr`/`data_byte_len` is the flattened storage
+ * array (Deterministic: `[H, count, *E]`; Scenarios: `[scenario_count, H,
+ * count, *E]`). `ts_type` must be 2=Deterministic or 5=Scenarios;
+ * `DeterministicSingleTimeSeries` is not directly addable and is derived from a
+ * stored `SingleTimeSeries` via `ts_store_transform_single_time_series`.
  *
  * # Safety
  *
@@ -381,6 +383,21 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    const char *units,
                                    const char *scaling_expr,
                                    struct TsKey **out_key);
+
+/**
+ * Derive `DeterministicSingleTimeSeries` forecasts from the stored
+ * `SingleTimeSeries` associations (see `Store::transform_single_time_series`).
+ * Writes the number of series transformed to `*out_count`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `out_count` must be valid
+ * for writing one `u64`.
+ */
+int32_t ts_store_transform_single_time_series(struct TsStore *handle,
+                                              int64_t horizon_ms,
+                                              int64_t interval_ms,
+                                              uint64_t *out_count);
 
 /**
  * Read `Probabilistic` metadata. Like `ts_store_get_forecast_metadata` but also
@@ -496,6 +513,166 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
                               uint64_t *out_data_byte_len,
                               double **out_percentiles,
                               uint64_t *out_percentiles_len);
+
+/**
+ * Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
+ * `DeterministicSingleTimeSeries` synthesized into a `Deterministic`) by key.
+ *
+ * This is the key-based counterpart to [`ts_store_get_forecast`]: the time
+ * series type comes from `key` rather than an explicit `ts_type` argument. The
+ * outputs and buffer-ownership rules are identical to [`ts_store_get_forecast`].
+ *
+ * # Safety
+ *
+ * - `handle` and `key` must be live handles created by this library; no
+ *   concurrent mutation is permitted for the duration of the call.
+ * - All `out_*` scalar pointers must be valid for writing one value each.
+ * - `out_dims` must be valid for writing one pointer; the returned pointer must
+ *   be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
+ * - `out_data` must be valid for writing one pointer; the returned pointer must
+ *   be freed exactly once with `ts_buffer_free_u8` using `*out_data_byte_len`.
+ * - `out_percentiles` must be valid for writing one pointer; when the result is
+ *   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
+ *   to 0, so no free is needed. When non-null it must be freed exactly once
+ *   with `ts_buffer_free_f64` using `*out_percentiles_len`.
+ */
+int32_t ts_store_get_forecast_by_key(const struct TsStore *handle,
+                                     const struct TsKey *key,
+                                     bool time_range_present,
+                                     int64_t time_range_start_ms,
+                                     int64_t time_range_end_ms,
+                                     int64_t *out_initial_ts_unix_ms,
+                                     int64_t *out_resolution_ms,
+                                     int64_t *out_horizon_ms,
+                                     int64_t *out_interval_ms,
+                                     uint64_t *out_count,
+                                     uint64_t *out_scenario_count,
+                                     uint64_t *out_ndims,
+                                     uint64_t **out_dims,
+                                     int32_t *out_dtype,
+                                     uint8_t **out_data,
+                                     uint64_t *out_data_byte_len,
+                                     double **out_percentiles,
+                                     uint64_t *out_percentiles_len);
+
+/**
+ * Construct a `TimeSeriesKey` handle from attributes `(owner_uuid, name,
+ * ts_type, resolution, features)`.
+ *
+ * The returned key can be passed to the key-based read functions (e.g.
+ * [`ts_store_get_single`], [`ts_store_get_non_sequential`],
+ * [`ts_store_get_forecast_by_key`]); it lets an attribute-addressed caller
+ * reuse the key-based read path without an `add`/lookup round trip.
+ * `resolution_ms <= 0` means "unspecified".
+ *
+ * # Safety
+ *
+ * `owner_uuid` and `name` must point to valid, null-terminated UTF-8 strings.
+ * `features_json`, when non-null, must be a null-terminated UTF-8 JSON object.
+ * `out_key` must be valid for writing one pointer. The returned key must be
+ * released exactly once with `ts_key_free`.
+ */
+int32_t ts_make_key_from_attrs(const char *owner_uuid,
+                               const char *name,
+                               int32_t ts_type,
+                               int64_t resolution_ms,
+                               const char *features_json,
+                               struct TsKey **out_key);
+
+/**
+ * List every time series key associated with `owner_uuid`. On success
+ * `*out_keys` points to an array of `*out_len` owned key handles (one per
+ * association, including derived `DeterministicSingleTimeSeries` rows), each
+ * usable with the key-based read functions.
+ *
+ * Ownership is two-tiered: free every individual `TsKey` with `ts_key_free`,
+ * then free the array buffer itself with `ts_keys_buffer_free`. When the owner
+ * has no series, `*out_keys` is set to null and `*out_len` to 0 (no free
+ * needed).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `owner_uuid` a null-terminated UTF-8
+ * string. `out_keys` must be valid for writing one pointer and `out_len` for
+ * writing one `u64`.
+ */
+int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
+                                      const char *owner_uuid,
+                                      struct TsKey ***out_keys,
+                                      uint64_t *out_len);
+
+/**
+ * Free the key-handle array returned by `ts_store_get_time_series_keys`.
+ *
+ * This releases only the array buffer, not the keys it held: transfer each
+ * `TsKey` out first (the Julia binding wraps each in a finalized object) and
+ * release them individually with `ts_key_free`.
+ *
+ * # Safety
+ *
+ * `ptr` must be null or an array returned by `ts_store_get_time_series_keys`
+ * with exactly `len` elements, not previously freed. It must not be used after
+ * this call.
+ */
+void ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
+
+/**
+ * Read the attributes of a key handle: its time series type code (see
+ * `ts_type_from_int`), resolution in milliseconds (`0` when unset), the owner
+ * UUID and name strings, and the features as a JSON object string (`"{}"` when
+ * empty — the same shape the attribute-addressed entry points accept).
+ *
+ * Strings follow the probe-then-fetch convention: call with `owner_buf` /
+ * `name_buf` / `features_buf` null (and capacities `0`) to learn the required
+ * lengths via the matching `out_*_len`, then call again with buffers of at
+ * least `len + 1` bytes. Each returned string is NUL-terminated and truncated
+ * to its capacity; the reported length is always the untruncated byte length.
+ *
+ * # Safety
+ *
+ * `key` must be a live key handle created by this library. `out_type`,
+ * `out_resolution_ms`, `out_owner_len`, `out_name_len`, and `out_features_len`
+ * must each be valid for writing one value. `owner_buf` / `name_buf` /
+ * `features_buf` may be null; when non-null they must be valid for writing
+ * `owner_cap` / `name_cap` / `features_cap` bytes respectively.
+ */
+int32_t ts_key_attributes(const struct TsKey *key,
+                          int32_t *out_type,
+                          int64_t *out_resolution_ms,
+                          char *owner_buf,
+                          uint64_t owner_cap,
+                          uint64_t *out_owner_len,
+                          char *name_buf,
+                          uint64_t name_cap,
+                          uint64_t *out_name_len,
+                          char *features_buf,
+                          uint64_t features_cap,
+                          uint64_t *out_features_len);
+
+/**
+ * Read an association's `name` and `scaling_factor_multiplier` by key, resolved
+ * through the stored metadata (`Store::get_metadata`). This surfaces the
+ * per-association attributes that are not carried on the key itself — the read
+ * path uses it to populate the returned time series object.
+ *
+ * Both strings use the probe-then-fetch convention (see [`ts_key_attributes`]).
+ * An absent `scaling_factor_multiplier` reports length 0.
+ *
+ * # Safety
+ *
+ * `handle` and `key` must be live handles created by this library.
+ * `out_name_len` and `out_scaling_len` must each be valid for writing one
+ * `u64`. `name_buf` / `scaling_buf` may be null; when non-null they must be
+ * valid for writing `name_cap` / `scaling_cap` bytes respectively.
+ */
+int32_t ts_store_get_association(const struct TsStore *handle,
+                                 const struct TsKey *key,
+                                 char *name_buf,
+                                 uint64_t name_cap,
+                                 uint64_t *out_name_len,
+                                 char *scaling_buf,
+                                 uint64_t scaling_cap,
+                                 uint64_t *out_scaling_len);
 
 /**
  * Release a `u64` dims buffer returned by `ts_store_get_forecast`.

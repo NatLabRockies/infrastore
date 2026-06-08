@@ -18,12 +18,16 @@ SQLite. It exposes multiple bindings over a shared core:
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
 end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
 `Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading
-values across the Rust core, C ABI, Python, Julia, and gRPC, and writing (`add_forecast`) across the
-Rust core, C ABI, Python, and Julia; forecast writes are not exposed over the read-only gRPC server.
-Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every binding, including Python)
-and may have multidimensional per-timestep values. Auth is `none` (default) or `api_key` via the
-`x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for the authoritative
-feature matrix.
+values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
+`Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
+matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
+`ts_store_add_forecast` / `ts_store_add_probabilistic` as low-level transport);
+`DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
+`transform_single_time_series` rather than added directly. Forecast writes are not exposed over the
+read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
+binding, including Python) and may have multidimensional per-timestep values. Auth is `none`
+(default) or `api_key` via the `x-api-key` header. See `README.md` and
+`docs/src/explanation/data-model.md` for the authoritative feature matrix.
 
 ## Code Quality Requirements
 

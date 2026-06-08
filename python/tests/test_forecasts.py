@@ -1,4 +1,10 @@
-"""Round-trip tests for forecast types (Deterministic, Probabilistic, Scenarios)."""
+"""Round-trip tests for forecast types (Deterministic, Probabilistic, Scenarios).
+
+Dense forecasts are written through the generic ``add_time_series`` by passing a
+``Deterministic`` / ``Probabilistic`` / ``Scenarios`` object;
+``DeterministicSingleTimeSeries`` is derived from a stored ``SingleTimeSeries``
+via ``transform_single_time_series``.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ from time_series_store import (
     OwnerCategory,
     Probabilistic,
     Scenarios,
+    SingleTimeSeries,
     TimeSeriesStore,
     TimeSeriesType,
 )
@@ -38,11 +45,10 @@ def test_deterministic_scalar_round_trip():
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_scalar",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_scalar",
+                      scaling_factor_multiplier="sfm"),
     )
 
     assert key.time_series_type == TimeSeriesType.Deterministic
@@ -53,6 +59,8 @@ def test_deterministic_scalar_round_trip():
     assert got.horizon == HORIZON_6H
     assert got.interval == INTERVAL_12H
     assert got.initial_timestamp == T0
+    assert got.name == "det_scalar"
+    assert got.scaling_factor_multiplier == "sfm"
     np.testing.assert_array_equal(np.asarray(got.data), data)
     assert np.asarray(got.data).shape == (H, C)
 
@@ -64,11 +72,9 @@ def test_deterministic_multidim_element():
     horizon = timedelta(hours=H)
     data = np.arange(H * C * E, dtype=np.float32).reshape(H, C, E)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_multidim",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, horizon, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_multidim"),
     )
 
     got = store.get_time_series(key)
@@ -85,11 +91,9 @@ def test_deterministic_window_selection():
     H, C = 6, 6  # 6 windows
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_window",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_window"),
     )
 
     # Select windows 2, 3, 4 (0-indexed): start = T0 + 2*interval, end = T0 + 5*interval
@@ -112,11 +116,9 @@ def test_deterministic_int64_dtype():
     horizon = timedelta(hours=H)
     data = np.arange(H * C, dtype=np.int64).reshape(H, C) * 100
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_int64",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, horizon, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_int64"),
     )
 
     got = store.get_time_series(key)
@@ -137,12 +139,9 @@ def test_probabilistic_round_trip():
     percentiles = [0.1, 0.5, 0.9]
     data = np.arange(P * H * C, dtype=np.float64).reshape(P, H, C)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "prob_basic",
-        TimeSeriesType.Probabilistic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
-        percentiles=percentiles,
+        Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_basic"),
     )
 
     assert key.time_series_type == TimeSeriesType.Probabilistic
@@ -153,6 +152,7 @@ def test_probabilistic_round_trip():
     assert got.horizon == HORIZON_6H
     assert got.interval == INTERVAL_12H
     assert got.initial_timestamp == T0
+    assert got.name == "prob_basic"
     assert got.percentiles == pytest.approx(percentiles)
     arr = np.asarray(got.data)
     assert arr.shape == (P, H, C)
@@ -166,12 +166,9 @@ def test_probabilistic_window_selection():
     percentiles = [0.25, 0.5, 0.75]
     data = np.arange(P * H * C, dtype=np.float64).reshape(P, H, C)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "prob_window",
-        TimeSeriesType.Probabilistic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
-        percentiles=percentiles,
+        Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_window"),
     )
 
     # Windows 1 and 2 (0-indexed): start = T0 + 1*interval, end = T0 + 3*interval
@@ -199,11 +196,9 @@ def test_scenarios_round_trip():
     S, H, C = 4, 6, 3
     data = np.arange(S * H * C, dtype=np.float64).reshape(S, H, C)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "scen_basic",
-        TimeSeriesType.Scenarios,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_basic"),
     )
 
     assert key.time_series_type == TimeSeriesType.Scenarios
@@ -215,6 +210,7 @@ def test_scenarios_round_trip():
     assert got.horizon == HORIZON_6H
     assert got.interval == INTERVAL_12H
     assert got.initial_timestamp == T0
+    assert got.name == "scen_basic"
     arr = np.asarray(got.data)
     assert arr.shape == (S, H, C)
     np.testing.assert_array_equal(arr, data)
@@ -226,11 +222,9 @@ def test_scenarios_window_selection():
     S, H, C = 4, 6, 6
     data = np.arange(S * H * C, dtype=np.float64).reshape(S, H, C)
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "scen_window",
-        TimeSeriesType.Scenarios,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_window"),
     )
 
     # Select windows 2, 3, 4 (0-indexed)
@@ -254,17 +248,57 @@ def test_scenarios_int64_dtype():
     horizon = timedelta(hours=H)
     data = np.arange(S * H * C, dtype=np.int64).reshape(S, H, C) * 7
 
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "scen_int64",
-        TimeSeriesType.Scenarios,
-        T0, RES_1H, horizon, INTERVAL_12H, C, data,
+        Scenarios(T0, RES_1H, horizon, INTERVAL_12H, C, data, "scen_int64"),
     )
 
     got = store.get_time_series(key)
     arr = np.asarray(got.data)
     assert arr.dtype == np.int64
     np.testing.assert_array_equal(arr, data)
+
+
+# ---------------------------------------------------------------------------
+# DeterministicSingleTimeSeries via transform_single_time_series
+# ---------------------------------------------------------------------------
+
+
+def test_transform_single_time_series_to_dst():
+    """A stored SingleTimeSeries transforms into a DST, read back as Deterministic."""
+    store = TimeSeriesStore.create(in_memory=True)
+    # total_len=8, H=4 (horizon=4h, res=1h), interval=2h => interval_steps=2.
+    # count = (8 - 4) / 2 + 1 = 3.
+    horizon = timedelta(hours=4)
+    interval = timedelta(hours=2)
+    underlying = np.arange(8, dtype=np.float64)
+    store.add_time_series(
+        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        SingleTimeSeries(T0, RES_1H, underlying, "dst_series"),
+    )
+
+    transformed = store.transform_single_time_series(horizon, interval)
+    assert transformed == 1
+
+    keys = store.get_time_series_keys(OWNER_UUID)
+    dst_key = next(
+        k for k in keys
+        if k.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
+    )
+    got = store.get_time_series(dst_key)
+    assert isinstance(got, Deterministic)
+    assert got.count == 3
+    assert got.name == "dst_series"
+    arr = np.asarray(got.data)
+    assert arr.shape == (4, 3)
+    # Row-major [H, C]: out[s, w] = underlying[w*2 + s].
+    expected = np.array([
+        [0.0, 2.0, 4.0],
+        [1.0, 3.0, 5.0],
+        [2.0, 4.0, 6.0],
+        [3.0, 5.0, 7.0],
+    ])
+    np.testing.assert_array_equal(arr, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -277,11 +311,9 @@ def test_misaligned_window_start_raises():
     store = TimeSeriesStore.create(in_memory=True)
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_misalign",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_misalign"),
     )
 
     # 1 hour off — not a window boundary (interval=12h)
@@ -296,11 +328,9 @@ def test_end_before_start_raises():
     store = TimeSeriesStore.create(in_memory=True)
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_backwards",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_backwards"),
     )
 
     with pytest.raises(InvalidParameterError):
@@ -315,11 +345,9 @@ def test_empty_window_range():
     store = TimeSeriesStore.create(in_memory=True)
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
-    key = store.add_forecast(
+    key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_empty",
-        TimeSeriesType.Deterministic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_empty"),
     )
 
     # Aligned start but end == start selects no windows
@@ -343,31 +371,27 @@ def test_repr_smoke():
     H, C = 6, 3
 
     det_data = np.zeros((H, C), dtype=np.float64)
-    det_key = store.add_forecast(
+    det_key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "det_repr", TimeSeriesType.Deterministic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, det_data,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, det_data, "det_repr"),
     )
     det = store.get_time_series(det_key)
     assert "Deterministic" in repr(det)
 
     P = 2
     prob_data = np.zeros((P, H, C), dtype=np.float64)
-    prob_key = store.add_forecast(
+    prob_key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "prob_repr", TimeSeriesType.Probabilistic,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, prob_data,
-        percentiles=[0.1, 0.9],
+        Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, [0.1, 0.9], prob_data, "prob_repr"),
     )
     prob = store.get_time_series(prob_key)
     assert "Probabilistic" in repr(prob)
 
     S = 3
     scen_data = np.zeros((S, H, C), dtype=np.float64)
-    scen_key = store.add_forecast(
+    scen_key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        "scen_repr", TimeSeriesType.Scenarios,
-        T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, scen_data,
+        Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, scen_data, "scen_repr"),
     )
     scen = store.get_time_series(scen_key)
     assert "Scenarios" in repr(scen)

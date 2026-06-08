@@ -4,14 +4,17 @@
 //! store, and a NetCDF store that is flushed, closed, and reopened read-only
 //! (exercising the persisted format).
 //!
-//! Forecast writes use `Store::add_forecast` directly (the public write API).
-//! Read results are returned as `TimeSeriesData::{Deterministic,Probabilistic,
-//! Scenarios}` variants; DST is synthesized into `Deterministic`.
+//! Dense forecasts (`Deterministic` / `Probabilistic` / `Scenarios`) are written
+//! through the generic `Store::add_time_series`; `DeterministicSingleTimeSeries`
+//! is derived from a stored `SingleTimeSeries` via
+//! `Store::transform_single_time_series`. Read results are returned as
+//! `TimeSeriesData::{Deterministic,Probabilistic,Scenarios}` variants; DST is
+//! synthesized into `Deterministic`.
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Dtype, Features, OwnerCategory, Store, TimeSeriesKey, TimeSeriesType, TypedArray, create_store,
-    open_store,
+    Deterministic, Dtype, Features, OwnerCategory, Probabilistic, Scenarios, SingleTimeSeries,
+    Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray, create_store, open_store,
 };
 
 // Re-export slice_count_axis through a test-visible path.  The helper is
@@ -99,23 +102,76 @@ fn add_forecast(
     data: TypedArray,
     percentiles: Option<Vec<f64>>,
 ) -> TimeSeriesKey {
+    let data = match ts_type {
+        TimeSeriesType::Deterministic => TimeSeriesData::Deterministic(
+            Deterministic::new(initial, resolution, horizon, interval, count, data).unwrap(),
+        ),
+        TimeSeriesType::Probabilistic => TimeSeriesData::Probabilistic(
+            Probabilistic::new(
+                initial,
+                resolution,
+                horizon,
+                interval,
+                count,
+                percentiles.expect("Probabilistic requires percentiles"),
+                data,
+            )
+            .unwrap(),
+        ),
+        TimeSeriesType::Scenarios => {
+            let scenario_count = data.shape[0];
+            TimeSeriesData::Scenarios(
+                Scenarios::new(
+                    initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    count,
+                    scenario_count,
+                    data,
+                )
+                .unwrap(),
+            )
+        }
+        TimeSeriesType::DeterministicSingleTimeSeries => {
+            // DST is not added directly: store the underlying SingleTimeSeries,
+            // then derive the DST via `transform_single_time_series`.
+            store
+                .add_time_series(
+                    owner,
+                    "Generator",
+                    OwnerCategory::Component,
+                    name,
+                    TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                        initial, resolution, data,
+                    )),
+                    Features::new(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            store
+                .transform_single_time_series(horizon, interval)
+                .unwrap();
+            return TimeSeriesKey {
+                owner_uuid: owner.to_string(),
+                time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
+                name: name.to_string(),
+                resolution: Some(resolution),
+                features: Features::new(),
+            };
+        }
+        other => panic!("add_forecast helper: unsupported type {other:?}"),
+    };
     store
-        .add_forecast(
+        .add_time_series(
             owner,
             "Generator",
             OwnerCategory::Component,
             name,
-            ts_type,
-            initial,
-            resolution,
-            horizon,
-            interval,
-            count,
             data,
             Features::new(),
             None,
-            None,
-            percentiles,
             None,
         )
         .unwrap()

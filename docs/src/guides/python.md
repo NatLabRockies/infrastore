@@ -38,13 +38,16 @@ ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
+    "load",  # name (required); pass scaling_factor_multiplier=... for the optional scaling expression
 )
 ```
 
 Use timezone-aware datetimes (UTC is stored). Pass `dtype=np.float64` — the Python binding works in
 `float64`. The array may be multi-dimensional: shape `(length,)` for scalar steps, or
-`(length, k1, …)` to attach a per-step element shape (such as cost-curve coefficients). Use
-`NonSequentialTimeSeries(timestamps, data)` for explicitly timestamped series.
+`(length, k1, …)` to attach a per-step element shape (such as cost-curve coefficients). The required
+`name` and optional `scaling_factor_multiplier` are association attributes carried on the object —
+the same array can be added under different names. Use
+`NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped series.
 
 ## Add a Series
 
@@ -53,8 +56,7 @@ key = store.add_time_series(
     owner_uuid="42",
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    name="load",
-    time_series=ts,
+    time_series=ts,   # name / scaling_factor_multiplier come from ts
     features={"model_year": 2030, "scenario": "high"},
     units="MW",
 )
@@ -149,13 +151,15 @@ ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
+    "load",
 )
 key = store.add_time_series(
     owner_uuid="42", owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    name="load", time_series=ts,
+    time_series=ts,
     features={"model_year": 2030}, units="MW",
 )
 got = store.get_time_series(key)
+assert got.name == "load"
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ```

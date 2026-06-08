@@ -136,30 +136,45 @@ let array = store.get_array_by_hash(&meta.data_hash)?;
 
 ## Forecasts
 
-Forecast types are written with `add_forecast`. `data` is a `TypedArray` in its native shape (the
-[data model](../explanation/data-model.md#forecasts) lists the conventional shapes per type); the
-store content-addresses it and records the windowing parameters:
+Dense forecasts are written through the generic `add_time_series` by wrapping a `Deterministic`,
+`Probabilistic`, or `Scenarios` object in `TimeSeriesData`. Each forecast object holds a
+`TypedArray` in its native shape (the [data model](../explanation/data-model.md#forecasts) lists the
+conventional shapes per type); the store content-addresses it and records the windowing parameters:
 
 ```rust
-use time_series_store_core::{TimeSeriesType, TypedArray};
+use time_series_store_core::{Deterministic, TimeSeriesData, TypedArray};
 
-// A Deterministic forecast: a (horizon_count, count) matrix.
+// A Deterministic forecast: a [H, count, *E] array (here scalar steps, so [H, count]).
 let (horizon_count, count) = (24, 7);
 let values: Vec<f64> = vec![0.0; horizon_count * count];   // row-major, shape (horizon_count, count)
 let data = TypedArray::from_f64(vec![horizon_count, count], &values);
 
-let key = store.add_forecast(
-    "42", "Generator", OwnerCategory::Component, "load_forecast",
-    TimeSeriesType::Deterministic,
+let forecast = Deterministic::new(
     initial, Duration::hours(1),      // initial_timestamp, resolution
     Duration::hours(24),              // horizon
     Duration::hours(24),              // interval
     count,
-    data, Features::new(),
+    data,
+).map_err(TimeSeriesError::InvalidParameter)?;
+
+let key = store.add_time_series(
+    "42", "Generator", OwnerCategory::Component, "load_forecast",
+    TimeSeriesData::Deterministic(forecast),
+    Features::new(),
     Some("MW".into()), None,          // units, scaling_factor_multiplier
-    None,                             // percentiles (Some(vec) for Probabilistic)
-    None,                             // logical_type
 )?;
+```
+
+`Probabilistic::new` additionally takes the `percentiles` vector, and `Scenarios::new` takes a
+`scenario_count`; wrap them in `TimeSeriesData::Probabilistic` / `TimeSeriesData::Scenarios` the
+same way.
+
+A `DeterministicSingleTimeSeries` is not added directly. Call `transform_single_time_series` to
+derive one from every stored `SingleTimeSeries` (it shares the backing array and derives `count`
+from the series length); it returns the number of series transformed:
+
+```rust
+let n = store.transform_single_time_series(Duration::hours(24), Duration::hours(24))?;
 ```
 
 `get_time_series` reconstructs forecasts too, returning a `TimeSeriesData::Deterministic`,

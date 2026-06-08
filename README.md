@@ -12,9 +12,13 @@ Spec:
 - **SingleTimeSeries** and **NonSequentialTimeSeries** are implemented end-to-end (read+write in the
   Rust core, C ABI, Python, and Julia; read-only over gRPC). The four forecast types
   (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) support reading
-  values across the Rust core, C ABI, Python, Julia, and gRPC, and writing (`add_forecast`) across
-  the Rust core, C ABI, Python, and Julia. Forecast writes are not exposed over the read-only gRPC
-  server.
+  values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
+  `Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
+  matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
+  `ts_store_add_forecast` / `ts_store_add_probabilistic` as low-level transport);
+  `DeterministicSingleTimeSeries` is not added directly — it is derived from stored
+  `SingleTimeSeries` via `transform_single_time_series`. Forecast writes are not exposed over the
+  read-only gRPC server.
 - Multi-dim per-step values (e.g. quadratic-curve coefficients) are supported: arrays carry an
   element `dtype` and a `(length, *element_shape)` shape, and the NetCDF backend persists the
   trailing element axes.
@@ -96,11 +100,12 @@ ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
+    "load",   # name (required); scaling_factor_multiplier=... is optional
 )
 key = store.add_time_series(
     owner_uuid="42", owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    name="load", time_series=ts,
+    time_series=ts,   # name / scaling_factor_multiplier come from ts
     features={"model_year": 2030}, units="MW",
 )
 got = store.get_time_series(key)
@@ -119,8 +124,8 @@ julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.
 ```julia
 using Dates, TimeSeriesStore
 store = Store(in_memory=true)
-ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0))
-key = add_time_series!(store, "42", "Generator", Component, "load", ts;
+ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
+key = add_time_series!(store, "42", "Generator", Component, ts;
                        features=Dict("model_year" => 2030), units="MW")
 got = get_time_series(store, key)
 @assert got.data == ts.data

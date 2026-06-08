@@ -67,8 +67,10 @@ The conventions that shape the Julia API:
   the Rust buffer with `ts_buffer_free_f64` / `ts_buffer_free_u8` / `ts_buffer_free_i64`.
 - **Features cross as JSON.** Julia serializes the feature dict to a JSON string, which the FFI
   layer parses into a `Features` map.
-- **Forecasts are wrapped.** `TimeSeriesStore.jl` exposes `add_forecast!` / `add_probabilistic!` and
-  the typed getters, so all four forecast types are usable from Julia.
+- **Forecasts are wrapped.** `TimeSeriesStore.jl` exposes `Deterministic` / `Probabilistic` /
+  `Scenarios` structs passed to the generic `add_time_series!`, type-dispatched
+  `get_time_series(Type, …)` getters, and `transform_single_time_series!`, so all four forecast
+  types are usable from Julia.
 
 `TimeSeriesStore.jl` loads the cdylib from the path in the `TIME_SERIES_STORE_LIB` environment
 variable. See the [Julia guide](../guides/julia.md), the [C ABI reference](../reference/c-abi.md),
@@ -122,5 +124,5 @@ that the read-only gRPC server does not accept any writes:
 | Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅          |
 | Forecast metadata / counts    | ✅        | ✅    | ✅     | ✅    | list/counts |
 
-The only gap is by design: writes (including `add_forecast`) require local filesystem access, so the
-read-only gRPC server serves forecast reads but not writes.
+The only gap is by design: writes (including forecasts added through `add_time_series`) require
+local filesystem access, so the read-only gRPC server serves forecast reads but not writes.

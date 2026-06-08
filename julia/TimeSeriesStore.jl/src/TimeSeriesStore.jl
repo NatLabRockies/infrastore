@@ -3,14 +3,14 @@ module TimeSeriesStore
 using Dates
 import JSON
 
-export Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
+export Store, SingleTimeSeries, NonSequentialTimeSeries,
+       Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
-       add_time_series!, get_time_series, remove_time_series!,
+       add_time_series!, get_time_series, get_time_series_keys, key_info,
+       remove_time_series!,
        has_time_series, get_counts, verify_integrity, compact!,
        get_metadata, get_array_by_hash, open_store, flush!, clear!,
-       add_forecast!, get_forecast_metadata, has_typed, remove_typed!,
-       add_probabilistic!, get_probabilistic_metadata,
-       get_deterministic, get_probabilistic, get_scenarios,
+       transform_single_time_series!, has_typed, remove_typed!,
        close!
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
@@ -147,6 +147,12 @@ function _row_major_bytes(arr::AbstractArray)
     return collect(reinterpret(UInt8, flat))
 end
 
+# `name` and `scaling_factor_multiplier` are per-association attributes carried on
+# the binding structs (matching InfrastructureSystems.jl); they are not part of
+# the deduplicated core data type. `name` is required; the rest are optional.
+_maybe_string(::Nothing) = nothing
+_maybe_string(s::AbstractString) = String(s)
+
 # ---- Single time series ---------------------------------------------------
 
 struct SingleTimeSeries
@@ -154,12 +160,19 @@ struct SingleTimeSeries
     resolution        :: Period
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time)."
     data              :: AbstractArray
+    "Association name (required; the same array may be stored under different names)."
+    name              :: String
+    "Optional scaling-factor-multiplier expression."
+    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type      :: Union{Nothing,String}
 end
 
-SingleTimeSeries(initial, resolution, data::AbstractArray) =
-    SingleTimeSeries(initial, resolution, data, nothing)
+SingleTimeSeries(initial, resolution, data::AbstractArray, name::AbstractString;
+                 scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+                 logical_type::Union{Nothing,AbstractString}=nothing) =
+    SingleTimeSeries(initial, resolution, data, String(name),
+                     _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
 
 # ---- Non-sequential time series -------------------------------------------
 
@@ -167,17 +180,118 @@ struct NonSequentialTimeSeries
     timestamps  :: Vector{DateTime}
     "Values: a 1-D vector with one value per timestamp."
     data        :: AbstractVector
+    "Association name (required)."
+    name        :: String
+    "Optional scaling-factor-multiplier expression."
+    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type :: Union{Nothing,String}
 
-    function NonSequentialTimeSeries(timestamps, data, logical_type=nothing)
+    function NonSequentialTimeSeries(timestamps, data, name::AbstractString;
+            scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+            logical_type::Union{Nothing,AbstractString}=nothing)
         length(timestamps) == length(data) ||
             throw(InvalidParameterError("timestamp count must match data length"))
         all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
             throw(InvalidParameterError("timestamps must be strictly increasing"))
-        new(Vector{DateTime}(timestamps), data, logical_type)
+        new(Vector{DateTime}(timestamps), data, String(name),
+            _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
     end
 end
+
+# ---- Forecast types -------------------------------------------------------
+#
+# Dense forecasts mirror the InfrastructureSystems.jl objects. `data` is a Julia
+# (column-major) array in the canonical shape noted on each type; it round-trips
+# through `add_time_series!` / `get_time_series`. `DeterministicSingleTimeSeries`
+# is a marker type with no materialized form: it is derived from a stored
+# `SingleTimeSeries` via `transform_single_time_series!` and read back as a
+# `Deterministic` (see the type below).
+
+struct Deterministic
+    initial_timestamp :: DateTime
+    resolution        :: Period
+    horizon           :: Period
+    interval          :: Period
+    count             :: Int
+    "Values with canonical shape `(H, count, element_dims...)`."
+    data              :: AbstractArray
+    "Association name (required)."
+    name              :: String
+    "Optional scaling-factor-multiplier expression."
+    scaling_factor_multiplier :: Union{Nothing,String}
+    "Opaque logical-type tag for the binding to reconstruct domain objects."
+    logical_type      :: Union{Nothing,String}
+end
+
+Deterministic(initial, resolution, horizon, interval, count, data::AbstractArray,
+              name::AbstractString;
+              scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+              logical_type::Union{Nothing,AbstractString}=nothing) =
+    Deterministic(initial, resolution, horizon, interval, Int(count), data, String(name),
+                  _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+
+struct Probabilistic
+    initial_timestamp :: DateTime
+    resolution        :: Period
+    horizon           :: Period
+    interval          :: Period
+    count             :: Int
+    percentiles       :: Vector{Float64}
+    "Values with canonical shape `(num_percentiles, H, count, element_dims...)`."
+    data              :: AbstractArray
+    "Association name (required)."
+    name              :: String
+    "Optional scaling-factor-multiplier expression."
+    scaling_factor_multiplier :: Union{Nothing,String}
+    "Opaque logical-type tag for the binding to reconstruct domain objects."
+    logical_type      :: Union{Nothing,String}
+end
+
+Probabilistic(initial, resolution, horizon, interval, count, percentiles, data::AbstractArray,
+              name::AbstractString;
+              scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+              logical_type::Union{Nothing,AbstractString}=nothing) =
+    Probabilistic(initial, resolution, horizon, interval, Int(count),
+                  Vector{Float64}(percentiles), data, String(name),
+                  _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+
+struct Scenarios
+    initial_timestamp :: DateTime
+    resolution        :: Period
+    horizon           :: Period
+    interval          :: Period
+    count             :: Int
+    scenario_count    :: Int
+    "Values with canonical shape `(scenario_count, H, count, element_dims...)`."
+    data              :: AbstractArray
+    "Association name (required)."
+    name              :: String
+    "Optional scaling-factor-multiplier expression."
+    scaling_factor_multiplier :: Union{Nothing,String}
+    "Opaque logical-type tag for the binding to reconstruct domain objects."
+    logical_type      :: Union{Nothing,String}
+end
+
+# `scenario_count` defaults to the leading axis of `data`.
+Scenarios(initial, resolution, horizon, interval, count, data::AbstractArray,
+          name::AbstractString;
+          scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+          logical_type::Union{Nothing,AbstractString}=nothing) =
+    Scenarios(initial, resolution, horizon, interval, Int(count), size(data, 1), data,
+              String(name), _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+
+"""
+    DeterministicSingleTimeSeries
+
+Marker type naming a forecast derived from a `SingleTimeSeries` via
+`transform_single_time_series!` (mirrors the InfrastructureSystems.jl type). It
+is never constructed or added directly and has no materialized struct: reading
+one — e.g. `get_time_series(DeterministicSingleTimeSeries, store, key)` — returns
+a [`Deterministic`]. It surfaces as the `time_series_type` of keys returned by
+`get_time_series_keys` / `key_info`.
+"""
+abstract type DeterministicSingleTimeSeries end
 
 # ---- Keys -----------------------------------------------------------------
 
@@ -262,24 +376,26 @@ function _resolution_to_ms(p::Period)
 end
 
 """
-    add_time_series!(store, owner_uuid, owner_type, owner_category, name, ts;
-                     features=Dict(), units=nothing, scaling_factor_multiplier=nothing)
+    add_time_series!(store, owner_uuid, owner_type, owner_category, ts;
+                     features=Dict(), units=nothing)
 
 `owner_uuid` identifies the owning component / supplemental attribute (a string,
-typically the stringified UUID).
+typically the stringified UUID). The association `name` and
+`scaling_factor_multiplier` come from the time series object (`ts.name`,
+`ts.scaling_factor_multiplier`).
 """
 function add_time_series!(
     store::Store,
     owner_uuid::AbstractString,
     owner_type::AbstractString,
     owner_category::OwnerCategory,
-    name::AbstractString,
     ts::SingleTimeSeries;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
+    name = ts.name
+    scaling_factor_multiplier = ts.scaling_factor_multiplier
     initial_ms = _to_unix_ms(ts.initial_timestamp)
     resolution_ms = _resolution_to_ms(ts.resolution)
     dtype = _dtype_code(eltype(ts.data))
@@ -323,13 +439,13 @@ function add_time_series!(
     owner_uuid::AbstractString,
     owner_type::AbstractString,
     owner_category::OwnerCategory,
-    name::AbstractString,
     ts::NonSequentialTimeSeries;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
+    name = ts.name
+    scaling_factor_multiplier = ts.scaling_factor_multiplier
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[length(ts.data)]
@@ -526,7 +642,9 @@ function get_time_series(store::Store, key::TimeSeriesKey)
     initial = _from_unix_ms(out_initial[])
     # resolution_ms is integer milliseconds.
     resolution = Millisecond(out_resolution[])
-    return SingleTimeSeries(initial, resolution, data)
+    assoc = _get_association(store, key)
+    return SingleTimeSeries(initial, resolution, data, assoc.name;
+                            scaling_factor_multiplier=assoc.scaling_factor_multiplier)
 end
 
 function get_time_series(
@@ -562,7 +680,208 @@ function get_time_series(
     )
     dtype = _julia_dtype(out_dtype[])
     values = collect(reinterpret(dtype, bytes))
-    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), values)
+    assoc = _get_association(store, key)
+    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), values, assoc.name;
+                                   scaling_factor_multiplier=assoc.scaling_factor_multiplier)
+end
+
+# ---- Attribute-addressed static reads --------------------------------------
+#
+# Every type supports both calling conventions. `get_time_series(T, store, key)`
+# is keyed by a `TimeSeriesKey` handle (returned by `add_time_series!`);
+# `get_time_series(T, store, owner_uuid, name; ...)` builds a key from attributes
+# (the same `(owner_uuid, name, resolution, features)` addressing used by
+# `has_time_series` / `remove_time_series!` / `get_metadata`) and routes through
+# the key-based reader.
+
+# Build a `TimeSeriesKey` from attributes via the FFI key constructor.
+function _make_key(
+    owner_uuid::AbstractString,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    features_json = _features_arg(features)
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall(
+        (:ts_make_key_from_attrs, lib_path()), Int32,
+        (Cstring, Cstring, Int32, Int64, Cstring, Ref{Ptr{Cvoid}}),
+        owner_uuid, name, Int32(ts_type), resolution_ms, features_json, out_key,
+    )
+    _check(code)
+    return TimeSeriesKey(out_key[])
+end
+
+# Fetch the per-association `name` and `scaling_factor_multiplier` for a key (the
+# attributes the read FFIs don't return), to populate the struct on read.
+function _get_association(store::Store, key::TimeSeriesKey)
+    name_len = Ref{UInt64}(0)
+    scal_len = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_get_association, lib_path()), Int32,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle, key.handle, C_NULL, UInt64(0), name_len, C_NULL, UInt64(0), scal_len,
+    )
+    _check(code)
+    name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
+    scal_buf = Vector{UInt8}(undef, Int(scal_len[]) + 1)
+    code = ccall(
+        (:ts_store_get_association, lib_path()), Int32,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle, key.handle,
+        name_buf, UInt64(length(name_buf)), name_len,
+        scal_buf, UInt64(length(scal_buf)), scal_len,
+    )
+    _check(code)
+    name = String(name_buf[1:Int(name_len[])])
+    scaling = Int(scal_len[]) == 0 ? nothing : String(scal_buf[1:Int(scal_len[])])
+    return (name=name, scaling_factor_multiplier=scaling)
+end
+
+# Association attributes for an attribute-addressed read: build the matching key,
+# then look up `name` / `scaling_factor_multiplier`.
+_assoc_attrs(store::Store, owner_uuid::AbstractString, name::AbstractString, ts_type::Integer;
+             resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}()) =
+    _get_association(store, _make_key(owner_uuid, name, ts_type; resolution=resolution, features=features))
+
+"""
+    get_time_series_keys(store, owner_uuid) -> Vector{TimeSeriesKey}
+
+Every key associated with `owner_uuid`, one per stored association (including
+`DeterministicSingleTimeSeries` rows derived by `transform_single_time_series!`).
+Each key can be passed to the key-based `get_time_series(Type, store, key)`
+readers — the way to read a transform-derived forecast by key.
+"""
+function get_time_series_keys(store::Store, owner_uuid::AbstractString)
+    out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
+    out_len = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_get_time_series_keys, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
+        store.handle, owner_uuid, out_keys, out_len,
+    )
+    _check(code)
+    n = Int(out_len[])
+    keys = Vector{TimeSeriesKey}(undef, n)
+    if n > 0
+        # Copy each owned handle into a finalized wrapper, then free the array
+        # buffer (the wrappers own the handles and free them via ts_key_free).
+        raw = unsafe_wrap(Array, out_keys[], n; own=false)
+        for i in 1:n
+            keys[i] = TimeSeriesKey(raw[i])
+        end
+        ccall(
+            (:ts_keys_buffer_free, lib_path()), Cvoid, (Ptr{Ptr{Cvoid}}, UInt64),
+            out_keys[], out_len[],
+        )
+    end
+    return keys
+end
+
+# The Julia time series type for a key's integer type code.
+_type_for_code(code::Integer) =
+    code == TS_TYPE_SINGLE                  ? SingleTimeSeries :
+    code == TS_TYPE_NON_SEQUENTIAL          ? NonSequentialTimeSeries :
+    code == TS_TYPE_DETERMINISTIC           ? Deterministic :
+    code == TS_TYPE_DETERMINISTIC_SINGLE    ? DeterministicSingleTimeSeries :
+    code == TS_TYPE_PROBABILISTIC           ? Probabilistic :
+    code == TS_TYPE_SCENARIOS               ? Scenarios :
+    throw(InvalidParameterError("unknown time series type code $code"))
+
+"""
+    key_info(key) -> NamedTuple
+
+Inspect an opaque `TimeSeriesKey` (e.g. one returned by `get_time_series_keys`):
+returns `(owner_uuid, name, time_series_type, resolution, features)`.
+`time_series_type` is the Julia type (one of `SingleTimeSeries`,
+`NonSequentialTimeSeries`, `Deterministic`, `DeterministicSingleTimeSeries`,
+`Probabilistic`, `Scenarios`) — pass it straight to
+`get_time_series(time_series_type, store, key)`. `features` is a `Dict` (empty
+when none).
+"""
+function key_info(key::TimeSeriesKey)
+    out_type = Ref{Int32}(0)
+    out_res = Ref{Int64}(0)
+    owner_len = Ref{UInt64}(0)
+    name_len = Ref{UInt64}(0)
+    feat_len = Ref{UInt64}(0)
+    # Probe the string lengths (type + resolution are filled on this call too).
+    code = ccall(
+        (:ts_key_attributes, lib_path()), Int32,
+        (Ptr{Cvoid}, Ref{Int32}, Ref{Int64},
+         Ptr{UInt8}, UInt64, Ref{UInt64}, Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt8}, UInt64, Ref{UInt64}),
+        key.handle, out_type, out_res,
+        C_NULL, UInt64(0), owner_len, C_NULL, UInt64(0), name_len,
+        C_NULL, UInt64(0), feat_len,
+    )
+    _check(code)
+    owner_buf = Vector{UInt8}(undef, Int(owner_len[]) + 1)
+    name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
+    feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
+    code = ccall(
+        (:ts_key_attributes, lib_path()), Int32,
+        (Ptr{Cvoid}, Ref{Int32}, Ref{Int64},
+         Ptr{UInt8}, UInt64, Ref{UInt64}, Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt8}, UInt64, Ref{UInt64}),
+        key.handle, out_type, out_res,
+        owner_buf, UInt64(length(owner_buf)), owner_len,
+        name_buf, UInt64(length(name_buf)), name_len,
+        feat_buf, UInt64(length(feat_buf)), feat_len,
+    )
+    _check(code)
+    owner = String(owner_buf[1:Int(owner_len[])])
+    name = String(name_buf[1:Int(name_len[])])
+    features = JSON.parse(String(feat_buf[1:Int(feat_len[])]))
+    resolution = out_res[] == 0 ? nothing : Millisecond(out_res[])
+    return (
+        owner_uuid       = owner,
+        name             = name,
+        time_series_type = _type_for_code(out_type[]),
+        resolution       = resolution,
+        features         = features,
+    )
+end
+
+# Key-based alias so `SingleTimeSeries` matches the `get_time_series(T, store, key)`
+# shape the other types use (the bare `get_time_series(store, key)` form is kept).
+get_time_series(::Type{SingleTimeSeries}, store::Store, key::TimeSeriesKey) =
+    get_time_series(store, key)
+
+"""
+    get_time_series(SingleTimeSeries, store, owner_uuid, name; resolution, features)
+
+Attribute-addressed counterpart to `get_time_series(store, key)`.
+"""
+function get_time_series(
+    ::Type{SingleTimeSeries},
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    key = _make_key(owner_uuid, name, TS_TYPE_SINGLE; resolution=resolution, features=features)
+    return get_time_series(store, key)
+end
+
+"""
+    get_time_series(NonSequentialTimeSeries, store, owner_uuid, name; resolution, features)
+
+Attribute-addressed counterpart to `get_time_series(NonSequentialTimeSeries, store, key)`.
+"""
+function get_time_series(
+    ::Type{NonSequentialTimeSeries},
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    key = _make_key(owner_uuid, name, TS_TYPE_NON_SEQUENTIAL; resolution=resolution, features=features)
+    return get_time_series(NonSequentialTimeSeries, store, key)
 end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)
@@ -640,14 +959,52 @@ _features_arg(features) = isempty(features) ? C_NULL : JSON.json(features)
 _category_int(c::OwnerCategory) = Int32(Int(c))
 
 """
-    add_forecast!(store, owner_uuid, owner_type, owner_category, name, ts_type,
-                  initial_timestamp, resolution, horizon, interval, count, flat_values;
-                  features=Dict(), units=nothing, scaling_factor_multiplier=nothing)
+    add_time_series!(store, owner_uuid, owner_type, owner_category, ts::Deterministic; ...)
+    add_time_series!(store, owner_uuid, owner_type, owner_category, ts::Scenarios; ...)
 
-Add a forecast. `flat_values` is the flattened storage array (the caller owns the
-window layout); `ts_type` is one of the `TS_TYPE_*` codes.
+Add a dense forecast. `ts.data` is the canonical-shape Julia array and is stored
+as a standalone array. The association `name` / `scaling_factor_multiplier` come
+from the time series object.
 """
-function add_forecast!(
+function add_time_series!(
+    store::Store,
+    owner_uuid::AbstractString,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    ts::Deterministic;
+    features::AbstractDict=Dict{String,Any}(),
+    units::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+)
+    return _add_dense_forecast!(
+        store, owner_uuid, owner_type, owner_category, ts.name, TS_TYPE_DETERMINISTIC,
+        ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
+        features=features, units=units,
+        scaling_factor_multiplier=ts.scaling_factor_multiplier, logical_type=logical_type,
+    )
+end
+
+function add_time_series!(
+    store::Store,
+    owner_uuid::AbstractString,
+    owner_type::AbstractString,
+    owner_category::OwnerCategory,
+    ts::Scenarios;
+    features::AbstractDict=Dict{String,Any}(),
+    units::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+)
+    return _add_dense_forecast!(
+        store, owner_uuid, owner_type, owner_category, ts.name, TS_TYPE_SCENARIOS,
+        ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
+        features=features, units=units,
+        scaling_factor_multiplier=ts.scaling_factor_multiplier, logical_type=logical_type,
+    )
+end
+
+# Shared implementation: ccall the per-type C transport `ts_store_add_forecast`
+# (Deterministic / Scenarios).
+function _add_dense_forecast!(
     store::Store,
     owner_uuid::AbstractString,
     owner_type::AbstractString,
@@ -689,37 +1046,23 @@ function add_forecast!(
 end
 
 """
-    get_forecast_metadata(store, owner_uuid, name, ts_type; resolution, features=Dict())
+    transform_single_time_series!(store, horizon::Period, interval::Period) -> Int
 
-Return `(; initial_timestamp, resolution, horizon, interval, count, length, data_hash)`.
+Derive `DeterministicSingleTimeSeries` forecasts from the stored
+`SingleTimeSeries` associations (mirrors InfrastructureSystems.jl's
+`transform_single_time_series!`). Each `SingleTimeSeries` is re-described as a
+DST sharing the same underlying array; `count` is derived from each series'
+length. Returns the number of series transformed.
 """
-function get_forecast_metadata(
-    store::Store,
-    owner_uuid::AbstractString,
-    name::AbstractString,
-    ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-)
-    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
-    features_json = _features_arg(features)
-    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
-    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
+function transform_single_time_series!(store::Store, horizon::Period, interval::Period)
+    out_count = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_forecast_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring,
-         Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ms, features_json,
-        oi, orr, oh, ov, oc, ol, ohash,
+        (:ts_store_transform_single_time_series, lib_path()), Int32,
+        (Ptr{Cvoid}, Int64, Int64, Ref{UInt64}),
+        store.handle, _resolution_to_ms(horizon), _resolution_to_ms(interval), out_count,
     )
     _check(code)
-    return (
-        initial_timestamp=_from_unix_ms(oi[]),
-        resolution=Millisecond(orr[]),
-        horizon=Millisecond(oh[]),
-        interval=Millisecond(ov[]),
-        count=Int(oc[]), length=Int(ol[]), data_hash=ohash,
-    )
+    return Int(out_count[])
 end
 
 """True iff a time series of `ts_type` with the given attributes exists."""
@@ -755,25 +1098,31 @@ function remove_typed!(
     return nothing
 end
 
-"""Add a Probabilistic forecast (carries a `percentiles` vector)."""
-function add_probabilistic!(
+"""
+    add_time_series!(store, owner_uuid, owner_type, owner_category, ts::Probabilistic; ...)
+
+Add a `Probabilistic` forecast (carries a `percentiles` vector). The association
+`name` / `scaling_factor_multiplier` come from the time series object.
+"""
+function add_time_series!(
     store::Store,
     owner_uuid::AbstractString,
     owner_type::AbstractString,
     owner_category::OwnerCategory,
-    name::AbstractString,
-    initial_timestamp::DateTime,
-    resolution::Period,
-    horizon::Period,
-    interval::Period,
-    count::Integer,
-    percentiles::Vector{Float64},
-    data::AbstractArray;
+    ts::Probabilistic;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
+    name = ts.name
+    scaling_factor_multiplier = ts.scaling_factor_multiplier
+    initial_timestamp = ts.initial_timestamp
+    resolution = ts.resolution
+    horizon = ts.horizon
+    interval = ts.interval
+    count = ts.count
+    percentiles = ts.percentiles
+    data = ts.data
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
     scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
@@ -796,36 +1145,6 @@ function add_probabilistic!(
     )
     _check(code)
     return TimeSeriesKey(out_key[])
-end
-
-"""Read Probabilistic metadata; the named tuple also includes `percentiles`."""
-function get_probabilistic_metadata(
-    store::Store, owner_uuid::AbstractString, name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
-)
-    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
-    features_json = _features_arg(features)
-    oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
-    oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
-    op = Ref{Ptr{Float64}}(C_NULL); opl = Ref{UInt64}(0)
-    code = ccall(
-        (:ts_store_get_probabilistic_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Int64}, Ref{Int64}, Ref{Int64},
-         Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
-        store.handle, owner_uuid, name, resolution_ms, features_json,
-        oi, orr, oh, ov, oc, ol, ohash, op, opl,
-    )
-    _check(code)
-    np = Int(opl[])
-    percentiles = copy(unsafe_wrap(Array, op[], np; own=false))
-    ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), op[], opl[])
-    return (
-        initial_timestamp=_from_unix_ms(oi[]),
-        resolution=Millisecond(orr[]),
-        horizon=Millisecond(oh[]),
-        interval=Millisecond(ov[]),
-        count=Int(oc[]), length=Int(ol[]), data_hash=ohash, percentiles=percentiles,
-    )
 end
 
 # ---- Forecast data reads ---------------------------------------------------
@@ -923,6 +1242,19 @@ function _get_forecast_raw(
     )
     _check(code)
 
+    return _decode_forecast_outputs(
+        out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
+        out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+    )
+end
+
+# Decode the out-params populated by `ts_store_get_forecast` /
+# `ts_store_get_forecast_by_key` into the common named tuple, copying then
+# freeing every FFI-owned buffer.
+function _decode_forecast_outputs(
+    out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
+    out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+)
     # Copy dims and free FFI buffer.
     nd = Int(out_ndims[])
     dims_raw = unsafe_wrap(Array, out_dims[], nd; own=false)
@@ -945,25 +1277,89 @@ function _get_forecast_raw(
         Float64[]
     end
 
-    # Decode scalars.
-    initial_timestamp = _from_unix_ms(out_initial[])
-    resolution_out    = Millisecond(out_res[])
-    horizon_out       = Millisecond(out_horizon[])
-    interval_out      = Millisecond(out_interval[])
-    count_out         = Int(out_count[])
-    scenario_count    = Int(out_scen[])
-
     return (
-        initial_timestamp = initial_timestamp,
-        resolution        = resolution_out,
-        horizon           = horizon_out,
-        interval          = interval_out,
-        count             = count_out,
-        scenario_count    = scenario_count,
+        initial_timestamp = _from_unix_ms(out_initial[]),
+        resolution        = Millisecond(out_res[]),
+        horizon           = Millisecond(out_horizon[]),
+        interval          = Millisecond(out_interval[]),
+        count             = Int(out_count[]),
+        scenario_count    = Int(out_scen[]),
         dims              = dims,
         bytes             = bytes,
         dtype_code        = out_dtype[],
         percentiles       = percentiles,
+    )
+end
+
+# Key-based counterpart of `_get_forecast_raw`: reads via the key handle
+# (`ts_store_get_forecast_by_key`), so the time series type comes from the key.
+function _get_forecast_raw(
+    store::Store,
+    key::TimeSeriesKey;
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    time_range_present = time_range !== nothing
+    range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
+    range_end_ms   = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
+
+    out_initial   = Ref{Int64}(0)
+    out_res       = Ref{Int64}(0)
+    out_horizon   = Ref{Int64}(0)
+    out_interval  = Ref{Int64}(0)
+    out_count     = Ref{UInt64}(0)
+    out_scen      = Ref{UInt64}(0)
+    out_ndims     = Ref{UInt64}(0)
+    out_dims      = Ref{Ptr{UInt64}}(C_NULL)
+    out_dtype     = Ref{Int32}(0)
+    out_data      = Ref{Ptr{UInt8}}(C_NULL)
+    out_byte_len  = Ref{UInt64}(0)
+    out_pct       = Ref{Ptr{Float64}}(C_NULL)
+    out_pct_len   = Ref{UInt64}(0)
+
+    code = ccall(
+        (:ts_store_get_forecast_by_key, lib_path()), Int32,
+        (Ptr{Cvoid},   # handle
+         Ptr{Cvoid},   # key
+         Bool,         # time_range_present
+         Int64,        # time_range_start_ms
+         Int64,        # time_range_end_ms
+         Ref{Int64},   # out_initial_ts_unix_ms
+         Ref{Int64},   # out_resolution_ms
+         Ref{Int64},   # out_horizon_ms
+         Ref{Int64},   # out_interval_ms
+         Ref{UInt64},  # out_count
+         Ref{UInt64},  # out_scenario_count
+         Ref{UInt64},  # out_ndims
+         Ref{Ptr{UInt64}},  # out_dims
+         Ref{Int32},   # out_dtype
+         Ref{Ptr{UInt8}},   # out_data
+         Ref{UInt64},  # out_data_byte_len
+         Ref{Ptr{Float64}}, # out_percentiles
+         Ref{UInt64}), # out_percentiles_len
+        store.handle,
+        key.handle,
+        time_range_present,
+        range_start_ms,
+        range_end_ms,
+        out_initial,
+        out_res,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_scen,
+        out_ndims,
+        out_dims,
+        out_dtype,
+        out_data,
+        out_byte_len,
+        out_pct,
+        out_pct_len,
+    )
+    _check(code)
+
+    return _decode_forecast_outputs(
+        out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
+        out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
     )
 end
 
@@ -980,18 +1376,54 @@ function _decode_forecast_array(bytes::Vector{UInt8}, dtype_code::Int32, dims::V
 end
 
 """
-    get_deterministic(store, owner_uuid, name; resolution, features, time_range) -> NamedTuple
+    get_time_series(Deterministic, store, owner_uuid, name; resolution, features, time_range)
 
-Fetch a `Deterministic` forecast and return a named tuple:
-`(; initial_timestamp, resolution, horizon, interval, count, data)`.
-
-`data` is an N-dimensional Julia array with canonical shape
-`(H, count, element_dims...)` where `H = horizon / resolution`.
-
-Pass `time_range = (start::DateTime, end::DateTime)` (exclusive end) to select
-a window sub-range per the InfrastructureSystems.jl convention.
+Fetch a `Deterministic` forecast (or a `DeterministicSingleTimeSeries` synthesized
+into one). `data` has canonical shape `(H, count, element_dims...)` where
+`H = horizon / resolution`. Pass `time_range = (start, end)` (exclusive end) to
+select a window sub-range per the InfrastructureSystems.jl convention.
 """
-function get_deterministic(
+function get_time_series(
+    ::Type{Deterministic},
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    # A request for `Deterministic` matches either a stored `Deterministic` or a
+    # `DeterministicSingleTimeSeries` derived via `transform_single_time_series!`
+    # (synthesized into a Deterministic on read), mirroring InfrastructureSystems.jl.
+    matched_type = TS_TYPE_DETERMINISTIC
+    r = try
+        _get_forecast_raw(
+            store, owner_uuid, name, TS_TYPE_DETERMINISTIC;
+            resolution=resolution, features=features, time_range=time_range,
+        )
+    catch e
+        e isa NotFoundError || rethrow()
+        matched_type = TS_TYPE_DETERMINISTIC_SINGLE
+        _get_forecast_raw(
+            store, owner_uuid, name, TS_TYPE_DETERMINISTIC_SINGLE;
+            resolution=resolution, features=features, time_range=time_range,
+        )
+    end
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    a = _assoc_attrs(store, owner_uuid, name, matched_type; resolution=resolution, features=features)
+    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
+                         a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+end
+
+"""
+    get_time_series(DeterministicSingleTimeSeries, store, owner_uuid, name; resolution, features, time_range)
+
+Fetch a `DeterministicSingleTimeSeries` (derived via `transform_single_time_series!`)
+explicitly by its stored type. It has no materialized form, so the result is a
+[`Deterministic`].
+"""
+function get_time_series(
+    ::Type{DeterministicSingleTimeSeries},
     store::Store,
     owner_uuid::AbstractString,
     name::AbstractString;
@@ -1000,30 +1432,24 @@ function get_deterministic(
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_uuid, name, TS_TYPE_DETERMINISTIC;
+        store, owner_uuid, name, TS_TYPE_DETERMINISTIC_SINGLE;
         resolution=resolution, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    return (
-        initial_timestamp = r.initial_timestamp,
-        resolution        = r.resolution,
-        horizon           = r.horizon,
-        interval          = r.interval,
-        count             = r.count,
-        data              = data,
-    )
+    a = _assoc_attrs(store, owner_uuid, name, TS_TYPE_DETERMINISTIC_SINGLE;
+                     resolution=resolution, features=features)
+    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
+                         a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
 end
 
 """
-    get_probabilistic(store, owner_uuid, name; resolution, features, time_range) -> NamedTuple
+    get_time_series(Probabilistic, store, owner_uuid, name; resolution, features, time_range)
 
-Fetch a `Probabilistic` forecast and return a named tuple:
-`(; initial_timestamp, resolution, horizon, interval, count, percentiles, data)`.
-
-`data` is an N-dimensional Julia array with canonical shape
+Fetch a `Probabilistic` forecast. `data` has canonical shape
 `(num_percentiles, H, count, element_dims...)`.
 """
-function get_probabilistic(
+function get_time_series(
+    ::Type{Probabilistic},
     store::Store,
     owner_uuid::AbstractString,
     name::AbstractString;
@@ -1036,27 +1462,22 @@ function get_probabilistic(
         resolution=resolution, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    return (
-        initial_timestamp = r.initial_timestamp,
-        resolution        = r.resolution,
-        horizon           = r.horizon,
-        interval          = r.interval,
-        count             = r.count,
-        percentiles       = r.percentiles,
-        data              = data,
+    a = _assoc_attrs(store, owner_uuid, name, TS_TYPE_PROBABILISTIC;
+                     resolution=resolution, features=features)
+    return Probabilistic(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
+        a.name; scaling_factor_multiplier=a.scaling_factor_multiplier,
     )
 end
 
 """
-    get_scenarios(store, owner_uuid, name; resolution, features, time_range) -> NamedTuple
+    get_time_series(Scenarios, store, owner_uuid, name; resolution, features, time_range)
 
-Fetch a `Scenarios` forecast and return a named tuple:
-`(; initial_timestamp, resolution, horizon, interval, count, scenario_count, data)`.
-
-`data` is an N-dimensional Julia array with canonical shape
+Fetch a `Scenarios` forecast. `data` has canonical shape
 `(scenario_count, H, count, element_dims...)`.
 """
-function get_scenarios(
+function get_time_series(
+    ::Type{Scenarios},
     store::Store,
     owner_uuid::AbstractString,
     name::AbstractString;
@@ -1069,15 +1490,92 @@ function get_scenarios(
         resolution=resolution, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    return (
-        initial_timestamp = r.initial_timestamp,
-        resolution        = r.resolution,
-        horizon           = r.horizon,
-        interval          = r.interval,
-        count             = r.count,
-        scenario_count    = r.scenario_count,
-        data              = data,
+    a = _assoc_attrs(store, owner_uuid, name, TS_TYPE_SCENARIOS;
+                     resolution=resolution, features=features)
+    # `scenario_count` is the leading axis of the decoded data.
+    return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
+                     a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+end
+
+# ---- Key-based forecast reads ----------------------------------------------
+#
+# Counterparts to the attribute-addressed forecast readers above, keyed by a
+# `TimeSeriesKey` handle (returned by `add_time_series!`). The time series type
+# comes from the key; the `::Type{...}` argument selects how the result is
+# decoded and which struct is returned. Unlike the attribute-based `Deterministic`
+# reader there is no `DeterministicSingleTimeSeries` fallback — the key already
+# names the exact stored type (a DST key reads back as a `Deterministic`).
+
+"""
+    get_time_series(Deterministic, store, key; time_range)
+
+Key-based counterpart to `get_time_series(Deterministic, store, owner_uuid, name; ...)`.
+"""
+function get_time_series(
+    ::Type{Deterministic},
+    store::Store,
+    key::TimeSeriesKey;
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(store, key; time_range=time_range)
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    a = _get_association(store, key)
+    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
+                         a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+end
+
+"""
+    get_time_series(DeterministicSingleTimeSeries, store, key; time_range)
+
+Key-based read of a `DeterministicSingleTimeSeries` key (as returned by
+`get_time_series_keys`). It has no materialized form, so the result is a
+[`Deterministic`] — identical decoding to the `Deterministic` key reader.
+"""
+function get_time_series(
+    ::Type{DeterministicSingleTimeSeries},
+    store::Store,
+    key::TimeSeriesKey;
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    return get_time_series(Deterministic, store, key; time_range=time_range)
+end
+
+"""
+    get_time_series(Probabilistic, store, key; time_range)
+
+Key-based counterpart to `get_time_series(Probabilistic, store, owner_uuid, name; ...)`.
+"""
+function get_time_series(
+    ::Type{Probabilistic},
+    store::Store,
+    key::TimeSeriesKey;
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(store, key; time_range=time_range)
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    a = _get_association(store, key)
+    return Probabilistic(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
+        a.name; scaling_factor_multiplier=a.scaling_factor_multiplier,
     )
+end
+
+"""
+    get_time_series(Scenarios, store, key; time_range)
+
+Key-based counterpart to `get_time_series(Scenarios, store, owner_uuid, name; ...)`.
+"""
+function get_time_series(
+    ::Type{Scenarios},
+    store::Store,
+    key::TimeSeriesKey;
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(store, key; time_range=time_range)
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    a = _get_association(store, key)
+    return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
+                     a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
 end
 
 end # module TimeSeriesStore
