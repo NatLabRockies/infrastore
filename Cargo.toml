@@ -7,6 +7,7 @@ members = [
     "crates/time-series-store-py",
     "crates/time-series-store-ffi",
     "crates/time-series-store-cli",
+    "crates/time-series-store-bench",
 ]
 
 [workspace.package]

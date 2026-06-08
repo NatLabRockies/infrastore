@@ -1575,6 +1575,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "time-series-store-bench"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "tempfile",
+ "time-series-store-core",
+]
+
+[[package]]
 name = "time-series-store-cli"
 version = "0.1.0"
 dependencies = [
