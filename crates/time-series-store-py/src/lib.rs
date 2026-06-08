@@ -1179,10 +1179,37 @@ fn unused_tz_imports() {
     let _ = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 }
 
+// ---- Tracing ---------------------------------------------------------------
+
+/// Initialize the Rust tracing subscriber.
+///
+/// `filter` is a [`tracing_subscriber::EnvFilter`] directive string, e.g.
+/// `"debug"`, `"time_series_store_core=debug"`, or `"warn,time_series_store_core=trace"`.
+///
+/// The subscriber is initialized at most once per process. Calling this
+/// function again after a successful first call is a no-op. If `RUST_LOG` is
+/// set when the module is imported, a subscriber is initialized automatically
+/// before this function is called; use this function when you need programmatic
+/// control without relying on environment variables.
+#[pyfunction]
+fn init_tracing(filter: &str) -> PyResult<()> {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(filter))
+        .try_init();
+    Ok(())
+}
+
 // ---- Module init ----------------------------------------------------------
 
 #[pymodule]
 fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Auto-initialize from RUST_LOG if set. try_init() is a no-op when a
+    // subscriber is already registered, so this is safe to call unconditionally.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
     m.add_class::<PyStore>()?;
     m.add_class::<PySingleTimeSeries>()?;
     m.add_class::<PyNonSequentialTimeSeries>()?;
@@ -1207,5 +1234,6 @@ fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ReadOnlyStoreError", py.get_type::<ReadOnlyStoreError>())?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add_function(wrap_pyfunction!(init_tracing, m)?)?;
     Ok(())
 }

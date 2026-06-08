@@ -17,3 +17,4 @@ ndarray = { workspace = true }
 numpy = { workspace = true }
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py310", "chrono"] }
 time-series-store-core = { workspace = true }
+tracing-subscriber = { workspace = true }

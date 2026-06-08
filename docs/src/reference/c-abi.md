@@ -333,3 +333,20 @@ cargo build -p time-series-store-ffi --release
 
 Point consumers at it via the `TIME_SERIES_STORE_LIB` environment variable (see the
 [Julia how-to](../how-to/integrate-julia.md)).
+
+## Tracing
+
+```c
+int32_t ts_store_init_logging(const char *filter);
+```
+
+Initialize the Rust tracing subscriber. `filter` is a null-terminated UTF-8
+[`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+directive string (e.g. `"debug"` or `"time_series_store_core=debug"`). Pass `NULL` to read the
+`RUST_LOG` environment variable; if that variable is also unset, no output is produced.
+
+The subscriber is initialized at most once per process — subsequent calls are no-ops. Returns
+`TS_OK` on success or `TS_ERR_INVALID_UTF8` if `filter` is not valid UTF-8.
+
+The [Julia binding](./julia-api.md) calls this automatically from its `__init__` hook when
+`RUST_LOG` is set, and exposes `init_logging` for explicit control.

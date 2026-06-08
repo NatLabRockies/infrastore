@@ -101,3 +101,38 @@ The two metrics to watch:
   queries rather than Rust overhead. The packed `SingleTimeSeries` layout places one timestep from
   up to 1 000 columns in a single HDF5 chunk, so per-step cost should grow slowly until a second
   dataset is needed.
+
+## Tracing spans for deeper diagnosis
+
+When the benchmark numbers show a problem but don't tell you which layer is slow, enable the
+built-in tracing spans with `--log-level`:
+
+```sh
+# Show all debug-level spans from the store core only (least noise)
+tss-bench --log-level time_series_store_core=debug add --count 100 --in-memory
+
+# Show everything — useful when the bottleneck might be in tss-bench itself
+tss-bench --log-level debug add --count 100
+```
+
+`RUST_LOG` is also accepted as a fallback when `--log-level` is not provided.
+
+The key spans emitted by `time-series-store-core`:
+
+| Span                      | Layer          | Key fields                                    |
+| ------------------------- | -------------- | --------------------------------------------- |
+| `add_time_series_bulk`    | `Store`        | `count` — number of items in the bulk request |
+| `get_time_series`         | `Store`        | `owner`, `name`, `has_time_range`, `ts_type`  |
+| `remove_time_series`      | `Store`        | `owner`, `name`                               |
+| `put_array`               | NetCDF backend | `bytes`, `packed`                             |
+| `put_packed`              | NetCDF backend | `bytes`, `resolution_ms`                      |
+| `put_standalone`          | NetCDF backend | `bytes`                                       |
+| `get_array` / `get_slice` | NetCDF backend | `start`, `end` (slice only)                   |
+| `read_locked`             | NetCDF backend | —                                             |
+| `rebuild_index`           | NetCDF backend | — (runs once on `Store::open`)                |
+
+Spans nest: a single `add_time_series_bulk` call will contain one `put_array` span per item, which
+in turn contains a `put_packed` or `put_standalone` span. This makes it straightforward to see
+whether time is spent in metadata insertion, NetCDF I/O, or the `debug_span` overhead itself.
+
+The `tss` CLI supports the same `--log-level` flag for diagnosing a live store.

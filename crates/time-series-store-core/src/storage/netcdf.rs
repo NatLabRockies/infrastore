@@ -302,6 +302,7 @@ impl NetCdfBackend {
         inner.compression
     }
 
+    #[tracing::instrument(skip(self))]
     fn rebuild_index(&mut self) -> Result<()> {
         let inner = self.inner.get_mut().expect("mutex poisoned");
 
@@ -528,6 +529,7 @@ impl Inner {
         ranges.as_slice().into()
     }
 
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len(), resolution_ms))]
     fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution_ms: i64) -> Result<()> {
         let length = data.length();
         let element_shape = data.element_shape().to_vec();
@@ -578,6 +580,7 @@ impl Inner {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
     fn put_standalone(&mut self, hash: &[u8; 32], data: &TypedArray) -> Result<()> {
         let var = format!("{STANDALONE_PREFIX}{}", hash_hex(hash));
         // If the variable already exists (live or tombstoned), the content is
@@ -613,6 +616,7 @@ impl Inner {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, hash, range))]
     fn read_locked(&self, hash: &[u8; 32], range: Option<Range<usize>>) -> Result<TypedArray> {
         let loc = self
             .by_hash
@@ -690,6 +694,7 @@ fn dtype_of_variable(var: &netcdf::Variable<'_>) -> Result<Dtype> {
 }
 
 impl StorageBackend for NetCdfBackend {
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len(), packed))]
     fn put_array(
         &mut self,
         hash: &[u8; 32],
@@ -708,11 +713,13 @@ impl StorageBackend for NetCdfBackend {
         }
     }
 
+    #[tracing::instrument(skip(self, hash))]
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_locked(hash, None)
     }
 
+    #[tracing::instrument(skip(self, hash), fields(start = range.start, end = range.end))]
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_locked(hash, Some(range))

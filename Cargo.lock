@@ -1582,6 +1582,8 @@ dependencies = [
  "clap",
  "tempfile",
  "time-series-store-core",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1626,6 +1628,7 @@ dependencies = [
  "ndarray",
  "serde_json",
  "time-series-store-core",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1652,6 +1655,7 @@ dependencies = [
  "numpy",
  "pyo3",
  "time-series-store-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

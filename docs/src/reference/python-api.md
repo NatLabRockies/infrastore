@@ -294,3 +294,23 @@ All inherit from `TimeSeriesError`:
 
 Feature-value typing note: because `bool` is a subtype of `int` in Python, the binding checks `bool`
 first, so `True`/`False` features are stored as booleans, not integers.
+
+## `init_tracing`
+
+```python
+def init_tracing(filter: str) -> None: ...
+```
+
+Initialize the Rust tracing subscriber with the given
+[`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+directive string. Examples:
+
+```python
+init_tracing("debug")                            # all targets at DEBUG
+init_tracing("time_series_store_core=debug")     # store core only
+init_tracing("warn,time_series_store_core=trace") # warn globally, trace the core
+```
+
+Silently no-ops if a subscriber is already registered (including the one auto-initialized from
+`RUST_LOG` at module import). See the
+[Python developer guide](../guides/python.md#diagnostics-and-tracing) for usage examples.

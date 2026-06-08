@@ -35,6 +35,23 @@ typedef struct TsKey TsKey;
 typedef struct TsStore TsStore;
 
 /**
+ * Initialize the Rust tracing subscriber.
+ *
+ * `filter` is a null-terminated UTF-8 [`EnvFilter`] directive string, e.g.
+ * `"debug"` or `"time_series_store_core=debug"`. Pass `NULL` to read the
+ * `RUST_LOG` environment variable (or emit nothing if the variable is unset).
+ *
+ * The subscriber is initialized at most once per process. Subsequent calls
+ * are no-ops. Returns `TS_OK` on success or `TS_ERR_INVALID_UTF8` if
+ * `filter` is not valid UTF-8.
+ *
+ * # Safety
+ *
+ * `filter` must be a valid null-terminated UTF-8 string or `NULL`.
+ */
+int32_t ts_store_init_logging(const char *filter);
+
+/**
  * Create a time-series store and return an owning handle through `out`.
  *
  * # Safety

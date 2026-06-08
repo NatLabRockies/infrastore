@@ -44,6 +44,12 @@ type Error = Box<dyn std::error::Error>;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Log filter directive (also read from RUST_LOG); defaults to `warn`.
+    ///
+    /// Examples: `debug`, `tss_bench=debug`, `time_series_store_core=debug`.
+    #[arg(long, env = "RUST_LOG", global = true)]
+    log_level: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -103,6 +109,7 @@ struct AllArgs {
 
 fn main() -> Result<(), Error> {
     let cli = Cli::parse();
+    init_tracing(cli.log_level.as_deref());
     match cli.command {
         Command::Add(args) => run_add(&args)?,
         Command::Read(args) => run_read(&args)?,
@@ -505,4 +512,13 @@ fn print_step_stats(step_times: &[StdDuration], count: usize) {
 
 fn storage_label(c: &CommonArgs) -> &'static str {
     if c.in_memory { "in-memory" } else { "on-disk" }
+}
+
+fn init_tracing(level: Option<&str>) {
+    use tracing_subscriber::EnvFilter;
+    let filter = match level {
+        Some(l) => EnvFilter::new(l),
+        None => EnvFilter::new("warn"),
+    };
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }

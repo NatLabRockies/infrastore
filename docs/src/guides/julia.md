@@ -214,3 +214,36 @@ The model is designed to back an InfrastructureSystems.jl time-series store:
 
 See [Language Bindings](../explanation/bindings.md#infrastructuresystemsjl-integration) for how this
 maps onto the FFI.
+
+## Diagnostics and tracing
+
+The store emits structured tracing spans for every significant operation. To see them, initialize a
+subscriber before your first store call.
+
+**Via environment variable** — set `RUST_LOG` before loading the package. The module's `__init__`
+hook calls `init_logging("")` automatically, which reads `RUST_LOG` if set:
+
+```sh
+# shell
+export RUST_LOG=time_series_store_core=debug
+julia --project=. myscript.jl
+```
+
+**Programmatically** — call `init_logging` with a filter directive string:
+
+```julia
+using TimeSeriesStore
+
+init_logging("time_series_store_core=debug")
+
+store = Store(in_memory=true)
+add_time_series!(store, ...)   # spans appear on stderr
+```
+
+`init_logging` is a no-op if a subscriber is already registered (including the automatic one from
+`RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
+bare level such as `"debug"` to match everything. Useful targets:
+
+| Target                   | What it covers                                               |
+| ------------------------ | ------------------------------------------------------------ |
+| `time_series_store_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |

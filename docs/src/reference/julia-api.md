@@ -323,3 +323,33 @@ The message text comes from the FFI layer's thread-local error buffer.
 - `DateTime` is converted to/from Unix milliseconds at the boundary.
 - `resolution` is passed as a `Period` and converted to milliseconds; reads return resolution as
   `Millisecond`.
+
+## Tracing
+
+```julia
+init_logging(level::AbstractString = "") -> Nothing
+```
+
+Initialize the Rust tracing subscriber. `level` is an
+[`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
+directive string such as `"debug"` or `"time_series_store_core=debug"`. Pass an empty string (the
+default) to read `RUST_LOG`; if that variable is also unset, no output is produced.
+
+The subscriber is initialized at most once per process — subsequent calls are no-ops. The module's
+`__init__` hook calls `init_logging("")` automatically when `RUST_LOG` is set, so the common case
+requires no code change:
+
+```sh
+export RUST_LOG=time_series_store_core=debug
+julia --project=. myscript.jl
+```
+
+For programmatic control without environment variables:
+
+```julia
+using TimeSeriesStore
+init_logging("time_series_store_core=debug")
+```
+
+See [Julia developer guide](../guides/julia.md#diagnostics-and-tracing) for usage examples and a
+table of available span targets.

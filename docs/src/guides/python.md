@@ -163,3 +163,36 @@ got = store.get_time_series(key)
 assert got.name == "load"
 assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ```
+
+## Diagnostics and tracing
+
+The store emits structured tracing spans for every significant operation. To see them, initialize a
+subscriber before your first store call.
+
+**Via environment variable** — set `RUST_LOG` before starting Python. The module auto-initializes a
+subscriber on import when this variable is set:
+
+```sh
+RUST_LOG=debug python myscript.py
+# or, to limit output to the store core only:
+RUST_LOG=time_series_store_core=debug python myscript.py
+```
+
+**Programmatically** — call `init_tracing` with a filter directive string:
+
+```python
+from time_series_store import init_tracing
+
+init_tracing("time_series_store_core=debug")
+
+store = TimeSeriesStore.create(in_memory=True)
+store.add_time_series(...)   # spans appear on stderr
+```
+
+`init_tracing` is a no-op if a subscriber is already registered (including the automatic one from
+`RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
+bare level such as `"debug"` to match everything. Useful targets:
+
+| Target                   | What it covers                                               |
+| ------------------------ | ------------------------------------------------------------ |
+| `time_series_store_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |

@@ -56,6 +56,39 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
     code
 }
 
+// ---- Logging --------------------------------------------------------------
+
+/// Initialize the Rust tracing subscriber.
+///
+/// `filter` is a null-terminated UTF-8 [`EnvFilter`] directive string, e.g.
+/// `"debug"` or `"time_series_store_core=debug"`. Pass `NULL` to read the
+/// `RUST_LOG` environment variable (or emit nothing if the variable is unset).
+///
+/// The subscriber is initialized at most once per process. Subsequent calls
+/// are no-ops. Returns `TS_OK` on success or `TS_ERR_INVALID_UTF8` if
+/// `filter` is not valid UTF-8.
+///
+/// # Safety
+///
+/// `filter` must be a valid null-terminated UTF-8 string or `NULL`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_init_logging(filter: *const c_char) -> i32 {
+    use tracing_subscriber::EnvFilter;
+    let env_filter = if filter.is_null() {
+        EnvFilter::from_default_env()
+    } else {
+        let s = match unsafe { cstr_to_str(filter) } {
+            Ok(s) => s,
+            Err(code) => return code,
+        };
+        EnvFilter::new(s)
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+    TS_OK
+}
+
 // ---- Handles --------------------------------------------------------------
 
 pub struct TsStoreHandle {

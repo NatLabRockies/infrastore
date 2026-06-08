@@ -209,6 +209,7 @@ impl Store {
 
     /// Bulk insert. All-or-nothing: any error rolls back every association
     /// and array put performed in this call.
+    #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -361,6 +362,13 @@ impl Store {
             };
 
             let already_present = self.backend.contains(&hash)?;
+            tracing::debug!(
+                owner = %item.owner_uuid,
+                bytes = data.bytes.len(),
+                packed,
+                already_present,
+                "backend put_array",
+            );
             self.backend.put_array(&hash, data, resolution_ms, packed)?;
             if !already_present {
                 staged_hashes.push(hash);
@@ -383,9 +391,11 @@ impl Store {
         }
 
         tx.commit()?;
+        tracing::debug!(count = keys.len(), "transaction committed");
         Ok(keys)
     }
 
+    #[tracing::instrument(skip(self, key), fields(owner = %key.owner_uuid, name = %key.name))]
     pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -434,12 +444,14 @@ impl Store {
         Ok(count)
     }
 
+    #[tracing::instrument(skip(self, key, time_range), fields(owner = %key.owner_uuid, name = %key.name, has_time_range = time_range.is_some()))]
     pub fn get_time_series(
         &self,
         key: &TimeSeriesKey,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
         let meta = self.metadata.get_by_key(key)?;
+        tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
                 let initial = meta.initial_timestamp.ok_or_else(|| {

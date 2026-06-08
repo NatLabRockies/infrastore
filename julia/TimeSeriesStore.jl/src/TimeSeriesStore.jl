@@ -12,7 +12,8 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        verify_integrity, compact!,
        get_metadata, get_array_by_hash, open_store, flush!, clear!,
        transform_single_time_series!, has_typed, remove_typed!,
-       close!
+       close!,
+       init_logging
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
 #
@@ -1636,6 +1637,39 @@ function get_time_series(
     a = _get_association(store, key)
     return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                      a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+end
+
+
+# ---- Tracing ---------------------------------------------------------------
+
+"""
+    init_logging(level::AbstractString = "")
+
+Initialize the Rust tracing subscriber.
+
+`level` is a [`tracing_subscriber::EnvFilter`] directive string such as
+`"debug"`, `"time_series_store_core=debug"`, or
+`"warn,time_series_store_core=trace"`. Pass an empty string (the default)
+to read the `RUST_LOG` environment variable; if that variable is also unset,
+no output is produced.
+
+The subscriber is initialized at most once per process — subsequent calls are
+no-ops. `TimeSeriesStore` calls `init_logging("")` automatically in its
+`__init__` hook, so setting `ENV["RUST_LOG"]` before `using TimeSeriesStore`
+is sufficient for the common case.
+"""
+function init_logging(level::AbstractString="")
+    filter_ptr = isempty(level) ? C_NULL : level
+    ccall((:ts_store_init_logging, lib_path()), Int32, (Cstring,), filter_ptr)
+    return nothing
+end
+
+# Auto-initialize from RUST_LOG when the module is loaded.
+function __init__()
+    rust_log = get(ENV, "RUST_LOG", "")
+    if !isempty(rust_log)
+        init_logging(rust_log)
+    end
 end
 
 end # module TimeSeriesStore
