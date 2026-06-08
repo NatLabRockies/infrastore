@@ -180,6 +180,10 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         features: Some(features_to_pb(&m.features)),
         scaling_factor_multiplier: m.scaling_factor_multiplier.clone().unwrap_or_default(),
         units: m.units.clone().unwrap_or_default(),
+        dtype: m.dtype.code(),
+        element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
+        logical_type: m.logical_type.clone().unwrap_or_default(),
+        percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
 
@@ -234,12 +238,14 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         features,
         scaling_factor_multiplier: optional_string(m.scaling_factor_multiplier),
         units: optional_string(m.units),
-        // Probabilistic percentiles are not exposed over the gRPC contract.
-        percentiles: None,
-        // Element typing is not yet carried on the gRPC contract; default scalar f64.
-        dtype: Dtype::F64,
-        element_shape: Vec::new(),
-        logical_type: None,
+        percentiles: if m.percentiles.is_empty() {
+            None
+        } else {
+            Some(m.percentiles)
+        },
+        dtype: Dtype::from_code(m.dtype).unwrap_or(Dtype::F64),
+        element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
+        logical_type: optional_string(m.logical_type),
     })
 }
 
@@ -253,18 +259,22 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             resolution_ns: duration_to_ns(s.resolution),
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            values: s.data.to_f64_vec().unwrap_or_default(),
+            dtype: s.data.dtype.code(),
+            value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
+            logical_type: String::new(),
         },
         TimeSeriesData::NonSequentialTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: String::new(),
             resolution_ns: 0,
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            values: s.data.to_f64_vec().unwrap_or_default(),
+            dtype: s.data.dtype.code(),
+            value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
+            logical_type: String::new(),
         },
     }
 }
@@ -277,7 +287,16 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
         }
     })?;
     let shape: Vec<usize> = resp.shape.iter().map(|d| *d as usize).collect();
-    let data = TypedArray::from_f64(shape, &resp.values);
+    let dtype = Dtype::from_code(resp.dtype).ok_or(ConvertError::InvalidValue {
+        field: "dtype",
+        message: format!("unknown dtype code {}", resp.dtype),
+    })?;
+    let data = TypedArray::new(dtype, shape, resp.value_bytes).map_err(|e| {
+        ConvertError::InvalidValue {
+            field: "value_bytes",
+            message: e,
+        }
+    })?;
     match ts_type {
         pb::TimeSeriesType::SingleTimeSeries => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)

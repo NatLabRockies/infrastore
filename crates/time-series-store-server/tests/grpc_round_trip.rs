@@ -6,7 +6,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store,
+    Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store,
     TimeSeriesData, TimeSeriesType, TypedArray, create_store,
 };
 use time_series_store_server::client::RemoteClient;
@@ -214,4 +214,43 @@ async fn non_sequential_round_trip_over_grpc() {
     let irregular = got.as_non_sequential().unwrap();
     assert_eq!(irregular.timestamps, timestamps[1..]);
     assert_eq!(irregular.data.to_f64_vec().unwrap(), vec![5.0, 6.0]);
+}
+
+#[tokio::test]
+async fn dtype_preserved_over_grpc() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let mut bytes = Vec::new();
+    for v in [10i64, 20, 30] {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let data = TypedArray::new(Dtype::I64, vec![3], bytes).unwrap();
+    store
+        .add_time_series(
+            "1",
+            "Generator",
+            OwnerCategory::Component,
+            "load",
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(initial, resolution, data)),
+            Features::new(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+    let keys = client.get_time_series_keys("1".to_string()).await.unwrap();
+    let got = client.get_time_series(&keys[0], None).await.unwrap();
+    let single = got.as_single().unwrap();
+    // dtype + raw bytes survive the round trip.
+    assert_eq!(single.data.dtype, Dtype::I64);
+    let vals: Vec<i64> = single
+        .data
+        .bytes
+        .chunks_exact(8)
+        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(vals, vec![10, 20, 30]);
 }

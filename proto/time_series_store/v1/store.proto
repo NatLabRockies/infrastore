@@ -72,6 +72,11 @@ message TimeSeriesMetadata {
   Features        features                       = 14;
   string          scaling_factor_multiplier      = 15;
   string          units                          = 16;
+  // Element typing.
+  int32           dtype                          = 17;       // Dtype code
+  repeated uint64 element_shape                  = 18;       // per-step trailing dims
+  string          logical_type                   = 19;       // opaque reconstruction tag
+  repeated double percentiles                    = 20;        // Probabilistic only
 }
 
 // ---- ListTimeSeries ----
@@ -101,9 +106,12 @@ message GetResp {
   int64              resolution_ns              = 2;
   uint64             length                     = 3;
   repeated uint64    shape                      = 4;
-  repeated double    values                     = 5;
+  reserved 5;  // was: repeated double values (replaced by dtype + value_bytes)
   TimeSeriesType     time_series_type            = 6;
   repeated string    timestamps_rfc3339          = 7;
+  int32              dtype                       = 8;        // Dtype code
+  bytes              value_bytes                 = 9;        // raw little-endian, row-major
+  string             logical_type                = 10;
 }
 
 // ---- GetTimeSeriesKeys ----
