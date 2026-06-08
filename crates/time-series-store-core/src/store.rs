@@ -14,7 +14,8 @@ use crate::types::array::TypedArray;
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
 use crate::types::time_series::{
-    NonSequentialTimeSeries, SingleTimeSeries, TimeSeriesData, TimeSeriesType,
+    Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
+    TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -273,10 +274,20 @@ impl Store {
                         },
                     )
                 }
+                TimeSeriesData::Deterministic(_)
+                | TimeSeriesData::Probabilistic(_)
+                | TimeSeriesData::Scenarios(_) => {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "forecast types must be added via add_forecast, not add_time_series".into(),
+                    ));
+                }
             };
             let data = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => &single.data,
                 TimeSeriesData::NonSequentialTimeSeries(non_sequential) => &non_sequential.data,
+                TimeSeriesData::Deterministic(_)
+                | TimeSeriesData::Probabilistic(_)
+                | TimeSeriesData::Scenarios(_) => unreachable!(),
             };
 
             let already_present = self.backend.contains(&hash)?;
@@ -466,10 +477,189 @@ impl Store {
                     .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
-            other => Err(TimeSeriesError::InvalidParameter(format!(
-                "time series type {} not supported in v0",
-                other.as_str()
-            ))),
+            TimeSeriesType::Deterministic => {
+                let arr = self.backend.get_array(&meta.data_hash)?;
+                let initial = required_initial(&meta, "Deterministic")?;
+                let resolution = required_resolution(&meta, "Deterministic")?;
+                let horizon = required_horizon(&meta, "Deterministic")?;
+                let interval = required_interval(&meta, "Deterministic")?;
+                let count = required_count(&meta, "Deterministic")?;
+                let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
+                // Validate stored shape: [H, count, *E].
+                validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
+                let (w0, w1, window_initial) =
+                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let windowed = if w0 == 0 && w1 == count {
+                    arr
+                } else {
+                    slice_count_axis(&arr, 1, w0, w1)
+                };
+                let det = Deterministic::new(
+                    window_initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    w1 - w0,
+                    windowed,
+                )
+                .map_err(TimeSeriesError::IntegrityError)?;
+                Ok(TimeSeriesData::Deterministic(det))
+            }
+
+            TimeSeriesType::Probabilistic => {
+                let arr = self.backend.get_array(&meta.data_hash)?;
+                let initial = required_initial(&meta, "Probabilistic")?;
+                let resolution = required_resolution(&meta, "Probabilistic")?;
+                let horizon = required_horizon(&meta, "Probabilistic")?;
+                let interval = required_interval(&meta, "Probabilistic")?;
+                let count = required_count(&meta, "Probabilistic")?;
+                let percentiles = meta.percentiles.clone().ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("Probabilistic missing percentiles".into())
+                })?;
+                let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
+                let p = percentiles.len();
+                // Validate stored shape: [P, H, count, *E].
+                validate_forecast_shape(&arr, &[p, h, count], "Probabilistic")?;
+                let (w0, w1, window_initial) =
+                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let windowed = if w0 == 0 && w1 == count {
+                    arr
+                } else {
+                    slice_count_axis(&arr, 2, w0, w1)
+                };
+                let prob = Probabilistic::new(
+                    window_initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    w1 - w0,
+                    percentiles,
+                    windowed,
+                )
+                .map_err(TimeSeriesError::IntegrityError)?;
+                Ok(TimeSeriesData::Probabilistic(prob))
+            }
+
+            TimeSeriesType::Scenarios => {
+                let arr = self.backend.get_array(&meta.data_hash)?;
+                let initial = required_initial(&meta, "Scenarios")?;
+                let resolution = required_resolution(&meta, "Scenarios")?;
+                let horizon = required_horizon(&meta, "Scenarios")?;
+                let interval = required_interval(&meta, "Scenarios")?;
+                let count = required_count(&meta, "Scenarios")?;
+                let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
+                // scenario_count = arr.shape[0]; validate remaining dims.
+                if arr.shape.len() < 3 {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "Scenarios: stored shape {:?} must have at least 3 dims",
+                        arr.shape
+                    )));
+                }
+                let scenario_count = arr.shape[0];
+                validate_forecast_shape(&arr, &[scenario_count, h, count], "Scenarios")?;
+                let (w0, w1, window_initial) =
+                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let windowed = if w0 == 0 && w1 == count {
+                    arr
+                } else {
+                    slice_count_axis(&arr, 2, w0, w1)
+                };
+                let scen = Scenarios::new(
+                    window_initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    w1 - w0,
+                    scenario_count,
+                    windowed,
+                )
+                .map_err(TimeSeriesError::IntegrityError)?;
+                Ok(TimeSeriesData::Scenarios(scen))
+            }
+
+            TimeSeriesType::DeterministicSingleTimeSeries => {
+                // The stored array is the underlying STS 1-D-like array, shape
+                // [total_len, *E]. Synthesize a Deterministic of shape
+                // [H, count, *E] by gathering windows.
+                let arr = self.backend.get_array(&meta.data_hash)?;
+                let initial = required_initial(&meta, "DeterministicSingleTimeSeries")?;
+                let resolution = required_resolution(&meta, "DeterministicSingleTimeSeries")?;
+                let horizon = required_horizon(&meta, "DeterministicSingleTimeSeries")?;
+                let interval = required_interval(&meta, "DeterministicSingleTimeSeries")?;
+                let count = required_count(&meta, "DeterministicSingleTimeSeries")?;
+                let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
+                let interval_ns = interval.num_nanoseconds().ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "DeterministicSingleTimeSeries: interval overflows i64 ns".into(),
+                    )
+                })?;
+                let res_ns = resolution.num_nanoseconds().ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "DeterministicSingleTimeSeries: resolution overflows i64 ns".into(),
+                    )
+                })?;
+                if interval_ns % res_ns != 0 {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "DeterministicSingleTimeSeries: interval ({interval_ns} ns) \
+                         is not evenly divisible by resolution ({res_ns} ns)"
+                    )));
+                }
+                let interval_steps = (interval_ns / res_ns) as usize;
+                let total_len = arr.length();
+                // Validate that all windows fit in the underlying array.
+                let required = (count.saturating_sub(1)) * interval_steps + h;
+                if required > total_len {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "DeterministicSingleTimeSeries: (count-1)*interval_steps+H = {required} \
+                         exceeds total_len = {total_len}"
+                    )));
+                }
+                // Element bytes per underlying step.
+                let elem_shape: Vec<usize> = arr.shape[1..].to_vec();
+                let elem_bytes: usize = elem_shape.iter().product::<usize>() * arr.dtype.size();
+                let elem_factor = if elem_bytes == 0 {
+                    arr.dtype.size()
+                } else {
+                    elem_bytes
+                };
+
+                let (w0, w1, window_initial) =
+                    resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
+                let selected = w1 - w0;
+
+                // Build output array [H, selected, *E].
+                let out_shape: Vec<usize> = std::iter::once(h)
+                    .chain(std::iter::once(selected))
+                    .chain(elem_shape.iter().copied())
+                    .collect();
+                let out_nelems: usize = out_shape.iter().product();
+                let mut out_bytes = vec![0u8; out_nelems * arr.dtype.size()];
+
+                for j in 0..selected {
+                    let k = w0 + j; // source window index
+                    for s in 0..h {
+                        let src_idx = k * interval_steps + s;
+                        let src_off = src_idx * elem_factor;
+                        // Row-major offset for [s, j] in [H, selected] with elem_factor.
+                        let dst_off = (s * selected + j) * elem_factor;
+                        out_bytes[dst_off..dst_off + elem_factor]
+                            .copy_from_slice(&arr.bytes[src_off..src_off + elem_factor]);
+                    }
+                }
+
+                let out_arr = TypedArray::new(arr.dtype, out_shape, out_bytes)
+                    .map_err(TimeSeriesError::IntegrityError)?;
+                let det = Deterministic::new(
+                    window_initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    selected,
+                    out_arr,
+                )
+                .map_err(TimeSeriesError::IntegrityError)?;
+                Ok(TimeSeriesData::Deterministic(det))
+            }
         }
     }
 
@@ -599,8 +789,36 @@ impl Store {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
+    /// Return the forecast parameters recorded in the store.
+    ///
+    /// Looks for any metadata row whose type is a forecast type and returns its
+    /// `horizon`, `interval`, `count`, and `resolution`. If no forecasts exist,
+    /// returns [`ForecastParameters::default()`]. When multiple forecasts are
+    /// present, returns the parameters from the first one found (v0 stores a
+    /// single coherent forecast configuration; callers that need per-type
+    /// parameters should use [`Self::list_time_series`] directly).
     pub fn get_forecast_parameters(&self) -> Result<ForecastParameters> {
-        // No forecast types in v0 — always empty.
+        use crate::metadata::MetadataFilter;
+        // Check each forecast type in priority order.
+        for ts_type in [
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            let rows = self.metadata.list(&MetadataFilter {
+                time_series_type: Some(ts_type),
+                ..Default::default()
+            })?;
+            if let Some(first) = rows.into_iter().next() {
+                return Ok(ForecastParameters {
+                    horizon: first.horizon,
+                    interval: first.interval,
+                    count: first.count,
+                    resolution: first.resolution,
+                });
+            }
+        }
         Ok(ForecastParameters::default())
     }
 
@@ -661,4 +879,186 @@ fn sidecar_sqlite_path(nc_path: &Path) -> PathBuf {
     };
     p.set_file_name(new_name);
     p
+}
+
+// ---------------------------------------------------------------------------
+// Forecast read-path helpers
+// ---------------------------------------------------------------------------
+
+/// Slice a contiguous range `[w0, w1)` along `axis` of a row-major array.
+///
+/// This is a strided gather: axis `a` is not necessarily the leading axis, so
+/// the bytes for each "outer" block are not contiguous in the source buffer.
+///
+/// - `outer = product(shape[0..axis])` — number of outer blocks.
+/// - `inner_bytes = product(shape[axis+1..]) * dtype.size()` — bytes per
+///   element in the axis-stride.
+/// - For each outer block `o`, the source bytes for windows `[w0, w1)` live at
+///   `o * axis_len * inner_bytes + w0 * inner_bytes .. + w1 * inner_bytes`.
+///
+/// The returned array has the same dtype and all the same shape dims except
+/// `shape[axis]` which becomes `w1 - w0`.
+pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usize) -> TypedArray {
+    assert!(
+        axis < arr.shape.len(),
+        "axis {axis} out of bounds for shape {:?}",
+        arr.shape
+    );
+    assert!(w0 <= w1, "w0 ({w0}) must be <= w1 ({w1})");
+    let axis_len = arr.shape[axis];
+    assert!(w1 <= axis_len, "w1 ({w1}) > axis_len ({axis_len})");
+
+    let outer: usize = arr.shape[..axis].iter().product();
+    let inner_bytes: usize = arr.shape[axis + 1..].iter().product::<usize>() * arr.dtype.size();
+    let window_bytes = (w1 - w0) * inner_bytes;
+
+    let mut out_bytes = Vec::with_capacity(outer * window_bytes);
+    for o in 0..outer {
+        let block_start = o * axis_len * inner_bytes;
+        let src_start = block_start + w0 * inner_bytes;
+        let src_end = block_start + w1 * inner_bytes;
+        out_bytes.extend_from_slice(&arr.bytes[src_start..src_end]);
+    }
+
+    let mut new_shape = arr.shape.clone();
+    new_shape[axis] = w1 - w0;
+
+    TypedArray {
+        dtype: arr.dtype,
+        shape: new_shape,
+        bytes: out_bytes,
+    }
+}
+
+/// Resolve the window range `[w0, w1)` from an optional `time_range`.
+///
+/// Implements the IS.jl rule: `start_time` must be the first timestamp of a
+/// window (`initial_timestamp + k·interval`), `end` is exclusive. Returns
+/// `(w0, w1, first_window_initial_timestamp)`.
+///
+/// On success, `w0 <= w1 <= count`. Empty selection returns `(0, 0, initial)`.
+fn resolve_windows(
+    initial: chrono::DateTime<chrono::Utc>,
+    _resolution: Duration,
+    _horizon: Duration,
+    interval: Duration,
+    count: usize,
+    time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+) -> Result<(usize, usize, chrono::DateTime<chrono::Utc>)> {
+    match time_range {
+        None => Ok((0, count, initial)),
+        Some((start, end)) => {
+            if end < start {
+                return Err(TimeSeriesError::InvalidParameter("end < start".into()));
+            }
+            let interval_ns = interval.num_nanoseconds().ok_or_else(|| {
+                TimeSeriesError::InvalidParameter(
+                    "forecast interval overflows i64 nanoseconds".into(),
+                )
+            })?;
+            if interval_ns <= 0 {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "forecast interval must be positive".into(),
+                ));
+            }
+            // Check alignment: (start - initial) must be a non-negative integer
+            // multiple of interval.
+            let offset_ns = (start - initial).num_nanoseconds().ok_or_else(|| {
+                TimeSeriesError::InvalidParameter(
+                    "forecast time_range offset overflows i64 nanoseconds".into(),
+                )
+            })?;
+            if offset_ns < 0 || offset_ns % interval_ns != 0 {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "forecast start_time must align to a window boundary \
+                     (initial_timestamp + k·interval)"
+                        .into(),
+                ));
+            }
+            let start_k = (offset_ns / interval_ns) as usize;
+
+            // Collect all k in [0, count) whose window start is in [start, end).
+            let mut w0 = count; // sentinel: no window selected yet
+            let mut w1 = 0usize;
+            for k in 0..count {
+                let window_start = initial + Duration::nanoseconds(k as i64 * interval_ns);
+                if window_start >= start && window_start < end {
+                    if w0 == count {
+                        w0 = k;
+                    }
+                    w1 = k + 1;
+                }
+            }
+
+            // Empty selection.
+            if w0 == count {
+                // Return initial_timestamp aligned to start (the requested start).
+                let first_ts = initial + Duration::nanoseconds(start_k as i64 * interval_ns);
+                return Ok((0, 0, first_ts));
+            }
+
+            let first_ts = initial + Duration::nanoseconds(w0 as i64 * interval_ns);
+            Ok((w0, w1, first_ts))
+        }
+    }
+}
+
+// --- Metadata field accessors that return IntegrityError on None ---
+
+fn required_initial(
+    meta: &crate::types::metadata::TimeSeriesMetadata,
+    label: &str,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    meta.initial_timestamp.ok_or_else(|| {
+        TimeSeriesError::IntegrityError(format!("{label} missing initial_timestamp"))
+    })
+}
+
+fn required_resolution(
+    meta: &crate::types::metadata::TimeSeriesMetadata,
+    label: &str,
+) -> Result<Duration> {
+    meta.resolution
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing resolution")))
+}
+
+fn required_horizon(
+    meta: &crate::types::metadata::TimeSeriesMetadata,
+    label: &str,
+) -> Result<Duration> {
+    meta.horizon
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing horizon")))
+}
+
+fn required_interval(
+    meta: &crate::types::metadata::TimeSeriesMetadata,
+    label: &str,
+) -> Result<Duration> {
+    meta.interval
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing interval")))
+}
+
+fn required_count(meta: &crate::types::metadata::TimeSeriesMetadata, label: &str) -> Result<usize> {
+    meta.count
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing count")))
+}
+
+/// Validate that the leading shape dims of `arr` match `expected_prefix`,
+/// returning an `IntegrityError` if not. Trailing element dims are allowed.
+fn validate_forecast_shape(arr: &TypedArray, expected_prefix: &[usize], label: &str) -> Result<()> {
+    if arr.shape.len() < expected_prefix.len() {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "{label}: stored shape {:?} has fewer dims than expected prefix {expected_prefix:?}",
+            arr.shape
+        )));
+    }
+    for (i, (&got, &exp)) in arr.shape.iter().zip(expected_prefix.iter()).enumerate() {
+        if got != exp {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "{label}: stored shape {:?} mismatch at dim {i}: expected {exp}, got {got}",
+                arr.shape
+            )));
+        }
+    }
+    Ok(())
 }

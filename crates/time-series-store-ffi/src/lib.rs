@@ -521,6 +521,13 @@ pub unsafe extern "C" fn ts_store_get_single(
             set_error("key does not identify a SingleTimeSeries");
             return TS_ERR_INVALID_PARAMETER;
         }
+        // Forecast types are not yet exposed through this FFI entry point.
+        core_lib::TimeSeriesData::Deterministic(_)
+        | core_lib::TimeSeriesData::Probabilistic(_)
+        | core_lib::TimeSeriesData::Scenarios(_) => {
+            set_error("key identifies a forecast type; use the forecast FFI");
+            return TS_ERR_INVALID_PARAMETER;
+        }
     };
     let initial_ns = match datetime_to_unix_ns(single.initial_timestamp) {
         Some(n) => n,
@@ -587,6 +594,15 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
         Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(series)) => series,
         Ok(core_lib::TimeSeriesData::SingleTimeSeries(_)) => {
             set_error("key does not identify a NonSequentialTimeSeries");
+            return TS_ERR_INVALID_PARAMETER;
+        }
+        // Forecast types are not yet exposed through this FFI entry point.
+        Ok(
+            core_lib::TimeSeriesData::Deterministic(_)
+            | core_lib::TimeSeriesData::Probabilistic(_)
+            | core_lib::TimeSeriesData::Scenarios(_),
+        ) => {
+            set_error("key identifies a forecast type; use the forecast FFI");
             return TS_ERR_INVALID_PARAMETER;
         }
         Err(error) => return map_core_error(error),

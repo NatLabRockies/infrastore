@@ -276,6 +276,16 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
             logical_type: String::new(),
         },
+        // Forecast types are not yet exposed over gRPC — this path is unreachable
+        // today because the server never calls `get_time_series` for forecast keys,
+        // but the match must be exhaustive now that the enum has more variants.
+        TimeSeriesData::Deterministic(_)
+        | TimeSeriesData::Probabilistic(_)
+        | TimeSeriesData::Scenarios(_) => {
+            // Return an empty/invalid response rather than panicking; the gRPC
+            // follow-up task will add real support.
+            pb::GetResp::default()
+        }
     }
 }
 

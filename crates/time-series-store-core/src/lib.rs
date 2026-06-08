@@ -17,7 +17,10 @@ pub use types::{
     array::{Dtype, TypedArray},
     key::TimeSeriesKey,
     metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
-    time_series::{NonSequentialTimeSeries, SingleTimeSeries, TimeSeriesData, TimeSeriesType},
+    time_series::{
+        Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
+        TimeSeriesData, TimeSeriesType,
+    },
 };
 pub use version::DATA_FORMAT_VERSION;
 

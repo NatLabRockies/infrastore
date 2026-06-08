@@ -500,6 +500,14 @@ impl PyStore {
             core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
                 Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
             }
+            // Forecast types are not yet wrapped by Python bindings.
+            core_lib::TimeSeriesData::Deterministic(_)
+            | core_lib::TimeSeriesData::Probabilistic(_)
+            | core_lib::TimeSeriesData::Scenarios(_) => {
+                Err(pyo3::exceptions::PyNotImplementedError::new_err(
+                    "forecast types are not yet exposed through Python bindings",
+                ))
+            }
         }
     }
 
