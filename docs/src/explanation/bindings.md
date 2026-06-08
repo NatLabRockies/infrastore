@@ -96,6 +96,23 @@ Writes are deliberately not exposed over gRPC — they require local filesystem 
 for fan-out reads of an existing store. See the [gRPC Server guide](../guides/server.md) and the
 [gRPC API reference](../reference/grpc-api.md).
 
+## CLI (`tss`)
+
+`time-series-store-cli` builds the `tss` binary, a thin wrapper over the core `Store` for use from a
+terminal. Unlike the gRPC server it is **not** read-only: it opens the on-disk `.nc` + `.nc.sqlite`
+pair directly and supports both reads and writes. Its shape:
+
+- **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
+  (owner, name, type, dtype, resolution, timestamps, units, features) is described in a sidecar
+  TOML. All six dtypes and all five writable types are supported, forecasts included.
+- **Output mirrors `torc`.** A global `-f/--format` selects `table` (default), `json`, or `csv`,
+  matching the conventions of the sibling `torc` CLI.
+- **Store access is isolated.** All store opening lives behind one module, so a future remote/gRPC
+  mode can be added without touching the command handlers; today there is no remote mode.
+
+See the [Use the `tss` CLI how-to](../how-to/use-cli.md) and the
+[CLI reference](../reference/cli.md).
+
 ## What Every Binding Shares
 
 | Concern            | Single source of truth                                             |

@@ -34,6 +34,7 @@ crates/
   time-series-store-server/  # gRPC server binary + Rust client
   time-series-store-py/      # PyO3 bindings, abi3-py310 wheel
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
+  time-series-store-cli/     # `tss` CLI: load CSV + inspect a store on disk
 proto/                       # .proto sources
 julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI (TimeSeriesStore.jl)
 python/tests/                # pytest suite
@@ -130,6 +131,33 @@ key = add_time_series!(store, "42", "Generator", Component, ts;
 got = get_time_series(store, key)
 @assert got.data == ts.data
 ```
+
+## CLI (`tss`)
+
+`tss` is a command-line tool that loads time series from CSV and inspects a store, talking directly
+to the on-disk NetCDF + SQLite artifact (no gRPC). Output follows the `torc` convention of a global
+`-f/--format` with `table` (default), `json`, and `csv`.
+
+```sh
+cargo build -p time-series-store-cli   # builds the `tss` binary
+TSS=target/debug/tss
+
+# Numeric values live in a CSV; everything else is described in a sidecar TOML.
+$TSS template single > load.toml       # print an example sidecar to edit
+$TSS --store demo.nc add --sidecar load.toml
+$TSS --store demo.nc list
+$TSS --store demo.nc get  --owner-uuid 42 --name load            # pretty table
+$TSS --store demo.nc -f csv  get  --owner-uuid 42 --name load    # round-trippable CSV
+$TSS --store demo.nc -f json info --owner-uuid 42 --name load    # metadata + stats
+```
+
+The sidecar carries the metadata that does not fit a CSV grid (owner, name, type, dtype, resolution,
+timestamps, units, features); the CSV holds only numbers, except `non_sequential`, whose first
+column is the timestamp. All six dtypes (`f64|f32|i64|i32|u64|bool`) and all five writable types
+(`single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`) are supported — forecast
+arrays are laid out as flat row-major values whose count equals the product of the type's shape (see
+`tss template <type>`). `tss transform --horizon <D> --interval <D>` derives
+`DeterministicSingleTimeSeries` from stored `SingleTimeSeries`. The store is created on first `add`.
 
 ## Server
 

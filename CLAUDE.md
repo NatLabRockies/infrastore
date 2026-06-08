@@ -14,6 +14,9 @@ SQLite. It exposes multiple bindings over a shared core:
   filesystem access)
 - **Python** — `time-series-store-py` via PyO3 (abi3-py310 wheel)
 - **Julia** — `time-series-store-ffi` C ABI cdylib, wrapped by `julia/TimeSeriesStore.jl`
+- **CLI** — `time-series-store-cli` (`tss` binary): loads time series from CSV + a sidecar TOML and
+  inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no gRPC).
+  Output mirrors the `../torc` CLI's global `-f/--format table|json|csv`.
 
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
 end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
@@ -72,6 +75,7 @@ crates/
   time-series-store-server/  # gRPC server binary (src/bin/server.rs) + Rust client
   time-series-store-py/      # PyO3 bindings
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
+  time-series-store-cli/     # `tss` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
 proto/                       # .proto sources
 julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite

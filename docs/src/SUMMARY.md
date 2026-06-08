@@ -31,6 +31,7 @@
   - [Integrate with Python](./how-to/integrate-python.md)
   - [Integrate with Julia](./how-to/integrate-julia.md)
   - [Run the gRPC Server](./how-to/run-server.md)
+  - [Use the `tss` CLI](./how-to/use-cli.md)
 
 # Reference
 
@@ -42,6 +43,7 @@
   - [C ABI](./reference/c-abi.md)
   - [gRPC API](./reference/grpc-api.md)
   - [Server Configuration](./reference/server-config.md)
+  - [CLI](./reference/cli.md)
 
 ---
 
