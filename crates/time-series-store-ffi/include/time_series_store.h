@@ -42,8 +42,9 @@ typedef struct TsStore TsStore;
  * `RUST_LOG` environment variable (or emit nothing if the variable is unset).
  *
  * The subscriber is initialized at most once per process. Subsequent calls
- * are no-ops. Returns `TS_OK` on success or `TS_ERR_INVALID_UTF8` if
- * `filter` is not valid UTF-8.
+ * are no-ops. Returns `TS_OK` on success, `TS_ERR_INVALID_UTF8` if `filter`
+ * is not valid UTF-8, or `TS_ERR_INVALID_PARAMETER` if `filter` contains an
+ * invalid directive (e.g. an unrecognised level name).
  *
  * # Safety
  *

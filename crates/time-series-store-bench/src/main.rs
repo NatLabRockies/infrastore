@@ -489,7 +489,7 @@ fn print_step_stats(step_times: &[StdDuration], count: usize) {
     sorted.sort();
 
     let n = sorted.len();
-    let median = sorted[n / 2];
+    let median = sorted[(n - 1) / 2];
     let p95 = sorted[(n * 95 / 100).min(n - 1)];
     let min = sorted[0];
     let max = *sorted.last().unwrap();

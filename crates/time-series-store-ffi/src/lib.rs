@@ -65,8 +65,9 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
 /// `RUST_LOG` environment variable (or emit nothing if the variable is unset).
 ///
 /// The subscriber is initialized at most once per process. Subsequent calls
-/// are no-ops. Returns `TS_OK` on success or `TS_ERR_INVALID_UTF8` if
-/// `filter` is not valid UTF-8.
+/// are no-ops. Returns `TS_OK` on success, `TS_ERR_INVALID_UTF8` if `filter`
+/// is not valid UTF-8, or `TS_ERR_INVALID_PARAMETER` if `filter` contains an
+/// invalid directive (e.g. an unrecognised level name).
 ///
 /// # Safety
 ///
@@ -81,7 +82,13 @@ pub unsafe extern "C" fn ts_store_init_logging(filter: *const c_char) -> i32 {
             Ok(s) => s,
             Err(code) => return code,
         };
-        EnvFilter::new(s)
+        match EnvFilter::try_new(s) {
+            Ok(f) => f,
+            Err(e) => {
+                set_error(e.to_string());
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
     };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)

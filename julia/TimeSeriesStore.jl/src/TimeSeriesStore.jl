@@ -1654,21 +1654,32 @@ to read the `RUST_LOG` environment variable; if that variable is also unset,
 no output is produced.
 
 The subscriber is initialized at most once per process — subsequent calls are
-no-ops. `TimeSeriesStore` calls `init_logging("")` automatically in its
-`__init__` hook, so setting `ENV["RUST_LOG"]` before `using TimeSeriesStore`
-is sufficient for the common case.
+no-ops. `TimeSeriesStore.__init__` reads `RUST_LOG` on module load, so setting
+`ENV["RUST_LOG"]` before `using TimeSeriesStore` is sufficient for the common
+case.
+
+Returns the FFI status code (`TS_OK = 0`, `TS_ERR_INVALID_PARAMETER = 3` for
+an invalid directive string).
 """
 function init_logging(level::AbstractString="")
     filter_ptr = isempty(level) ? C_NULL : level
-    ccall((:ts_store_init_logging, lib_path()), Int32, (Cstring,), filter_ptr)
-    return nothing
+    ret = ccall((:ts_store_init_logging, lib_path()), Int32, (Cstring,), filter_ptr)
+    if ret != 0
+        @warn "TimeSeriesStore.init_logging: ts_store_init_logging returned error code $ret"
+    end
+    return ret
 end
 
-# Auto-initialize from RUST_LOG when the module is loaded.
+# Read RUST_LOG at module-load time so that `using TimeSeriesStore` with RUST_LOG
+# set in the environment automatically enables tracing without extra user code.
 function __init__()
     rust_log = get(ENV, "RUST_LOG", "")
     if !isempty(rust_log)
-        init_logging(rust_log)
+        try
+            init_logging(rust_log)
+        catch e
+            @warn "TimeSeriesStore.__init__: failed to initialize tracing" exception=e
+        end
     end
 end
 

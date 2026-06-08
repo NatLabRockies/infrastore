@@ -1194,8 +1194,10 @@ fn unused_tz_imports() {
 #[pyfunction]
 fn init_tracing(filter: &str) -> PyResult<()> {
     use tracing_subscriber::EnvFilter;
+    let env_filter = EnvFilter::try_new(filter)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
+        .with_env_filter(env_filter)
         .try_init();
     Ok(())
 }

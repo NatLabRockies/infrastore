@@ -104,7 +104,7 @@ impl Descriptor {
         }
         let rel = self.csv.as_ref().ok_or_else(|| {
             format!(
-                "series '{}' has no csv path (set `csv =` or pass --csv)",
+                "series '{}' has no csv path (add \"csv\": \"path/to/data.csv\" or pass --csv)",
                 self.name
             )
         })?;
