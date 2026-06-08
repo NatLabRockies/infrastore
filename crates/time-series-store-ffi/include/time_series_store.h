@@ -247,7 +247,10 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
                               int64_t *out_resolution_ns,
                               uint64_t *out_length,
                               uint8_t *out_data_hash,
-                              int32_t *out_dtype);
+                              int32_t *out_dtype,
+                              char *out_logical_type,
+                              uint64_t logical_type_cap,
+                              uint64_t *out_logical_type_len);
 
 /**
  * True iff a SingleTimeSeries with the given attributes exists.

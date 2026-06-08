@@ -841,6 +841,9 @@ pub unsafe extern "C" fn ts_store_get_metadata(
     out_length: *mut u64,
     out_data_hash: *mut u8,
     out_dtype: *mut i32,
+    out_logical_type: *mut c_char,
+    logical_type_cap: u64,
+    out_logical_type_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -852,6 +855,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         || out_length.is_null()
         || out_data_hash.is_null()
         || out_dtype.is_null()
+        || out_logical_type_len.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
@@ -884,6 +888,17 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
         *out_dtype = meta.dtype.code();
+    }
+    // logical_type (optional): copy up to cap-1 bytes + NUL; report the full length.
+    let lt = meta.logical_type.unwrap_or_default();
+    let lt_bytes = lt.as_bytes();
+    unsafe {
+        *out_logical_type_len = lt_bytes.len() as u64;
+        if !out_logical_type.is_null() && logical_type_cap > 0 {
+            let n = lt_bytes.len().min((logical_type_cap - 1) as usize);
+            ptr::copy_nonoverlapping(lt_bytes.as_ptr(), out_logical_type as *mut u8, n);
+            *out_logical_type.add(n) = 0;
+        }
     }
     TS_OK
 }

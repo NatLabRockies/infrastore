@@ -376,21 +376,28 @@ function get_metadata(
     out_length = Ref{UInt64}(0)
     out_hash = Vector{UInt8}(undef, 32)
     out_dtype = Ref{Int32}(0)
+    lt_buf = Vector{UInt8}(undef, 256)
+    out_lt_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring,
-         Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32}),
+         Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32},
+         Ptr{UInt8}, UInt64, Ref{UInt64}),
         store.handle, owner_uuid, name, resolution_ns, features_json,
         out_initial, out_resolution, out_length, out_hash, out_dtype,
+        lt_buf, UInt64(length(lt_buf)), out_lt_len,
     )
     _check(code)
     res_ms = div(out_resolution[], 1_000_000)
+    n = min(Int(out_lt_len[]), length(lt_buf))
+    logical_type = n == 0 ? nothing : String(lt_buf[1:n])
     return (
         initial_timestamp=_from_unix_ns(out_initial[]),
         resolution=Millisecond(res_ms),
         length=Int(out_length[]),
         data_hash=out_hash,
         dtype=_julia_dtype(out_dtype[]),
+        logical_type=logical_type,
     )
 end
 
