@@ -48,6 +48,19 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     }
 }
 
+/// Translate the Python-facing compression arguments into a core
+/// [`Compression`](core_lib::Compression). Level validation is left to the core
+/// constructor so the error message stays in one place.
+fn parse_compression(algorithm: &str, level: u8, shuffle: bool) -> PyResult<core_lib::Compression> {
+    match algorithm {
+        "none" => Ok(core_lib::Compression::None),
+        "deflate" => Ok(core_lib::Compression::Deflate { level, shuffle }),
+        other => Err(InvalidParameterError::new_err(format!(
+            "unknown compression '{other}', expected 'deflate' or 'none'"
+        ))),
+    }
+}
+
 // ---- Enums ----------------------------------------------------------------
 
 #[pyclass(
@@ -773,14 +786,25 @@ impl PyStore {
     /// Create a new store. With `in_memory=True`, no filesystem I/O occurs;
     /// otherwise a NetCDF file is created at `path` and a sidecar SQLite file
     /// at `<path>.sqlite` holds metadata.
+    ///
+    /// `compression` selects the NetCDF data-variable filter: `"deflate"`
+    /// (default) applies DEFLATE at `compression_level` (0–9) with optional
+    /// byte `shuffle`; `"none"` disables compression. The setting is ignored
+    /// for in-memory stores and is persisted so later appends reuse it.
     #[classmethod]
-    #[pyo3(signature = (path=None, in_memory=false))]
+    #[pyo3(signature = (path=None, in_memory=false, compression="deflate", compression_level=3, shuffle=true))]
     fn create(
         _cls: &Bound<'_, pyo3::types::PyType>,
         path: Option<PathBuf>,
         in_memory: bool,
+        compression: &str,
+        compression_level: u8,
+        shuffle: bool,
     ) -> PyResult<Self> {
-        let store = core_lib::create_store(path.as_deref(), in_memory).map_err(map_err)?;
+        let compression = parse_compression(compression, compression_level, shuffle)?;
+        let store =
+            core_lib::create_store_with_compression(path.as_deref(), in_memory, compression)
+                .map_err(map_err)?;
         Ok(Self { inner: store })
     }
 
@@ -1066,6 +1090,46 @@ impl PyStore {
             out.push(chrono_to_pydelta(py, d)?.unbind());
         }
         Ok(out)
+    }
+
+    /// Return the store's forecast parameters as a dict with keys `horizon`,
+    /// `interval` (timedeltas), `count` (int), and `resolution` (timedelta).
+    /// Each value is `None` when the store holds no forecasts.
+    fn get_forecast_parameters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let p = self.inner.get_forecast_parameters().map_err(map_err)?;
+        let d = PyDict::new(py);
+        let dur = |py: Python<'py>, v: Option<chrono::Duration>| -> PyResult<Option<Py<PyDelta>>> {
+            match v {
+                Some(v) => Ok(Some(chrono_to_pydelta(py, v)?.unbind())),
+                None => Ok(None),
+            }
+        };
+        d.set_item("horizon", dur(py, p.horizon)?)?;
+        d.set_item("interval", dur(py, p.interval)?)?;
+        d.set_item("count", p.count)?;
+        d.set_item("resolution", dur(py, p.resolution)?)?;
+        Ok(d)
+    }
+
+    /// Return the store's compression policy as a dict with keys `compression`
+    /// (`"deflate"` or `"none"`), `level` (int, 0-9), and `shuffle` (bool). For a
+    /// store opened from disk this reflects the persisted policy; in-memory
+    /// stores report `"none"`.
+    fn get_compression<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        match self.inner.compression() {
+            core_lib::Compression::None => {
+                d.set_item("compression", "none")?;
+                d.set_item("level", 0u8)?;
+                d.set_item("shuffle", false)?;
+            }
+            core_lib::Compression::Deflate { level, shuffle } => {
+                d.set_item("compression", "deflate")?;
+                d.set_item("level", level)?;
+                d.set_item("shuffle", shuffle)?;
+            }
+        }
+        Ok(d)
     }
 
     fn get_time_series_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

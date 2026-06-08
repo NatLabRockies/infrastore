@@ -500,3 +500,67 @@ end
                           resolution=info.resolution, features=info.features).data ==
           collect(1.0:6.0)
 end
+
+@testset "get_forecast_parameters" begin
+    store = Store(in_memory=true)
+    t0  = DateTime(2024, 1, 1)
+    res = Hour(1); hor = Hour(4); ivl = Hour(2); count = 3; H = 4
+    data = Float64[h * 10 + c for h in 1:H, c in 1:count]
+    add_time_series!(store, "det-owner", "Generator", Component,
+                     Deterministic(t0, res, hor, ivl, count, data, "pf"))
+
+    params = get_forecast_parameters(store)
+    @test params.horizon == Millisecond(hor)
+    @test params.interval == Millisecond(ivl)
+    @test params.count == count
+    @test params.resolution == Millisecond(res)
+
+    # No forecasts -> every field is nothing.
+    empty = get_forecast_parameters(Store(in_memory=true))
+    @test empty.horizon === nothing
+    @test empty.interval === nothing
+    @test empty.count === nothing
+    @test empty.resolution === nothing
+end
+
+@testset "compression policies round-trip" begin
+    for (compression, level, shuffle) in [(:none, 3, true), (:deflate, 9, false), (:deflate, 1, true)]
+        mktempdir() do dir
+            path = joinpath(dir, "store.nc")
+            let store = Store(in_memory=false, path=path;
+                              compression=compression, compression_level=level, shuffle=shuffle)
+                ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:12.0), "load")
+                add_time_series!(store, "1", "Generator", Component, ts)
+                flush!(store)
+                TimeSeriesStore.close!(store)
+            end
+            # Reopen read-write and append, exercising the restored policy.
+            let store = TimeSeriesStore.open_store(path; read_only=false)
+                ts2 = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(13.0:24.0), "load")
+                add_time_series!(store, "2", "Generator", Component, ts2)
+                flush!(store)
+                TimeSeriesStore.close!(store)
+            end
+            store = TimeSeriesStore.open_store(path; read_only=true)
+            try
+                @test verify_integrity(store) == 0
+                # The persisted policy is restored on open.
+                c = get_compression(store)
+                @test c.compression == compression
+                if compression == :deflate
+                    @test c.level == level
+                    @test c.shuffle == shuffle
+                end
+                m1 = get_metadata(store, "1", "load"; resolution=Hour(1))
+                @test get_array_by_hash(store, m1.data_hash) == collect(1.0:12.0)
+                m2 = get_metadata(store, "2", "load"; resolution=Hour(1))
+                @test get_array_by_hash(store, m2.data_hash) == collect(13.0:24.0)
+            finally
+                TimeSeriesStore.close!(store)
+            end
+        end
+    end
+
+    @test get_compression(Store(in_memory=true)).compression == :none
+    @test_throws ArgumentError Store(in_memory=true, compression=:lz4)
+end

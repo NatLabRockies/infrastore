@@ -46,6 +46,28 @@ typedef struct TsStore TsStore;
 int32_t ts_store_create(const char *path, bool in_memory, struct TsStore **out);
 
 /**
+ * Create a store with an explicit NetCDF compression policy.
+ *
+ * `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
+ * DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
+ * other `compression_kind` is rejected. The policy is ignored for in-memory
+ * stores and persisted so later appends reuse it. Equivalent to
+ * [`ts_store_create`] with `compression_kind = 1`, level 3, shuffle on.
+ *
+ * # Safety
+ *
+ * `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
+ * null-terminated UTF-8 string. The returned handle must be released exactly once with
+ * `ts_store_free`.
+ */
+int32_t ts_store_create_with_compression(const char *path,
+                                         bool in_memory,
+                                         uint8_t compression_kind,
+                                         uint8_t deflate_level,
+                                         bool shuffle,
+                                         struct TsStore **out);
+
+/**
  * Open an existing time-series store and return an owning handle through `out`.
  *
  * # Safety
@@ -196,6 +218,46 @@ int32_t ts_store_counts(const struct TsStore *handle,
                         int64_t *out_components_with_time_series,
                         int64_t *out_static_time_series,
                         int64_t *out_forecasts);
+
+/**
+ * Write the store's forecast parameters.
+ *
+ * `out_present` is set to `true` when the store holds at least one forecast,
+ * `false` otherwise. Each of `out_horizon_ms`, `out_interval_ms`,
+ * `out_count`, and `out_resolution_ms` receives the corresponding value, or
+ * `-1` when that field is absent (durations, resolution, and counts are always
+ * non-negative when present, so `-1` is an unambiguous "unset" sentinel).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_present` must be valid for writing
+ * one `bool`; every other output pointer must be valid for writing one `i64`.
+ */
+int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
+                                         bool *out_present,
+                                         int64_t *out_horizon_ms,
+                                         int64_t *out_interval_ms,
+                                         int64_t *out_count,
+                                         int64_t *out_resolution_ms);
+
+/**
+ * Write the store's compression policy.
+ *
+ * `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,
+ * `out_level` (0-9) and `out_shuffle` receive the filter parameters; for no
+ * compression they are set to `0` / `false`. This reflects the policy the
+ * store was created with, restored from the file when the store was opened
+ * (in-memory stores report `0`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_kind` and `out_level` must each be
+ * valid for writing one `u8`; `out_shuffle` must be valid for writing one `bool`.
+ */
+int32_t ts_store_get_compression(const struct TsStore *handle,
+                                 uint8_t *out_kind,
+                                 uint8_t *out_level,
+                                 bool *out_shuffle);
 
 /**
  * Verify store integrity and return the number of detected errors.

@@ -8,7 +8,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
 use crate::storage::{
-    CompactionReport, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
+    CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
 use crate::types::array::TypedArray;
 use crate::types::key::TimeSeriesKey;
@@ -114,7 +114,22 @@ impl Store {
     /// Create a new store. With `in_memory=true`, no filesystem I/O occurs;
     /// otherwise a NetCDF4 file is created at `path` and a sidecar SQLite
     /// file at `<path>.sqlite` holds metadata.
+    ///
+    /// Uses the default compression policy ([`Compression::default`]). Use
+    /// [`Self::create_with_compression`] to choose a different filter.
     pub fn create(path: Option<&Path>, in_memory: bool) -> Result<Self> {
+        Self::create_with_compression(path, in_memory, Compression::default())
+    }
+
+    /// Like [`Self::create`], but applies `compression` to NetCDF data
+    /// variables. The setting is persisted with the store so later appends
+    /// reuse it. It is ignored for `in_memory` stores, which never touch disk.
+    pub fn create_with_compression(
+        path: Option<&Path>,
+        in_memory: bool,
+        compression: Compression,
+    ) -> Result<Self> {
+        compression.validate()?;
         if in_memory {
             return Ok(Self {
                 backend: Box::new(MemoryBackend::new()),
@@ -128,7 +143,7 @@ impl Store {
         })?;
         let sqlite_path = sidecar_sqlite_path(nc_path);
         let metadata = MetadataStore::open_path(&sqlite_path, false)?;
-        let backend = NetCdfBackend::create(nc_path)?;
+        let backend = NetCdfBackend::create(nc_path, compression)?;
         Ok(Self {
             backend: Box::new(backend),
             metadata,
@@ -154,6 +169,13 @@ impl Store {
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// The compression policy applied to newly written arrays. For a store
+    /// opened from disk this reflects the policy persisted at creation (restored
+    /// from the file); in-memory stores report [`Compression::None`].
+    pub fn compression(&self) -> Compression {
+        self.backend.compression()
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is

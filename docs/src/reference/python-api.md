@@ -25,14 +25,25 @@ from time_series_store import (
 
 ```python
 @classmethod
-def create(cls, path: str | None = None, in_memory: bool = False) -> TimeSeriesStore: ...
+def create(
+    cls,
+    path: str | None = None,
+    in_memory: bool = False,
+    compression: str = "deflate",   # "deflate" or "none"
+    compression_level: int = 3,     # 0–9, DEFLATE only
+    shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
+) -> TimeSeriesStore: ...
 
 @classmethod
 def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
 ```
 
-- `create(in_memory=True)` — in-memory store; `path` is ignored.
+- `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
 - `create(path=...)` — writes `path` (NetCDF) and `path + ".sqlite"` (metadata).
+- `create(path=..., compression="none")` — store arrays uncompressed; `compression="deflate"` with a
+  `compression_level` / `shuffle` of your choice tunes the filter. The policy persists with the
+  store and is reused on later appends. An unknown `compression` or out-of-range level raises
+  `InvalidParameterError`.
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
 
 ### Property
@@ -82,6 +93,8 @@ def get_time_series_keys(self, owner_uuid: str) -> list[TimeSeriesKey]: ...
 def has_time_series(self, key: TimeSeriesKey) -> bool: ...
 def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[timedelta]: ...
 def get_time_series_counts(self) -> dict: ...
+def get_forecast_parameters(self) -> dict: ...
+def get_compression(self) -> dict: ...
 def compact(self) -> dict: ...
 def verify_integrity(self) -> list[str]: ...
 def flush(self) -> None: ...
@@ -101,6 +114,12 @@ def flush(self) -> None: ...
   filter is a subset match — rows must contain at least the given pairs.
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
+- **`get_forecast_parameters`** returns
+  `{"horizon": timedelta, "interval": timedelta, "count": int,
+  "resolution": timedelta}`. Every
+  value is `None` when the store holds no forecasts.
+- **`get_compression`** returns `{"compression": "deflate" | "none", "level": int, "shuffle": bool}`
+  — the policy the store was created with (restored from the file on open; `"none"` for in-memory).
 - **`compact`** returns `{"slots_reclaimed": int, "datasets_dropped": int}`.
 - **`verify_integrity`** returns a list of error strings; an empty list means the store is intact.
 - **`get_time_series`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive.

@@ -122,6 +122,63 @@ pub unsafe extern "C" fn ts_store_create(
     TS_OK
 }
 
+/// Create a store with an explicit NetCDF compression policy.
+///
+/// `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
+/// DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
+/// other `compression_kind` is rejected. The policy is ignored for in-memory
+/// stores and persisted so later appends reuse it. Equivalent to
+/// [`ts_store_create`] with `compression_kind = 1`, level 3, shuffle on.
+///
+/// # Safety
+///
+/// `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
+/// null-terminated UTF-8 string. The returned handle must be released exactly once with
+/// `ts_store_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_create_with_compression(
+    path: *const c_char,
+    in_memory: bool,
+    compression_kind: u8,
+    deflate_level: u8,
+    shuffle: bool,
+    out: *mut *mut TsStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let path = match unsafe { cstr_to_optional_path(path) } {
+        Ok(p) => p,
+        Err(code) => {
+            set_error("invalid path");
+            return code;
+        }
+    };
+    let compression = match compression_kind {
+        0 => core_lib::Compression::None,
+        1 => core_lib::Compression::Deflate {
+            level: deflate_level,
+            shuffle,
+        },
+        other => {
+            set_error(format!(
+                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
+            ));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let store =
+        match core_lib::create_store_with_compression(path.as_deref(), in_memory, compression) {
+            Ok(s) => s,
+            Err(e) => return map_core_error(e),
+        };
+    let handle = Box::new(TsStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    TS_OK
+}
+
 /// Open an existing time-series store and return an owning handle through `out`.
 ///
 /// # Safety
@@ -730,6 +787,98 @@ pub unsafe extern "C" fn ts_store_counts(
         }
         Err(e) => map_core_error(e),
     }
+}
+
+/// Write the store's forecast parameters.
+///
+/// `out_present` is set to `true` when the store holds at least one forecast,
+/// `false` otherwise. Each of `out_horizon_ms`, `out_interval_ms`,
+/// `out_count`, and `out_resolution_ms` receives the corresponding value, or
+/// `-1` when that field is absent (durations, resolution, and counts are always
+/// non-negative when present, so `-1` is an unambiguous "unset" sentinel).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_present` must be valid for writing
+/// one `bool`; every other output pointer must be valid for writing one `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_get_forecast_parameters(
+    handle: *const TsStoreHandle,
+    out_present: *mut bool,
+    out_horizon_ms: *mut i64,
+    out_interval_ms: *mut i64,
+    out_count: *mut i64,
+    out_resolution_ms: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_present.is_null()
+        || out_horizon_ms.is_null()
+        || out_interval_ms.is_null()
+        || out_count.is_null()
+        || out_resolution_ms.is_null()
+    {
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.get_forecast_parameters() {
+        Ok(p) => {
+            let present = p.horizon.is_some()
+                || p.interval.is_some()
+                || p.count.is_some()
+                || p.resolution.is_some();
+            unsafe {
+                *out_present = present;
+                *out_horizon_ms = p.horizon.map(|d| d.num_milliseconds()).unwrap_or(-1);
+                *out_interval_ms = p.interval.map(|d| d.num_milliseconds()).unwrap_or(-1);
+                *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
+                *out_resolution_ms = p.resolution.map(|d| d.num_milliseconds()).unwrap_or(-1);
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Write the store's compression policy.
+///
+/// `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,
+/// `out_level` (0-9) and `out_shuffle` receive the filter parameters; for no
+/// compression they are set to `0` / `false`. This reflects the policy the
+/// store was created with, restored from the file when the store was opened
+/// (in-memory stores report `0`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_kind` and `out_level` must each be
+/// valid for writing one `u8`; `out_shuffle` must be valid for writing one `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_get_compression(
+    handle: *const TsStoreHandle,
+    out_kind: *mut u8,
+    out_level: *mut u8,
+    out_shuffle: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_kind.is_null() || out_level.is_null() || out_shuffle.is_null() {
+        return TS_ERR_NULL_POINTER;
+    }
+    let (kind, level, shuffle) = match store.inner.compression() {
+        core_lib::Compression::None => (0u8, 0u8, false),
+        core_lib::Compression::Deflate { level, shuffle } => (1u8, level, shuffle),
+    };
+    unsafe {
+        *out_kind = kind;
+        *out_level = level;
+        *out_shuffle = shuffle;
+    }
+    TS_OK
 }
 
 /// Verify store integrity and return the number of detected errors.

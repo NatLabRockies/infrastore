@@ -13,8 +13,8 @@ use time_series_store_proto::convert::{
     features_to_pb, get_resp_to_time_series_data, key_from_pb, key_to_pb, metadata_from_pb,
 };
 use time_series_store_proto::pb::{
-    self, CountsReq, GetReq, HasReq, KeysReq, ListReq, ResolutionsReq, VerifyReq,
-    time_series_store_client::TimeSeriesStoreClient,
+    self, CountsReq, ForecastParamsReq, GetReq, HasReq, KeysReq, ListReq, ResolutionsReq,
+    VerifyReq, time_series_store_client::TimeSeriesStoreClient,
 };
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -163,6 +163,23 @@ impl RemoteClient {
             components_with_time_series: resp.components_with_time_series,
             static_time_series: resp.static_time_series,
             forecasts: resp.forecasts,
+        })
+    }
+
+    pub async fn get_forecast_parameters(
+        &self,
+    ) -> CoreResult<time_series_store_core::ForecastParameters> {
+        let mut inner = self.inner.lock().await;
+        let resp = inner
+            .get_forecast_parameters(ForecastParamsReq {})
+            .await
+            .map_err(Self::map_status)?
+            .into_inner();
+        Ok(time_series_store_core::ForecastParameters {
+            horizon: resp.horizon_ms.map(chrono::Duration::milliseconds),
+            interval: resp.interval_ms.map(chrono::Duration::milliseconds),
+            count: resp.count.map(|c| c as usize),
+            resolution: resp.resolution_ms.map(chrono::Duration::milliseconds),
         })
     }
 

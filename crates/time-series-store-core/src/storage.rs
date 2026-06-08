@@ -6,7 +6,7 @@
 
 use std::ops::Range;
 
-use crate::error::Result;
+use crate::error::{Result, TimeSeriesError};
 use crate::types::array::TypedArray;
 
 pub mod memory;
@@ -14,6 +14,81 @@ pub mod netcdf;
 
 pub use memory::MemoryBackend;
 pub use netcdf::NetCdfBackend;
+
+/// Compression filter applied to NetCDF4 data variables when they are created.
+///
+/// This is a write-time storage policy: it controls how arrays are encoded on
+/// disk but never affects the logical data, which is decoded transparently by
+/// NetCDF/HDF5 on read regardless of the filter used. Stores created with
+/// different settings therefore remain mutually readable, and the on-disk
+/// [`DATA_FORMAT_VERSION`](crate::version::DATA_FORMAT_VERSION) is unaffected.
+///
+/// The chosen policy is persisted as a global attribute so that appends made
+/// after re-opening a store reuse the same filter (see
+/// [`NetCdfBackend::open`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    /// No compression filter is applied; arrays are stored uncompressed.
+    None,
+    /// DEFLATE (zlib) at `level` (0–9), optionally preceded by the byte-shuffle
+    /// filter, which usually improves the ratio for numeric data.
+    Deflate { level: u8, shuffle: bool },
+}
+
+impl Default for Compression {
+    /// Matches the historical hard-coded behaviour: DEFLATE level 3 + shuffle.
+    fn default() -> Self {
+        Compression::Deflate {
+            level: 3,
+            shuffle: true,
+        }
+    }
+}
+
+impl Compression {
+    /// Reject DEFLATE levels outside the NetCDF-supported 0–9 range.
+    pub fn validate(&self) -> Result<()> {
+        if let Compression::Deflate { level, .. } = self
+            && *level > 9
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "deflate compression level must be 0-9, got {level}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Encode as a stable string for persistence in a NetCDF global attribute.
+    pub(crate) fn encode(&self) -> String {
+        match self {
+            Compression::None => "none".to_string(),
+            Compression::Deflate { level, shuffle } => {
+                let s = if *shuffle { "shuffle" } else { "noshuffle" };
+                format!("deflate:{level}:{s}")
+            }
+        }
+    }
+
+    /// Parse the persisted attribute string. Unknown/malformed values (and
+    /// stores predating this attribute) fall back to [`Compression::default`],
+    /// which is also the filter such legacy stores were written with.
+    pub(crate) fn decode(s: &str) -> Self {
+        if s == "none" {
+            return Compression::None;
+        }
+        let mut parts = s.split(':');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("deflate"), Some(level), Some(shuffle)) => match level.parse::<u8>() {
+                Ok(level) if level <= 9 => Compression::Deflate {
+                    level,
+                    shuffle: shuffle != "noshuffle",
+                },
+                _ => Compression::default(),
+            },
+            _ => Compression::default(),
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct CompactionReport {
@@ -73,4 +148,11 @@ pub trait StorageBackend: Send + Sync {
 
     /// Flush any in-memory state to disk (no-op for in-memory backends).
     fn flush(&mut self) -> Result<()>;
+
+    /// The compression policy applied to newly written arrays. In-memory
+    /// backends report [`Compression::None`] since they never compress; the
+    /// NetCDF backend reports the policy it was created or reopened with.
+    fn compression(&self) -> Compression {
+        Compression::None
+    }
 }

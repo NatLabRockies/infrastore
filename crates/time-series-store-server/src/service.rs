@@ -9,8 +9,9 @@ use time_series_store_proto::convert::{
     features_from_pb, key_from_pb, metadata_to_pb, time_series_data_to_get_resp,
 };
 use time_series_store_proto::pb::{
-    self, CountsReq, CountsResp, GetReq, GetResp, HasReq, HasResp, KeysReq, KeysResp, ListReq,
-    ListResp, ResolutionsReq, ResolutionsResp, VerifyReq, VerifyResp,
+    self, CountsReq, CountsResp, ForecastParamsReq, ForecastParamsResp, GetReq, GetResp, HasReq,
+    HasResp, KeysReq, KeysResp, ListReq, ListResp, ResolutionsReq, ResolutionsResp, VerifyReq,
+    VerifyResp,
     time_series_store_server::{TimeSeriesStore as TimeSeriesStoreSvc, TimeSeriesStoreServer},
 };
 use tokio::sync::Mutex;
@@ -173,6 +174,20 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
             components_with_time_series: counts.components_with_time_series,
             static_time_series: counts.static_time_series,
             forecasts: counts.forecasts,
+        }))
+    }
+
+    async fn get_forecast_parameters(
+        &self,
+        _request: Request<ForecastParamsReq>,
+    ) -> Result<Response<ForecastParamsResp>, Status> {
+        let store = self.store.lock().await;
+        let params = store.get_forecast_parameters().map_err(map_err)?;
+        Ok(Response::new(ForecastParamsResp {
+            horizon_ms: params.horizon.map(|d| d.num_milliseconds()),
+            interval_ms: params.interval.map(|d| d.num_milliseconds()),
+            count: params.count.map(|c| c as u64),
+            resolution_ms: params.resolution.map(|d| d.num_milliseconds()),
         }))
     }
 

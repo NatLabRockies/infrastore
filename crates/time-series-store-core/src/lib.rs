@@ -11,7 +11,7 @@ pub mod types;
 pub mod version;
 
 pub use error::{Result, TimeSeriesError};
-pub use storage::{CompactionReport, IntegrityReport};
+pub use storage::{CompactionReport, Compression, IntegrityReport};
 pub use store::{AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts};
 pub use types::{
     array::{Dtype, TypedArray},
@@ -31,6 +31,18 @@ pub use version::DATA_FORMAT_VERSION;
 /// is wired in M1).
 pub fn create_store(path: Option<&std::path::Path>, in_memory: bool) -> Result<Store> {
     Store::create(path, in_memory)
+}
+
+/// Create a new store with an explicit NetCDF compression policy.
+///
+/// Behaves like [`create_store`] but applies `compression` to data variables
+/// (ignored for `in_memory` stores).
+pub fn create_store_with_compression(
+    path: Option<&std::path::Path>,
+    in_memory: bool,
+    compression: Compression,
+) -> Result<Store> {
+    Store::create_with_compression(path, in_memory, compression)
 }
 
 /// Open an existing store from disk.

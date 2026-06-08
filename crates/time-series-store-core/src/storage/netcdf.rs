@@ -27,6 +27,7 @@ use netcdf::{Extents, FileMut, Group, GroupMut};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
+use crate::storage::Compression;
 use crate::types::array::{Dtype, TypedArray};
 use crate::version::DATA_FORMAT_VERSION;
 
@@ -39,6 +40,8 @@ const ROOT_GROUP: &str = "time_series";
 const SINGLE_GROUP: &str = "single";
 const HASH_SUFFIX: &str = "_h";
 const STANDALONE_PREFIX: &str = "arr_";
+/// Global attribute recording the compression policy a store was created with.
+const COMPRESSION_ATTR: &str = "compression";
 
 #[derive(Debug, Clone)]
 enum Location {
@@ -208,12 +211,15 @@ fn add_typed_variable(
     dtype: Dtype,
     dim_names: &[&str],
     chunks: &[usize],
+    compression: Compression,
 ) -> Result<()> {
     macro_rules! add_var {
         ($t:ty) => {{
             let mut var = single.add_variable::<$t>(name, dim_names).map_err(map_nc)?;
             var.set_chunking(chunks).map_err(map_nc)?;
-            var.set_compression(3, true).map_err(map_nc)?;
+            if let Compression::Deflate { level, shuffle } = compression {
+                var.set_compression(level as _, shuffle).map_err(map_nc)?;
+            }
         }};
     }
     match dtype {
@@ -237,12 +243,15 @@ struct Inner {
     datasets: HashMap<String, DatasetState>,
     standalone_vars: HashSet<String>,
     by_hash: HashMap<[u8; 32], Location>,
+    compression: Compression,
 }
 
 impl NetCdfBackend {
-    pub fn create(path: &Path) -> Result<Self> {
+    pub fn create(path: &Path, compression: Compression) -> Result<Self> {
         let mut file = netcdf::create(path).map_err(map_nc)?;
         file.add_attribute("data_format_version", DATA_FORMAT_VERSION)
+            .map_err(map_nc)?;
+        file.add_attribute(COMPRESSION_ATTR, compression.encode())
             .map_err(map_nc)?;
         {
             let mut ts = file.add_group(ROOT_GROUP).map_err(map_nc)?;
@@ -255,12 +264,20 @@ impl NetCdfBackend {
                 datasets: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
+                compression,
             }),
         })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
         let file = netcdf::append(path).map_err(map_nc)?;
+        // Restore the compression policy the store was created with so that
+        // appended arrays reuse the same filter. Legacy stores without the
+        // attribute fall back to the historical default.
+        let compression = match file.attribute(COMPRESSION_ATTR).map(|a| a.value()) {
+            Some(Ok(netcdf::AttributeValue::Str(s))) => Compression::decode(&s),
+            _ => Compression::default(),
+        };
         let mut backend = Self {
             inner: Mutex::new(Inner {
                 file,
@@ -268,6 +285,7 @@ impl NetCdfBackend {
                 datasets: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
+                compression,
             }),
         };
         backend.rebuild_index()?;
@@ -277,6 +295,11 @@ impl NetCdfBackend {
     pub fn path(&self) -> PathBuf {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.path.clone()
+    }
+
+    pub fn compression(&self) -> Compression {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.compression
     }
 
     fn rebuild_index(&mut self) -> Result<()> {
@@ -454,6 +477,7 @@ impl Inner {
             .chain(std::iter::once(MAX_COLS_PER_DATASET))
             .chain(element_shape.iter().copied())
             .collect();
+        let compression = self.compression;
 
         self.with_single_mut(|single| {
             single.add_dimension(&dim_time, length).map_err(map_nc)?;
@@ -467,7 +491,7 @@ impl Inner {
             for (dn, _) in &elem_dims {
                 dim_names.push(dn);
             }
-            add_typed_variable(single, &name_owned, dtype, &dim_names, &chunks)?;
+            add_typed_variable(single, &name_owned, dtype, &dim_names, &chunks, compression)?;
             let _h = single
                 .add_string_variable(&hash_name_for_closure, &[&dim_col])
                 .map_err(map_nc)?;
@@ -566,6 +590,7 @@ impl Inner {
         let dtype = data.dtype;
         let bytes = data.bytes.clone();
         let var_c = var.clone();
+        let compression = self.compression;
         self.with_single_mut(move |single| {
             let dims: Vec<(String, usize)> = shape
                 .iter()
@@ -576,7 +601,7 @@ impl Inner {
                 single.add_dimension(dn, *sz).map_err(map_nc)?;
             }
             let dim_names: Vec<&str> = dims.iter().map(|(n, _)| n.as_str()).collect();
-            add_typed_variable(single, &var_c, dtype, &dim_names, &shape)?;
+            add_typed_variable(single, &var_c, dtype, &dim_names, &shape, compression)?;
             let mut v = single.variable_mut(&var_c).ok_or_else(|| {
                 TimeSeriesError::IntegrityError(format!("missing variable {var_c}"))
             })?;
@@ -780,5 +805,9 @@ impl StorageBackend for NetCdfBackend {
     fn flush(&mut self) -> Result<()> {
         let inner = self.inner.lock().unwrap();
         inner.file.sync().map_err(map_nc)
+    }
+
+    fn compression(&self) -> Compression {
+        NetCdfBackend::compression(self)
     }
 }

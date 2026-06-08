@@ -9,15 +9,16 @@ remove, clear, compact) requires local filesystem access and is intentionally ab
 
 ## Methods
 
-| RPC                 | Request          | Response          | Purpose                             |
-| ------------------- | ---------------- | ----------------- | ----------------------------------- |
-| `ListTimeSeries`    | `ListReq`        | `ListResp`        | List metadata matching a filter     |
-| `GetTimeSeries`     | `GetReq`         | `GetResp`         | Fetch one series' values            |
-| `GetTimeSeriesKeys` | `KeysReq`        | `KeysResp`        | List keys for an owner              |
-| `GetResolutions`    | `ResolutionsReq` | `ResolutionsResp` | Distinct resolutions present        |
-| `GetCounts`         | `CountsReq`      | `CountsResp`      | Aggregate counts                    |
-| `HasTimeSeries`     | `HasReq`         | `HasResp`         | Existence check                     |
-| `VerifyIntegrity`   | `VerifyReq`      | `VerifyResp`      | Recompute and compare stored hashes |
+| RPC                     | Request             | Response             | Purpose                              |
+| ----------------------- | ------------------- | -------------------- | ------------------------------------ |
+| `ListTimeSeries`        | `ListReq`           | `ListResp`           | List metadata matching a filter      |
+| `GetTimeSeries`         | `GetReq`            | `GetResp`            | Fetch one series' values             |
+| `GetTimeSeriesKeys`     | `KeysReq`           | `KeysResp`           | List keys for an owner               |
+| `GetResolutions`        | `ResolutionsReq`    | `ResolutionsResp`    | Distinct resolutions present         |
+| `GetCounts`             | `CountsReq`         | `CountsResp`         | Aggregate counts                     |
+| `GetForecastParameters` | `ForecastParamsReq` | `ForecastParamsResp` | Horizon, interval, count, resolution |
+| `HasTimeSeries`         | `HasReq`            | `HasResp`            | Existence check                      |
+| `VerifyIntegrity`       | `VerifyReq`         | `VerifyResp`         | Recompute and compare stored hashes  |
 
 ## Common Messages
 
@@ -113,6 +114,14 @@ message CountsResp {
   int64 forecasts                   = 3;
 }
 
+message ForecastParamsReq  {}
+message ForecastParamsResp {
+  optional int64  horizon_ms    = 1;
+  optional int64  interval_ms   = 2;
+  optional uint64 count         = 3;
+  optional int64  resolution_ms = 4;
+}
+
 message HasReq  { TimeSeriesKey key = 1; }
 message HasResp { bool present = 1; }
 
@@ -160,6 +169,6 @@ let data = client.get_time_series(&keys[0], None).await?;
 ```
 
 `RemoteClient` methods: `connect`, `from_channel`, `list_time_series`, `get_time_series`,
-`get_time_series_keys`, `get_resolutions`, `get_counts`, `has_time_series`, `verify_integrity`. See
-the [gRPC Server guide](../guides/server.md) for end-to-end usage and adding an API key to client
-requests.
+`get_time_series_keys`, `get_resolutions`, `get_counts`, `get_forecast_parameters`,
+`has_time_series`, `verify_integrity`. See the [gRPC Server guide](../guides/server.md) for
+end-to-end usage and adding an API key to client requests.

@@ -6,8 +6,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, TimeSeriesData,
-    TypedArray, create_store, open_store,
+    Compression, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
+    TimeSeriesData, TypedArray, create_store, create_store_with_compression, open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -56,6 +56,96 @@ fn persistent_round_trip() {
 
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
+}
+
+/// Every supported compression policy must round-trip transparently: data
+/// written under one filter reads back identically, and appends after reopen
+/// reuse the persisted policy.
+#[test]
+fn compression_policies_round_trip() {
+    for compression in [
+        Compression::None,
+        Compression::Deflate {
+            level: 9,
+            shuffle: false,
+        },
+        Compression::Deflate {
+            level: 1,
+            shuffle: true,
+        },
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.nc");
+
+        {
+            let mut store =
+                create_store_with_compression(Some(path.as_path()), false, compression).unwrap();
+            store
+                .add_time_series(
+                    "7",
+                    "Generator",
+                    OwnerCategory::Component,
+                    "load",
+                    TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
+                    Features::new(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            store.flush().unwrap();
+        }
+
+        // Reopen read-write and append a second series; this exercises the
+        // restored-from-attribute compression path.
+        {
+            let mut store = open_store(path.as_path(), false).unwrap();
+            // The policy is restored from the persisted file attribute.
+            assert_eq!(store.compression(), compression, "{compression:?}");
+            store
+                .add_time_series(
+                    "8",
+                    "Generator",
+                    OwnerCategory::Component,
+                    "load",
+                    TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
+                    Features::new(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            store.flush().unwrap();
+        }
+
+        let store = open_store(path.as_path(), true).unwrap();
+        for (owner, base) in [("7", 100.0), ("8", 200.0)] {
+            let keys = store.get_time_series_keys(owner).unwrap();
+            assert_eq!(keys.len(), 1, "{compression:?}");
+            let got = store.get_time_series(&keys[0], None).unwrap();
+            assert_eq!(
+                got.as_single().unwrap().data.to_f64_vec().unwrap(),
+                (0..24).map(|i| base + i as f64).collect::<Vec<_>>(),
+                "{compression:?}",
+            );
+        }
+        let report = store.verify_integrity().unwrap();
+        assert!(report.ok(), "integrity errors: {:?}", report.errors);
+    }
+}
+
+/// DEFLATE levels outside 0–9 are rejected up front.
+#[test]
+fn invalid_compression_level_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+    let err = create_store_with_compression(
+        Some(path.as_path()),
+        false,
+        Compression::Deflate {
+            level: 10,
+            shuffle: true,
+        },
+    );
+    assert!(err.is_err(), "level 10 should be rejected");
 }
 
 #[test]

@@ -8,7 +8,8 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, get_time_series, get_time_series_keys, key_info,
        remove_time_series!,
-       has_time_series, get_counts, verify_integrity, compact!,
+       has_time_series, get_counts, get_forecast_parameters, get_compression,
+       verify_integrity, compact!,
        get_metadata, get_array_by_hash, open_store, flush!, clear!,
        transform_single_time_series!, has_typed, remove_typed!,
        close!
@@ -330,17 +331,33 @@ function close!(s::Store)
 end
 
 """
-    Store(; in_memory=true, path=nothing)
+    Store(; in_memory=true, path=nothing,
+            compression=:deflate, compression_level=3, shuffle=true)
 
 Construct a new store. Pass `path` (and `in_memory=false`) to persist to a
 NetCDF file on disk.
+
+`compression` selects the on-disk filter for NetCDF data variables:
+`:deflate` (default) applies DEFLATE at `compression_level` (0–9) with optional
+byte `shuffle`; `:none` disables compression. The setting is ignored for
+in-memory stores and is persisted so later appends reuse it.
 """
-function Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing)
+function Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
+               compression::Union{Symbol,AbstractString}=:deflate,
+               compression_level::Integer=3, shuffle::Bool=true)
+    kind = Symbol(compression)
+    compression_kind = if kind === :none
+        UInt8(0)
+    elseif kind === :deflate
+        UInt8(1)
+    else
+        throw(ArgumentError("unknown compression $(repr(compression)), expected :deflate or :none"))
+    end
     out = Ref{Ptr{Cvoid}}(C_NULL)
     cpath = path === nothing ? C_NULL : pointer(String(path))
-    code = ccall((:ts_store_create, lib_path()), Int32,
-                 (Cstring, Bool, Ref{Ptr{Cvoid}}),
-                 cpath, in_memory, out)
+    code = ccall((:ts_store_create_with_compression, lib_path()), Int32,
+                 (Cstring, Bool, UInt8, UInt8, Bool, Ref{Ptr{Cvoid}}),
+                 cpath, in_memory, compression_kind, UInt8(compression_level), shuffle, out)
     _check(code)
     return Store(out[])
 end
@@ -907,6 +924,49 @@ function get_counts(store::Store)
                  store.handle, a, b, c)
     _check(code)
     return (components_with_time_series=a[], static_time_series=b[], forecasts=c[])
+end
+
+"""
+    get_forecast_parameters(store)
+
+Return the store's forecast parameters as a NamedTuple
+`(horizon, interval, count, resolution)`. `horizon`, `interval`, and
+`resolution` are `Millisecond` periods (or `nothing`); `count` is an `Int` (or
+`nothing`). Every field is `nothing` when the store holds no forecasts.
+"""
+function get_forecast_parameters(store::Store)
+    present = Ref{Bool}(false)
+    horizon = Ref{Int64}(-1); interval = Ref{Int64}(-1)
+    count = Ref{Int64}(-1); resolution = Ref{Int64}(-1)
+    code = ccall((:ts_store_get_forecast_parameters, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+                 store.handle, present, horizon, interval, count, resolution)
+    _check(code)
+    _ms(x) = x < 0 ? nothing : Millisecond(x)
+    return (
+        horizon=_ms(horizon[]),
+        interval=_ms(interval[]),
+        count=(count[] < 0 ? nothing : Int(count[])),
+        resolution=_ms(resolution[]),
+    )
+end
+
+"""
+    get_compression(store)
+
+Return the store's compression policy as a NamedTuple `(compression, level,
+shuffle)`. `compression` is `:deflate` or `:none`; `level` (0-9) and `shuffle`
+apply to DEFLATE. For a store opened from disk this reflects the policy it was
+created with; in-memory stores report `:none`.
+"""
+function get_compression(store::Store)
+    kind = Ref{UInt8}(0); level = Ref{UInt8}(0); shuffle = Ref{Bool}(false)
+    code = ccall((:ts_store_get_compression, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{UInt8}, Ref{UInt8}, Ref{Bool}),
+                 store.handle, kind, level, shuffle)
+    _check(code)
+    return kind[] == 0 ? (compression=:none, level=Int(level[]), shuffle=shuffle[]) :
+           (compression=:deflate, level=Int(level[]), shuffle=shuffle[])
 end
 
 function verify_integrity(store::Store)

@@ -100,6 +100,53 @@ def test_persistent_round_trip(tmp_path):
     assert report == [], f"integrity errors: {report}"
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"compression": "none"},
+        {"compression": "deflate", "compression_level": 9, "shuffle": False},
+        {"compression": "deflate", "compression_level": 1, "shuffle": True},
+    ],
+)
+def test_compression_round_trip(tmp_path, kwargs):
+    """Each compression policy stores and reads back identical data."""
+    path = tmp_path / "store.nc"
+    s = make_series(2024, 12, 1.0)
+
+    store = TimeSeriesStore.create(path=str(path), in_memory=False, **kwargs)
+    store.add_time_series("1", "Generator", OwnerCategory.Component, s)
+    store.flush()
+    del store
+
+    reopened = TimeSeriesStore.open(path=str(path), read_only=True)
+    # The persisted policy is restored on open.
+    comp = reopened.get_compression()
+    expected = kwargs.get("compression", "deflate")
+    assert comp["compression"] == expected
+    if expected == "deflate":
+        assert comp["level"] == kwargs.get("compression_level", 3)
+        assert comp["shuffle"] == kwargs.get("shuffle", True)
+    keys = reopened.get_time_series_keys("1")
+    got = reopened.get_time_series(keys[0])
+    np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
+    assert reopened.verify_integrity() == []
+
+
+def test_get_compression_in_memory_is_none():
+    store = TimeSeriesStore.create(in_memory=True)
+    assert store.get_compression()["compression"] == "none"
+
+
+def test_invalid_compression_rejected(tmp_path):
+    path = tmp_path / "store.nc"
+    with pytest.raises(InvalidParameterError):
+        TimeSeriesStore.create(path=str(path), in_memory=False, compression="lz4")
+    with pytest.raises(InvalidParameterError):
+        TimeSeriesStore.create(
+            path=str(path), in_memory=False, compression="deflate", compression_level=99
+        )
+
+
 def test_features_disambiguate_keys():
     store = TimeSeriesStore.create(in_memory=True)
     s1 = make_series(base=1.0)

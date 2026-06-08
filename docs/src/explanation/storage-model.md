@@ -60,8 +60,14 @@ flowchart TB
 - **A companion string variable holds the hashes.** For each packed dataset there is a sibling
   `{dataset}_h`; slot `i` holds the SHA-256 hex of column `i`, or an empty string if the slot is
   free. This is the on-disk index the backend rebuilds on open.
-- **Datasets spill at 1,000 columns** into `…__1`, `…__2`, and so on. Compression is zlib level 3
-  with shuffle.
+- **Datasets spill at 1,000 columns** into `…__1`, `…__2`, and so on.
+- **Compression is configurable** at store creation and applies to every data variable (packed and
+  standalone). The default is DEFLATE (zlib) level 3 with the byte-shuffle filter; you may change
+  the level (0–9), disable shuffle, or turn compression off entirely. The choice is recorded in a
+  `compression` global attribute and restored when the store is reopened for appends, so later
+  writes reuse the same filter. Compression is a storage detail only — arrays decode transparently
+  regardless of the filter, so stores written with different settings stay mutually readable and the
+  data-format version is unaffected. In-memory stores ignore the setting.
 
 **Standalone mode** holds `NonSequentialTimeSeries` and the dense forecast arrays (`Deterministic`,
 `Probabilistic`, `Scenarios`). Each is its own typed, multi-dimensional variable `arr_{hex_hash}` of

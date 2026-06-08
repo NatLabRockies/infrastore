@@ -11,19 +11,26 @@ using TimeSeriesStore
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
 `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
 `Component`, `SupplementalAttribute`, `add_time_series!`, `get_time_series`, `get_time_series_keys`,
-`key_info`, `remove_time_series!`, `has_time_series`, `get_counts`, `verify_integrity`, `compact!`,
-`get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `clear!`,
-`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
+`key_info`, `remove_time_series!`, `has_time_series`, `get_counts`, `get_forecast_parameters`,
+`get_compression`, `verify_integrity`, `compact!`, `get_metadata`, `get_array_by_hash`,
+`open_store`, `flush!`, `clear!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`,
+`close!`.
 
 ## Constructors
 
 ```julia
-Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing) -> Store
+Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
+        compression::Union{Symbol,AbstractString}=:deflate,
+        compression_level::Integer=3, shuffle::Bool=true) -> Store
 open_store(path::AbstractString; read_only::Bool=false) -> Store
 ```
 
 - `Store()` — in-memory store.
 - `Store(in_memory=false, path="system.nc")` — persists to `system.nc` plus `system.nc.sqlite`.
+- `compression=:none` stores arrays uncompressed; `:deflate` (default) applies DEFLATE at
+  `compression_level` (0–9) with optional byte `shuffle`. The policy is persisted with the store and
+  reused on later appends; it is ignored for in-memory stores. An unknown `compression` throws
+  `ArgumentError`.
 - `open_store(path; read_only=true)` — opens an existing on-disk pair.
 
 The store registers a finalizer; close it eagerly with `close!(store)`.
@@ -287,6 +294,8 @@ flattened array.
 
 ```julia
 get_counts(store) -> NamedTuple   # (components_with_time_series, static_time_series, forecasts)
+get_forecast_parameters(store) -> NamedTuple  # (horizon, interval, count, resolution); fields `nothing` when no forecasts
+get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
 flush!(store) -> Nothing          # sync to disk; afterwards .nc and .sqlite can be copied

@@ -17,20 +17,42 @@ use time_series_store_core::{
 
 ```rust
 pub fn create_store(path: Option<&Path>, in_memory: bool) -> Result<Store>
+pub fn create_store_with_compression(
+    path: Option<&Path>,
+    in_memory: bool,
+    compression: Compression,
+) -> Result<Store>
 pub fn open_store(path: &Path, read_only: bool) -> Result<Store>
 ```
 
 - `create_store(None, true)` — in-memory store, no filesystem I/O.
 - `create_store(Some(path), false)` — creates `path` (NetCDF) and `path.sqlite` (metadata).
+- `create_store_with_compression(...)` — as above but with an explicit NetCDF compression policy.
 - `open_store(path, read_only)` — opens an existing pair. `read_only = true` rejects all writes.
 
-`Store::create` / `Store::open` are the inherent-method equivalents.
+`Store::create` / `Store::create_with_compression` / `Store::open` are the inherent-method
+equivalents.
+
+```rust
+pub enum Compression {
+    None,
+    Deflate { level: u8, shuffle: bool }, // level 0–9
+}
+```
+
+`create_store` uses `Compression::default()` (DEFLATE level 3 + shuffle). The policy is persisted
+and restored when the store is reopened for appends, applies only to on-disk stores, and never
+changes how data is read back — see the [storage model](../explanation/storage-model.md).
 
 ## `Store`
 
 ```rust
 impl Store {
     pub fn read_only(&self) -> bool;
+
+    // The compression policy applied to writes (restored from the file on open;
+    // `Compression::None` for in-memory stores).
+    pub fn compression(&self) -> Compression;
 
     pub fn add_time_series(
         &mut self,

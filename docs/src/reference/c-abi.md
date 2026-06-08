@@ -49,6 +49,9 @@ consumer.
 
 ```c
 int32_t ts_store_create(const char *path, bool in_memory, struct TsStore **out);
+/* compression_kind: 0 = none, 1 = DEFLATE (deflate_level 0-9 + shuffle). */
+int32_t ts_store_create_with_compression(const char *path, bool in_memory, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, struct TsStore **out);
 int32_t ts_store_open(const char *path, bool read_only, struct TsStore **out);
 void    ts_store_free(struct TsStore *handle);
 void    ts_key_free(struct TsKey *key);
@@ -297,6 +300,13 @@ int32_t ts_store_remove_typed(struct TsStore *handle, const char *owner_uuid, co
 ```c
 int32_t ts_store_counts(const struct TsStore *handle, int64_t *out_components_with_time_series,
                         int64_t *out_static_time_series, int64_t *out_forecasts);
+/* out_present = false when no forecasts; absent fields are set to -1. */
+int32_t ts_store_get_forecast_parameters(const struct TsStore *handle, bool *out_present,
+                                         int64_t *out_horizon_ms, int64_t *out_interval_ms,
+                                         int64_t *out_count, int64_t *out_resolution_ms);
+/* out_kind: 0 = none, 1 = DEFLATE (out_level 0-9 + out_shuffle). */
+int32_t ts_store_get_compression(const struct TsStore *handle, uint8_t *out_kind,
+                                 uint8_t *out_level, bool *out_shuffle);
 int32_t ts_store_verify(const struct TsStore *handle, uint64_t *out_error_count);
 int32_t ts_store_compact(struct TsStore *handle);
 int32_t ts_store_flush(struct TsStore *handle);

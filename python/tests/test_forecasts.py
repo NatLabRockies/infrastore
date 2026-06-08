@@ -361,6 +361,40 @@ def test_empty_window_range():
 
 
 # ---------------------------------------------------------------------------
+# get_forecast_parameters
+# ---------------------------------------------------------------------------
+
+
+def test_get_forecast_parameters():
+    """A store with a forecast reports its horizon/interval/count/resolution."""
+    store = TimeSeriesStore.create(in_memory=True)
+    H, C = 6, 4
+    data = np.arange(H * C, dtype=np.float64).reshape(H, C)
+    store.add_time_series(
+        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_params"),
+    )
+
+    params = store.get_forecast_parameters()
+    assert params["horizon"] == HORIZON_6H
+    assert params["interval"] == INTERVAL_12H
+    assert params["count"] == C
+    assert params["resolution"] == RES_1H
+
+
+def test_get_forecast_parameters_no_forecasts():
+    """Without forecasts, every parameter is None."""
+    store = TimeSeriesStore.create(in_memory=True)
+    params = store.get_forecast_parameters()
+    assert params == {
+        "horizon": None,
+        "interval": None,
+        "count": None,
+        "resolution": None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # repr smoke test
 # ---------------------------------------------------------------------------
 
