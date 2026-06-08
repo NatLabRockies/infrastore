@@ -1586,7 +1586,6 @@ dependencies = [
  "tabled",
  "tempfile",
  "time-series-store-core",
- "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]

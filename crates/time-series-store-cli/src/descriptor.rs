@@ -1,5 +1,8 @@
-//! Sidecar TOML metadata: the human-authored description of a time series whose
+//! JSON descriptor: the human-authored file that describes a time series whose
 //! numeric values live in a companion CSV.
+//!
+//! A descriptor file may be a single JSON object (one series) or a JSON array
+//! of objects (batch add).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -16,7 +19,7 @@ use crate::parse;
 /// One time-series description. Field presence is validated per `type`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Sidecar {
+pub struct Descriptor {
     pub owner_uuid: String,
     pub owner_type: String,
     #[serde(default = "default_owner_category")]
@@ -27,14 +30,14 @@ pub struct Sidecar {
     pub dtype: String,
     pub units: Option<String>,
     pub scaling_factor_multiplier: Option<String>,
-    /// CSV data path, relative to the sidecar file. May be overridden by `--csv`.
+    /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
     pub csv: Option<String>,
     #[serde(default = "default_true")]
     pub has_header: bool,
     #[serde(default)]
     pub element_shape: Vec<usize>,
     #[serde(default)]
-    pub features: BTreeMap<String, toml::Value>,
+    pub features: BTreeMap<String, serde_json::Value>,
 
     // Type-specific.
     pub initial_timestamp: Option<String>,
@@ -53,39 +56,44 @@ fn default_owner_category() -> String {
     "component".to_string()
 }
 
-/// Load one or more sidecar descriptions. A file may carry a single series at
-/// the root, or a `[[series]]` array-of-tables for batch adds.
-pub fn load(path: &Path) -> Result<Vec<Sidecar>, String> {
+/// Load one or more descriptors from a JSON file.
+///
+/// A root JSON object is a single series; a root JSON array is a batch add.
+pub fn load(path: &Path) -> Result<Vec<Descriptor>, String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("reading sidecar {}: {e}", path.display()))?;
-    let value: toml::Value =
-        toml::from_str(&text).map_err(|e| format!("parsing sidecar {}: {e}", path.display()))?;
+        .map_err(|e| format!("reading descriptor {}: {e}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("parsing descriptor {}: {e}", path.display()))?;
 
-    if value.get("series").is_some() {
-        #[derive(Deserialize)]
-        struct Batch {
-            series: Vec<Sidecar>,
+    match &value {
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Err(format!("descriptor {} is an empty array", path.display()));
+            }
+            let series: Vec<Descriptor> = arr
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("parsing descriptor[{i}] in {}: {e}", path.display()))
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(series)
         }
-        let batch: Batch = value
-            .try_into()
-            .map_err(|e| format!("parsing sidecar {}: {e}", path.display()))?;
-        if batch.series.is_empty() {
-            return Err(format!(
-                "sidecar {} has an empty [[series]] list",
-                path.display()
-            ));
+        serde_json::Value::Object(_) => {
+            let one: Descriptor = serde_json::from_value(value)
+                .map_err(|e| format!("parsing descriptor {}: {e}", path.display()))?;
+            Ok(vec![one])
         }
-        Ok(batch.series)
-    } else {
-        let one: Sidecar = value
-            .try_into()
-            .map_err(|e| format!("parsing sidecar {}: {e}", path.display()))?;
-        Ok(vec![one])
+        _ => Err(format!(
+            "descriptor {} must be a JSON object or array",
+            path.display()
+        )),
     }
 }
 
-impl Sidecar {
-    /// Resolve the CSV path against the sidecar's directory, honoring an override.
+impl Descriptor {
+    /// Resolve the CSV path against the descriptor's directory, honoring an override.
     fn csv_path(
         &self,
         base_dir: Option<&Path>,
@@ -109,7 +117,7 @@ impl Sidecar {
     fn features(&self) -> Result<Features, String> {
         let mut out = Features::new();
         for (k, v) in &self.features {
-            out.insert(k.clone(), parse::feature_from_toml(k, v)?);
+            out.insert(k.clone(), parse::feature_from_json(k, v)?);
         }
         Ok(out)
     }

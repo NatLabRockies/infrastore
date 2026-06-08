@@ -55,7 +55,7 @@ crates/
   time-series-store-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
     src/types/               #   key.rs, metadata.rs, time_series.rs
     src/storage/             #   memory.rs, netcdf.rs (storage backends)
-    src/metadata/            #   schema.rs (SQLite sidecar schema)
+    src/metadata/            #   schema.rs (SQLite catalog schema)
     src/store.rs             #   Store: the top-level public API
     src/hash.rs              #   SHA-256 column hashing
   time-series-store-proto/   # Protobuf service definition + tonic codegen, conversions
@@ -143,7 +143,7 @@ cargo run -p time-series-store-server -- --config my_server.toml
 
 ## Storage Format
 
-- A persisted store is a NetCDF file plus a SQLite sidecar at `<netcdf-path>.sqlite`. They are one
+- A persisted store is a NetCDF file plus a SQLite catalog at `<netcdf-path>.sqlite`. They are one
   logical artifact and must be moved, copied, and deleted together.
 - `DATA_FORMAT_VERSION` in `crates/time-series-store-core/src/version.rs` is the on-disk
   compatibility contract. Any incompatible NetCDF layout, SQLite schema, dtype encoding, or hashing

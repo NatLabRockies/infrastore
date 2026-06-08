@@ -1,7 +1,7 @@
 //! CSV <-> [`TypedArray`] conversion.
 //!
 //! Reading flattens all value cells in row-major order into the dtype's
-//! little-endian bytes; the full array shape comes from the sidecar. Writing
+//! little-endian bytes; the full array shape comes from the descriptor. Writing
 //! decodes the bytes back to per-dtype text.
 
 use std::path::Path;

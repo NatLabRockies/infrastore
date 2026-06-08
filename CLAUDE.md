@@ -14,9 +14,9 @@ SQLite. It exposes multiple bindings over a shared core:
   filesystem access)
 - **Python** — `time-series-store-py` via PyO3 (abi3-py310 wheel)
 - **Julia** — `time-series-store-ffi` C ABI cdylib, wrapped by `julia/TimeSeriesStore.jl`
-- **CLI** — `time-series-store-cli` (`tss` binary): loads time series from CSV + a sidecar TOML and
-  inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no gRPC).
-  Output mirrors the `../torc` CLI's global `-f/--format table|json|csv`.
+- **CLI** — `time-series-store-cli` (`tss` binary): loads time series from CSV + a descriptor JSON
+  and inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no
+  gRPC). Output mirrors the `../torc` CLI's global `-f/--format table|json|csv`.
 
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
 end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
@@ -68,7 +68,7 @@ crates/
   time-series-store-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
     src/types/               #   key.rs, metadata.rs, time_series.rs
     src/storage/             #   memory.rs, netcdf.rs (storage backends)
-    src/metadata/            #   schema.rs (SQLite sidecar schema)
+    src/metadata/            #   schema.rs (SQLite catalog schema)
     src/store.rs             #   Store: the top-level public API
     src/hash.rs              #   SHA-256 column hashing
   time-series-store-proto/   # Protobuf service definition + tonic codegen, conversions
@@ -157,7 +157,7 @@ cargo run -p time-series-store-server -- --config my_server.toml
 
 ## Storage Format
 
-- A persisted store is a NetCDF file plus a SQLite sidecar at `<netcdf-path>.sqlite`. They are one
+- A persisted store is a NetCDF file plus a SQLite catalog at `<netcdf-path>.sqlite`. They are one
   logical artifact and must be moved, copied, and deleted together.
 - `DATA_FORMAT_VERSION` in `crates/time-series-store-core/src/version.rs` is the on-disk
   compatibility contract. Any incompatible NetCDF layout, SQLite schema, dtype encoding, or hashing

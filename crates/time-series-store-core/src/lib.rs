@@ -27,7 +27,7 @@ pub use version::DATA_FORMAT_VERSION;
 /// Create a new store.
 ///
 /// If `in_memory` is true, no filesystem I/O occurs and `path` is ignored.
-/// Otherwise a sidecar SQLite database is created at `path` (NetCDF persistence
+/// Otherwise a catalog SQLite database is created at `path` (NetCDF persistence
 /// is wired in M1).
 pub fn create_store(path: Option<&std::path::Path>, in_memory: bool) -> Result<Store> {
     Store::create(path, in_memory)

@@ -103,8 +103,8 @@ terminal. Unlike the gRPC server it is **not** read-only: it opens the on-disk `
 pair directly and supports both reads and writes. Its shape:
 
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
-  (owner, name, type, dtype, resolution, timestamps, units, features) is described in a sidecar
-  TOML. All six dtypes and all five writable types are supported, forecasts included.
+  (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
+  JSON. All six dtypes and all five writable types are supported, forecasts included.
 - **Output mirrors `torc`.** A global `-f/--format` selects `table` (default), `json`, or `csv`,
   matching the conventions of the sibling `torc` CLI.
 - **Store access is isolated.** All store opening lives behind one module, so a future remote/gRPC

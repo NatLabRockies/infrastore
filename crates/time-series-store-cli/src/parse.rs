@@ -1,4 +1,4 @@
-//! Small, shared parsers for CLI/sidecar inputs: durations, timestamps,
+//! Small, shared parsers for CLI/descriptor inputs: durations, timestamps,
 //! owner categories, time-series-type names, and `key=value` features.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -154,17 +154,31 @@ pub fn infer_feature_value(s: &str) -> FeatureValue {
     FeatureValue::Str(s.to_string())
 }
 
-/// Convert a TOML scalar into a [`FeatureValue`] for sidecar `[features]`.
-pub fn feature_from_toml(key: &str, v: &toml::Value) -> Result<FeatureValue, String> {
+/// Convert a JSON scalar into a [`FeatureValue`] for descriptor `features`.
+pub fn feature_from_json(key: &str, v: &serde_json::Value) -> Result<FeatureValue, String> {
     Ok(match v {
-        toml::Value::Integer(i) => FeatureValue::Int(*i),
-        toml::Value::Float(f) => FeatureValue::Float(*f),
-        toml::Value::Boolean(b) => FeatureValue::Bool(*b),
-        toml::Value::String(s) => FeatureValue::Str(s.clone()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                FeatureValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                FeatureValue::Float(f)
+            } else {
+                return Err(format!(
+                    "feature '{key}' has a number that cannot be represented as i64 or f64"
+                ));
+            }
+        }
+        serde_json::Value::Bool(b) => FeatureValue::Bool(*b),
+        serde_json::Value::String(s) => FeatureValue::Str(s.clone()),
         other => {
+            let type_name = match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+                _ => unreachable!(),
+            };
             return Err(format!(
-                "feature '{key}' has unsupported type {}; use int, float, bool, or string",
-                other.type_str()
+                "feature '{key}' has unsupported type {type_name}; use int, float, bool, or string"
             ));
         }
     })

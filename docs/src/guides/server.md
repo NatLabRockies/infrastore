@@ -24,7 +24,7 @@ files.
    port = 50051
 
    [data]
-   files = ["./system.nc"]   # the .nc.sqlite sidecar must sit beside it
+   files = ["./system.nc"]   # the .nc.sqlite catalog must sit beside it
 
    [authentication]
    method = "none"

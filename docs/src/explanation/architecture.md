@@ -96,7 +96,7 @@ append-mostly, and read by content; metadata is small, frequently queried, and b
 and transactions. time-series-store puts each where it is strongest:
 
 - **Arrays → NetCDF4.** Chunked, compressed, columnar storage that HDF5 tooling already understands.
-- **Metadata → SQLite.** A queryable, transactional sidecar at `<path>.nc.sqlite`.
+- **Metadata → SQLite.** A queryable, transactional catalog at `<path>.nc.sqlite`.
 
 The [Storage Model](./storage-model.md) page covers the trade-offs and the consistency protocol that
 keeps the two files in agreement.

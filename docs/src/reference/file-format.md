@@ -7,7 +7,7 @@ A persisted store is a pair of files that must be kept together:
 <name>.nc.sqlite   # SQLite  — metadata associations
 ```
 
-The SQLite sidecar path is the NetCDF path with `.sqlite` appended to the file name. This page is
+The SQLite catalog path is the NetCDF path with `.sqlite` appended to the file name. This page is
 the authoritative description of both. For the rationale behind the split, see the
 [Storage Model](../explanation/storage-model.md).
 
@@ -105,7 +105,7 @@ column packing and no companion hash variable — the variable name carries the 
 
 ## SQLite Schema
 
-The sidecar database is created with `PRAGMA foreign_keys = ON` and the following DDL (idempotent —
+The catalog database is created with `PRAGMA foreign_keys = ON` and the following DDL (idempotent —
 `CREATE TABLE IF NOT EXISTS`).
 
 ### `time_series_associations`

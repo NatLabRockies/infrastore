@@ -5,10 +5,10 @@
 mod color;
 mod commands;
 mod csv_io;
+mod descriptor;
 mod output;
 mod parse;
 mod select;
-mod sidecar;
 mod store_access;
 
 use std::path::PathBuf;
@@ -34,7 +34,7 @@ const HELP_STYLES: Styles = Styles::styled()
     styles = HELP_STYLES
 )]
 struct Cli {
-    /// Path to the NetCDF store file (.nc). The SQLite sidecar is derived automatically.
+    /// Path to the NetCDF store file (.nc). The SQLite catalog is derived automatically.
     #[arg(long, global = true)]
     store: Option<PathBuf>,
 
@@ -52,12 +52,12 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Add one or more time series from a sidecar TOML + CSV data.
+    /// Add one or more time series from a descriptor JSON + CSV data.
     Add {
-        /// Sidecar TOML describing the series (single or `[[series]]` batch).
+        /// Descriptor JSON describing the series (single object or array of objects).
         #[arg(long)]
-        sidecar: PathBuf,
-        /// Override the CSV path from the sidecar (single-series sidecars only).
+        descriptor: PathBuf,
+        /// Override the CSV path from the descriptor (single-series descriptors only).
         #[arg(long)]
         csv: Option<PathBuf>,
     },
@@ -99,7 +99,7 @@ enum Commands {
         #[arg(long)]
         interval: String,
     },
-    /// Print an example sidecar TOML for a time-series type.
+    /// Print an example descriptor JSON for a time-series type.
     Template {
         /// single|non_sequential|deterministic|probabilistic|scenarios
         #[arg(value_name = "TYPE")]
@@ -118,8 +118,8 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<(), String> {
     match &cli.command {
-        Commands::Add { sidecar, csv } => {
-            commands::add::run(&require_store(cli)?, sidecar, csv.as_deref())
+        Commands::Add { descriptor, csv } => {
+            commands::add::run(&require_store(cli)?, descriptor, csv.as_deref())
         }
         Commands::List(selector) => {
             commands::show::list(&require_store(cli)?, selector, cli.format)

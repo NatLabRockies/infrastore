@@ -13,7 +13,7 @@ tss [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 
 | Option           | Description                                                             |
 | ---------------- | ----------------------------------------------------------------------- |
-| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` sidecar is implicit. |
+| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. |
 | `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                     |
 | `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.          |
 
@@ -23,16 +23,16 @@ tss [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 
 | Command     | Purpose                                                                |
 | ----------- | ---------------------------------------------------------------------- |
-| `add`       | Add one or more series from a sidecar TOML + CSV.                      |
+| `add`       | Add one or more series from a descriptor JSON + CSV.                   |
 | `list`      | List stored series matching the selector filters.                      |
 | `get`       | Read and display a single series' values.                              |
 | `info`      | Show metadata plus numeric stats for a single series.                  |
 | `remove`    | Delete a single series (prompts unless `--force` or non-interactive).  |
 | `transform` | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`. |
-| `template`  | Print an example sidecar for a given type to stdout.                   |
+| `template`  | Print an example descriptor for a given type to stdout.                |
 
 ```text
-tss --store <PATH> add --sidecar <FILE.toml> [--csv <FILE.csv>]
+tss --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>]
 tss --store <PATH> list    [SELECTOR...]
 tss --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
 tss --store <PATH> info    [SELECTOR...]
@@ -64,34 +64,34 @@ be narrowed.
 - **Timestamps** (`initial_timestamp`, non-sequential timestamp column, `--time-range`): RFC3339
   (e.g. `2024-01-01T00:00:00Z`) or a bare integer of epoch milliseconds.
 
-## Sidecar Schema
+## Descriptor Schema
 
-A sidecar TOML describes one series at the root, or many under `[[series]]`. The CSV holds only
-numbers (plus a leading timestamp column for `non_sequential`).
+A descriptor JSON file is either a single object (one series) or an array of objects (batch add).
+The CSV holds only numbers (plus a leading timestamp column for `non_sequential`).
 
-| Key                            | Required for                | Notes                                              |
-| ------------------------------ | --------------------------- | -------------------------------------------------- |
-| `owner_uuid`                   | all                         |                                                    |
-| `owner_type`                   | all                         |                                                    |
-| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`. |
-| `name`                         | all                         |                                                    |
-| `type`                         | all                         | One of the five writable types.                    |
-| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.         |
-| `csv`                          | all                         | Path relative to the sidecar; `--csv` overrides.   |
-| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.            |
-| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).     |
-| `units`                        | optional                    | Free-form label.                                   |
-| `scaling_factor_multiplier`    | optional                    | Opaque label, stored verbatim.                     |
-| `[features]`                   | optional                    | TOML int/float/bool/string values.                 |
-| `initial_timestamp`            | all except `non_sequential` |                                                    |
-| `resolution`                   | all except `non_sequential` |                                                    |
-| `horizon`, `interval`, `count` | forecasts                   |                                                    |
-| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                |
-| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.          |
+| Key                            | Required for                | Notes                                               |
+| ------------------------------ | --------------------------- | --------------------------------------------------- |
+| `owner_uuid`                   | all                         |                                                     |
+| `owner_type`                   | all                         |                                                     |
+| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.  |
+| `name`                         | all                         |                                                     |
+| `type`                         | all                         | One of the five writable types.                     |
+| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.          |
+| `csv`                          | all                         | Path relative to the descriptor; `--csv` overrides. |
+| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.             |
+| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).      |
+| `units`                        | optional                    | Free-form label.                                    |
+| `scaling_factor_multiplier`    | optional                    | Opaque label, stored verbatim.                      |
+| `features`                     | optional                    | JSON object; int/float/bool/string values.          |
+| `initial_timestamp`            | all except `non_sequential` |                                                     |
+| `resolution`                   | all except `non_sequential` |                                                     |
+| `horizon`, `interval`, `count` | forecasts                   |                                                     |
+| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                 |
+| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.           |
 
 ## CSV Layout
 
-`tss` computes the full array shape from the sidecar and reads the CSV's value cells in
+`tss` computes the full array shape from the descriptor and reads the CSV's value cells in
 **row-major** order to fill it. The total cell count must equal the product of the shape.
 
 | Type             | Shape                             | CSV                                                                    |

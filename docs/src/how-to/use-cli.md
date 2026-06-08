@@ -1,7 +1,7 @@
 # Use the `tss` CLI
 
 `tss` loads time series from CSV files and inspects a store, talking directly to the on-disk `.nc` +
-`.nc.sqlite` pair (no gRPC server required). For the full command and sidecar reference, see
+`.nc.sqlite` pair (no gRPC server required). For the full command and descriptor reference, see
 [CLI Reference](../reference/cli.md).
 
 ## 1. Build the Binary
@@ -17,31 +17,32 @@ The examples below assume `tss` is on your `PATH` (or use `./target/debug/tss`).
 ## 2. Describe the Data
 
 Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type, dtype,
-resolution, initial timestamp, units, features) lives in a **sidecar TOML**. Print a starting point
-for any type with `template`:
+resolution, initial timestamp, units, features) lives in a **descriptor JSON**. Print a starting
+point for any type with `template`:
 
 ```sh
-tss template single > load.toml
+tss template single > load.json       # print an example descriptor to edit
 ```
 
 Edit it to point at your data and metadata:
 
-```toml
-# load.toml
-owner_uuid = "42"
-owner_type = "Generator"
-owner_category = "component"
-name = "load"
-type = "single"
-dtype = "f64"
-units = "MW"
-csv = "load.csv"               # relative to this sidecar; override with --csv
-has_header = true
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-
-[features]
-model_year = 2030
+```json
+{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "owner_category": "component",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "load.csv",
+  "has_header": true,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "features": {
+    "model_year": 2030
+  }
+}
 ```
 
 ```text
@@ -55,11 +56,11 @@ value
 ## 3. Add It to a Store
 
 ```sh
-tss --store demo.nc add --sidecar load.toml
+tss --store demo.nc add --descriptor load.json
 ```
 
-The store (`demo.nc` and its `demo.nc.sqlite` sidecar) is created on first `add`. A sidecar may also
-hold a `[[series]]` array of tables to add many series in one transaction.
+The store (`demo.nc` and its `demo.nc.sqlite` catalog) is created on first `add`. A descriptor may
+also be a JSON array of objects to add many series in one transaction.
 
 ## 4. Read It Back
 

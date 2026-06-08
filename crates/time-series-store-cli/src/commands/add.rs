@@ -1,23 +1,23 @@
-//! The `add` command: load one or more series from a sidecar + CSV.
+//! The `add` command: load one or more series from a descriptor JSON + CSV.
 
 use std::path::Path;
 
-use crate::{color, sidecar, store_access};
+use crate::{color, descriptor, store_access};
 
 pub fn run(
     store_path: &Path,
-    sidecar_path: &Path,
+    descriptor_path: &Path,
     csv_override: Option<&Path>,
 ) -> Result<(), String> {
-    let sidecars = sidecar::load(sidecar_path)?;
-    if csv_override.is_some() && sidecars.len() > 1 {
-        return Err("--csv cannot be used with a [[series]] batch sidecar".to_string());
+    let descriptors = descriptor::load(descriptor_path)?;
+    if csv_override.is_some() && descriptors.len() > 1 {
+        return Err("--csv cannot be used with an array descriptor".to_string());
     }
-    let base_dir = sidecar_path.parent();
+    let base_dir = descriptor_path.parent();
 
-    let mut requests = Vec::with_capacity(sidecars.len());
-    for sc in &sidecars {
-        requests.push(sc.to_add_request(base_dir, csv_override)?);
+    let mut requests = Vec::with_capacity(descriptors.len());
+    for desc in &descriptors {
+        requests.push(desc.to_add_request(base_dir, csv_override)?);
     }
 
     let mut store = store_access::open_writable(store_path)?;

@@ -64,7 +64,7 @@ pub fn transform(store_path: &Path, horizon: &str, interval: &str) -> Result<(),
     Ok(())
 }
 
-/// `template`: print an example sidecar for the given time-series type.
+/// `template`: print an example descriptor for the given time-series type.
 pub fn template(ts_type: &str) -> Result<(), String> {
     let kind = parse::parse_ts_type(ts_type)?;
     use time_series_store_core::TimeSeriesType::*;
@@ -76,7 +76,7 @@ pub fn template(ts_type: &str) -> Result<(), String> {
         Scenarios => SCENARIOS,
         DeterministicSingleTimeSeries => {
             return Err(
-                "DeterministicSingleTimeSeries is derived via `tss transform`, not a sidecar"
+                "DeterministicSingleTimeSeries is derived via `tss transform`, not a descriptor"
                     .to_string(),
             );
         }
@@ -85,89 +85,89 @@ pub fn template(ts_type: &str) -> Result<(), String> {
     Ok(())
 }
 
-const SINGLE: &str = r#"# SingleTimeSeries: one value per timestep at a fixed resolution.
-# CSV: one value column (or `prod(element_shape)` columns), one row per timestep.
-owner_uuid = "42"
-owner_type = "Generator"
-owner_category = "component"
-name = "load"
-type = "single"
-dtype = "f64"
-units = "MW"
-csv = "load.csv"
-has_header = true
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-
-[features]
-model_year = 2030
+const SINGLE: &str = r#"{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "owner_category": "component",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "load.csv",
+  "has_header": true,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "features": {
+    "model_year": 2030
+  }
+}
 "#;
 
-const NON_SEQUENTIAL: &str = r#"# NonSequentialTimeSeries: explicit timestamps, irregular spacing.
-# CSV: first column is the timestamp (RFC3339 or epoch-ms), then value columns.
-owner_uuid = "42"
-owner_type = "Generator"
-owner_category = "component"
-name = "events"
-type = "non_sequential"
-dtype = "f64"
-units = "MW"
-csv = "events.csv"
-has_header = true
+const NON_SEQUENTIAL: &str = r#"{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "owner_category": "component",
+  "name": "events",
+  "type": "non_sequential",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "events.csv",
+  "has_header": true
+}
 "#;
 
-const DETERMINISTIC: &str = r#"# Deterministic forecast: data shape [H, count, *element_shape], H = horizon/resolution.
-# CSV: flat row-major values; total must equal H * count * prod(element_shape).
-owner_uuid = "42"
-owner_type = "Generator"
-owner_category = "component"
-name = "load_forecast"
-type = "deterministic"
-dtype = "f64"
-units = "MW"
-csv = "forecast.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-horizon = "24h"
-interval = "1h"
-count = 7
+const DETERMINISTIC: &str = r#"{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "owner_category": "component",
+  "name": "load_forecast",
+  "type": "deterministic",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "forecast.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "horizon": "24h",
+  "interval": "1h",
+  "count": 7
+}
 "#;
 
-const PROBABILISTIC: &str = r#"# Probabilistic forecast: data shape [num_percentiles, H, count, *element_shape].
-# CSV: flat row-major values; total must equal P * H * count * prod(element_shape).
-owner_uuid = "42"
-owner_type = "Generator"
-owner_category = "component"
-name = "load_prob"
-type = "probabilistic"
-dtype = "f64"
-units = "MW"
-csv = "prob.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-horizon = "24h"
-interval = "1h"
-count = 7
-percentiles = [10.0, 50.0, 90.0]
+const PROBABILISTIC: &str = r#"{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "owner_category": "component",
+  "name": "load_prob",
+  "type": "probabilistic",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "prob.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "horizon": "24h",
+  "interval": "1h",
+  "count": 7,
+  "percentiles": [10.0, 50.0, 90.0]
+}
 "#;
 
-const SCENARIOS: &str = r#"# Scenarios forecast: data shape [scenario_count, H, count, *element_shape].
-# scenario_count may be omitted and inferred from the data length.
-owner_uuid = "42"
-owner_type = "Generator"
-owner_category = "component"
-name = "load_scenarios"
-type = "scenarios"
-dtype = "f64"
-units = "MW"
-csv = "scenarios.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-horizon = "24h"
-interval = "1h"
-count = 7
-scenario_count = 10
+const SCENARIOS: &str = r#"{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "owner_category": "component",
+  "name": "load_scenarios",
+  "type": "scenarios",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "scenarios.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "horizon": "24h",
+  "interval": "1h",
+  "count": 7,
+  "scenario_count": 10
+}
 "#;

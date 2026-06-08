@@ -112,7 +112,7 @@ pub struct Store {
 
 impl Store {
     /// Create a new store. With `in_memory=true`, no filesystem I/O occurs;
-    /// otherwise a NetCDF4 file is created at `path` and a sidecar SQLite
+    /// otherwise a NetCDF4 file is created at `path` and a catalog SQLite
     /// file at `<path>.sqlite` holds metadata.
     ///
     /// Uses the default compression policy ([`Compression::default`]). Use
@@ -141,7 +141,7 @@ impl Store {
         let nc_path = path.ok_or_else(|| {
             TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
         })?;
-        let sqlite_path = sidecar_sqlite_path(nc_path);
+        let sqlite_path = catalog_sqlite_path(nc_path);
         let metadata = MetadataStore::open_path(&sqlite_path, false)?;
         let backend = NetCdfBackend::create(nc_path, compression)?;
         Ok(Self {
@@ -153,7 +153,7 @@ impl Store {
     }
 
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
-        let sqlite_path = sidecar_sqlite_path(path);
+        let sqlite_path = catalog_sqlite_path(path);
         let metadata = MetadataStore::open_path(&sqlite_path, read_only)?;
         // For v0, `read_only` only locks down the metadata side. The NetCDF
         // backend opens in append mode regardless; write attempts are rejected
@@ -966,7 +966,7 @@ fn forecast_key(
     }
 }
 
-fn sidecar_sqlite_path(nc_path: &Path) -> PathBuf {
+fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {
     let mut p = nc_path.to_path_buf();
     let new_name = match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => format!("{name}.sqlite"),

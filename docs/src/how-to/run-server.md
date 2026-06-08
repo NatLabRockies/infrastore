@@ -23,7 +23,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.nc"]   # the ./system.nc.sqlite sidecar must sit beside it
+files = ["./system.nc"]   # the ./system.nc.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"

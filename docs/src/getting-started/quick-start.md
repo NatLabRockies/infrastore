@@ -14,7 +14,7 @@ use time_series_store_core::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `in_memory = true` means no filesystem I/O. Pass a path and `false`
-    // to write a NetCDF file plus its SQLite sidecar.
+    // to write a NetCDF file plus its SQLite catalog.
     let mut store = create_store(None, true)?;
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -77,7 +77,7 @@ store.flush()?; // sync buffered NetCDF writes to disk
 This produces two files that travel together:
 
 - `system.nc` — the NetCDF4 file holding the arrays.
-- `system.nc.sqlite` — the sidecar holding the metadata associations.
+- `system.nc.sqlite` — the catalog holding the metadata associations.
 
 Reopen them later with `open_store(Path::new("system.nc"), /* read_only */ true)`.
 

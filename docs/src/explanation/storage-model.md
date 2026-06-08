@@ -7,7 +7,7 @@ system.nc          # NetCDF4 — the numerical arrays
 system.nc.sqlite   # SQLite  — the metadata associations
 ```
 
-The sidecar path is derived by appending `.sqlite` to the NetCDF file name. This page explains the
+The catalog path is derived by appending `.sqlite` to the NetCDF file name. This page explains the
 split and how the two halves stay consistent. For the exact bytes, dataset names, and table columns,
 see the [On-Disk File Format reference](../reference/file-format.md).
 
@@ -80,7 +80,7 @@ same physical shape — the type, timestamps, and windowing parameters all live 
 
 ## The Metadata Side: SQLite
 
-The sidecar holds two tables:
+The catalog holds two tables:
 
 - **`time_series_associations`** — one row per `(owner, name, resolution, features)` association,
   including the `data_hash` that links it to a packed column or standalone variable, the array

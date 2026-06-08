@@ -784,7 +784,7 @@ pub struct PyStore {
 #[pymethods]
 impl PyStore {
     /// Create a new store. With `in_memory=True`, no filesystem I/O occurs;
-    /// otherwise a NetCDF file is created at `path` and a sidecar SQLite file
+    /// otherwise a NetCDF file is created at `path` and a catalog SQLite file
     /// at `<path>.sqlite` holds metadata.
     ///
     /// `compression` selects the NetCDF data-variable filter: `"deflate"`

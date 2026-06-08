@@ -1,5 +1,5 @@
 //! End-to-end round-trip tests: drive the `tss` binary to add series from a
-//! sidecar + CSV, then read them back via `get -f csv` and compare values.
+//! descriptor + CSV, then read them back via `get -f csv` and compare values.
 
 use std::fs;
 use std::path::Path;
@@ -60,20 +60,24 @@ fn single_round_trip_all_dtypes() {
     for (dtype, csv_body, expected) in cases {
         let store = dir.path().join(format!("{dtype}.nc"));
         write(dir.path(), "data.csv", csv_body);
-        let toml = format!(
-            r#"owner_uuid = "42"
-owner_type = "Generator"
-name = "load"
-type = "single"
-dtype = "{dtype}"
-csv = "data.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-"#
+        let json = format!(
+            r#"{{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "dtype": "{dtype}",
+  "csv": "data.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}}"#
         );
-        let sidecar = write(dir.path(), "s.toml", &toml);
-        run(&store, &["add", "--sidecar", sidecar.to_str().unwrap()]);
+        let descriptor = write(dir.path(), "s.json", &json);
+        run(
+            &store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
 
         let out = run(
             &store,
@@ -92,19 +96,23 @@ fn non_sequential_round_trip() {
         "ns.csv",
         "2024-01-01T00:00:00Z,10\n2024-01-01T05:00:00Z,20\n2024-01-02T00:00:00Z,30\n",
     );
-    let sidecar = write(
+    let descriptor = write(
         dir.path(),
-        "ns.toml",
-        r#"owner_uuid = "9"
-owner_type = "Generator"
-name = "events"
-type = "non_sequential"
-dtype = "f64"
-csv = "ns.csv"
-has_header = false
-"#,
+        "ns.json",
+        r#"{
+  "owner_uuid": "9",
+  "owner_type": "Generator",
+  "name": "events",
+  "type": "non_sequential",
+  "dtype": "f64",
+  "csv": "ns.csv",
+  "has_header": false
+}"#,
     );
-    run(&store, &["add", "--sidecar", sidecar.to_str().unwrap()]);
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
 
     let out = run(
         &store,
@@ -127,22 +135,23 @@ fn forecast_round_trips() {
     write(dir.path(), "det.csv", "1\n2\n3\n4\n5\n6\n");
     let det = write(
         dir.path(),
-        "det.toml",
-        r#"owner_uuid = "1"
-owner_type = "Generator"
-name = "det"
-type = "deterministic"
-dtype = "i64"
-csv = "det.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-horizon = "2h"
-interval = "1h"
-count = 3
-"#,
+        "det.json",
+        r#"{
+  "owner_uuid": "1",
+  "owner_type": "Generator",
+  "name": "det",
+  "type": "deterministic",
+  "dtype": "i64",
+  "csv": "det.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "horizon": "2h",
+  "interval": "1h",
+  "count": 3
+}"#,
     );
-    run(&det_store, &["add", "--sidecar", det.to_str().unwrap()]);
+    run(&det_store, &["add", "--descriptor", det.to_str().unwrap()]);
     let out = run(
         &det_store,
         &["-f", "csv", "get", "--owner-uuid", "1", "--name", "det"],
@@ -155,23 +164,27 @@ count = 3
     write(dir.path(), "prob.csv", &prob_vals);
     let prob = write(
         dir.path(),
-        "prob.toml",
-        r#"owner_uuid = "2"
-owner_type = "Generator"
-name = "prob"
-type = "probabilistic"
-dtype = "i64"
-csv = "prob.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-horizon = "2h"
-interval = "1h"
-count = 2
-percentiles = [10.0, 50.0, 90.0]
-"#,
+        "prob.json",
+        r#"{
+  "owner_uuid": "2",
+  "owner_type": "Generator",
+  "name": "prob",
+  "type": "probabilistic",
+  "dtype": "i64",
+  "csv": "prob.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "horizon": "2h",
+  "interval": "1h",
+  "count": 2,
+  "percentiles": [10.0, 50.0, 90.0]
+}"#,
     );
-    run(&prob_store, &["add", "--sidecar", prob.to_str().unwrap()]);
+    run(
+        &prob_store,
+        &["add", "--descriptor", prob.to_str().unwrap()],
+    );
     let out = run(
         &prob_store,
         &["-f", "csv", "get", "--owner-uuid", "2", "--name", "prob"],
@@ -184,22 +197,26 @@ percentiles = [10.0, 50.0, 90.0]
     write(dir.path(), "scen.csv", &scen_vals);
     let scen = write(
         dir.path(),
-        "scen.toml",
-        r#"owner_uuid = "3"
-owner_type = "Generator"
-name = "scen"
-type = "scenarios"
-dtype = "i64"
-csv = "scen.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-horizon = "2h"
-interval = "1h"
-count = 2
-"#,
+        "scen.json",
+        r#"{
+  "owner_uuid": "3",
+  "owner_type": "Generator",
+  "name": "scen",
+  "type": "scenarios",
+  "dtype": "i64",
+  "csv": "scen.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h",
+  "horizon": "2h",
+  "interval": "1h",
+  "count": 2
+}"#,
     );
-    run(&scen_store, &["add", "--sidecar", scen.to_str().unwrap()]);
+    run(
+        &scen_store,
+        &["add", "--descriptor", scen.to_str().unwrap()],
+    );
     let out = run(
         &scen_store,
         &["-f", "csv", "get", "--owner-uuid", "3", "--name", "scen"],
@@ -212,22 +229,26 @@ fn multidim_single_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("md.nc");
     write(dir.path(), "md.csv", "1,2\n3,4\n5,6\n");
-    let sidecar = write(
+    let descriptor = write(
         dir.path(),
-        "md.toml",
-        r#"owner_uuid = "5"
-owner_type = "Generator"
-name = "curve"
-type = "single"
-dtype = "f64"
-csv = "md.csv"
-has_header = false
-element_shape = [2]
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-"#,
+        "md.json",
+        r#"{
+  "owner_uuid": "5",
+  "owner_type": "Generator",
+  "name": "curve",
+  "type": "single",
+  "dtype": "f64",
+  "csv": "md.csv",
+  "has_header": false,
+  "element_shape": [2],
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}"#,
     );
-    run(&store, &["add", "--sidecar", sidecar.to_str().unwrap()]);
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
     let out = run(
         &store,
         &["-f", "csv", "get", "--owner-uuid", "5", "--name", "curve"],
@@ -240,22 +261,26 @@ fn list_info_and_json_succeed() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("ok.nc");
     write(dir.path(), "d.csv", "1\n2\n3\n4\n");
-    let sidecar = write(
+    let descriptor = write(
         dir.path(),
-        "d.toml",
-        r#"owner_uuid = "42"
-owner_type = "Generator"
-name = "load"
-type = "single"
-dtype = "f64"
-units = "MW"
-csv = "d.csv"
-has_header = false
-initial_timestamp = "2024-01-01T00:00:00Z"
-resolution = "1h"
-"#,
+        "d.json",
+        r#"{
+  "owner_uuid": "42",
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "units": "MW",
+  "csv": "d.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}"#,
     );
-    run(&store, &["add", "--sidecar", sidecar.to_str().unwrap()]);
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
 
     // list in all three formats
     run(&store, &["list"]);
@@ -269,4 +294,72 @@ resolution = "1h"
         &["-f", "json", "info", "--owner-uuid", "42", "--name", "load"],
     );
     assert!(info.contains("\"mean\""), "info json includes stats");
+}
+
+#[test]
+fn batch_json_array_adds_multiple() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("batch.nc");
+    write(dir.path(), "a.csv", "1\n2\n3\n");
+    write(dir.path(), "b.csv", "4\n5\n6\n");
+    let descriptor = write(
+        dir.path(),
+        "batch.json",
+        r#"[
+  {
+    "owner_uuid": "10",
+    "owner_type": "Generator",
+    "name": "series_a",
+    "type": "single",
+    "dtype": "f64",
+    "csv": "a.csv",
+    "has_header": false,
+    "initial_timestamp": "2024-01-01T00:00:00Z",
+    "resolution": "1h"
+  },
+  {
+    "owner_uuid": "10",
+    "owner_type": "Generator",
+    "name": "series_b",
+    "type": "single",
+    "dtype": "f64",
+    "csv": "b.csv",
+    "has_header": false,
+    "initial_timestamp": "2024-01-01T00:00:00Z",
+    "resolution": "1h"
+  }
+]"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    let out_a = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--owner-uuid",
+            "10",
+            "--name",
+            "series_a",
+        ],
+    );
+    assert_eq!(data_lines(&out_a), ["1", "2", "3"]);
+
+    let out_b = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "get",
+            "--owner-uuid",
+            "10",
+            "--name",
+            "series_b",
+        ],
+    );
+    assert_eq!(data_lines(&out_b), ["4", "5", "6"]);
 }

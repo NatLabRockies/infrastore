@@ -49,7 +49,7 @@ flowchart TB
   shared across components are written to disk a single time
   ([content addressing](./explanation/content-addressing.md))
 - **NetCDF4 for arrays, SQLite for metadata** — Numerical data lands in a compact, chunked NetCDF4
-  file; queryable associations live in a sidecar SQLite database
+  file; queryable associations live in a catalog SQLite database
   ([storage model](./explanation/storage-model.md))
 - **Feature-tagged associations** — Each association carries an arbitrary map of typed features
   (`int` / `float` / `bool` / `str`) so multiple variants of a series can coexist under one owner

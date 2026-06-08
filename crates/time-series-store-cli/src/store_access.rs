@@ -16,7 +16,7 @@ pub fn open_readonly(path: &Path) -> Result<Store, String> {
     open_store(path, true).map_err(|e| e.to_string())
 }
 
-/// Open a writable store, creating it (and its SQLite sidecar) if absent.
+/// Open a writable store, creating it (and its SQLite catalog) if absent.
 pub fn open_writable(path: &Path) -> Result<Store, String> {
     if path.exists() {
         open_store(path, false).map_err(|e| e.to_string())

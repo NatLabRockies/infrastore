@@ -335,7 +335,7 @@ fn read_only_blocks_writes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
 
-    // Create a writable store at `path` (sidecar sqlite) and add a row.
+    // Create a writable store at `path` (catalog sqlite) and add a row.
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let s = series(2024, 12, 1.0);

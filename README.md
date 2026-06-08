@@ -142,21 +142,21 @@ to the on-disk NetCDF + SQLite artifact (no gRPC). Output follows the `torc` con
 cargo build -p time-series-store-cli   # builds the `tss` binary
 TSS=target/debug/tss
 
-# Numeric values live in a CSV; everything else is described in a sidecar TOML.
-$TSS template single > load.toml       # print an example sidecar to edit
-$TSS --store demo.nc add --sidecar load.toml
+# Numeric values live in a CSV; everything else is described in a descriptor JSON.
+$TSS template single > load.json       # print an example descriptor to edit
+$TSS --store demo.nc add --descriptor load.json
 $TSS --store demo.nc list
 $TSS --store demo.nc get  --owner-uuid 42 --name load            # pretty table
 $TSS --store demo.nc -f csv  get  --owner-uuid 42 --name load    # round-trippable CSV
 $TSS --store demo.nc -f json info --owner-uuid 42 --name load    # metadata + stats
 ```
 
-The sidecar carries the metadata that does not fit a CSV grid (owner, name, type, dtype, resolution,
-timestamps, units, features); the CSV holds only numbers, except `non_sequential`, whose first
-column is the timestamp. All six dtypes (`f64|f32|i64|i32|u64|bool`) and all five writable types
-(`single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`) are supported — forecast
-arrays are laid out as flat row-major values whose count equals the product of the type's shape (see
-`tss template <type>`). `tss transform --horizon <D> --interval <D>` derives
+The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,
+resolution, timestamps, units, features); the CSV holds only numbers, except `non_sequential`, whose
+first column is the timestamp. All six dtypes (`f64|f32|i64|i32|u64|bool`) and all five writable
+types (`single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`) are supported —
+forecast arrays are laid out as flat row-major values whose count equals the product of the type's
+shape (see `tss template <type>`). `tss transform --horizon <D> --interval <D>` derives
 `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`. The store is created on first `add`.
 
 ## Server
@@ -177,7 +177,7 @@ NetCDF file with attribute `data_format_version = "0.2.0"`. Each packed dataset 
 contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash for each column; an
 empty string marks a free slot. Standalone arrays are stored as `arr_{hex_hash}`.
 
-Metadata lives in a sidecar SQLite file at `<path>.sqlite`. Two artifacts ship together; an
+Metadata lives in a catalog SQLite file at `<path>.sqlite`. Two artifacts ship together; an
 `archive` helper that bundles them is post-v0.
 
 ## Open questions resolved for v0
