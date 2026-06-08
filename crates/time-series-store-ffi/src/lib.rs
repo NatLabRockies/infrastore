@@ -940,6 +940,54 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     }
 }
 
+/// True iff `owner_uuid` has any time series, optionally filtered to a single
+/// time series type (`use_type` selects whether `ts_type` is applied). Answers
+/// the name-less `has_time_series(owner)` / `has_time_series(owner, T)` queries.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle; `owner_uuid` a null-terminated UTF-8
+/// string; `out_present` valid for writing one bool.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_has_for_owner(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    ts_type: i32,
+    use_type: bool,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_present.is_null() {
+        return TS_ERR_NULL_POINTER;
+    }
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let mut filter = core_lib::ListFilter::new().owner_uuid(owner_uuid);
+    if use_type {
+        let t = match ts_type_from_int(ts_type) {
+            Some(t) => t,
+            None => {
+                set_error(format!("invalid time_series_type {ts_type}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        filter = filter.time_series_type(t);
+    }
+    match store.inner.list_time_series(filter) {
+        Ok(list) => {
+            unsafe { *out_present = !list.is_empty() };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
 /// other association still references its content hash.
 ///

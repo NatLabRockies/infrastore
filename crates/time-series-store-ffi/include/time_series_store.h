@@ -268,6 +268,22 @@ int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               bool *out_present);
 
 /**
+ * True iff `owner_uuid` has any time series, optionally filtered to a single
+ * time series type (`use_type` selects whether `ts_type` is applied). Answers
+ * the name-less `has_time_series(owner)` / `has_time_series(owner, T)` queries.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; `owner_uuid` a null-terminated UTF-8
+ * string; `out_present` valid for writing one bool.
+ */
+int32_t ts_store_has_for_owner(const struct TsStore *handle,
+                               const char *owner_uuid,
+                               int32_t ts_type,
+                               bool use_type,
+                               bool *out_present);
+
+/**
  * Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
  * other association still references its content hash.
  *

@@ -463,6 +463,29 @@ function has_time_series(
 end
 
 """
+    has_for_owner(store, owner_uuid; time_series_type=nothing) -> Bool
+
+True if `owner_uuid` has any time series, optionally restricted to a single
+`time_series_type` code (the name-less existence query).
+"""
+function has_for_owner(
+    store::Store,
+    owner_uuid::AbstractString;
+    time_series_type::Union{Nothing,Integer}=nothing,
+)
+    out = Ref{Bool}(false)
+    use_type = time_series_type !== nothing
+    code = ccall(
+        (:ts_store_has_for_owner, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Int32, Bool, Ref{Bool}),
+        store.handle, owner_uuid,
+        Int32(use_type ? time_series_type : 0), use_type, out,
+    )
+    _check(code)
+    return out[]
+end
+
+"""
     remove_time_series!(store, owner_uuid, name; resolution, features=Dict())
 """
 function remove_time_series!(
