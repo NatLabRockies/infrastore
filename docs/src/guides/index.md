@@ -9,6 +9,7 @@ exact signatures.
 - [Python](./python.md) — Use the `time_series_store` PyO3 wheel.
 - [Julia](./julia.md) — Use the `TimeSeriesStore.jl` package over the C ABI.
 - [gRPC Server & Client](./server.md) — Serve a store for remote readers.
+- [Benchmarks](./benchmarks.md) — Measure bulk-add and simulation-loop read performance.
 
 If you just want a task-sized recipe (install, wire up a binding), see the
 [How-To Guides](../how-to/index.md). For the concepts underneath all of these, read the

@@ -23,6 +23,7 @@
   - [Python](./guides/python.md)
   - [Julia](./guides/julia.md)
   - [gRPC Server & Client](./guides/server.md)
+  - [Benchmarks](./guides/benchmarks.md)
 
 # How-To Guides
 

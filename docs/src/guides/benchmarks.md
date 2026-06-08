@@ -1,0 +1,103 @@
+# Benchmarks
+
+`time-series-store-bench` is a standalone binary (`tss-bench`) for measuring two critical
+performance dimensions: **bulk ingestion** and **simulation-loop reads**.
+
+## Build
+
+```sh
+# Debug build (fast to compile, slower to run)
+cargo build -p time-series-store-bench
+
+# Release build (recommended for any real measurement)
+cargo build --release -p time-series-store-bench
+```
+
+The binary is placed at `target/release/tss-bench`.
+
+## Subcommands
+
+| Subcommand | What it measures                                                               |
+| ---------- | ------------------------------------------------------------------------------ |
+| `add`      | `add_time_series_bulk` throughput — NetCDF packing and SQLite transaction cost |
+| `read`     | Per-timestep simulation I/O — reading all N components at each step t          |
+| `all`      | Runs `add` then `read` back-to-back                                            |
+
+## Common flags
+
+| Flag          | Default  | Description                                                        |
+| ------------- | -------- | ------------------------------------------------------------------ |
+| `--count N`   | 1 000    | Number of components (time series)                                 |
+| `--length L`  | 168      | Timesteps per `SingleTimeSeries`; window count for `Deterministic` |
+| `--in-memory` | off      | Use an in-memory store — eliminates disk I/O to isolate CPU cost   |
+| `--path DIR`  | temp dir | Directory for on-disk store files                                  |
+
+The `read` and `all` subcommands also accept `--steps T` (default: `--length`) to control how many
+simulation timesteps are benchmarked.
+
+## Add benchmark
+
+```sh
+# 10 000 components, 1 week hourly, in-memory
+tss-bench add --count 10000 --length 168 --in-memory
+
+# 100 000 components, same length, on-disk (tests real I/O + OS page cache)
+tss-bench add --count 100000 --length 168
+```
+
+Reports for both `SingleTimeSeries` and `Deterministic`:
+
+- **Build requests** — time to construct `AddRequest` objects in memory (array allocation only;
+  excluded from the add throughput measurement).
+- **`add_time_series_bulk`** — wall time, items/s, and data MB/s.
+
+`SingleTimeSeries` arrays are column-packed into NetCDF datasets of up to 1 000 columns each and
+wrapped in a single SQLite transaction; the add benchmark stresses both. `Deterministic` arrays are
+standalone NetCDF variables; their add cost is dominated by per-variable write overhead and the same
+single-transaction SQLite commit.
+
+## Read benchmark
+
+```sh
+# 1 000 components, 168 timesteps, in-memory (pure CPU / metadata cost)
+tss-bench read --count 1000 --length 168 --in-memory
+
+# Same, but on-disk — store is written, dropped, then reopened read-only
+tss-bench read --count 1000 --length 168
+
+# Benchmark only the first 24 simulation steps of a 168-step series
+tss-bench read --count 10000 --length 168 --steps 24
+```
+
+The read benchmark simulates the access pattern of an energy-simulation step loop:
+
+```
+for t in 0..T:
+    for each component key:
+        store.get_time_series(key, time_range=(t₀ + t·Δt, t₀ + (t+1)·Δt))
+```
+
+For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
+This rebuilds the NetCDF in-memory index and starts the HDF5 chunk cache cold, reflecting real
+simulation startup conditions. The OS page cache may still be warm.
+
+Reports per-step **min / median / p95 / max** and total **component-reads/s**.
+
+> **Deterministic note.** The current `get_time_series` implementation reads the full `[H × count]`
+> array from storage and then slices to the requested window in memory. For large `count` (e.g. 168
+> windows) each single-step read transfers `H × count × 8` bytes, which is `24 × 168 × 8 = 32 KB`
+> per component. The benchmark output flags this explicitly so the overhead is visible.
+
+## Interpreting results
+
+The two metrics to watch:
+
+- **`add` throughput** drops sharply when the number of items exceeds a SQLite transaction or NetCDF
+  dataset threshold. If adding 100 000 items is notably slower per-item than adding 10 000, the
+  bottleneck is likely the SQLite commit or NetCDF file growth, not array construction.
+
+- **Per-step time** for the read benchmark scales linearly with `--count`. If the cost per step is
+  much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
+  queries rather than Rust overhead. The packed `SingleTimeSeries` layout places one timestep from
+  up to 1 000 columns in a single HDF5 chunk, so per-step cost should grow slowly until a second
+  dataset is needed.
