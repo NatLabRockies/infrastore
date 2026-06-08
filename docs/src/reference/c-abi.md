@@ -14,8 +14,9 @@ consumer.
 - **Out-parameters.** Results are written through caller-provided pointers (`**out`, `*out_len`, …).
 - **Caller-owned buffers.** Returned arrays come back through an out-pointer + length and must be
   freed: `f64` buffers (`double **`) with `ts_buffer_free_f64`, raw element-byte buffers
-  (`uint8_t **`) with `ts_buffer_free_u8`, and timestamp buffers (`int64_t **`) with
-  `ts_buffer_free_i64`.
+  (`uint8_t **`) with `ts_buffer_free_u8`, timestamp buffers (`int64_t **`) with
+  `ts_buffer_free_i64`, and the `u64` dims buffer from `ts_store_get_forecast` (`uint64_t **`) with
+  `ts_buffer_free_u64`.
 - **Typed arrays.** Add functions take the element `dtype` code
   (`0=f64, 1=f32, 2=i64, 3=i32,
   4=u64, 5=bool`), `ndims` plus a `dims_ptr` shape array
@@ -54,6 +55,7 @@ void    ts_key_free(struct TsKey *key);
 void    ts_buffer_free_f64(double *ptr, uint64_t len);
 void    ts_buffer_free_u8(uint8_t *ptr, uint64_t len);
 void    ts_buffer_free_i64(int64_t *ptr, uint64_t len);
+void    ts_buffer_free_u64(uint64_t *ptr, uint64_t len);
 ```
 
 ## SingleTimeSeries
@@ -119,6 +121,11 @@ int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               const char *owner_uuid, const char *name,
                               int64_t resolution_ns, const char *features_json, bool *out_present);
 
+/* Name-less existence query: true iff owner_uuid has any series, optionally
+   filtered to a single ts_type (use_type selects whether ts_type applies). */
+int32_t ts_store_has_for_owner(const struct TsStore *handle, const char *owner_uuid,
+                               int32_t ts_type, bool use_type, bool *out_present);
+
 int32_t ts_store_remove_by_attrs(struct TsStore *handle,
                                  const char *owner_uuid, const char *name,
                                  int64_t resolution_ns, const char *features_json);
@@ -136,7 +143,8 @@ maintain their own key objects (such as an InfrastructureSystems.jl-side store).
 The forecast types are created and read through the C ABI. `ts_type` is the `TimeSeriesType`
 discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
 `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. Forecast values are
-passed as a flattened, column-major `f64` array (see the
+dtype-generic raw little-endian byte buffers with explicit dimensions — the same `dtype`, `ndims`,
+`dims_ptr`, `data_ptr`, `data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout.
 
@@ -150,7 +158,9 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               const char *name, int32_t ts_type,
                               int64_t initial_ts_unix_ns, int64_t resolution_ns,
                               int64_t horizon_ns, int64_t interval_ns, uint64_t count,
-                              const double *data_ptr, uint64_t data_len,
+                              int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                              const uint8_t *data_ptr, uint64_t data_byte_len,
+                              const char *logical_type,          /* optional */
                               const char *features_json, const char *units, const char *scaling_expr,
                               struct TsKey **out_key);
 
@@ -160,14 +170,40 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    int64_t initial_ts_unix_ns, int64_t resolution_ns,
                                    int64_t horizon_ns, int64_t interval_ns, uint64_t count,
                                    const double *percentiles_ptr, uint64_t percentiles_len,
-                                   const double *data_ptr, uint64_t data_len,
+                                   int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                                   const uint8_t *data_ptr, uint64_t data_byte_len,
+                                   const char *logical_type,     /* optional */
                                    const char *features_json, const char *units,
                                    const char *scaling_expr, struct TsKey **out_key);
 ```
 
-Read forecast metadata by attributes, then fetch the flattened array with
-`ts_store_get_array_by_hash` and reshape it. `ts_store_get_probabilistic_metadata` additionally
-returns the percentile vector (free it with `ts_buffer_free_f64`):
+`ts_store_get_forecast` is the forecast read function: it resolves a `Deterministic`,
+`Probabilistic`, or `Scenarios` forecast by attributes (DST is synthesized into `Deterministic`) and
+returns the decoded data buffer, its out-dimensions, the metadata, and — for `Probabilistic` — the
+percentile vector. When `time_range_present` is `true`, only the windows whose start timestamp falls
+in `[time_range_start_ns, time_range_end_ns)` are returned; pass `false` to retrieve all windows.
+The caller owns the returned buffers: free `*out_data` with `ts_buffer_free_u8`, `*out_dims` with
+`ts_buffer_free_u64`, and `*out_percentiles` (non-NULL only for `Probabilistic`) with
+`ts_buffer_free_f64`.
+
+```c
+int32_t ts_store_get_forecast(const struct TsStore *handle,
+                              const char *owner_uuid, const char *name, int32_t ts_type,
+                              int64_t resolution_ns, const char *features_json,
+                              bool time_range_present,
+                              int64_t time_range_start_ns, int64_t time_range_end_ns,
+                              int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
+                              int64_t *out_horizon_ns, int64_t *out_interval_ns,
+                              uint64_t *out_count, uint64_t *out_scenario_count,
+                              uint64_t *out_ndims, uint64_t **out_dims,  /* dims: ts_buffer_free_u64 */
+                              int32_t *out_dtype,
+                              uint8_t **out_data, uint64_t *out_data_byte_len, /* ts_buffer_free_u8 */
+                              double **out_percentiles, uint64_t *out_percentiles_len); /* ts_buffer_free_f64 */
+```
+
+The metadata-only accessors read the windowing parameters and content hash without decoding the
+array. `ts_store_get_probabilistic_metadata` additionally returns the percentile vector (free it
+with `ts_buffer_free_f64`):
 
 ```c
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,

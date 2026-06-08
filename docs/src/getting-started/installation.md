@@ -43,9 +43,9 @@ rustup update stable
 ```sh
 git clone https://github.com/NatLabRockies/time-series-store
 cd time-series-store
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --all-features
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so

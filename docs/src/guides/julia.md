@@ -102,11 +102,13 @@ remove_time_series!(store, "42", "load"; resolution = Hour(1))
 
 ## Forecasts
 
-`TimeSeriesStore.jl` wraps the forecast API. Pass forecast values flattened (column-major) and the
-`TimeSeriesType` integer code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`,
+`TimeSeriesStore.jl` wraps the forecast API. Pass forecast values as a native `AbstractArray` in the
+type's logical shape (the wrapper derives the dtype and dims and serializes the buffer row-major)
+and the `TimeSeriesType` integer code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`,
 `5 = Scenarios`); `add_probabilistic!` carries the percentile vector for `Probabilistic`:
 
 ```julia
+data = zeros(Float64, 24, 7)   # (horizon_count, count)
 key = add_forecast!(
     store,
     "42",
@@ -116,15 +118,16 @@ key = add_forecast!(
     2,
     DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24),
     7,
-    flat_values;
+    data;
     units = "MW",
 )
 
-meta = get_forecast_metadata(store, "42", "load_fc", 2; resolution = Hour(1))
-values = get_array_by_hash(store, meta.data_hash)
+fc = get_deterministic(store, "42", "load_fc"; resolution = Hour(1))
+values = fc.data   # Float64 matrix, shape (24, 7)
 ```
 
-`has_typed` and `remove_typed!` operate on forecast types by `ts_type`. See the
+`has_typed` and `remove_typed!` operate on forecast types by `ts_type`. The low-level
+`get_forecast_metadata` + `get_array_by_hash` path is still available for raw access. See the
 [Julia API reference](../reference/julia-api.md#forecasts).
 
 ## Store-Wide Operations
@@ -145,13 +148,14 @@ Keep the `.nc` and `.nc.sqlite` files together.
 
 ## Error Handling
 
-Errors subtype `TimeSeriesException`. Catch broadly or narrowly:
+Errors subtype `TimeSeriesStore.TimeSeriesException`. The exception types are not exported, so
+reference them module-qualified. Catch broadly or narrowly:
 
 ```julia
 try
     add_time_series!(store, "42", "Generator", Component, "load", ts)
 catch e
-    if e isa DuplicateTimeSeriesError
+    if e isa TimeSeriesStore.DuplicateTimeSeriesError
         @warn "already present"
     else
         rethrow()
@@ -159,9 +163,10 @@ catch e
 end
 ```
 
-The available types are `NotFoundError`, `DuplicateTimeSeriesError`, `InvalidParameterError`,
-`IntegrityError`, `ReadOnlyStoreError`, and `GenericError` (which carries the raw FFI status
-`code`).
+The available types are `TimeSeriesStore.NotFoundError`, `TimeSeriesStore.DuplicateTimeSeriesError`,
+`TimeSeriesStore.InvalidParameterError`, `TimeSeriesStore.IntegrityError`,
+`TimeSeriesStore.ReadOnlyStoreError`, and `TimeSeriesStore.GenericError` (which carries the raw FFI
+status `code`).
 
 ## InfrastructureSystems.jl Integration Notes
 

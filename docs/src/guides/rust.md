@@ -145,7 +145,7 @@ use time_series_store_core::{TimeSeriesType, TypedArray};
 
 // A Deterministic forecast: a (horizon_count, count) matrix.
 let (horizon_count, count) = (24, 7);
-let values: Vec<f64> = vec![0.0; horizon_count * count];   // column-major
+let values: Vec<f64> = vec![0.0; horizon_count * count];   // row-major, shape (horizon_count, count)
 let data = TypedArray::from_f64(vec![horizon_count, count], &values);
 
 let key = store.add_forecast(
@@ -162,14 +162,26 @@ let key = store.add_forecast(
 )?;
 ```
 
-Forecasts are **not** returned by `get_time_series` (it reconstructs the static types only). Read
-one through the low-level path — `get_metadata` exposes `horizon`, `interval`, `count`, and
-`percentiles`, and `get_array_by_hash` returns the `TypedArray` in its stored shape:
+`get_time_series` reconstructs forecasts too, returning a `TimeSeriesData::Deterministic`,
+`Probabilistic`, or `Scenarios` variant (a `DeterministicSingleTimeSeries` is synthesized into a
+`Deterministic`). Match on the variant or use the `as_deterministic` / `as_probabilistic` /
+`as_scenarios` accessors:
+
+```rust
+if let Some(d) = store.get_time_series(&key, None)?.as_deterministic() {
+    // d.data is the TypedArray; d.horizon, d.interval, d.count carry the forecast parameters
+}
+```
+
+The low-level path is still available when you only need the raw array: `get_metadata` exposes
+`horizon`, `interval`, `count`, and `percentiles`, and `get_array_by_hash` returns the `TypedArray`
+in its stored shape (`to_f64_vec` returns a `Result<_, String>`, so map the error if your function
+returns `TimeSeriesError`):
 
 ```rust
 let meta = store.get_metadata(&key)?;
 let arr = store.get_array_by_hash(&meta.data_hash)?;   // arr.shape == [horizon_count, count]
-let values = arr.to_f64_vec()?;
+let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 ```
 
 ## Remove and Maintain

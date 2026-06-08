@@ -67,10 +67,10 @@ flowchart TB
 **`SingleTimeSeries`** and **`NonSequentialTimeSeries`** — regular and explicitly timestamped static
 series — are implemented end to end across every interface (Rust, Python, Julia, and the gRPC
 server). The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
-`Scenarios`) are implemented in the **Rust core, the C ABI, and the Julia binding**; the Python
-binding and the gRPC server currently expose them only as enum values and aggregate counts. The
-on-disk format is version `0.2.0`. See [Data Model](./explanation/data-model.md) for the full
-picture.
+`Scenarios`) can be **read** across the Rust core, the C ABI, Python, Julia, and gRPC, and
+**written** (`add_forecast`) across the Rust core, the C ABI, Python, and Julia; forecast writes are
+not exposed over the read-only gRPC server. The on-disk format is version `0.2.0`. See
+[Data Model](./explanation/data-model.md) for the full picture.
 
 ## Who Should Read This
 

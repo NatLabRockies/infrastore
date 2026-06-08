@@ -28,9 +28,9 @@ flowchart TB
 `time-series-store-py` uses [PyO3](https://pyo3.rs) to expose `Store` as native Python classes in a
 module importable as `time_series_store`. The binding:
 
-- Converts Python `datetime`/`timedelta` to `chrono` types and NumPy `float64` arrays (any shape) to
-  `TypedArray`s at the boundary. Python works in `f64` only; the other dtypes and `logical_type` are
-  not yet surfaced there.
+- Converts Python `datetime`/`timedelta` to `chrono` types and NumPy arrays (any shape) to
+  `TypedArray`s at the boundary, supporting the full dtype set (`f64`, `f32`, `i64`, `i32`, `u64`,
+  `bool`).
 - Translates the typed `TimeSeriesError` variants into a Python exception hierarchy rooted at
   `TimeSeriesError` (`NotFoundError`, `DuplicateTimeSeriesError`, `InvalidParameterError`,
   `IntegrityError`, `ReadOnlyStoreError`).
@@ -108,19 +108,19 @@ bindings reimplement storage — they all funnel through the one core.
 
 ## Feature Coverage Varies by Binding
 
-The bindings funnel through one core, but they do not all expose the same _surface_ yet. Both static
-series types are available everywhere. [Forecasts](./data-model.md#forecasts) are newer and so far
-reach only the layers closest to the core:
+The bindings funnel through one core, and the surface is now broadly consistent. Both static series
+types are available everywhere (read+write, except the read-only gRPC server), and
+[forecasts](./data-model.md#forecasts) read back across every interface. The remaining asymmetry is
+that the read-only gRPC server does not accept any writes:
 
 | Capability                    | Rust core | C ABI | Python | Julia | gRPC        |
 | ----------------------------- | --------- | ----- | ------ | ----- | ----------- |
 | `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | read-only   |
 | `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | read-only   |
-| dtypes beyond `f64`           | ✅        | ✅    | ❌     | ✅    | ❌          |
-| Create forecasts              | ✅        | ✅    | ❌     | ✅    | ❌          |
-| Read forecast values          | ✅        | ✅    | ❌     | ✅    | ❌          |
-| Forecast metadata / counts    | ✅        | ✅    | counts | ✅    | list/counts |
+| dtypes beyond `f64`           | ✅        | ✅    | ✅     | ✅    | read-only   |
+| Create forecasts              | ✅        | ✅    | ✅     | ✅    | ❌          |
+| Read forecast values          | ✅        | ✅    | ✅     | ✅    | ✅          |
+| Forecast metadata / counts    | ✅        | ✅    | ✅     | ✅    | list/counts |
 
-The **Python** binding still surfaces forecast types only as enum values and counts, and it works in
-`f64` only — adding forecast methods and the other dtypes to the PyO3 module are the remaining
-steps.
+The only gap is by design: writes (including `add_forecast`) require local filesystem access, so the
+read-only gRPC server serves forecast reads but not writes.

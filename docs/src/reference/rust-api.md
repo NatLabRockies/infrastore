@@ -5,7 +5,8 @@ The public surface of `time-series-store-core`. Import paths below are relative 
 ```rust
 use time_series_store_core::{
     create_store, open_store, Store, TimeSeriesKey,
-    SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesData, TimeSeriesType,
+    SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
+    TimeSeriesData, TimeSeriesType,
     TypedArray, Dtype, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
     TimeSeriesCounts, ForecastParameters, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
@@ -79,8 +80,10 @@ impl Store {
   `ReadOnlyStore` on a read-only store. It is a convenience wrapper over `add_time_series_bulk`.
 - **`add_time_series_bulk`** — All-or-nothing: every array put and association insert in the call
   commits together or rolls back together.
-- **`get_time_series`** — With `time_range = Some((start, end))`, slices on the time axis; the
-  returned series's `initial_timestamp` and `length` reflect the slice. `end` is exclusive.
+- **`get_time_series`** — Reconstructs the stored type as a [`TimeSeriesData`](#timeseriesdata)
+  variant (static series and all forecast types). With `time_range = Some((start, end))`, slices on
+  the time axis; the returned series's `initial_timestamp` and `length` reflect the slice. For
+  forecasts the window is resolved over the `count` axis (`resolve_windows`). `end` is exclusive.
 - **`clear_time_series`** — `Some(uuid)` removes one owner's series; `None` removes all. Returns the
   count removed. Underlying arrays are freed only when their last reference is gone.
 - **`get_metadata` / `get_array_by_hash`** — The low-level pair used by external bindings: resolve a
@@ -121,11 +124,12 @@ Conventional array shapes:
 | `Probabilistic`                 | `(percentile_count, horizon_count, count)`    | the vector    |
 | `Scenarios`                     | `(scenario_count, horizon_count, count)`      | `None`        |
 
-**Reading forecasts:** `get_time_series` reconstructs `SingleTimeSeries` and
-`NonSequentialTimeSeries` only and returns `InvalidParameter` for forecast types. Read a forecast
-through the low-level pair instead — resolve its [`TimeSeriesMetadata`](#timeseriesmetadata) with
-`get_metadata` (it carries `horizon`, `interval`, `count`, and `percentiles`), then fetch the array
-with `get_array_by_hash(&meta.data_hash)`.
+**Reading forecasts:** `get_time_series` reconstructs all forecast types, returning the matching
+[`TimeSeriesData`](#timeseriesdata) variant — `Deterministic`, `Probabilistic`, or `Scenarios`. A
+`DeterministicSingleTimeSeries` is synthesized into a `Deterministic` by gathering its windows from
+the underlying packed array. The low-level pair still works for direct array access: resolve a
+[`TimeSeriesMetadata`](#timeseriesmetadata) with `get_metadata` (it carries `horizon`, `interval`,
+`count`, and `percentiles`), then fetch the array with `get_array_by_hash(&meta.data_hash)`.
 
 ## Types
 
@@ -198,22 +202,97 @@ pub struct NonSequentialTimeSeries {
 
 `new` validates that timestamps are strictly increasing and match the data length.
 
+### `Deterministic`
+
+```rust
+pub struct Deterministic {
+    pub initial_timestamp: DateTime<Utc>,
+    pub resolution: Duration,
+    pub horizon: Duration,
+    pub interval: Duration,
+    pub count: usize,
+    pub data: TypedArray,   // shape [H, count, *E]
+}
+
+impl Deterministic {
+    pub fn new(
+        initial_timestamp: DateTime<Utc>, resolution: Duration,
+        horizon: Duration, interval: Duration, count: usize, data: TypedArray,
+    ) -> Result<Self, String>;
+}
+```
+
+`new` validates `data.shape` against `[H, count, *E]` where `H = horizon / resolution`.
+
+### `Probabilistic`
+
+```rust
+pub struct Probabilistic {
+    pub initial_timestamp: DateTime<Utc>,
+    pub resolution: Duration,
+    pub horizon: Duration,
+    pub interval: Duration,
+    pub count: usize,
+    pub percentiles: Vec<f64>,
+    pub data: TypedArray,   // shape [num_percentiles, H, count, *E]
+}
+
+impl Probabilistic {
+    pub fn new(
+        initial_timestamp: DateTime<Utc>, resolution: Duration,
+        horizon: Duration, interval: Duration, count: usize,
+        percentiles: Vec<f64>, data: TypedArray,
+    ) -> Result<Self, String>;
+}
+```
+
+`new` also requires `percentiles` to be non-empty and strictly increasing.
+
+### `Scenarios`
+
+```rust
+pub struct Scenarios {
+    pub initial_timestamp: DateTime<Utc>,
+    pub resolution: Duration,
+    pub horizon: Duration,
+    pub interval: Duration,
+    pub count: usize,
+    pub scenario_count: usize,
+    pub data: TypedArray,   // shape [scenario_count, H, count, *E]
+}
+
+impl Scenarios {
+    pub fn new(
+        initial_timestamp: DateTime<Utc>, resolution: Duration,
+        horizon: Duration, interval: Duration, count: usize,
+        scenario_count: usize, data: TypedArray,
+    ) -> Result<Self, String>;
+}
+```
+
 ### `TimeSeriesData`
 
 ```rust
 pub enum TimeSeriesData {
     SingleTimeSeries(SingleTimeSeries),
     NonSequentialTimeSeries(NonSequentialTimeSeries),
-    // No forecast variants: forecasts are written with `add_forecast` and read
-    // via `get_metadata` + `get_array_by_hash`, not through this enum.
+    Deterministic(Deterministic),
+    Probabilistic(Probabilistic),
+    Scenarios(Scenarios),
 }
 
 impl TimeSeriesData {
     pub fn time_series_type(&self) -> TimeSeriesType;
     pub fn as_single(&self) -> Option<&SingleTimeSeries>;
     pub fn as_non_sequential(&self) -> Option<&NonSequentialTimeSeries>;
+    pub fn as_deterministic(&self) -> Option<&Deterministic>;
+    pub fn as_probabilistic(&self) -> Option<&Probabilistic>;
+    pub fn as_scenarios(&self) -> Option<&Scenarios>;
 }
 ```
+
+There is no `DeterministicSingleTimeSeries` variant: a stored `DeterministicSingleTimeSeries` is
+read back as a `Deterministic` (so `as_deterministic` returns `Some` for it).
 
 ### `TimeSeriesType`
 

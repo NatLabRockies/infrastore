@@ -9,10 +9,15 @@ Spec:
 
 ## v0 scope
 
-- **SingleTimeSeries** and **NonSequentialTimeSeries** are implemented end-to-end. The four forecast
-  types are implemented in the Rust core and C ABI.
-- 1-D `data` only. Multi-dim per-step values (e.g. quadratic-curve coefficients) are accepted by the
-  in-memory backend but rejected with `InvalidParameter` by the NetCDF backend.
+- **SingleTimeSeries** and **NonSequentialTimeSeries** are implemented end-to-end (read+write in the
+  Rust core, C ABI, Python, and Julia; read-only over gRPC). The four forecast types
+  (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) support reading
+  values across the Rust core, C ABI, Python, Julia, and gRPC, and writing (`add_forecast`) across
+  the Rust core, C ABI, Python, and Julia. Forecast writes are not exposed over the read-only gRPC
+  server.
+- Multi-dim per-step values (e.g. quadratic-curve coefficients) are supported: arrays carry an
+  element `dtype` and a `(length, *element_shape)` shape, and the NetCDF backend persists the
+  trailing element axes.
 - Read-only gRPC server. Writes require local filesystem access.
 - Auth: `none` (default) or `api_key` via the `x-api-key` header.
 
@@ -134,11 +139,10 @@ cargo run -p time-series-store-server -- --config my_server.toml
 
 ## Storage format
 
-NetCDF file with attribute `data_format_version = "0.1.0"` and group `time_series/single/`. Each
-compacted dataset is named `sts_{length}_{resolution_seconds}` with shape `(length, 1000)` and
-chunking `(1, 1000)` (per-timestep reads across all components are contiguous). A sibling string
-variable `<dataset>_h` holds the SHA-256 hex hash for each column; an empty string marks a free
-slot.
+NetCDF file with attribute `data_format_version = "0.2.0"`. Each packed dataset is named
+`sts_{dtype}_{shape}_{length}_{resolution}` (per-timestep reads across all components are
+contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash for each column; an
+empty string marks a free slot. Standalone arrays are stored as `arr_{hex_hash}`.
 
 Metadata lives in a sidecar SQLite file at `<path>.sqlite`. Two artifacts ship together; an
 `archive` helper that bundles them is post-v0.
@@ -155,5 +159,5 @@ Metadata lives in a sidecar SQLite file at `<path>.sqlite`. Two artifacts ship t
 
 ## Status
 
-- 30 Rust tests + 10 Python tests + 11 Julia tests.
+- Covered by Rust, Python, and Julia test suites across the core, bindings, and round trips.
 - Workspace clippy-clean on edition 2024 (Rust 1.95).

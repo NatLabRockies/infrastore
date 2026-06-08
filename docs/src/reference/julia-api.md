@@ -13,7 +13,7 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `TimeSer
 `remove_time_series!`, `has_time_series`, `get_counts`, `verify_integrity`, `compact!`, `clear!`,
 `get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `close!`, `add_forecast!`,
 `get_forecast_metadata`, `has_typed`, `remove_typed!`, `add_probabilistic!`,
-`get_probabilistic_metadata`.
+`get_probabilistic_metadata`, `get_deterministic`, `get_probabilistic`, `get_scenarios`.
 
 ## Constructors
 
@@ -116,25 +116,27 @@ remove_time_series!(store, key::TimeSeriesKey) -> Nothing
 
 ## Forecasts
 
-The Julia binding now wraps the forecast C ABI. Forecast values are passed flattened (column-major,
-see the [data model](../explanation/data-model.md#forecasts) for the conventional shapes). `ts_type`
-is the `TimeSeriesType` integer code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`,
+The Julia binding wraps the forecast C ABI. Forecast `data` is passed as an `AbstractArray` of any
+element type and dimensionality — the binding derives the stored dtype and dims and converts to
+row-major bytes, just like `add_time_series!` (see the
+[data model](../explanation/data-model.md#forecasts) for the conventional shapes). `ts_type` is the
+`TimeSeriesType` integer code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`,
 `5 = Scenarios`).
 
 ```julia
 add_forecast!(
     store, owner_uuid, owner_type, owner_category::OwnerCategory, name,
     ts_type::Integer, initial_timestamp::DateTime, resolution::Period,
-    horizon::Period, interval::Period, count::Integer, flat_values::Vector{Float64};
-    features=Dict(), units=nothing, scaling_factor_multiplier=nothing,
+    horizon::Period, interval::Period, count::Integer, data::AbstractArray;
+    features=Dict(), units=nothing, scaling_factor_multiplier=nothing, logical_type=nothing,
 ) -> TimeSeriesKey
 
 add_probabilistic!(
     store, owner_uuid, owner_type, owner_category::OwnerCategory, name,
     initial_timestamp::DateTime, resolution::Period, horizon::Period,
     interval::Period, count::Integer,
-    percentiles::Vector{Float64}, flat_values::Vector{Float64};
-    features=Dict(), units=nothing, scaling_factor_multiplier=nothing,
+    percentiles::Vector{Float64}, data::AbstractArray;
+    features=Dict(), units=nothing, scaling_factor_multiplier=nothing, logical_type=nothing,
 ) -> TimeSeriesKey
 
 get_forecast_metadata(store, owner_uuid, name, ts_type::Integer; resolution=nothing, features=Dict())
@@ -147,8 +149,29 @@ has_typed(store, owner_uuid, name, ts_type::Integer; resolution=nothing, feature
 remove_typed!(store, owner_uuid, name, ts_type::Integer; resolution=nothing, features=Dict())
 ```
 
-Read forecast values with `get_forecast_metadata`/`get_probabilistic_metadata` to obtain the
-`data_hash`, then `get_array_by_hash`.
+### Reading forecast values
+
+The high-level read functions resolve a forecast by attributes and return a decoded N-dimensional
+Julia array (reshaped to the type's logical shape, with native Julia indexing) alongside its
+metadata. Pass `time_range = (start::DateTime, end::DateTime)` (exclusive end) to select a window
+sub-range.
+
+```julia
+get_deterministic(store, owner_uuid, name; resolution=nothing, features=Dict(), time_range=nothing)
+    -> NamedTuple  # (initial_timestamp, resolution, horizon, interval, count, data)
+                   # data shape: (H, count, element_dims...)
+
+get_probabilistic(store, owner_uuid, name; resolution=nothing, features=Dict(), time_range=nothing)
+    -> NamedTuple  # (initial_timestamp, resolution, horizon, interval, count, percentiles, data)
+                   # data shape: (num_percentiles, H, count, element_dims...)
+
+get_scenarios(store, owner_uuid, name; resolution=nothing, features=Dict(), time_range=nothing)
+    -> NamedTuple  # (initial_timestamp, resolution, horizon, interval, count, scenario_count, data)
+                   # data shape: (scenario_count, H, count, element_dims...)
+```
+
+Alternatively, use `get_forecast_metadata`/`get_probabilistic_metadata` to obtain the `data_hash`,
+then `get_array_by_hash` for the raw flattened array.
 
 ## Store-Wide Operations
 

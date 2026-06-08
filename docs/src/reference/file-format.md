@@ -161,14 +161,19 @@ A single-column table holding the metadata schema version.
 ```sql
 CREATE UNIQUE INDEX uq_assoc ON time_series_associations
     (owner_uuid, time_series_type, name, resolution_ns, features_hash);
+CREATE UNIQUE INDEX uq_assoc_null_resolution ON time_series_associations
+    (owner_uuid, time_series_type, name, COALESCE(resolution_ns, -9223372036854775808), features_hash);
 
 CREATE INDEX ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX ix_owner      ON time_series_associations(owner_uuid);
 CREATE INDEX ix_resolution ON time_series_associations(resolution_ns);
 ```
 
-The unique index `uq_assoc` enforces [key uniqueness](../explanation/data-model.md#keys); a
-violation surfaces as `DuplicateTimeSeries`.
+Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
+violation surfaces as `DuplicateTimeSeries`. SQLite treats `NULL` values as distinct in a `UNIQUE`
+index, so `uq_assoc` does not constrain rows with a `NULL` `resolution_ns` (e.g.
+`NonSequentialTimeSeries`). `uq_assoc_null_resolution` covers that case by folding `NULL` to a
+sentinel via `COALESCE` before enforcing uniqueness.
 
 ## Field Encoding Notes
 

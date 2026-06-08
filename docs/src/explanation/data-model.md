@@ -22,21 +22,23 @@ association's uniqueness constraint; `owner_type` and `owner_category` are descr
 ## Time-Series Types
 
 The data model defines six time-series types, all present in the `TimeSeriesType` enum and the
-metadata schema. Both static series types are implemented across every interface; the four forecast
-types are implemented in the Rust core, the C ABI, and the Julia binding:
+metadata schema. Both static series types are implemented across every interface. The four forecast
+types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC, and writing
+(`add_forecast`) across the Rust core, C ABI, Python, and Julia (gRPC stays read-only):
 
-| Type                            | Where implemented  | Description                                         |
-| ------------------------------- | ------------------ | --------------------------------------------------- |
-| `SingleTimeSeries`              | All interfaces     | One array sampled at a fixed resolution             |
-| `NonSequentialTimeSeries`       | All interfaces     | Values at explicit, irregular timestamps            |
-| `Deterministic`                 | Core, C ABI, Julia | Forecast: a `(horizon × count)` window matrix       |
-| `DeterministicSingleTimeSeries` | Core, C ABI, Julia | Forecast view over an underlying `SingleTimeSeries` |
-| `Probabilistic`                 | Core, C ABI, Julia | Forecast with percentile bands                      |
-| `Scenarios`                     | Core, C ABI, Julia | Forecast with discrete scenarios                    |
+| Type                            | Where implemented | Description                                         |
+| ------------------------------- | ----------------- | --------------------------------------------------- |
+| `SingleTimeSeries`              | All interfaces    | One array sampled at a fixed resolution             |
+| `NonSequentialTimeSeries`       | All interfaces    | Values at explicit, irregular timestamps            |
+| `Deterministic`                 | All interfaces    | Forecast: a `(horizon × count)` window matrix       |
+| `DeterministicSingleTimeSeries` | All interfaces    | Forecast view over an underlying `SingleTimeSeries` |
+| `Probabilistic`                 | All interfaces    | Forecast with percentile bands                      |
+| `Scenarios`                     | All interfaces    | Forecast with discrete scenarios                    |
 
-The **Python** binding and the gRPC server currently surface the forecast types only as
-`TimeSeriesType` values and aggregate counts — creating and reading forecast _values_ from those
-interfaces is not yet wired. See [Forecasts](#forecasts) below.
+Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC; writing
+forecasts (`add_forecast`) is available in the Rust core, the C ABI, Python, and Julia. The
+read-only gRPC server serves forecast reads but does not accept writes. See [Forecasts](#forecasts)
+below.
 
 ### `NonSequentialTimeSeries`
 
@@ -88,9 +90,12 @@ successive window start times), `count` (the number of windows), and — for `Pr
 | `Scenarios`                     | `(scenario_count, horizon_count, count)`   | —              |
 
 The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
-native-shape `TypedArray`; the C ABI and Julia pass a column-major buffer), and a
-`DeterministicSingleTimeSeries` deduplicates against the static series it forecasts. Forecasts are
-read through the low-level metadata + array path rather than `get_time_series`; see the
+native-shape `TypedArray`; the C ABI takes a row-major byte buffer with explicit dims, and the Julia
+wrapper accepts a native array and serializes it row-major), and a `DeterministicSingleTimeSeries`
+deduplicates against the static series it forecasts. Forecast values read back through the
+high-level path — `get_time_series` returns a forecast object in the Rust core, Python, and over
+gRPC, and Julia exposes `get_deterministic` / `get_probabilistic` / `get_scenarios` — while the
+low-level metadata + array path remains available for raw access. See the
 [Rust API](../reference/rust-api.md#forecasts) and [C ABI](../reference/c-abi.md#forecasts).
 
 ## Features
