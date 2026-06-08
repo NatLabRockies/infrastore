@@ -115,7 +115,7 @@ One row per association between an owner and a stored array.
 | Column              | Type    | Notes                                                           |
 | ------------------- | ------- | --------------------------------------------------------------- |
 | `id`                | INTEGER | Primary key                                                     |
-| `owner_uuid`        | TEXT    | Owner identity (e.g. an IS.jl UUID string)                      |
+| `owner_uuid`        | TEXT    | Owner identity (e.g. an InfrastructureSystems.jl UUID string)   |
 | `owner_type`        | TEXT    | Owner's concrete type, descriptive                              |
 | `owner_category`    | TEXT    | `CHECK` in (`Component`, `SupplementalAttribute`)               |
 | `time_series_type`  | TEXT    | One of the six `TimeSeriesType` names                           |

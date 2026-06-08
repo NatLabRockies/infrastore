@@ -59,8 +59,8 @@ key = add_time_series!(
 
 Notes:
 
-- **`owner_uuid` is a string** — typically the stringified IS.jl UUID. (Integer-looking owners must
-  still be passed as strings, e.g. `"42"`.)
+- **`owner_uuid` is a string** — typically the stringified InfrastructureSystems.jl UUID.
+  (Integer-looking owners must still be passed as strings, e.g. `"42"`.)
 - **`resolution` is a `Period`** such as `Hour(1)` or `Minute(5)`.
 - **`features`** is a `Dict` serialized to JSON, so values must be JSON scalars (`Int`, `Float64`,
   `Bool`, `String`). String features are supported and round-trip unchanged.
@@ -79,7 +79,7 @@ println(got.initial_timestamp, " ", got.resolution)   # resolution comes back as
 ## Attribute-Based Lookups
 
 Beyond key handles, `TimeSeriesStore.jl` can resolve a series directly from its attributes —
-convenient when a caller keeps its own identifiers (as an IS.jl-side store does):
+convenient when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):
 
 ```julia
 meta = get_metadata(
@@ -163,14 +163,15 @@ The available types are `NotFoundError`, `DuplicateTimeSeriesError`, `InvalidPar
 `IntegrityError`, `ReadOnlyStoreError`, and `GenericError` (which carries the raw FFI status
 `code`).
 
-## IS.jl Integration Notes
+## InfrastructureSystems.jl Integration Notes
 
 The model is designed to back an InfrastructureSystems.jl time-series store:
 
-- Owners are string UUIDs, so IS.jl component/attribute UUIDs map straight through.
+- Owners are string UUIDs, so InfrastructureSystems.jl component/attribute UUIDs map straight
+  through.
 - `OwnerCategory` distinguishes `Component` from `SupplementalAttribute`.
 - The attribute-based accessors (`get_metadata`, `has_time_series`, `remove_time_series!`) plus
-  `get_array_by_hash` let an IS.jl-side store keep its own key objects and reach the array layer
-  without holding a `TimeSeriesKey`.
+  `get_array_by_hash` let an InfrastructureSystems.jl-side store keep its own key objects and reach
+  the array layer without holding a `TimeSeriesKey`.
 
 See [Language Bindings](../explanation/bindings.md#isjl-integration) for how this maps onto the FFI.

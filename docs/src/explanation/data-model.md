@@ -1,23 +1,23 @@
 # Data Model
 
 The data model mirrors the time-series concepts in
-[InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl) (IS.jl): a
-**component** (or supplemental attribute) owns one or more named time series, and each time series
-may exist in several variants distinguished by **features**.
+[InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl): a **component**
+(or supplemental attribute) owns one or more named time series, and each time series may exist in
+several variants distinguished by **features**.
 
 ## Owners
 
 Every time series belongs to an owner, identified by three fields:
 
-| Field            | Type            | Meaning                                                           |
-| ---------------- | --------------- | ----------------------------------------------------------------- |
-| `owner_uuid`     | string          | Stable identity of the owning object (an IS.jl UUID, for example) |
-| `owner_type`     | string          | The owner's concrete type, e.g. `"Generator"`                     |
-| `owner_category` | `OwnerCategory` | `Component` or `SupplementalAttribute`                            |
+| Field            | Type            | Meaning                                                                              |
+| ---------------- | --------------- | ------------------------------------------------------------------------------------ |
+| `owner_uuid`     | string          | Stable identity of the owning object (an InfrastructureSystems.jl UUID, for example) |
+| `owner_type`     | string          | The owner's concrete type, e.g. `"Generator"`                                        |
+| `owner_category` | `OwnerCategory` | `Component` or `SupplementalAttribute`                                               |
 
-`owner_uuid` is a free-form string, so it interoperates with IS.jl UUIDs, integer IDs rendered as
-text, or any other stable identifier scheme. Only `owner_uuid` participates in the association's
-uniqueness constraint; `owner_type` and `owner_category` are descriptive.
+`owner_uuid` is a free-form string, so it interoperates with InfrastructureSystems.jl UUIDs, integer
+IDs rendered as text, or any other stable identifier scheme. Only `owner_uuid` participates in the
+association's uniqueness constraint; `owner_type` and `owner_category` are descriptive.
 
 ## Time-Series Types
 

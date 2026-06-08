@@ -85,9 +85,9 @@ get_time_series(store::Store, key::TimeSeriesKey) -> SingleTimeSeries
 get_time_series(NonSequentialTimeSeries, store::Store, key::TimeSeriesKey) -> NonSequentialTimeSeries
 ```
 
-`owner_uuid` is a string (typically the stringified IS.jl UUID). `features` is serialized to JSON
-and must contain only JSON-scalar values (`Int`, `Float64`, `Bool`, `String`). Pass the type as the
-first argument to `get_time_series` to read a non-sequential series back.
+`owner_uuid` is a string (typically the stringified InfrastructureSystems.jl UUID). `features` is
+serialized to JSON and must contain only JSON-scalar values (`Int`, `Float64`, `Bool`, `String`).
+Pass the type as the first argument to `get_time_series` to read a non-sequential series back.
 
 ### Attribute-based lookups
 

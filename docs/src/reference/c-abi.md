@@ -129,7 +129,7 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *
 ```
 
 `ts_store_get_metadata` + `ts_store_get_array_by_hash` is the read path used by bindings that
-maintain their own key objects (such as an IS.jl-side store).
+maintain their own key objects (such as an InfrastructureSystems.jl-side store).
 
 ## Forecasts
 
