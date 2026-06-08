@@ -12,11 +12,19 @@ consumer.
 - **Opaque handles.** `TsStore` and `TsKey` are incomplete struct types; you only ever hold
   pointers. Free them with `ts_store_free` and `ts_key_free`.
 - **Out-parameters.** Results are written through caller-provided pointers (`**out`, `*out_len`, …).
-- **Caller-owned buffers.** `f64` arrays are returned via `double **out_data` +
-  `uint64_t
-  *out_data_len`; free them with `ts_buffer_free_f64`.
-- **Strings** are null-terminated UTF-8. Optional string arguments (`features_json`, `units`,
-  `scaling_expr`) accept `NULL`.
+- **Caller-owned buffers.** Returned arrays come back through an out-pointer + length and must be
+  freed: `f64` buffers (`double **`) with `ts_buffer_free_f64`, raw element-byte buffers
+  (`uint8_t **`) with `ts_buffer_free_u8`, and timestamp buffers (`int64_t **`) with
+  `ts_buffer_free_i64`.
+- **Typed arrays.** Add functions take the element `dtype` code
+  (`0=f64, 1=f32, 2=i64, 3=i32,
+  4=u64, 5=bool`), `ndims` plus a `dims_ptr` shape array
+  (`[length, k1, …]`), and the raw little-endian `data_ptr` of `data_byte_len` bytes. Reads return
+  the dtype code and a raw byte buffer for the caller to decode. `ts_store_get_single` is a
+  convenience that decodes to `f64`.
+- **`logical_type`** is an optional opaque domain label passed to the add functions.
+- **Strings** are null-terminated UTF-8. Optional string arguments (`logical_type`, `features_json`,
+  `units`, `scaling_expr`) accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string.
 - **Timestamps** are `int64_t` Unix nanoseconds; **resolutions/horizons/intervals** are `int64_t`
   nanoseconds (`0` means unset).
@@ -44,6 +52,8 @@ int32_t ts_store_open(const char *path, bool read_only, struct TsStore **out);
 void    ts_store_free(struct TsStore *handle);
 void    ts_key_free(struct TsKey *key);
 void    ts_buffer_free_f64(double *ptr, uint64_t len);
+void    ts_buffer_free_u8(uint8_t *ptr, uint64_t len);
+void    ts_buffer_free_i64(int64_t *ptr, uint64_t len);
 ```
 
 ## SingleTimeSeries
@@ -54,7 +64,9 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
                             const char *name,
                             int64_t initial_ts_unix_ns, int64_t resolution_ns,
-                            const double *data_ptr, uint64_t data_len,
+                            int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                            const uint8_t *data_ptr, uint64_t data_byte_len,
+                            const char *logical_type,         /* optional */
                             const char *features_json,        /* optional */
                             const char *units,                /* optional */
                             const char *scaling_expr,         /* optional */
@@ -62,7 +74,7 @@ int32_t ts_store_add_single(struct TsStore *handle,
 
 int32_t ts_store_get_single(const struct TsStore *handle, const struct TsKey *key,
                             int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
-                            double **out_data, uint64_t *out_data_len);  /* ts_buffer_free_f64 */
+                            double **out_data, uint64_t *out_data_len);  /* decoded f64; ts_buffer_free_f64 */
 
 int32_t ts_store_remove(struct TsStore *handle, const struct TsKey *key);
 int32_t ts_store_has(const struct TsStore *handle, const struct TsKey *key, bool *out_present);
@@ -70,9 +82,26 @@ int32_t ts_store_has(const struct TsStore *handle, const struct TsKey *key, bool
 
 ## NonSequentialTimeSeries
 
-`ts_store_add_non_sequential` accepts an `int64_t` Unix-nanosecond timestamp for each value and a
-typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and byte buffers; release
-them with `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+`ts_store_add_non_sequential` takes an explicit `int64_t` Unix-nanosecond timestamp array alongside
+the typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and raw-byte buffers
+(free with `ts_buffer_free_i64` and `ts_buffer_free_u8`) plus the dtype code.
+
+```c
+int32_t ts_store_add_non_sequential(struct TsStore *handle,
+                                    const char *owner_uuid, const char *owner_type,
+                                    int32_t owner_category, const char *name,
+                                    const int64_t *timestamps_unix_ns, uint64_t timestamps_len,
+                                    int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                                    const uint8_t *data_ptr, uint64_t data_byte_len,
+                                    const char *logical_type, const char *features_json,
+                                    const char *units, const char *scaling_expr,
+                                    struct TsKey **out_key);
+
+int32_t ts_store_get_non_sequential(const struct TsStore *handle, const struct TsKey *key,
+                                    int64_t **out_timestamps, uint64_t *out_timestamps_len,
+                                    int32_t *out_dtype,
+                                    uint8_t **out_data, uint64_t *out_data_byte_len);
+```
 
 ## Attribute-Based Access
 
@@ -83,7 +112,8 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
                               const char *owner_uuid, const char *name,
                               int64_t resolution_ns, const char *features_json,
                               int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
-                              uint64_t *out_length, uint8_t *out_data_hash /* 32-byte buffer */);
+                              uint64_t *out_length, uint8_t *out_data_hash, /* 32-byte buffer */
+                              int32_t *out_dtype);
 
 int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               const char *owner_uuid, const char *name,
@@ -94,7 +124,8 @@ int32_t ts_store_remove_by_attrs(struct TsStore *handle,
                                  int64_t resolution_ns, const char *features_json);
 
 int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *data_hash,
-                                   double **out_data, uint64_t *out_data_len); /* ts_buffer_free_f64 */
+                                   int32_t *out_dtype,
+                                   uint8_t **out_data, uint64_t *out_byte_len); /* ts_buffer_free_u8 */
 ```
 
 `ts_store_get_metadata` + `ts_store_get_array_by_hash` is the read path used by bindings that

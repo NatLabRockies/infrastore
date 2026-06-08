@@ -15,7 +15,7 @@ flowchart TB
         SRV["time-series-store-server<br/>gRPC server + Rust client"]
     end
 
-    JL["TimeSeries.jl<br/>(Julia package)"]
+    JL["TimeSeriesStore.jl<br/>(Julia package)"]
     PROTO["time-series-store-proto<br/>protobuf + tonic"]
 
     subgraph core["time-series-store-core"]
@@ -53,9 +53,9 @@ flowchart TB
 | `time-series-store-core`   | The whole engine: types, storage backends, hashing, the `Store` API    |
 | `time-series-store-proto`  | The `.proto` service compiled with `tonic`; shared message types       |
 | `time-series-store-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient` |
-| `time-series-store-py`     | PyO3 classes exposing `Store` to Python as the `time_series` module    |
+| `time-series-store-py`     | PyO3 classes exposing `Store` as the `time_series_store` module        |
 | `time-series-store-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`           |
-| `TimeSeries.jl`            | A Julia package that `ccall`s into the FFI cdylib                      |
+| `TimeSeriesStore.jl`       | A Julia package that `ccall`s into the FFI cdylib                      |
 
 ## The Core: `Store`
 

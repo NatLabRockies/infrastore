@@ -1,6 +1,6 @@
 # Integrate with Julia
 
-Wire `TimeSeries.jl` to the native library. For API usage once it loads, see the
+Wire `TimeSeriesStore.jl` to the native library. For API usage once it loads, see the
 [Julia Developer Guide](../guides/julia.md).
 
 ## Prerequisites
@@ -10,7 +10,7 @@ Wire `TimeSeries.jl` to the native library. For API usage once it loads, see the
 
 ## 1. Build the Native Library
 
-`TimeSeries.jl` calls into the C ABI cdylib, so build it first:
+`TimeSeriesStore.jl` calls into the C ABI cdylib, so build it first:
 
 ```sh
 cargo build -p time-series-store-ffi --release
@@ -18,21 +18,21 @@ cargo build -p time-series-store-ffi --release
 
 ## 2. Point Julia at the Library
 
-`TimeSeries.jl` reads the library path from the `TIME_SERIES_STORE_LIB` environment variable at
+`TimeSeriesStore.jl` reads the library path from the `TIME_SERIES_STORE_LIB` environment variable at
 first use:
 
 ```sh
 export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
 ```
 
-If the variable is unset, `using TimeSeries` works but the first store operation errors with a
+If the variable is unset, `using TimeSeriesStore` works but the first store operation errors with a
 message telling you to set it. Add the export to your shell profile to make it permanent.
 
 ## 3. Instantiate and Test the Package
 
 ```sh
-julia --project=julia/TimeSeries.jl -e 'using Pkg; Pkg.instantiate()'
-julia --project=julia/TimeSeries.jl julia/TimeSeries.jl/test/runtests.jl
+julia --project=julia/TimeSeriesStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.jl
 ```
 
 ## 4. Use It From Your Project
@@ -41,15 +41,15 @@ Develop the package into your own environment, then activate it with the library
 
 ```julia
 using Pkg
-Pkg.develop(path="/path/to/time-series-store/julia/TimeSeries.jl")
+Pkg.develop(path="/path/to/time-series-store/julia/TimeSeriesStore.jl")
 ```
 
 ## Smoke Test
 
 ```julia
-using Dates, TimeSeries
+using Dates, TimeSeriesStore
 
-store = TimeSeriesStore(in_memory=true)
+store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0))
 key = add_time_series!(store, "42", "Generator", Component, "load", ts;
                        features=Dict("model_year" => 2030), units="MW")

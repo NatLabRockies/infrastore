@@ -6,17 +6,19 @@ the mechanism that lets many [keys](./data-model.md#keys) share one underlying a
 
 ## The Array Hash
 
-`array_hash` produces a deterministic 32-byte digest from an `ArrayD<f64>`. The hashed byte stream
-is, in order:
+`array_hash` produces a deterministic 32-byte digest from a
+[`TypedArray`](./data-model.md#typed-n-dimensional-arrays). The hashed byte stream is, in order:
 
-1. A **dtype tag**, `b"f64\0"` (the only element type supported today).
+1. A **dtype tag**: the dtype name (`f64`, `f32`, `i64`, `i32`, `u64`, `bool`) followed by a NUL
+   byte.
 2. The **shape**: the rank as a little-endian `u64`, then each dimension as a little-endian `u64`.
-3. The **elements** in row-major order, each as `f64::to_le_bytes`.
+3. The **elements** in row-major order. Float dtypes canonicalize `NaN` to a single quiet-`NaN` bit
+   pattern before hashing; integer and `bool` bytes are hashed verbatim.
 
 ```mermaid
 flowchart LR
-    T["dtype tag<br/>f64\\0"] --> S["rank + dims<br/>(u64 LE each)"]
-    S --> E["elements<br/>(f64 LE, row-major)"]
+    T["dtype tag<br/>e.g. f64\\0"] --> S["rank + dims<br/>(u64 LE each)"]
+    S --> E["elements<br/>(typed LE, row-major)"]
     E --> H["SHA-256"]
     H --> D["32-byte hash"]
 
@@ -27,13 +29,13 @@ flowchart LR
     style D fill:#28a745,color:#fff
 ```
 
-Two consequences worth calling out:
+Identity is therefore `(dtype, shape, content)`:
 
-- **Shape is part of the identity.** A flat 4-element array and a 2×2 array with the same values
-  hash differently. Reshaping changes the hash.
-- **`NaN` is canonicalized.** Any `NaN`, regardless of its payload bits, is hashed as a single
-  canonical quiet-`NaN` pattern. Semantically equal arrays never collide on `NaN` representation,
-  and equality of hash matches equality of values.
+- **dtype and shape are part of the identity.** Two arrays with the same numbers but a different
+  dtype, or a different shape, never collide. Reshaping or retyping changes the hash.
+- **`NaN` is canonicalized** (float dtypes only). Any `NaN`, regardless of its payload bits, hashes
+  as a single canonical quiet-`NaN` pattern, so semantically equal float arrays never collide on
+  `NaN` representation.
 
 ## The Features Hash
 
@@ -55,10 +57,12 @@ in their features.
 When you add a series, `Store` hashes the array and asks the backend whether that hash is already
 present:
 
-- **Present** → the existing column is reused; no new array bytes are written. Only a new metadata
+- **Present** → the existing array is reused; no new array bytes are written. Only a new metadata
   association row is inserted.
-- **Absent** → the array is written to the first free column of a compatible
-  `sts_{length}_{resolution}` dataset, and the hash is recorded in the companion hash variable.
+- **Absent** → the array is written. A packed array (`SingleTimeSeries`) goes into the first free
+  column of a compatible `sts_{dtype}_{shape}_{length}_{res}` dataset, recording its hash in the
+  companion hash variable; a standalone array (`NonSequentialTimeSeries`, dense forecasts) becomes a
+  new `arr_{hash}` variable.
 
 So storage cost scales with the number of _distinct_ arrays, while metadata cost scales with the
 number of _associations_. A profile shared by a thousand generators costs one array and a thousand

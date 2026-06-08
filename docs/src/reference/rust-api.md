@@ -4,8 +4,9 @@ The public surface of `time-series-store-core`. Import paths below are relative 
 
 ```rust
 use time_series_store_core::{
-    create_store, open_store, Store, TimeSeriesKey, SingleTimeSeries, TimeSeriesData,
-    TimeSeriesType, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
+    create_store, open_store, Store, TimeSeriesKey,
+    SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesData, TimeSeriesType,
+    TypedArray, Dtype, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
     TimeSeriesCounts, ForecastParameters, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
@@ -58,7 +59,7 @@ impl Store {
     pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool>;
 
     pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata>;
-    pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<ArrayD<f64>>;
+    pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
     pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Duration>>;
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts>;
@@ -72,10 +73,10 @@ impl Store {
 
 ### Method notes
 
-- **`add_time_series`** — Hashes the array, stores it (deduplicating on the hash), inserts a
-  metadata association, and returns its key. Errors with `DuplicateTimeSeries` if the key already
-  exists, `ReadOnlyStore` on a read-only store, `InvalidParameter` for non-rank-1 data on the NetCDF
-  backend. It is a convenience wrapper over `add_time_series_bulk`.
+- **`add_time_series`** — Accepts a `SingleTimeSeries` or `NonSequentialTimeSeries` (wrapped in
+  `TimeSeriesData`). Hashes the array, stores it (deduplicating on the hash), inserts a metadata
+  association, and returns its key. Errors with `DuplicateTimeSeries` if the key already exists or
+  `ReadOnlyStore` on a read-only store. It is a convenience wrapper over `add_time_series_bulk`.
 - **`add_time_series_bulk`** — All-or-nothing: every array put and association insert in the call
   commits together or rolls back together.
 - **`get_time_series`** — With `time_range = Some((start, end))`, slices on the time axis; the
@@ -90,11 +91,12 @@ impl Store {
 ### Forecasts
 
 The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
-`Scenarios`) are written with `add_forecast`. The forecast values are flattened to a 1-D,
-column-major `data` array that is content-addressed like any other array; the windowing parameters
-(`horizon`, `interval`, `count`, and for `Probabilistic` the `percentiles`) are recorded in
-metadata. The store does not interpret the array layout — the caller flattens on write and reshapes
-on read.
+`Scenarios`) are written with `add_forecast`. `data` is a [`TypedArray`](#typedarray-and-dtype) in
+its native shape; the windowing parameters (`horizon`, `interval`, `count`, and for `Probabilistic`
+the `percentiles`) plus an optional `logical_type` are recorded in metadata. Dense forecast arrays
+(`Deterministic` / `Probabilistic` / `Scenarios`) are stored as standalone NetCDF variables; a
+`DeterministicSingleTimeSeries` stores the underlying `SingleTimeSeries` array (column-packed) and
+dedups against that series.
 
 ```rust
 #[allow(clippy::too_many_arguments)]
@@ -104,26 +106,26 @@ pub fn add_forecast(
     time_series_type: TimeSeriesType,
     initial_timestamp: DateTime<Utc>, resolution: Duration,
     horizon: Duration, interval: Duration, count: usize,
-    data: ArrayD<f64>, features: Features,
+    data: TypedArray, features: Features,
     units: Option<String>, scaling_factor_multiplier: Option<String>,
-    percentiles: Option<Vec<f64>>,
+    percentiles: Option<Vec<f64>>, logical_type: Option<String>,
 ) -> Result<TimeSeriesKey>;
 ```
 
-Conventional column-major layouts (flattened to 1-D for storage):
+Conventional array shapes:
 
-| Type                            | `data` shape (before flattening)              | `percentiles` |
+| Type                            | `data` shape                                  | `percentiles` |
 | ------------------------------- | --------------------------------------------- | ------------- |
 | `Deterministic`                 | `(horizon_count, count)`                      | `None`        |
 | `DeterministicSingleTimeSeries` | the backing `SingleTimeSeries` array (dedups) | `None`        |
 | `Probabilistic`                 | `(percentile_count, horizon_count, count)`    | the vector    |
 | `Scenarios`                     | `(scenario_count, horizon_count, count)`      | `None`        |
 
-**Reading forecasts:** `get_time_series` reconstructs `SingleTimeSeries` only and returns
-`InvalidParameter` for forecast types. Read a forecast through the low-level pair instead — resolve
-its [`TimeSeriesMetadata`](#timeseriesmetadata) with `get_metadata` (it carries `horizon`,
-`interval`, `count`, and `percentiles`), then fetch the flattened array with
-`get_array_by_hash(&meta.data_hash)` and reshape it yourself.
+**Reading forecasts:** `get_time_series` reconstructs `SingleTimeSeries` and
+`NonSequentialTimeSeries` only and returns `InvalidParameter` for forecast types. Read a forecast
+through the low-level pair instead — resolve its [`TimeSeriesMetadata`](#timeseriesmetadata) with
+`get_metadata` (it carries `horizon`, `interval`, `count`, and `percentiles`), then fetch the array
+with `get_array_by_hash(&meta.data_hash)`.
 
 ## Types
 
@@ -148,15 +150,41 @@ pub struct SingleTimeSeries {
     pub initial_timestamp: DateTime<Utc>,
     pub resolution: Duration,
     pub length: usize,
-    pub data: ArrayD<f64>,
+    pub data: TypedArray,
 }
 
 impl SingleTimeSeries {
-    pub fn new(initial_timestamp: DateTime<Utc>, resolution: Duration, data: ArrayD<f64>) -> Self;
+    pub fn new(initial_timestamp: DateTime<Utc>, resolution: Duration, data: TypedArray) -> Self;
 }
 ```
 
-`length` is derived from `data.shape()[0]` by `new`.
+`length` is derived from the array's first axis (`data.length()`) by `new`.
+
+### `TypedArray` and `Dtype`
+
+The storage array type: an element `dtype`, an N-dimensional `shape` `[length, k1, k2, …]` (first
+axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.
+
+```rust
+pub enum Dtype { F64, F32, I64, I32, U64, Bool }   // codes 0..=5; size() = 8/4/8/4/8/1
+
+pub struct TypedArray {
+    pub dtype: Dtype,
+    pub shape: Vec<usize>,
+    pub bytes: Vec<u8>,
+}
+
+impl TypedArray {
+    pub fn new(dtype: Dtype, shape: Vec<usize>, bytes: Vec<u8>) -> Result<Self, String>; // validates len
+    pub fn from_f64(shape: Vec<usize>, values: &[f64]) -> Self;
+    pub fn to_f64_vec(&self) -> Result<Vec<f64>, String>;
+    pub fn length(&self) -> usize;          // shape[0]
+    pub fn element_shape(&self) -> &[usize]; // shape[1..]
+}
+```
+
+`Dtype::code()` / `Dtype::from_code(i32)` and `Dtype::as_str()` / `Dtype::parse(&str)` convert to
+and from the stable integer codes and string names used by the bindings and the on-disk format.
 
 ### `NonSequentialTimeSeries`
 
@@ -223,7 +251,8 @@ canonicalizes `NaN` for hashing and equality.
 The full record returned by `list_time_series` and `get_metadata`: owner fields, `time_series_type`,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `scaling_factor_multiplier`,
-`units`, and `percentiles: Option<Vec<f64>>` (set for `Probabilistic` forecasts).
+`units`, `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing:
+`dtype: Dtype`, `element_shape: Vec<usize>`, and `logical_type: Option<String>`.
 
 ### `ListFilter`
 
@@ -240,7 +269,8 @@ ListFilter::new()
 
 ### `AddRequest`
 
-The element type of `add_time_series_bulk`, mirroring the `add_time_series` arguments.
+The element type of `add_time_series_bulk`, mirroring the `add_time_series` arguments plus an
+optional `logical_type: Option<String>` (an opaque, binding-owned domain label).
 
 ### Report and count types
 
@@ -284,10 +314,12 @@ rarely call it directly, but it documents the backend contract.
 
 ```rust
 pub trait StorageBackend: Send + Sync {
-    fn put_array(&mut self, hash: &[u8; 32], data: &ArrayD<f64>, length: usize,
-                 resolution_seconds: i64) -> Result<()>;          // idempotent on hash
-    fn get_array(&self, hash: &[u8; 32]) -> Result<ArrayD<f64>>;
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<ArrayD<f64>>;
+    // `packed = true` column-packs same-shaped arrays (SingleTimeSeries / DST);
+    // `packed = false` stores a standalone multi-dim variable (NonSequential, dense forecasts).
+    fn put_array(&mut self, hash: &[u8; 32], data: &TypedArray,
+                 resolution_seconds: i64, packed: bool) -> Result<()>;   // idempotent on hash
+    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
+    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
     fn contains(&self, hash: &[u8; 32]) -> Result<bool>;
     fn compact(&mut self) -> Result<CompactionReport>;
@@ -299,7 +331,7 @@ pub trait StorageBackend: Send + Sync {
 ## Hashing
 
 ```rust
-pub fn array_hash(data: &ArrayD<f64>) -> [u8; 32];
+pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes
 pub fn features_hash(features: &Features) -> [u8; 32];
 pub fn hash_hex(hash: &[u8; 32]) -> String;
 ```
@@ -310,5 +342,5 @@ These define the cross-language content-addressing contract; see
 ## Constants
 
 ```rust
-pub const DATA_FORMAT_VERSION: &str = "0.1.0";
+pub const DATA_FORMAT_VERSION: &str = "0.2.0";
 ```

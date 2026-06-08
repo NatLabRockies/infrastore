@@ -53,6 +53,8 @@ flowchart TB
   ([storage model](./explanation/storage-model.md))
 - **Feature-tagged associations** — Each association carries an arbitrary map of typed features
   (`int` / `float` / `bool` / `str`) so multiple variants of a series can coexist under one owner
+- **Typed, N-dimensional arrays** — Store `f64`, `f32`, `i64`, `i32`, `u64`, or `bool` values, with
+  an optional per-step element shape (e.g. the coefficient tuple of a cost curve)
 - **Three language bindings** — Use it from Rust, Python, or Julia with the same on-disk format
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
@@ -65,9 +67,10 @@ flowchart TB
 **`SingleTimeSeries`** and **`NonSequentialTimeSeries`** — regular and explicitly timestamped static
 series — are implemented end to end across every interface (Rust, Python, Julia, and the gRPC
 server). The four forecast types (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`,
-`Scenarios`) are implemented in the **Rust core and the C ABI**; the Python and Julia bindings and
-the gRPC server currently expose them only as enum values and aggregate counts, not yet as
-create/read operations. See [Data Model](./explanation/data-model.md) for the full picture.
+`Scenarios`) are implemented in the **Rust core, the C ABI, and the Julia binding**; the Python
+binding and the gRPC server currently expose them only as enum values and aggregate counts. The
+on-disk format is version `0.2.0`. See [Data Model](./explanation/data-model.md) for the full
+picture.
 
 ## Who Should Read This
 

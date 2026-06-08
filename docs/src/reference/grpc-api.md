@@ -94,8 +94,10 @@ message GetResp {
   string          initial_timestamp_rfc3339 = 1;
   int64           resolution_ns             = 2;
   uint64          length                    = 3;
-  repeated uint64 shape                     = 4;
-  repeated double values                    = 5;   // flattened, row-major
+  repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
+  repeated double values                    = 5;   // row-major f64
+  TimeSeriesType  time_series_type          = 6;
+  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
 }
 
 message KeysReq  { string owner_uuid = 1; }
@@ -128,9 +130,13 @@ and `GetCounts` includes them in `forecasts`. Two caveats:
 - **`percentiles` is not on the wire.** `Probabilistic` percentiles are dropped in the gRPC
   conversion, so they are not returned to clients.
 - **`GetTimeSeries` does not fetch forecast values.** It reconstructs `SingleTimeSeries` or
-  `NonSequentialTimeSeries` and returns `InvalidArgument` for forecast types. Irregular responses
-  set `time_series_type` and `timestamps_rfc3339`. Read forecast arrays through a local store or the
-  C ABI instead.
+  `NonSequentialTimeSeries` and returns `InvalidArgument` for forecast types. Non-sequential
+  responses set `time_series_type` and `timestamps_rfc3339`. Read forecast arrays through a local
+  store or the C ABI instead.
+- **Array typing is `f64` over the wire.** The `dtype`, `element_shape`, and `logical_type` fields
+  are not carried in the proto contract — `GetResp.values` are always `f64` (with `shape` giving the
+  dimensions), and `TimeSeriesMetadata` reconstructed from gRPC defaults to `f64` / empty element
+  shape / no `logical_type`.
 
 ## Authentication
 

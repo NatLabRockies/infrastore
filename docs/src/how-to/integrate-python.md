@@ -1,6 +1,6 @@
 # Integrate with Python
 
-Get the `time_series` module into a Python environment. For API usage once it imports, see the
+Get the `time_series_store` module into a Python environment. For API usage once it imports, see the
 [Python Developer Guide](../guides/python.md).
 
 ## Prerequisites
@@ -23,7 +23,7 @@ maturin develop
 Verify the install:
 
 ```sh
-python -c "import time_series; print(time_series.__version__)"
+python -c "import time_series_store; print(time_series_store.__version__)"
 pytest ../../python/tests
 ```
 
@@ -34,8 +34,8 @@ To produce a wheel you can install elsewhere:
 ```sh
 cd crates/time-series-store-py
 maturin build --release
-# -> target/wheels/time_series-<version>-cp310-abi3-<platform>.whl
-pip install ../../target/wheels/time_series-*.whl
+# -> target/wheels/time_series_store-<version>-cp310-abi3-<platform>.whl
+pip install ../../target/wheels/time_series_store-*.whl
 ```
 
 The wheel is built against the **`abi3-py310`** stable ABI, so a single wheel works on CPython 3.10
@@ -46,7 +46,7 @@ and every newer 3.x without recompiling.
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series import TimeSeriesStore, SingleTimeSeries, OwnerCategory
+from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory
 
 store = TimeSeriesStore.create(in_memory=True)
 ts = SingleTimeSeries(
@@ -70,8 +70,9 @@ print("ok")
   `pip install`-ed the wheel into the interpreter you are running.
 - **HDF5 not found during build** — Set `HDF5_DIR` (see
   [Install](./install.md#1-install-system-libraries)).
-- **`InvalidParameterError` on add** — The NetCDF backend stores 1-D `float64` arrays only; pass
-  `dtype=np.float64` and a 1-D array.
+- **`InvalidParameterError` on add** — In Python, pass a `float64` NumPy array (any shape), and make
+  feature values `int`/`float`/`bool`/`str`. Timestamps for a `NonSequentialTimeSeries` must be
+  strictly increasing.
 
 ## Next
 

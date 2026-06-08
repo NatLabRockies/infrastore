@@ -23,20 +23,20 @@ uniqueness constraint; `owner_type` and `owner_category` are descriptive.
 
 The data model defines six time-series types, all present in the `TimeSeriesType` enum and the
 metadata schema. Both static series types are implemented across every interface; the four forecast
-types are implemented in the Rust core and the C ABI:
+types are implemented in the Rust core, the C ABI, and the Julia binding:
 
-| Type                            | Where implemented | Description                                         |
-| ------------------------------- | ----------------- | --------------------------------------------------- |
-| `SingleTimeSeries`              | All interfaces    | One array sampled at a fixed resolution             |
-| `NonSequentialTimeSeries`       | All interfaces    | Values at explicit, irregular timestamps            |
-| `Deterministic`                 | Core + C ABI      | Forecast: a `(horizon × count)` window matrix       |
-| `DeterministicSingleTimeSeries` | Core + C ABI      | Forecast view over an underlying `SingleTimeSeries` |
-| `Probabilistic`                 | Core + C ABI      | Forecast with percentile bands                      |
-| `Scenarios`                     | Core + C ABI      | Forecast with discrete scenarios                    |
+| Type                            | Where implemented  | Description                                         |
+| ------------------------------- | ------------------ | --------------------------------------------------- |
+| `SingleTimeSeries`              | All interfaces     | One array sampled at a fixed resolution             |
+| `NonSequentialTimeSeries`       | All interfaces     | Values at explicit, irregular timestamps            |
+| `Deterministic`                 | Core, C ABI, Julia | Forecast: a `(horizon × count)` window matrix       |
+| `DeterministicSingleTimeSeries` | Core, C ABI, Julia | Forecast view over an underlying `SingleTimeSeries` |
+| `Probabilistic`                 | Core, C ABI, Julia | Forecast with percentile bands                      |
+| `Scenarios`                     | Core, C ABI, Julia | Forecast with discrete scenarios                    |
 
-The Python and Julia bindings and the gRPC server currently surface the forecast types only as
-`TimeSeriesType` values and aggregate counts — creating and reading forecast _values_ is a Rust-core
-and C-ABI capability today. See [Forecasts](#forecasts) below.
+The **Python** binding and the gRPC server currently surface the forecast types only as
+`TimeSeriesType` values and aggregate counts — creating and reading forecast _values_ from those
+interfaces is not yet wired. See [Forecasts](#forecasts) below.
 
 ### `NonSequentialTimeSeries`
 
@@ -60,18 +60,25 @@ value
 ```
 
 The timestamps are implied — sample `i` is at `initial_timestamp + i * resolution` — so only the
-values are stored. v0 stores **1-D values only** (one scalar per timestep). The in-memory type
-(`ArrayD<f64>`) can carry trailing axes for per-step vectors such as cost-curve coefficients, but
-the NetCDF backend rejects anything other than rank-1 with an `InvalidParameter` error. That
-dimension is reserved for a later milestone.
+values are stored.
+
+### Typed, N-dimensional arrays
+
+Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, `i64`, `i32`, `u64`,
+or `bool`) and a shape `[length, k1, k2, …]`. The first axis is time; the trailing axes are a fixed
+**per-step element shape**, so a step can hold a scalar (empty element shape) or a small tuple — for
+example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The optional
+`logical_type` label travels with the metadata so a binding can reconstruct its domain object on
+read; the store itself never interprets it.
 
 ### Forecasts
 
-The four forecast types share one storage strategy: the forecast values are **flattened to a 1-D,
-column-major array** and stored content-addressed like any other array, while the windowing
-parameters live in metadata. A forecast association records `horizon` (the span each window covers),
-`interval` (the spacing between successive window start times), `count` (the number of windows), and
-— for `Probabilistic` — a `percentiles` vector.
+The four forecast types store their values as a content-addressed `TypedArray` in its **native
+shape** (the dense types as standalone NetCDF variables; a `DeterministicSingleTimeSeries` reuses
+its backing `SingleTimeSeries` array), while the windowing parameters live in metadata. A forecast
+association records `horizon` (the span each window covers), `interval` (the spacing between
+successive window start times), `count` (the number of windows), and — for `Probabilistic` — a
+`percentiles` vector.
 
 | Type                            | Conventional array shape                   | Extra metadata |
 | ------------------------------- | ------------------------------------------ | -------------- |
@@ -80,7 +87,8 @@ parameters live in metadata. A forecast association records `horizon` (the span 
 | `Probabilistic`                 | `(percentile_count, horizon_count, count)` | `percentiles`  |
 | `Scenarios`                     | `(scenario_count, horizon_count, count)`   | —              |
 
-The store does not interpret the layout — the caller flattens on write and reshapes on read, and a
+The store does not interpret the layout — the caller owns the array shape (the Rust core takes a
+native-shape `TypedArray`; the C ABI and Julia pass a column-major buffer), and a
 `DeterministicSingleTimeSeries` deduplicates against the static series it forecasts. Forecasts are
 read through the low-level metadata + array path rather than `get_time_series`; see the
 [Rust API](../reference/rust-api.md#forecasts) and [C ABI](../reference/c-abi.md#forecasts).
@@ -137,7 +145,9 @@ is a metadata concept; the array is shared by [content addressing](./content-add
 Each association can also carry:
 
 - **`units`** — a free-form label such as `"MW"`. No dimensional analysis is performed.
-- **`scaling_factor_multiplier`** — an opaque expression string such as `"x * 1.05"`. v0 stores it
-  verbatim and never evaluates it.
+- **`scaling_factor_multiplier`** — an opaque expression string such as `"x * 1.05"`. It is stored
+  verbatim and never evaluated.
+- **`logical_type`** — an opaque, binding-owned label (e.g. `"QuadraticFunctionData"`) for
+  reconstructing a domain object on read. The store never interprets it.
 
 These are recorded in metadata and returned on read, but they do not affect identity or storage.

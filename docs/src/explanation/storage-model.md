@@ -27,20 +27,23 @@ strongest, and the `Store` layer coordinates them.
 
 ## The Array Side: NetCDF4
 
-Arrays are grouped under `time_series/single/` in the NetCDF file. Series that share a **length**
-and a **resolution** are packed together as columns of a single 2-D dataset named
-`sts_{length}_{resolution_seconds}`, with shape `(length, 1000)`:
+Arrays live under `time_series/single/` in the NetCDF file, in one of **two storage modes**.
+
+**Packed mode** holds `SingleTimeSeries` (and the backing array of a
+`DeterministicSingleTimeSeries`). Arrays that share a `(dtype, element_shape, length, resolution)`
+are packed together as columns of one dataset named `sts_{dtype}_{shape}_{length}_{res}`, with shape
+`(length, 1000, *element_shape)`:
 
 ```mermaid
 flowchart TB
-    subgraph ds["dataset sts_8760_3600  shape (8760, 1000)"]
+    subgraph ds["dataset sts_f64_s_8760_3600  shape (8760, 1000)"]
         direction LR
         C0["col 0<br/>series A"]
         C1["col 1<br/>series B"]
         C2["col 2<br/>(free)"]
         CN["col 999<br/>(free)"]
     end
-    H["companion sts_8760_3600_h<br/>1000 hash strings"]
+    H["companion sts_f64_s_8760_3600_h<br/>1000 hash strings"]
     C0 -.hash.-> H
     C1 -.hash.-> H
 
@@ -51,34 +54,32 @@ flowchart TB
     style H fill:#6f42c1,color:#fff
 ```
 
-Key design choices:
+- **Columns are series, rows are timesteps.** Chunking is `(1, 1000, *element_shape)`, so reading
+  one timestep across all packed series is contiguous on disk — the layout favors "give me hour
+  4,000 for every generator."
+- **A companion string variable holds the hashes.** For each packed dataset there is a sibling
+  `{dataset}_h`; slot `i` holds the SHA-256 hex of column `i`, or an empty string if the slot is
+  free. This is the on-disk index the backend rebuilds on open.
+- **Datasets spill at 1,000 columns** into `…__1`, `…__2`, and so on. Compression is zlib level 3
+  with shuffle.
 
-- **Columns are series, rows are timesteps.** Chunking is `(1, 1000)`, so reading one timestep
-  across all components is contiguous on disk — the layout favors "give me hour 4,000 for every
-  generator."
-- **A companion string variable holds the hashes.** For each data variable `sts_…` there is a
-  sibling `sts_…_h` of the same column count. Slot `i` holds the SHA-256 hex of column `i`'s array,
-  or an empty string if the slot is free. This is the on-disk index that the backend rebuilds on
-  open.
-- **Datasets spill at 1,000 columns.** When a `(length, resolution)` family fills its 1,000 columns,
-  the next write creates `sts_{length}_{resolution}__1`, then `__2`, and so on.
-- **Compression is on.** Data variables use zlib level 3 with shuffle.
+**Standalone mode** holds `NonSequentialTimeSeries` and the dense forecast arrays (`Deterministic`,
+`Probabilistic`, `Scenarios`). Each is its own typed, multi-dimensional variable `arr_{hex_hash}` of
+shape `[length, *element_shape]` — no column packing and no companion hash (the variable name
+carries the hash).
 
-The [Storage Backend design](../reference/file-format.md#netcdf-layout) reference gives the precise
-naming and dimension scheme.
-
-[Forecasts](./data-model.md#forecasts) reuse this exact machinery: their values are flattened to a
-1-D array and stored as a column in the same `sts_…` datasets. Nothing on the array side
-distinguishes a forecast from a static series — the forecast windowing parameters live entirely in
-metadata.
+The [file-format reference](../reference/file-format.md#netcdf-layout) gives the precise naming and
+dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
+same physical shape — the type, timestamps, and windowing parameters all live in metadata.
 
 ## The Metadata Side: SQLite
 
 The sidecar holds two tables:
 
 - **`time_series_associations`** — one row per `(owner, name, resolution, features)` association,
-  including the `data_hash` that links it to a NetCDF column, plus temporal fields, forecast
-  parameters (`horizon`, `interval`, `count`, `percentiles`), units, and the scaling expression.
+  including the `data_hash` that links it to a packed column or standalone variable, the array
+  typing (`dtype`, `element_shape`, `logical_type`), plus temporal fields, forecast parameters
+  (`horizon`, `interval`, `count`, `percentiles`), units, and the scaling expression.
 - **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
   a `value_kind` discriminator.
 

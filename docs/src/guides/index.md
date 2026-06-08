@@ -6,8 +6,8 @@ with the idioms of that language, then points at the matching [reference](../ref
 exact signatures.
 
 - [Rust](./rust.md) — Embed `time-series-store-core` directly.
-- [Python](./python.md) — Use the `time_series` PyO3 wheel.
-- [Julia](./julia.md) — Use the `TimeSeries.jl` package over the C ABI.
+- [Python](./python.md) — Use the `time_series_store` PyO3 wheel.
+- [Julia](./julia.md) — Use the `TimeSeriesStore.jl` package over the C ABI.
 - [gRPC Server & Client](./server.md) — Serve a store for remote readers.
 
 If you just want a task-sized recipe (install, wire up a binding), see the

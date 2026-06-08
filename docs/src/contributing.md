@@ -29,7 +29,7 @@ cd crates/time-series-store-py && maturin develop && pytest ../../python/tests
 # Julia (requires the cdylib + TIME_SERIES_STORE_LIB)
 cargo build -p time-series-store-ffi --release
 export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
-julia --project=julia/TimeSeries.jl julia/TimeSeries.jl/test/runtests.jl
+julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.jl
 ```
 
 ## The On-Disk Format Is a Contract

@@ -1,18 +1,23 @@
 # Python API
 
-The PyO3 binding is importable as the `time_series` module. It is built as an `abi3-py310` wheel, so
-one build runs on CPython 3.10 and newer.
+The PyO3 binding is importable as the `time_series_store` module (package `time-series-store`). It
+is built as an `abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
 
 ```python
-from time_series import (
-    TimeSeriesStore, SingleTimeSeries, TimeSeriesKey,
+from time_series_store import (
+    TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
     TimeSeriesType, OwnerCategory,
     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError,
     InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 ```
 
-`time_series.__version__` reports the wheel version.
+`time_series_store.__version__` reports the wheel version.
+
+> **Arrays are `float64` in Python.** The core supports several dtypes, but the Python binding
+> accepts and returns NumPy `float64` arrays only. Multi-dimensional arrays (a per-step element
+> shape) are supported via the NumPy array's shape. The `logical_type` label and forecast creation
+> are not yet exposed in Python — see [Forecasts](#forecasts).
 
 ## `TimeSeriesStore`
 
@@ -45,7 +50,7 @@ def add_time_series(
     owner_type: str,
     owner_category: OwnerCategory,
     name: str,
-    time_series: SingleTimeSeries,
+    time_series: SingleTimeSeries | NonSequentialTimeSeries,
     features: dict[str, int | float | bool | str] | None = None,
     units: str | None = None,
     scaling_factor_multiplier: str | None = None,
@@ -55,7 +60,7 @@ def get_time_series(
     self,
     key: TimeSeriesKey,
     time_range: tuple[datetime, datetime] | None = None,
-) -> SingleTimeSeries: ...
+) -> SingleTimeSeries | NonSequentialTimeSeries: ...
 
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
 def clear_time_series(self, owner_uuid: str | None = None) -> int: ...
@@ -81,13 +86,14 @@ def flush(self) -> None: ...
 
 #### Return shapes
 
+- **`add_time_series`** accepts a `SingleTimeSeries` or a `NonSequentialTimeSeries`;
+  **`get_time_series`** returns whichever matches the stored type.
 - **`list_time_series`** returns a list of dicts, each with the keys: `owner_uuid`, `owner_type`,
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`,
   `resolution_seconds`, `features`, `units`, `scaling_factor_multiplier`. The `features` filter is a
   subset match — rows must contain at least the given pairs.
 - **`get_time_series_counts`** returns
-  `{"components_with_time_series": int, "static_time_series":
-  int, "forecasts": int}`.
+  `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
 - **`compact`** returns `{"slots_reclaimed": int, "datasets_dropped": int}`.
 - **`verify_integrity`** returns a list of error strings; an empty list means the store is intact.
 - **`get_time_series`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive.
@@ -98,19 +104,20 @@ def flush(self) -> None: ...
 SingleTimeSeries(
     initial_timestamp: datetime,
     resolution: timedelta,
-    data: numpy.ndarray,   # dtype float64
+    data: numpy.ndarray,   # dtype float64; shape (length,) or (length, k1, ...)
 )
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> timedelta`, `length -> int`,
-`data -> numpy.ndarray[float64]`. The NetCDF backend accepts 1-D `data` only.
+`data -> numpy.ndarray[float64]`. A multi-dimensional `data` array keeps its per-step element shape
+through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
 ```python
 NonSequentialTimeSeries(
     timestamps: list[datetime],
-    data: numpy.ndarray,
+    data: numpy.ndarray,   # dtype float64
 )
 ```
 
@@ -158,13 +165,13 @@ capability.
 
 All inherit from `TimeSeriesError`:
 
-| Exception                  | Raised when                                         |
-| -------------------------- | --------------------------------------------------- |
-| `NotFoundError`            | A key or array does not exist                       |
-| `DuplicateTimeSeriesError` | Adding a series whose key already exists            |
-| `InvalidParameterError`    | Bad arguments (e.g. non-1-D data, bad feature type) |
-| `IntegrityError`           | On-disk inconsistency detected                      |
-| `ReadOnlyStoreError`       | A write on a read-only store                        |
+| Exception                  | Raised when                                           |
+| -------------------------- | ----------------------------------------------------- |
+| `NotFoundError`            | A key or array does not exist                         |
+| `DuplicateTimeSeriesError` | Adding a series whose key already exists              |
+| `InvalidParameterError`    | Bad arguments (e.g. bad feature type, bad timestamps) |
+| `IntegrityError`           | On-disk inconsistency detected                        |
+| `ReadOnlyStoreError`       | A write on a read-only store                          |
 
 Feature-value typing note: because `bool` is a subtype of `int` in Python, the binding checks `bool`
 first, so `True`/`False` features are stored as booleans, not integers.

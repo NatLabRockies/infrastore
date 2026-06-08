@@ -11,11 +11,11 @@ The crate is part of this workspace. From another crate in the workspace:
 [dependencies]
 time-series-store-core = { path = "crates/time-series-store-core" }
 chrono = "0.4"
-ndarray = "0.16"
 ```
 
-You will use `chrono::Duration`/`DateTime<Utc>` for time and `ndarray::ArrayD<f64>` for values,
-since those are the types the API speaks.
+You will use `chrono::Duration`/`DateTime<Utc>` for time and the crate's
+[`TypedArray`](../reference/rust-api.md#typedarray-and-dtype) for values, since those are the types
+the API speaks.
 
 ## Open or Create a Store
 
@@ -37,13 +37,13 @@ let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
 
 ```rust
 use chrono::{Duration, TimeZone, Utc};
-use ndarray::ArrayD;
 use time_series_store_core::{
-    Features, FeatureValue, OwnerCategory, SingleTimeSeries, TimeSeriesData,
+    Features, FeatureValue, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
 };
 
 let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-let data = ArrayD::from_shape_vec(vec![24], (0..24).map(|i| 100.0 + i as f64).collect())?;
+let values: Vec<f64> = (0..24).map(|i| 100.0 + i as f64).collect();
+let data = TypedArray::from_f64(vec![24], &values);   // shape [length]; or [length, k1, ...]
 let ts = SingleTimeSeries::new(initial, Duration::hours(1), data);
 
 let mut features = Features::new();
@@ -136,17 +136,17 @@ let array = store.get_array_by_hash(&meta.data_hash)?;
 
 ## Forecasts
 
-Forecast types are written with `add_forecast`. You flatten the forecast into a 1-D, column-major
-array (the [data model](../explanation/data-model.md#forecasts) lists the conventional shapes per
-type); the store content-addresses it and records the windowing parameters:
+Forecast types are written with `add_forecast`. `data` is a `TypedArray` in its native shape (the
+[data model](../explanation/data-model.md#forecasts) lists the conventional shapes per type); the
+store content-addresses it and records the windowing parameters:
 
 ```rust
-use time_series_store_core::TimeSeriesType;
+use time_series_store_core::{TimeSeriesType, TypedArray};
 
-// A Deterministic forecast: horizon_count rows × count windows, flattened column-major.
+// A Deterministic forecast: a (horizon_count, count) matrix.
 let (horizon_count, count) = (24, 7);
-let flat: Vec<f64> = /* horizon_count * count values, column-major */ vec![0.0; horizon_count * count];
-let data = ArrayD::from_shape_vec(vec![flat.len()], flat)?;
+let values: Vec<f64> = vec![0.0; horizon_count * count];   // column-major
+let data = TypedArray::from_f64(vec![horizon_count, count], &values);
 
 let key = store.add_forecast(
     "42", "Generator", OwnerCategory::Component, "load_forecast",
@@ -156,19 +156,20 @@ let key = store.add_forecast(
     Duration::hours(24),              // interval
     count,
     data, Features::new(),
-    Some("MW".into()), None,
+    Some("MW".into()), None,          // units, scaling_factor_multiplier
     None,                             // percentiles (Some(vec) for Probabilistic)
+    None,                             // logical_type
 )?;
 ```
 
-Forecasts are **not** returned by `get_time_series` (it reconstructs `SingleTimeSeries` only). Read
+Forecasts are **not** returned by `get_time_series` (it reconstructs the static types only). Read
 one through the low-level path — `get_metadata` exposes `horizon`, `interval`, `count`, and
-`percentiles`, and `get_array_by_hash` returns the flattened values for you to reshape:
+`percentiles`, and `get_array_by_hash` returns the `TypedArray` in its stored shape:
 
 ```rust
 let meta = store.get_metadata(&key)?;
-let flat = store.get_array_by_hash(&meta.data_hash)?;
-let matrix = flat.into_shape_with_order((meta.length.unwrap() / count, count))?;
+let arr = store.get_array_by_hash(&meta.data_hash)?;   // arr.shape == [horizon_count, count]
+let values = arr.to_f64_vec()?;
 ```
 
 ## Remove and Maintain

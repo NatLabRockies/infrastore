@@ -1,7 +1,7 @@
 # Python Developer Guide
 
-This guide covers building on the `time_series` PyO3 module. For exact signatures and return shapes,
-see the [Python API reference](../reference/python-api.md). To install the wheel into your
+This guide covers building on the `time_series_store` PyO3 module. For exact signatures and return
+shapes, see the [Python API reference](../reference/python-api.md). To install the wheel into your
 environment, see [Integrate with Python](../how-to/integrate-python.md).
 
 ## Import
@@ -9,7 +9,7 @@ environment, see [Integrate with Python](../how-to/integrate-python.md).
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series import TimeSeriesStore, SingleTimeSeries, OwnerCategory, TimeSeriesType
+from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
 The module exposes `TimeSeriesStore`, `SingleTimeSeries`, `TimeSeriesKey`, the `TimeSeriesType` and
@@ -30,7 +30,7 @@ store = TimeSeriesStore.open("system.nc", read_only=True)
 
 ## Build a Series
 
-`SingleTimeSeries` takes a timezone-aware `datetime`, a `timedelta` resolution, and a 1-D NumPy
+`SingleTimeSeries` takes a timezone-aware `datetime`, a `timedelta` resolution, and a NumPy
 `float64` array:
 
 ```python
@@ -41,8 +41,10 @@ ts = SingleTimeSeries(
 )
 ```
 
-Use timezone-aware datetimes (UTC is stored). Pass `dtype=np.float64`; the NetCDF backend stores 1-D
-arrays only.
+Use timezone-aware datetimes (UTC is stored). Pass `dtype=np.float64` — the Python binding works in
+`float64`. The array may be multi-dimensional: shape `(length,)` for scalar steps, or
+`(length, k1, …)` to attach a per-step element shape (such as cost-curve coefficients). Use
+`NonSequentialTimeSeries(timestamps, data)` for explicitly timestamped series.
 
 ## Add a Series
 
@@ -120,7 +122,7 @@ Keep the two files together — the `.nc` and `.nc.sqlite` pair is a single logi
 All exceptions inherit from `TimeSeriesError`, so you can catch broadly or narrowly:
 
 ```python
-from time_series import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
+from time_series_store import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
 
 try:
     store.add_time_series(...)
@@ -138,7 +140,7 @@ first, so `True`/`False` feature values are stored as booleans (not as `1`/`0` i
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series import TimeSeriesStore, SingleTimeSeries, OwnerCategory
+from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory
 
 store = TimeSeriesStore.create(in_memory=True)
 ts = SingleTimeSeries(

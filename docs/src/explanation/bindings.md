@@ -6,7 +6,7 @@ why the APIs look the way they do, how errors propagate, and what each layer own
 ```mermaid
 flowchart TB
     PYAPP["Python code"] --> PYO3["PyO3 classes<br/>(time_series_store_py)"]
-    JLAPP["Julia code"] --> JLPKG["TimeSeries.jl"]
+    JLAPP["Julia code"] --> JLPKG["TimeSeriesStore.jl"]
     JLPKG -->|"ccall"| CABI["C ABI<br/>(time_series_store_ffi)"]
     RUSTAPP["Rust client code"] --> RC["RemoteClient"]
     RC -->|"gRPC / HTTP2"| GS["gRPC server"]
@@ -26,10 +26,11 @@ flowchart TB
 ## Python (PyO3)
 
 `time-series-store-py` uses [PyO3](https://pyo3.rs) to expose `Store` as native Python classes in a
-module importable as `time_series`. The binding:
+module importable as `time_series_store`. The binding:
 
-- Converts Python `datetime`/`timedelta` to `chrono` types and NumPy `float64` arrays to `ndarray`
-  arrays at the boundary.
+- Converts Python `datetime`/`timedelta` to `chrono` types and NumPy `float64` arrays (any shape) to
+  `TypedArray`s at the boundary. Python works in `f64` only; the other dtypes and `logical_type` are
+  not yet surfaced there.
 - Translates the typed `TimeSeriesError` variants into a Python exception hierarchy rooted at
   `TimeSeriesError` (`NotFoundError`, `DuplicateTimeSeriesError`, `InvalidParameterError`,
   `IntegrityError`, `ReadOnlyStoreError`).
@@ -41,11 +42,11 @@ The metadata side is owned entirely by Rust; Python never touches SQLite directl
 ## Julia (C ABI)
 
 Julia does not call Rust directly. Instead, `time-series-store-ffi` compiles a C-compatible cdylib
-with an opaque-handle API, and `TimeSeries.jl` `ccall`s into it.
+with an opaque-handle API, and `TimeSeriesStore.jl` `ccall`s into it.
 
 ```mermaid
 flowchart LR
-    JL["TimeSeries.jl<br/>structs hold Ptr{Cvoid}"] -->|"ccall ts_store_*"| LIB["libtime_series_store_ffi"]
+    JL["TimeSeriesStore.jl<br/>structs hold Ptr{Cvoid}"] -->|"ccall ts_store_*"| LIB["libtime_series_store_ffi"]
     LIB --> STORE["Store"]
     LIB -.->|"ts_last_error_message"| JL
 
@@ -61,15 +62,17 @@ The conventions that shape the Julia API:
 - **Status codes plus thread-local error messages.** Every C function returns an `int32_t` code. On
   a non-zero code, Julia calls `ts_last_error_message` to retrieve the detail string and raises the
   matching Julia exception type.
-- **Out-parameters and caller-owned buffers.** Arrays come back through an out-pointer plus a
-  length; Julia copies them into a `Vector{Float64}` and frees the Rust buffer with
-  `ts_buffer_free_f64`.
+- **Out-parameters and caller-owned buffers.** Arrays come back through an out-pointer plus a length
+  and a dtype code; Julia copies them into a `Vector{T}` for the requested element type and frees
+  the Rust buffer with `ts_buffer_free_f64` / `ts_buffer_free_u8` / `ts_buffer_free_i64`.
 - **Features cross as JSON.** Julia serializes the feature dict to a JSON string, which the FFI
   layer parses into a `Features` map.
+- **Forecasts are wrapped.** `TimeSeriesStore.jl` exposes `add_forecast!` / `add_probabilistic!` and
+  the typed getters, so all four forecast types are usable from Julia.
 
-`TimeSeries.jl` loads the cdylib from the path in the `TIME_SERIES_STORE_LIB` environment variable.
-See the [Julia guide](../guides/julia.md), the [C ABI reference](../reference/c-abi.md), and the
-[Julia API reference](../reference/julia-api.md).
+`TimeSeriesStore.jl` loads the cdylib from the path in the `TIME_SERIES_STORE_LIB` environment
+variable. See the [Julia guide](../guides/julia.md), the [C ABI reference](../reference/c-abi.md),
+and the [Julia API reference](../reference/julia-api.md).
 
 ### IS.jl Integration
 
@@ -109,14 +112,15 @@ The bindings funnel through one core, but they do not all expose the same _surfa
 series types are available everywhere. [Forecasts](./data-model.md#forecasts) are newer and so far
 reach only the layers closest to the core:
 
-| Capability                    | Rust core | C ABI / Julia FFI | Python | Julia wrapper | gRPC        |
-| ----------------------------- | --------- | ----------------- | ------ | ------------- | ----------- |
-| `SingleTimeSeries` r/w        | ✅        | ✅                | ✅     | ✅            | read-only   |
-| `NonSequentialTimeSeries` r/w | ✅        | ✅                | ✅     | ✅            | read-only   |
-| Create forecasts              | ✅        | ✅                | ❌     | ❌            | ❌          |
-| Read forecast values          | ✅        | ✅                | ❌     | ❌            | ❌          |
-| Forecast metadata / counts    | ✅        | ✅                | counts | counts        | list/counts |
+| Capability                    | Rust core | C ABI | Python | Julia | gRPC        |
+| ----------------------------- | --------- | ----- | ------ | ----- | ----------- |
+| `SingleTimeSeries` r/w        | ✅        | ✅    | ✅     | ✅    | read-only   |
+| `NonSequentialTimeSeries` r/w | ✅        | ✅    | ✅     | ✅    | read-only   |
+| dtypes beyond `f64`           | ✅        | ✅    | ❌     | ✅    | ❌          |
+| Create forecasts              | ✅        | ✅    | ❌     | ✅    | ❌          |
+| Read forecast values          | ✅        | ✅    | ❌     | ✅    | ❌          |
+| Forecast metadata / counts    | ✅        | ✅    | counts | ✅    | list/counts |
 
-The Python and Julia _bindings_ surface forecast types only as enum values and counts even though
-the C ABI underneath Julia already implements them — wrapping the forecast FFI calls in
-`TimeSeries.jl` and adding forecast methods to the PyO3 module are the remaining steps.
+The **Python** binding still surfaces forecast types only as enum values and counts, and it works in
+`f64` only — adding forecast methods and the other dtypes to the PyO3 module are the remaining
+steps.
