@@ -316,8 +316,14 @@ rarely call it directly, but it documents the backend contract.
 pub trait StorageBackend: Send + Sync {
     // `packed = true` column-packs same-shaped arrays (SingleTimeSeries / DST);
     // `packed = false` stores a standalone multi-dim variable (NonSequential, dense forecasts).
-    fn put_array(&mut self, hash: &[u8; 32], data: &TypedArray,
-                 resolution_seconds: i64, packed: bool) -> Result<()>;   // idempotent on hash
+    // idempotent on hash
+    fn put_array(
+        &mut self,
+        hash: &[u8; 32],
+        data: &TypedArray,
+        resolution_seconds: i64,
+        packed: bool,
+    ) -> Result<()>;
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;

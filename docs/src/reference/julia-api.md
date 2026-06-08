@@ -122,16 +122,20 @@ is the `TimeSeriesType` integer code (`2 = Deterministic`, `3 = DeterministicSin
 `5 = Scenarios`).
 
 ```julia
-add_forecast!(store, owner_uuid, owner_type, owner_category::OwnerCategory, name,
-              ts_type::Integer, initial_timestamp::DateTime, resolution::Period,
-              horizon::Period, interval::Period, count::Integer, flat_values::Vector{Float64};
-              features=Dict(), units=nothing, scaling_factor_multiplier=nothing) -> TimeSeriesKey
+add_forecast!(
+    store, owner_uuid, owner_type, owner_category::OwnerCategory, name,
+    ts_type::Integer, initial_timestamp::DateTime, resolution::Period,
+    horizon::Period, interval::Period, count::Integer, flat_values::Vector{Float64};
+    features=Dict(), units=nothing, scaling_factor_multiplier=nothing,
+) -> TimeSeriesKey
 
-add_probabilistic!(store, owner_uuid, owner_type, owner_category::OwnerCategory, name,
-                   initial_timestamp::DateTime, resolution::Period, horizon::Period,
-                   interval::Period, count::Integer,
-                   percentiles::Vector{Float64}, flat_values::Vector{Float64};
-                   features=Dict(), units=nothing, scaling_factor_multiplier=nothing) -> TimeSeriesKey
+add_probabilistic!(
+    store, owner_uuid, owner_type, owner_category::OwnerCategory, name,
+    initial_timestamp::DateTime, resolution::Period, horizon::Period,
+    interval::Period, count::Integer,
+    percentiles::Vector{Float64}, flat_values::Vector{Float64};
+    features=Dict(), units=nothing, scaling_factor_multiplier=nothing,
+) -> TimeSeriesKey
 
 get_forecast_metadata(store, owner_uuid, name, ts_type::Integer; resolution=nothing, features=Dict())
     -> NamedTuple  # (initial_timestamp, resolution, horizon, interval, count, length, data_hash)

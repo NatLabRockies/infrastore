@@ -78,8 +78,10 @@ Slice on the time axis with a `(start, end)` tuple of datetimes (`end` exclusive
 ```python
 window = store.get_time_series(
     key,
-    time_range=(datetime(2024, 1, 1, 6, tzinfo=timezone.utc),
-                datetime(2024, 1, 1, 12, tzinfo=timezone.utc)),
+    time_range=(
+        datetime(2024, 1, 1, 6, tzinfo=timezone.utc),
+        datetime(2024, 1, 1, 12, tzinfo=timezone.utc),
+    ),
 )
 ```
 

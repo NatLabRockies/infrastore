@@ -45,9 +45,16 @@ The store is finalized automatically, but you can release it eagerly with `close
 ```julia
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0))
 
-key = add_time_series!(store, "42", "Generator", Component, "load", ts;
-                       features = Dict("model_year" => 2030),
-                       units = "MW")
+key = add_time_series!(
+    store,
+    "42",
+    "Generator",
+    Component,
+    "load",
+    ts;
+    features = Dict("model_year" => 2030),
+    units = "MW",
+)
 ```
 
 Notes:
@@ -75,8 +82,13 @@ Beyond key handles, `TimeSeriesStore.jl` can resolve a series directly from its 
 convenient when a caller keeps its own identifiers (as an IS.jl-side store does):
 
 ```julia
-meta = get_metadata(store, "42", "load"; resolution = Hour(1),
-                    features = Dict("model_year" => 2030))
+meta = get_metadata(
+    store,
+    "42",
+    "load";
+    resolution = Hour(1),
+    features = Dict("model_year" => 2030),
+)
 # meta :: (initial_timestamp::DateTime, resolution::Millisecond, length::Int,
 #          data_hash::Vector{UInt8}, dtype)
 
@@ -95,9 +107,18 @@ remove_time_series!(store, "42", "load"; resolution = Hour(1))
 `5 = Scenarios`); `add_probabilistic!` carries the percentile vector for `Probabilistic`:
 
 ```julia
-key = add_forecast!(store, "42", "Generator", Component, "load_fc", 2,
-                    DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, flat_values;
-                    units = "MW")
+key = add_forecast!(
+    store,
+    "42",
+    "Generator",
+    Component,
+    "load_fc",
+    2,
+    DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24),
+    7,
+    flat_values;
+    units = "MW",
+)
 
 meta = get_forecast_metadata(store, "42", "load_fc", 2; resolution = Hour(1))
 values = get_array_by_hash(store, meta.data_hash)
