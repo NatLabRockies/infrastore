@@ -295,21 +295,17 @@ impl Scenarios {
 
 /// Compute H = horizon / resolution, requiring an exact integer division > 0.
 pub(crate) fn compute_h(horizon: Duration, resolution: Duration) -> Result<usize, String> {
-    let h_ns = horizon
-        .num_nanoseconds()
-        .ok_or("horizon overflows i64 ns")?;
-    let r_ns = resolution
-        .num_nanoseconds()
-        .ok_or("resolution overflows i64 ns")?;
-    if r_ns <= 0 {
+    let h_ms = horizon.num_milliseconds();
+    let r_ms = resolution.num_milliseconds();
+    if r_ms <= 0 {
         return Err("resolution must be positive".to_string());
     }
-    if h_ns % r_ns != 0 {
+    if h_ms % r_ms != 0 {
         return Err(format!(
-            "horizon ({h_ns} ns) is not evenly divisible by resolution ({r_ns} ns)"
+            "horizon ({h_ms} ms) is not evenly divisible by resolution ({r_ms} ms)"
         ));
     }
-    let h = (h_ns / r_ns) as usize;
+    let h = (h_ms / r_ms) as usize;
     if h == 0 {
         return Err("horizon / resolution = 0 (horizon must be ≥ resolution)".to_string());
     }
@@ -323,7 +319,7 @@ fn validate_positive_durations(
     interval: Duration,
 ) -> Result<(), String> {
     let check = |d: Duration, name: &str| {
-        if d.num_nanoseconds().unwrap_or(0) <= 0 {
+        if d.num_milliseconds() <= 0 {
             Err(format!("{name} must be strictly positive"))
         } else {
             Ok(())

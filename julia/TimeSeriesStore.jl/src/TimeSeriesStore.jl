@@ -247,20 +247,18 @@ end
 
 # ---- Operations -----------------------------------------------------------
 
-# Convert a DateTime to Unix nanoseconds.
-function _to_unix_ns(dt::DateTime)
-    ms = Int64(Dates.datetime2unix(dt) * 1000)
-    return ms * 1_000_000
+# Convert a DateTime to Unix milliseconds.
+function _to_unix_ms(dt::DateTime)
+    return Int64(Dates.datetime2unix(dt) * 1000)
 end
 
-# Convert nanoseconds since epoch back into a DateTime.
-function _from_unix_ns(ns::Int64)
-    ms_total = div(ns, 1_000_000)
-    return Dates.unix2datetime(ms_total / 1000)
+# Convert milliseconds since epoch back into a DateTime.
+function _from_unix_ms(ms::Int64)
+    return Dates.unix2datetime(ms / 1000)
 end
 
-function _resolution_to_ns(p::Period)
-    Dates.toms(p) * 1_000_000
+function _resolution_to_ms(p::Period)
+    Dates.toms(p)
 end
 
 """
@@ -282,8 +280,8 @@ function add_time_series!(
     scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
-    initial_ns = _to_unix_ns(ts.initial_timestamp)
-    resolution_ns = _resolution_to_ns(ts.resolution)
+    initial_ms = _to_unix_ms(ts.initial_timestamp)
+    resolution_ms = _resolution_to_ms(ts.resolution)
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
@@ -303,8 +301,8 @@ function add_time_series!(
         owner_type,
         Int32(Int(owner_category)),
         name,
-        initial_ns,
-        resolution_ns,
+        initial_ms,
+        resolution_ms,
         dtype,
         UInt64(length(dims)),
         dims,
@@ -332,7 +330,7 @@ function add_time_series!(
     scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
-    timestamps = Int64[_to_unix_ns(timestamp) for timestamp in ts.timestamps]
+    timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[length(ts.data)]
     bytes = _row_major_bytes(ts.data)
@@ -370,7 +368,7 @@ function get_metadata(
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Int64}(0)
@@ -384,16 +382,16 @@ function get_metadata(
         (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring,
          Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, owner_uuid, name, resolution_ns, features_json,
+        store.handle, owner_uuid, name, resolution_ms, features_json,
         out_initial, out_resolution, out_length, out_hash, out_dtype,
         lt_buf, UInt64(length(lt_buf)), out_lt_len,
     )
     _check(code)
-    res_ms = div(out_resolution[], 1_000_000)
+    res_ms = out_resolution[]
     n = min(Int(out_lt_len[]), length(lt_buf))
     logical_type = n == 0 ? nothing : String(lt_buf[1:n])
     return (
-        initial_timestamp=_from_unix_ns(out_initial[]),
+        initial_timestamp=_from_unix_ms(out_initial[]),
         resolution=Millisecond(res_ms),
         length=Int(out_length[]),
         data_hash=out_hash,
@@ -451,13 +449,13 @@ function has_time_series(
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out = Ref{Bool}(false)
     code = ccall(
         (:ts_store_has_by_attrs, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Bool}),
-        store.handle, owner_uuid, name, resolution_ns, features_json, out,
+        store.handle, owner_uuid, name, resolution_ms, features_json, out,
     )
     _check(code)
     return out[]
@@ -496,12 +494,12 @@ function remove_time_series!(
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     code = ccall(
         (:ts_store_remove_by_attrs, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring),
-        store.handle, owner_uuid, name, resolution_ns, features_json,
+        store.handle, owner_uuid, name, resolution_ms, features_json,
     )
     _check(code)
     return nothing
@@ -525,11 +523,9 @@ function get_time_series(store::Store, key::TimeSeriesKey)
     data = copy(raw)
     ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_data[], out_len[])
 
-    initial = _from_unix_ns(out_initial[])
-    # resolution_ns is integer nanoseconds. Convert to Period: prefer Millisecond.
-    res_ns = out_resolution[]
-    res_ms = div(res_ns, 1_000_000)
-    resolution = Millisecond(res_ms)
+    initial = _from_unix_ms(out_initial[])
+    # resolution_ms is integer milliseconds.
+    resolution = Millisecond(out_resolution[])
     return SingleTimeSeries(initial, resolution, data)
 end
 
@@ -552,7 +548,7 @@ function get_time_series(
     )
     _check(code)
 
-    timestamp_ns = copy(unsafe_wrap(
+    timestamp_ms = copy(unsafe_wrap(
         Array, out_timestamps[], Int(out_timestamps_len[]); own=false,
     ))
     ccall(
@@ -566,7 +562,7 @@ function get_time_series(
     )
     dtype = _julia_dtype(out_dtype[])
     values = collect(reinterpret(dtype, bytes))
-    return NonSequentialTimeSeries(_from_unix_ns.(timestamp_ns), values)
+    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), values)
 end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)
@@ -683,8 +679,8 @@ function add_forecast!(
          UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring,
          Cstring, Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
-        Int32(ts_type), _to_unix_ns(initial_timestamp), _resolution_to_ns(resolution),
-        _resolution_to_ns(horizon), _resolution_to_ns(interval), UInt64(count),
+        Int32(ts_type), _to_unix_ms(initial_timestamp), _resolution_to_ms(resolution),
+        _resolution_to_ms(horizon), _resolution_to_ms(interval), UInt64(count),
         dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
         logical_ptr, features_json, units_ptr, scaling_ptr, out_key,
     )
@@ -705,7 +701,7 @@ function get_forecast_metadata(
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = _features_arg(features)
     oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
     oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
@@ -713,15 +709,15 @@ function get_forecast_metadata(
         (:ts_store_get_forecast_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring,
          Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json,
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ms, features_json,
         oi, orr, oh, ov, oc, ol, ohash,
     )
     _check(code)
     return (
-        initial_timestamp=_from_unix_ns(oi[]),
-        resolution=Millisecond(div(orr[], 1_000_000)),
-        horizon=Millisecond(div(oh[], 1_000_000)),
-        interval=Millisecond(div(ov[], 1_000_000)),
+        initial_timestamp=_from_unix_ms(oi[]),
+        resolution=Millisecond(orr[]),
+        horizon=Millisecond(oh[]),
+        interval=Millisecond(ov[]),
         count=Int(oc[]), length=Int(ol[]), data_hash=ohash,
     )
 end
@@ -731,13 +727,13 @@ function has_typed(
     store::Store, owner_uuid::AbstractString, name::AbstractString, ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
     code = ccall(
         (:ts_store_has_typed, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring, Ref{Bool}),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json, out,
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ms, features_json, out,
     )
     _check(code)
     return out[]
@@ -748,12 +744,12 @@ function remove_typed!(
     store::Store, owner_uuid::AbstractString, name::AbstractString, ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = _features_arg(features)
     code = ccall(
         (:ts_store_remove_typed, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring),
-        store.handle, owner_uuid, name, Int32(ts_type), resolution_ns, features_json,
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ms, features_json,
     )
     _check(code)
     return nothing
@@ -792,8 +788,8 @@ function add_probabilistic!(
          Ptr{Float64}, UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
          Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
-        _to_unix_ns(initial_timestamp), _resolution_to_ns(resolution),
-        _resolution_to_ns(horizon), _resolution_to_ns(interval), UInt64(count),
+        _to_unix_ms(initial_timestamp), _resolution_to_ms(resolution),
+        _resolution_to_ms(horizon), _resolution_to_ms(interval), UInt64(count),
         percentiles, UInt64(length(percentiles)),
         dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
         logical_ptr, features_json, units_ptr, scaling_ptr, out_key,
@@ -807,7 +803,7 @@ function get_probabilistic_metadata(
     store::Store, owner_uuid::AbstractString, name::AbstractString;
     resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = _features_arg(features)
     oi = Ref{Int64}(0); orr = Ref{Int64}(0); oh = Ref{Int64}(0); ov = Ref{Int64}(0)
     oc = Ref{UInt64}(0); ol = Ref{UInt64}(0); ohash = Vector{UInt8}(undef, 32)
@@ -816,7 +812,7 @@ function get_probabilistic_metadata(
         (:ts_store_get_probabilistic_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int64, Cstring, Ref{Int64}, Ref{Int64}, Ref{Int64},
          Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8}, Ref{Ptr{Float64}}, Ref{UInt64}),
-        store.handle, owner_uuid, name, resolution_ns, features_json,
+        store.handle, owner_uuid, name, resolution_ms, features_json,
         oi, orr, oh, ov, oc, ol, ohash, op, opl,
     )
     _check(code)
@@ -824,10 +820,10 @@ function get_probabilistic_metadata(
     percentiles = copy(unsafe_wrap(Array, op[], np; own=false))
     ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), op[], opl[])
     return (
-        initial_timestamp=_from_unix_ns(oi[]),
-        resolution=Millisecond(div(orr[], 1_000_000)),
-        horizon=Millisecond(div(oh[], 1_000_000)),
-        interval=Millisecond(div(ov[], 1_000_000)),
+        initial_timestamp=_from_unix_ms(oi[]),
+        resolution=Millisecond(orr[]),
+        horizon=Millisecond(oh[]),
+        interval=Millisecond(ov[]),
         count=Int(oc[]), length=Int(ol[]), data_hash=ohash, percentiles=percentiles,
     )
 end
@@ -857,12 +853,12 @@ function _get_forecast_raw(
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
-    resolution_ns = resolution === nothing ? Int64(0) : _resolution_to_ns(resolution)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = _features_arg(features)
 
     time_range_present = time_range !== nothing
-    range_start_ns = time_range_present ? _to_unix_ns(time_range[1]) : Int64(0)
-    range_end_ns   = time_range_present ? _to_unix_ns(time_range[2]) : Int64(0)
+    range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
+    range_end_ms   = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
 
     out_initial   = Ref{Int64}(0)
     out_res       = Ref{Int64}(0)
@@ -884,15 +880,15 @@ function _get_forecast_raw(
          Cstring,      # owner_uuid
          Cstring,      # name
          Int32,        # ts_type
-         Int64,        # resolution_ns
+         Int64,        # resolution_ms
          Cstring,      # features_json
          Bool,         # time_range_present
-         Int64,        # time_range_start_ns
-         Int64,        # time_range_end_ns
-         Ref{Int64},   # out_initial_ts_unix_ns
-         Ref{Int64},   # out_resolution_ns
-         Ref{Int64},   # out_horizon_ns
-         Ref{Int64},   # out_interval_ns
+         Int64,        # time_range_start_ms
+         Int64,        # time_range_end_ms
+         Ref{Int64},   # out_initial_ts_unix_ms
+         Ref{Int64},   # out_resolution_ms
+         Ref{Int64},   # out_horizon_ms
+         Ref{Int64},   # out_interval_ms
          Ref{UInt64},  # out_count
          Ref{UInt64},  # out_scenario_count
          Ref{UInt64},  # out_ndims
@@ -906,11 +902,11 @@ function _get_forecast_raw(
         owner_uuid,
         name,
         Int32(ts_type),
-        resolution_ns,
+        resolution_ms,
         features_json,
         time_range_present,
-        range_start_ns,
-        range_end_ns,
+        range_start_ms,
+        range_end_ms,
         out_initial,
         out_res,
         out_horizon,
@@ -950,10 +946,10 @@ function _get_forecast_raw(
     end
 
     # Decode scalars.
-    initial_timestamp = _from_unix_ns(out_initial[])
-    resolution_out    = Millisecond(div(out_res[], 1_000_000))
-    horizon_out       = Millisecond(div(out_horizon[], 1_000_000))
-    interval_out      = Millisecond(div(out_interval[], 1_000_000))
+    initial_timestamp = _from_unix_ms(out_initial[])
+    resolution_out    = Millisecond(out_res[])
+    horizon_out       = Millisecond(out_horizon[])
+    interval_out      = Millisecond(out_interval[])
     count_out         = Int(out_count[])
     scenario_count    = Int(out_scen[])
 

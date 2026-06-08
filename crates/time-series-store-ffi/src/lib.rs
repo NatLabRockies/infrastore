@@ -226,8 +226,8 @@ pub unsafe extern "C" fn ts_store_add_single(
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
-    initial_ts_unix_ns: i64,
-    resolution_ns: i64,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
     dtype: i32,
     ndims: u64,
     dims_ptr: *const u64,
@@ -301,14 +301,14 @@ pub unsafe extern "C" fn ts_store_add_single(
         Err(code) => return code,
     };
 
-    let initial_timestamp = match unix_ns_to_datetime(initial_ts_unix_ns) {
+    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
-            set_error(format!("invalid initial_ts_unix_ns: {initial_ts_unix_ns}"));
+            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
             return TS_ERR_INVALID_PARAMETER;
         }
     };
-    let resolution = Duration::nanoseconds(resolution_ns);
+    let resolution = Duration::milliseconds(resolution_ms);
     let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
     {
         Ok(a) => a,
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn ts_store_add_single(
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null. `timestamps_unix_ns` must
+/// null-terminated UTF-8 strings; optional string pointers may be null. `timestamps_unix_ms` must
 /// reference `timestamps_len` elements, `dims_ptr` must reference `ndims` elements when `ndims` is
 /// nonzero, and `data_ptr` must reference `data_byte_len` bytes. `out_key` must be valid for
 /// writing one pointer. The returned key must be released with `ts_key_free`.
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
-    timestamps_unix_ns: *const i64,
+    timestamps_unix_ms: *const i64,
     timestamps_len: u64,
     dtype: i32,
     ndims: u64,
@@ -379,7 +379,7 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
             return TS_ERR_NULL_POINTER;
         }
     };
-    if out_key.is_null() || timestamps_unix_ns.is_null() || data_ptr.is_null() {
+    if out_key.is_null() || timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input or output pointer is null");
         return TS_ERR_NULL_POINTER;
     }
@@ -404,14 +404,14 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
         }
     };
     let timestamps = match unsafe {
-        slice::from_raw_parts(timestamps_unix_ns, timestamps_len as usize)
+        slice::from_raw_parts(timestamps_unix_ms, timestamps_len as usize)
             .iter()
-            .map(|&ns| unix_ns_to_datetime(ns).ok_or(ns))
+            .map(|&ns| unix_ms_to_datetime(ns).ok_or(ns))
             .collect::<std::result::Result<Vec<_>, _>>()
     } {
         Ok(timestamps) => timestamps,
         Err(ns) => {
-            set_error(format!("invalid timestamp unix nanoseconds: {ns}"));
+            set_error(format!("invalid timestamp unix milliseconds: {ns}"));
             return TS_ERR_INVALID_PARAMETER;
         }
     };
@@ -483,8 +483,8 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
 pub unsafe extern "C" fn ts_store_get_single(
     handle: *const TsStoreHandle,
     key: *const TsKeyHandle,
-    out_initial_ts_unix_ns: *mut i64,
-    out_resolution_ns: *mut i64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
     out_data: *mut *mut f64,
     out_data_len: *mut u64,
 ) -> i32 {
@@ -503,8 +503,8 @@ pub unsafe extern "C" fn ts_store_get_single(
             return TS_ERR_NULL_POINTER;
         }
     };
-    if out_initial_ts_unix_ns.is_null()
-        || out_resolution_ns.is_null()
+    if out_initial_ts_unix_ms.is_null()
+        || out_resolution_ms.is_null()
         || out_data.is_null()
         || out_data_len.is_null()
     {
@@ -529,24 +529,21 @@ pub unsafe extern "C" fn ts_store_get_single(
             return TS_ERR_INVALID_PARAMETER;
         }
     };
-    let initial_ns = match datetime_to_unix_ns(single.initial_timestamp) {
+    let initial_ms = match datetime_to_unix_ms(single.initial_timestamp) {
         Some(n) => n,
         None => {
-            set_error("initial_timestamp out of i64 nanosecond range");
+            set_error("initial_timestamp out of i64 millisecond range");
             return TS_ERR_INTEGRITY;
         }
     };
-    let resolution_ns = single
-        .resolution
-        .num_nanoseconds()
-        .unwrap_or_else(|| single.resolution.num_seconds() * 1_000_000_000);
+    let resolution_ms = single.resolution.num_milliseconds();
     let mut buf: Vec<f64> = single.data.to_f64_vec().unwrap_or_default();
     let len = buf.len() as u64;
     let ptr = buf.as_mut_ptr();
     std::mem::forget(buf);
     unsafe {
-        *out_initial_ts_unix_ns = initial_ns;
-        *out_resolution_ns = resolution_ns;
+        *out_initial_ts_unix_ms = initial_ms;
+        *out_resolution_ms = resolution_ms;
         *out_data = ptr;
         *out_data_len = len;
     }
@@ -610,12 +607,12 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
     let mut timestamps = match series
         .timestamps
         .iter()
-        .map(|timestamp| datetime_to_unix_ns(*timestamp).ok_or(TS_ERR_INTEGRITY))
+        .map(|timestamp| datetime_to_unix_ms(*timestamp).ok_or(TS_ERR_INTEGRITY))
         .collect::<std::result::Result<Vec<_>, _>>()
     {
         Ok(timestamps) => timestamps,
         Err(code) => {
-            set_error("timestamp out of i64 nanosecond range");
+            set_error("timestamp out of i64 millisecond range");
             return code;
         }
     };
@@ -810,7 +807,7 @@ pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
 unsafe fn build_key_from_attrs(
     owner_uuid: *const c_char,
     name: *const c_char,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
 ) -> Result<core_lib::TimeSeriesKey, i32> {
     let owner_uuid = unsafe { cstr_to_str(owner_uuid) }.inspect_err(|_| {
@@ -820,10 +817,10 @@ unsafe fn build_key_from_attrs(
         set_error("name is invalid");
     })?;
     let features = unsafe { parse_features_json(features_json) }?;
-    let resolution = if resolution_ns <= 0 {
+    let resolution = if resolution_ms <= 0 {
         None
     } else {
-        Some(Duration::nanoseconds(resolution_ns))
+        Some(Duration::milliseconds(resolution_ms))
     };
     Ok(core_lib::TimeSeriesKey {
         owner_uuid: owner_uuid.to_string(),
@@ -850,10 +847,10 @@ pub unsafe extern "C" fn ts_store_get_metadata(
     handle: *const TsStoreHandle,
     owner_uuid: *const c_char,
     name: *const c_char,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
-    out_initial_ts_unix_ns: *mut i64,
-    out_resolution_ns: *mut i64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
     out_dtype: *mut i32,
@@ -866,8 +863,8 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if out_initial_ts_unix_ns.is_null()
-        || out_resolution_ns.is_null()
+    if out_initial_ts_unix_ms.is_null()
+        || out_resolution_ms.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
         || out_dtype.is_null()
@@ -876,7 +873,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }
     {
         Ok(k) => k,
         Err(code) => return code,
@@ -885,22 +882,20 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         Ok(m) => m,
         Err(e) => return map_core_error(e),
     };
-    let initial_ns = match meta.initial_timestamp.and_then(datetime_to_unix_ns) {
+    let initial_ms = match meta.initial_timestamp.and_then(datetime_to_unix_ms) {
         Some(n) => n,
         None => {
             set_error("metadata missing or out-of-range initial_timestamp");
             return TS_ERR_INTEGRITY;
         }
     };
-    let res_ns = match meta.resolution {
-        Some(r) => r
-            .num_nanoseconds()
-            .unwrap_or_else(|| r.num_seconds() * 1_000_000_000),
+    let res_ms = match meta.resolution {
+        Some(r) => r.num_milliseconds(),
         None => 0,
     };
     unsafe {
-        *out_initial_ts_unix_ns = initial_ns;
-        *out_resolution_ns = res_ns;
+        *out_initial_ts_unix_ms = initial_ms;
+        *out_resolution_ms = res_ms;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
         *out_dtype = meta.dtype.code();
@@ -930,7 +925,7 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     handle: *const TsStoreHandle,
     owner_uuid: *const c_char,
     name: *const c_char,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
     out_present: *mut bool,
 ) -> i32 {
@@ -942,7 +937,7 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     if out_present.is_null() {
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }
     {
         Ok(k) => k,
         Err(code) => return code,
@@ -1016,7 +1011,7 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
     handle: *mut TsStoreHandle,
     owner_uuid: *const c_char,
     name: *const c_char,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
@@ -1024,7 +1019,7 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }
+    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }
     {
         Ok(k) => k,
         Err(code) => return code,
@@ -1100,7 +1095,7 @@ unsafe fn build_typed_key_from_attrs(
     owner_uuid: *const c_char,
     name: *const c_char,
     ts_type: i32,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
 ) -> Result<core_lib::TimeSeriesKey, i32> {
     let time_series_type = match ts_type_from_int(ts_type) {
@@ -1110,7 +1105,7 @@ unsafe fn build_typed_key_from_attrs(
             return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let mut key = unsafe { build_key_from_attrs(owner_uuid, name, resolution_ns, features_json) }?;
+    let mut key = unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }?;
     key.time_series_type = time_series_type;
     Ok(key)
 }
@@ -1133,10 +1128,10 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    initial_ts_unix_ns: i64,
-    resolution_ns: i64,
-    horizon_ns: i64,
-    interval_ns: i64,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    horizon_ms: i64,
+    interval_ms: i64,
     count: u64,
     dtype: i32,
     ndims: u64,
@@ -1197,10 +1192,10 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         Ok(f) => f,
         Err(c) => return c,
     };
-    let initial_timestamp = match unix_ns_to_datetime(initial_ts_unix_ns) {
+    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
-            set_error(format!("invalid initial_ts_unix_ns: {initial_ts_unix_ns}"));
+            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
             return TS_ERR_INVALID_PARAMETER;
         }
     };
@@ -1221,9 +1216,9 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         name,
         time_series_type,
         initial_timestamp,
-        Duration::nanoseconds(resolution_ns),
-        Duration::nanoseconds(horizon_ns),
-        Duration::nanoseconds(interval_ns),
+        Duration::milliseconds(resolution_ms),
+        Duration::milliseconds(horizon_ms),
+        Duration::milliseconds(interval_ms),
         count as usize,
         array,
         features,
@@ -1259,10 +1254,10 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
-    initial_ts_unix_ns: i64,
-    resolution_ns: i64,
-    horizon_ns: i64,
-    interval_ns: i64,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    horizon_ms: i64,
+    interval_ms: i64,
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
@@ -1318,10 +1313,10 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         Ok(f) => f,
         Err(c) => return c,
     };
-    let initial_timestamp = match unix_ns_to_datetime(initial_ts_unix_ns) {
+    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
-            set_error(format!("invalid initial_ts_unix_ns: {initial_ts_unix_ns}"));
+            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
             return TS_ERR_INVALID_PARAMETER;
         }
     };
@@ -1344,9 +1339,9 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         name,
         core_lib::TimeSeriesType::Probabilistic,
         initial_timestamp,
-        Duration::nanoseconds(resolution_ns),
-        Duration::nanoseconds(horizon_ns),
-        Duration::nanoseconds(interval_ns),
+        Duration::milliseconds(resolution_ms),
+        Duration::milliseconds(horizon_ms),
+        Duration::milliseconds(interval_ms),
         count as usize,
         array,
         features,
@@ -1381,12 +1376,12 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     handle: *const TsStoreHandle,
     owner_uuid: *const c_char,
     name: *const c_char,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
-    out_initial_ts_unix_ns: *mut i64,
-    out_resolution_ns: *mut i64,
-    out_horizon_ns: *mut i64,
-    out_interval_ns: *mut i64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_horizon_ms: *mut i64,
+    out_interval_ms: *mut i64,
     out_count: *mut u64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
@@ -1407,7 +1402,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
             owner_uuid,
             name,
             4, // Probabilistic
-            resolution_ns,
+            resolution_ms,
             features_json,
         )
     } {
@@ -1418,29 +1413,23 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
         Ok(m) => m,
         Err(e) => return map_core_error(e),
     };
-    let initial_ns = match meta.initial_timestamp.and_then(datetime_to_unix_ns) {
+    let initial_ms = match meta.initial_timestamp.and_then(datetime_to_unix_ms) {
         Some(n) => n,
         None => {
             set_error("forecast metadata missing initial_timestamp");
             return TS_ERR_INTEGRITY;
         }
     };
-    let dur_ns = |d: Option<Duration>| {
-        d.map(|x| {
-            x.num_nanoseconds()
-                .unwrap_or_else(|| x.num_seconds() * 1_000_000_000)
-        })
-        .unwrap_or(0)
-    };
+    let dur_ms = |d: Option<Duration>| d.map(|x| x.num_milliseconds()).unwrap_or(0);
     let mut pct: Vec<f64> = meta.percentiles.unwrap_or_default();
     let pct_len = pct.len() as u64;
     let pct_ptr = pct.as_mut_ptr();
     std::mem::forget(pct);
     unsafe {
-        *out_initial_ts_unix_ns = initial_ns;
-        *out_resolution_ns = dur_ns(meta.resolution);
-        *out_horizon_ns = dur_ns(meta.horizon);
-        *out_interval_ns = dur_ns(meta.interval);
+        *out_initial_ts_unix_ms = initial_ms;
+        *out_resolution_ms = dur_ms(meta.resolution);
+        *out_horizon_ms = dur_ms(meta.horizon);
+        *out_interval_ms = dur_ms(meta.interval);
         *out_count = meta.count.unwrap_or(0) as u64;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
@@ -1466,12 +1455,12 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     owner_uuid: *const c_char,
     name: *const c_char,
     ts_type: i32,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
-    out_initial_ts_unix_ns: *mut i64,
-    out_resolution_ns: *mut i64,
-    out_horizon_ns: *mut i64,
-    out_interval_ns: *mut i64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_horizon_ms: *mut i64,
+    out_interval_ms: *mut i64,
     out_count: *mut u64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
@@ -1481,10 +1470,10 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if out_initial_ts_unix_ns.is_null()
-        || out_resolution_ns.is_null()
-        || out_horizon_ns.is_null()
-        || out_interval_ns.is_null()
+    if out_initial_ts_unix_ms.is_null()
+        || out_resolution_ms.is_null()
+        || out_horizon_ms.is_null()
+        || out_interval_ms.is_null()
         || out_count.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
@@ -1493,7 +1482,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -1502,25 +1491,19 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         Ok(m) => m,
         Err(e) => return map_core_error(e),
     };
-    let initial_ns = match meta.initial_timestamp.and_then(datetime_to_unix_ns) {
+    let initial_ms = match meta.initial_timestamp.and_then(datetime_to_unix_ms) {
         Some(n) => n,
         None => {
             set_error("forecast metadata missing initial_timestamp");
             return TS_ERR_INTEGRITY;
         }
     };
-    let dur_ns = |d: Option<Duration>| {
-        d.map(|x| {
-            x.num_nanoseconds()
-                .unwrap_or_else(|| x.num_seconds() * 1_000_000_000)
-        })
-        .unwrap_or(0)
-    };
+    let dur_ms = |d: Option<Duration>| d.map(|x| x.num_milliseconds()).unwrap_or(0);
     unsafe {
-        *out_initial_ts_unix_ns = initial_ns;
-        *out_resolution_ns = dur_ns(meta.resolution);
-        *out_horizon_ns = dur_ns(meta.horizon);
-        *out_interval_ns = dur_ns(meta.interval);
+        *out_initial_ts_unix_ms = initial_ms;
+        *out_resolution_ms = dur_ms(meta.resolution);
+        *out_horizon_ms = dur_ms(meta.horizon);
+        *out_interval_ms = dur_ms(meta.interval);
         *out_count = meta.count.unwrap_or(0) as u64;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
@@ -1544,7 +1527,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 ///
 /// **Optional time-range / window selection:** when `time_range_present` is
 /// `true`, only the windows whose start timestamp falls in
-/// `[time_range_start_ns, time_range_end_ns)` are returned. Pass
+/// `[time_range_start_ms, time_range_end_ms)` are returned. Pass
 /// `time_range_present = false` to retrieve all windows.
 ///
 /// # Safety
@@ -1572,16 +1555,16 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     owner_uuid: *const c_char,
     name: *const c_char,
     ts_type: i32,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
     time_range_present: bool,
-    time_range_start_ns: i64,
-    time_range_end_ns: i64,
+    time_range_start_ms: i64,
+    time_range_end_ms: i64,
     // scalar metadata outputs
-    out_initial_ts_unix_ns: *mut i64,
-    out_resolution_ns: *mut i64,
-    out_horizon_ns: *mut i64,
-    out_interval_ns: *mut i64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_horizon_ms: *mut i64,
+    out_interval_ms: *mut i64,
     out_count: *mut u64,
     out_scenario_count: *mut u64, // Scenarios only; 0 for other types
     // array shape outputs (dims buffer)
@@ -1604,10 +1587,10 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         }
     };
     // Null-check all output pointers.
-    if out_initial_ts_unix_ns.is_null()
-        || out_resolution_ns.is_null()
-        || out_horizon_ns.is_null()
-        || out_interval_ns.is_null()
+    if out_initial_ts_unix_ms.is_null()
+        || out_resolution_ms.is_null()
+        || out_horizon_ms.is_null()
+        || out_interval_ms.is_null()
         || out_count.is_null()
         || out_scenario_count.is_null()
         || out_ndims.is_null()
@@ -1622,25 +1605,25 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
     };
     let time_range = if time_range_present {
-        let start = match unix_ns_to_datetime(time_range_start_ns) {
+        let start = match unix_ms_to_datetime(time_range_start_ms) {
             Some(d) => d,
             None => {
                 set_error(format!(
-                    "invalid time_range_start_ns: {time_range_start_ns}"
+                    "invalid time_range_start_ms: {time_range_start_ms}"
                 ));
                 return TS_ERR_INVALID_PARAMETER;
             }
         };
-        let end = match unix_ns_to_datetime(time_range_end_ns) {
+        let end = match unix_ms_to_datetime(time_range_end_ms) {
             Some(d) => d,
             None => {
-                set_error(format!("invalid time_range_end_ns: {time_range_end_ns}"));
+                set_error(format!("invalid time_range_end_ms: {time_range_end_ms}"));
                 return TS_ERR_INVALID_PARAMETER;
             }
         };
@@ -1653,18 +1636,15 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         Err(e) => return map_core_error(e),
     };
 
-    // Helper: convert Duration to nanoseconds.
-    let dur_to_ns = |d: Duration| {
-        d.num_nanoseconds()
-            .unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
-    };
+    // Helper: convert Duration to milliseconds.
+    let dur_to_ms = |d: Duration| d.num_milliseconds();
 
     match data {
         core_lib::TimeSeriesData::Deterministic(det) => {
-            let initial_ns = match datetime_to_unix_ns(det.initial_timestamp) {
+            let initial_ms = match datetime_to_unix_ms(det.initial_timestamp) {
                 Some(n) => n,
                 None => {
-                    set_error("initial_timestamp out of i64 nanosecond range");
+                    set_error("initial_timestamp out of i64 millisecond range");
                     return TS_ERR_INTEGRITY;
                 }
             };
@@ -1680,10 +1660,10 @@ pub unsafe extern "C" fn ts_store_get_forecast(
             std::mem::forget(bytes);
 
             unsafe {
-                *out_initial_ts_unix_ns = initial_ns;
-                *out_resolution_ns = dur_to_ns(det.resolution);
-                *out_horizon_ns = dur_to_ns(det.horizon);
-                *out_interval_ns = dur_to_ns(det.interval);
+                *out_initial_ts_unix_ms = initial_ms;
+                *out_resolution_ms = dur_to_ms(det.resolution);
+                *out_horizon_ms = dur_to_ms(det.horizon);
+                *out_interval_ms = dur_to_ms(det.interval);
                 *out_count = det.count as u64;
                 *out_scenario_count = 0;
                 *out_ndims = ndims;
@@ -1697,10 +1677,10 @@ pub unsafe extern "C" fn ts_store_get_forecast(
             TS_OK
         }
         core_lib::TimeSeriesData::Probabilistic(prob) => {
-            let initial_ns = match datetime_to_unix_ns(prob.initial_timestamp) {
+            let initial_ms = match datetime_to_unix_ms(prob.initial_timestamp) {
                 Some(n) => n,
                 None => {
-                    set_error("initial_timestamp out of i64 nanosecond range");
+                    set_error("initial_timestamp out of i64 millisecond range");
                     return TS_ERR_INTEGRITY;
                 }
             };
@@ -1721,10 +1701,10 @@ pub unsafe extern "C" fn ts_store_get_forecast(
             std::mem::forget(pct);
 
             unsafe {
-                *out_initial_ts_unix_ns = initial_ns;
-                *out_resolution_ns = dur_to_ns(prob.resolution);
-                *out_horizon_ns = dur_to_ns(prob.horizon);
-                *out_interval_ns = dur_to_ns(prob.interval);
+                *out_initial_ts_unix_ms = initial_ms;
+                *out_resolution_ms = dur_to_ms(prob.resolution);
+                *out_horizon_ms = dur_to_ms(prob.horizon);
+                *out_interval_ms = dur_to_ms(prob.interval);
                 *out_count = prob.count as u64;
                 *out_scenario_count = 0;
                 *out_ndims = ndims;
@@ -1738,10 +1718,10 @@ pub unsafe extern "C" fn ts_store_get_forecast(
             TS_OK
         }
         core_lib::TimeSeriesData::Scenarios(scen) => {
-            let initial_ns = match datetime_to_unix_ns(scen.initial_timestamp) {
+            let initial_ms = match datetime_to_unix_ms(scen.initial_timestamp) {
                 Some(n) => n,
                 None => {
-                    set_error("initial_timestamp out of i64 nanosecond range");
+                    set_error("initial_timestamp out of i64 millisecond range");
                     return TS_ERR_INTEGRITY;
                 }
             };
@@ -1759,10 +1739,10 @@ pub unsafe extern "C" fn ts_store_get_forecast(
             std::mem::forget(bytes);
 
             unsafe {
-                *out_initial_ts_unix_ns = initial_ns;
-                *out_resolution_ns = dur_to_ns(scen.resolution);
-                *out_horizon_ns = dur_to_ns(scen.horizon);
-                *out_interval_ns = dur_to_ns(scen.interval);
+                *out_initial_ts_unix_ms = initial_ms;
+                *out_resolution_ms = dur_to_ms(scen.resolution);
+                *out_horizon_ms = dur_to_ms(scen.horizon);
+                *out_interval_ms = dur_to_ms(scen.interval);
                 *out_count = scen.count as u64;
                 *out_scenario_count = scenario_count as u64;
                 *out_ndims = ndims;
@@ -1811,7 +1791,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
     owner_uuid: *const c_char,
     name: *const c_char,
     ts_type: i32,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
     out_present: *mut bool,
 ) -> i32 {
@@ -1824,7 +1804,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -1850,7 +1830,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
     owner_uuid: *const c_char,
     name: *const c_char,
     ts_type: i32,
-    resolution_ns: i64,
+    resolution_ms: i64,
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
@@ -1859,7 +1839,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
         None => return TS_ERR_NULL_POINTER,
     };
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ns, features_json)
+        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2058,14 +2038,12 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
-fn unix_ns_to_datetime(ns: i64) -> Option<DateTime<Utc>> {
-    let secs = ns.div_euclid(1_000_000_000);
-    let nanos = ns.rem_euclid(1_000_000_000) as u32;
-    Utc.timestamp_opt(secs, nanos).single()
+fn unix_ms_to_datetime(ms: i64) -> Option<DateTime<Utc>> {
+    Utc.timestamp_millis_opt(ms).single()
 }
 
-fn datetime_to_unix_ns(dt: DateTime<Utc>) -> Option<i64> {
-    dt.timestamp_nanos_opt()
+fn datetime_to_unix_ms(dt: DateTime<Utc>) -> Option<i64> {
+    Some(dt.timestamp_millis())
 }
 
 use chrono::TimeZone;

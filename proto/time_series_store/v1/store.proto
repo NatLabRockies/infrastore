@@ -49,8 +49,8 @@ message TimeSeriesKey {
   string          owner_uuid        = 1;
   TimeSeriesType  time_series_type  = 2;
   string          name              = 3;
-  // Resolution in nanoseconds. 0 = unset (e.g. NonSequentialTimeSeries).
-  int64           resolution_ns     = 4;
+  // Resolution in milliseconds. 0 = unset (e.g. NonSequentialTimeSeries).
+  int64           resolution_ms     = 4;
   Features        features          = 5;
 }
 
@@ -63,10 +63,10 @@ message TimeSeriesMetadata {
   bytes           data_hash                      = 6;        // 32 bytes
   // Temporal — populated when applicable to the time series type.
   string          initial_timestamp_rfc3339      = 7;
-  int64           resolution_ns                  = 8;
+  int64           resolution_ms                  = 8;
   uint64          length                         = 9;
-  int64           horizon_ns                     = 10;
-  int64           interval_ns                    = 11;
+  int64           horizon_ms                     = 10;
+  int64           interval_ms                    = 11;
   uint64          count                          = 12;
   repeated string timestamps_rfc3339             = 13;
   Features        features                       = 14;
@@ -86,7 +86,7 @@ message ListReq {
   optional string          owner_type        = 2;
   optional TimeSeriesType  time_series_type  = 3;
   optional string          name              = 4;
-  optional int64           resolution_ns     = 5;
+  optional int64           resolution_ms     = 5;
   Features                 features          = 6;
 }
 message ListResp {
@@ -103,7 +103,7 @@ message GetReq {
 }
 message GetResp {
   string             initial_timestamp_rfc3339  = 1;
-  int64              resolution_ns              = 2;
+  int64              resolution_ms              = 2;
   uint64             length                     = 3;
   repeated uint64    shape                      = 4;
   reserved 5;  // was: repeated double values (replaced by dtype + value_bytes)
@@ -113,8 +113,8 @@ message GetResp {
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
   string             logical_type                = 10;
   // Forecast-specific fields (fields 1–10 are backward-compatible).
-  int64              horizon_ns                  = 11;
-  int64              interval_ns                 = 12;
+  int64              horizon_ms                  = 11;
+  int64              interval_ms                 = 12;
   uint64             count                       = 13;
   repeated double    percentiles                 = 14;       // Probabilistic only
   uint64             scenario_count              = 15;       // Scenarios only
@@ -135,7 +135,7 @@ message ResolutionsReq {
   optional TimeSeriesType time_series_type = 1;
 }
 message ResolutionsResp {
-  repeated int64 resolution_ns = 1;
+  repeated int64 resolution_ms = 1;
 }
 
 // ---- GetCounts ----

@@ -198,12 +198,12 @@ impl Store {
         let mut keys = Vec::with_capacity(items.len());
 
         for item in &items {
-            let (hash, resolution_seconds, packed, meta, key) = match &item.data {
+            let (hash, resolution_ms, packed, meta, key) = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => {
                     let hash = array_hash(&single.data);
                     (
                         hash,
-                        single.resolution.num_seconds(),
+                        single.resolution.num_milliseconds(),
                         true,
                         TimeSeriesMetadata {
                             owner_uuid: item.owner_uuid.clone(),
@@ -291,8 +291,7 @@ impl Store {
             };
 
             let already_present = self.backend.contains(&hash)?;
-            self.backend
-                .put_array(&hash, data, resolution_seconds, packed)?;
+            self.backend.put_array(&hash, data, resolution_ms, packed)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
@@ -394,36 +393,24 @@ impl Store {
                         if end < start {
                             return Err(TimeSeriesError::InvalidParameter("end < start".into()));
                         }
-                        let resolution_ns = resolution.num_nanoseconds().ok_or_else(|| {
-                            TimeSeriesError::InvalidParameter(
-                                "resolution overflows i64 nanoseconds".into(),
-                            )
-                        })?;
-                        if resolution_ns <= 0 {
+                        let resolution_ms = resolution.num_milliseconds();
+                        if resolution_ms <= 0 {
                             return Err(TimeSeriesError::InvalidParameter(
                                 "resolution must be positive".into(),
                             ));
                         }
-                        let total_ns = (start - initial).num_nanoseconds().ok_or_else(|| {
-                            TimeSeriesError::InvalidParameter(
-                                "time range overflows i64 nanoseconds".into(),
-                            )
-                        })?;
-                        let start_idx = (total_ns / resolution_ns).max(0) as usize;
-                        let end_total_ns = (end - initial).num_nanoseconds().ok_or_else(|| {
-                            TimeSeriesError::InvalidParameter(
-                                "time range overflows i64 nanoseconds".into(),
-                            )
-                        })?;
+                        let total_ms = (start - initial).num_milliseconds();
+                        let start_idx = (total_ms / resolution_ms).max(0) as usize;
+                        let end_total_ms = (end - initial).num_milliseconds();
                         // Ceiling division of a non-negative numerator. Written as
                         // `(n - 1) / d + 1` rather than `(n + d - 1) / d` so a
-                        // far-future `end` (where `end_total_ns` is near `i64::MAX`)
+                        // far-future `end` (where `end_total_ms` is near `i64::MAX`)
                         // cannot overflow the addition. Non-positive numerators map
                         // to index 0.
-                        let end_idx = if end_total_ns <= 0 {
+                        let end_idx = if end_total_ms <= 0 {
                             0
                         } else {
-                            ((end_total_ns - 1) / resolution_ns + 1) as usize
+                            ((end_total_ms - 1) / resolution_ms + 1) as usize
                         };
                         let start_idx = start_idx.min(length);
                         let end_idx = end_idx.min(length).max(start_idx);
@@ -431,7 +418,7 @@ impl Store {
                             .backend
                             .get_slice(&meta.data_hash, start_idx..end_idx)?;
                         let new_initial =
-                            initial + Duration::nanoseconds(start_idx as i64 * resolution_ns);
+                            initial + Duration::milliseconds(start_idx as i64 * resolution_ms);
                         (data, new_initial, end_idx - start_idx)
                     }
                 };
@@ -588,23 +575,15 @@ impl Store {
                 let interval = required_interval(&meta, "DeterministicSingleTimeSeries")?;
                 let count = required_count(&meta, "DeterministicSingleTimeSeries")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                let interval_ns = interval.num_nanoseconds().ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "DeterministicSingleTimeSeries: interval overflows i64 ns".into(),
-                    )
-                })?;
-                let res_ns = resolution.num_nanoseconds().ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(
-                        "DeterministicSingleTimeSeries: resolution overflows i64 ns".into(),
-                    )
-                })?;
-                if interval_ns % res_ns != 0 {
+                let interval_ms = interval.num_milliseconds();
+                let res_ms = resolution.num_milliseconds();
+                if interval_ms % res_ms != 0 {
                     return Err(TimeSeriesError::IntegrityError(format!(
-                        "DeterministicSingleTimeSeries: interval ({interval_ns} ns) \
-                         is not evenly divisible by resolution ({res_ns} ns)"
+                        "DeterministicSingleTimeSeries: interval ({interval_ms} ms) \
+                         is not evenly divisible by resolution ({res_ms} ms)"
                     )));
                 }
-                let interval_steps = (interval_ns / res_ns) as usize;
+                let interval_steps = (interval_ms / res_ms) as usize;
                 let total_len = arr.length();
                 // Validate that all windows fit in the underlying array.
                 let required = (count.saturating_sub(1)) * interval_steps + h;
@@ -718,7 +697,7 @@ impl Store {
         }
         let length = data.length();
         let hash = array_hash(&data);
-        let resolution_seconds = resolution.num_seconds();
+        let resolution_ms = resolution.num_milliseconds();
         // DST stores its underlying 1-D SingleTimeSeries array and is packed;
         // the dense forecast types are standalone.
         let packed = matches!(
@@ -727,7 +706,7 @@ impl Store {
         );
         let already_present = self.backend.contains(&hash)?;
         self.backend
-            .put_array(&hash, &data, resolution_seconds, packed)?;
+            .put_array(&hash, &data, resolution_ms, packed)?;
 
         let meta = TimeSeriesMetadata {
             owner_uuid: owner_uuid.to_string(),
@@ -951,37 +930,29 @@ fn resolve_windows(
             if end < start {
                 return Err(TimeSeriesError::InvalidParameter("end < start".into()));
             }
-            let interval_ns = interval.num_nanoseconds().ok_or_else(|| {
-                TimeSeriesError::InvalidParameter(
-                    "forecast interval overflows i64 nanoseconds".into(),
-                )
-            })?;
-            if interval_ns <= 0 {
+            let interval_ms = interval.num_milliseconds();
+            if interval_ms <= 0 {
                 return Err(TimeSeriesError::InvalidParameter(
                     "forecast interval must be positive".into(),
                 ));
             }
             // Check alignment: (start - initial) must be a non-negative integer
             // multiple of interval.
-            let offset_ns = (start - initial).num_nanoseconds().ok_or_else(|| {
-                TimeSeriesError::InvalidParameter(
-                    "forecast time_range offset overflows i64 nanoseconds".into(),
-                )
-            })?;
-            if offset_ns < 0 || offset_ns % interval_ns != 0 {
+            let offset_ms = (start - initial).num_milliseconds();
+            if offset_ms < 0 || offset_ms % interval_ms != 0 {
                 return Err(TimeSeriesError::InvalidParameter(
                     "forecast start_time must align to a window boundary \
                      (initial_timestamp + k·interval)"
                         .into(),
                 ));
             }
-            let start_k = (offset_ns / interval_ns) as usize;
+            let start_k = (offset_ms / interval_ms) as usize;
 
             // Collect all k in [0, count) whose window start is in [start, end).
             let mut w0 = count; // sentinel: no window selected yet
             let mut w1 = 0usize;
             for k in 0..count {
-                let window_start = initial + Duration::nanoseconds(k as i64 * interval_ns);
+                let window_start = initial + Duration::milliseconds(k as i64 * interval_ms);
                 if window_start >= start && window_start < end {
                     if w0 == count {
                         w0 = k;
@@ -993,11 +964,11 @@ fn resolve_windows(
             // Empty selection.
             if w0 == count {
                 // Return initial_timestamp aligned to start (the requested start).
-                let first_ts = initial + Duration::nanoseconds(start_k as i64 * interval_ns);
+                let first_ts = initial + Duration::milliseconds(start_k as i64 * interval_ms);
                 return Ok((0, 0, first_ts));
             }
 
-            let first_ts = initial + Duration::nanoseconds(w0 as i64 * interval_ns);
+            let first_ts = initial + Duration::milliseconds(w0 as i64 * interval_ms);
             Ok((w0, w1, first_ts))
         }
     }

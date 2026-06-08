@@ -352,9 +352,9 @@ fn single_slice_boundary_semantics() {
                 "{backend}: end boundary exclusive"
             );
 
-            // End one nanosecond past the boundary pulls the next sample (ceil).
+            // End one millisecond past the boundary pulls the next sample (ceil).
             assert_eq!(
-                sliced(store, key, h(2), h(3) + Duration::nanoseconds(1)).2,
+                sliced(store, key, h(2), h(3) + Duration::milliseconds(1)).2,
                 vec![30.0, 40.0],
                 "{backend}: end ceil"
             );
@@ -430,9 +430,9 @@ fn length_one_series_slicing() {
     );
 }
 
-/// Regression: an `end` whose offset from `initial` is near `i64::MAX`
-/// nanoseconds must not overflow the ceiling-division arithmetic in
-/// `get_time_series`. Expect the full series, no panic.
+/// Regression: a far-future `end` (here `initial + i64::MAX` nanoseconds)
+/// must clamp to the series length in the ceiling-division arithmetic in
+/// `get_time_series` without overflow. Expect the full series, no panic.
 #[test]
 fn far_future_end_does_not_overflow() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

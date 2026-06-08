@@ -69,7 +69,7 @@ dataset:
 | `{dtype}`  | Element dtype string (`f64`, `i64`, …)                            |
 | `{shape}`  | Element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`        |
 | `{length}` | Number of timesteps (size of the time axis)                       |
-| `{res}`    | Resolution in **whole seconds** (`Duration::num_seconds`)         |
+| `{res}`    | Resolution in **milliseconds** (`Duration::num_milliseconds`)     |
 | `__{n}`    | Spill suffix; absent for the first dataset, `__1`, `__2`, … after |
 
 The dataset shape is `(length, 1000, *element_shape)` (`MAX_COLS_PER_DATASET = 1000` columns) and
@@ -122,10 +122,10 @@ One row per association between an owner and a stored array.
 | `name`              | TEXT    | Series name                                                     |
 | `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable |
 | `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`           |
-| `resolution_ns`     | INTEGER | Resolution in nanoseconds; `NULL` for non-sequential            |
+| `resolution_ms`     | INTEGER | Resolution in milliseconds; `NULL` for non-sequential           |
 | `length`            | INTEGER | Number of timesteps                                             |
-| `horizon_ns`        | INTEGER | Forecast horizon, nanoseconds; `NULL` for non-forecasts         |
-| `interval_ns`       | INTEGER | Forecast interval, nanoseconds; `NULL` for non-forecasts        |
+| `horizon_ms`        | INTEGER | Forecast horizon, milliseconds; `NULL` for non-forecasts        |
+| `interval_ms`       | INTEGER | Forecast interval, milliseconds; `NULL` for non-forecasts       |
 | `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                 |
 | `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (`NonSequentialTimeSeries`)   |
 | `scaling_factor`    | TEXT    | Opaque scaling expression, stored verbatim, never evaluated     |
@@ -160,26 +160,26 @@ A single-column table holding the metadata schema version.
 
 ```sql
 CREATE UNIQUE INDEX uq_assoc ON time_series_associations
-    (owner_uuid, time_series_type, name, resolution_ns, features_hash);
+    (owner_uuid, time_series_type, name, resolution_ms, features_hash);
 CREATE UNIQUE INDEX uq_assoc_null_resolution ON time_series_associations
-    (owner_uuid, time_series_type, name, COALESCE(resolution_ns, -9223372036854775808), features_hash);
+    (owner_uuid, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
 
 CREATE INDEX ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX ix_owner      ON time_series_associations(owner_uuid);
-CREATE INDEX ix_resolution ON time_series_associations(resolution_ns);
+CREATE INDEX ix_resolution ON time_series_associations(resolution_ms);
 ```
 
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
 violation surfaces as `DuplicateTimeSeries`. SQLite treats `NULL` values as distinct in a `UNIQUE`
-index, so `uq_assoc` does not constrain rows with a `NULL` `resolution_ns` (e.g.
+index, so `uq_assoc` does not constrain rows with a `NULL` `resolution_ms` (e.g.
 `NonSequentialTimeSeries`). `uq_assoc_null_resolution` covers that case by folding `NULL` to a
 sentinel via `COALESCE` before enforcing uniqueness.
 
 ## Field Encoding Notes
 
 - **Timestamps** are RFC 3339 strings in UTC.
-- **Durations** (`resolution`, `horizon`, `interval`) are integer **nanoseconds** in SQLite, but the
-  packed dataset name uses **seconds**.
+- **Durations** (`resolution`, `horizon`, `interval`) are integer **milliseconds** in SQLite, and
+  the packed dataset name's `{res}` field is likewise in **milliseconds**.
 - **Hashes** are raw 32-byte `BLOB`s in SQLite, lowercase hex in NetCDF (the `…_h` variable for
   packed arrays, the `arr_` variable name for standalone arrays).
 - **`element_shape`** is the per-step shape only (the trailing axes); the time `length` is a

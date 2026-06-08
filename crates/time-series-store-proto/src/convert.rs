@@ -126,7 +126,7 @@ pub fn key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
         owner_uuid: k.owner_uuid.clone(),
         time_series_type: pb::TimeSeriesType::from(k.time_series_type) as i32,
         name: k.name.clone(),
-        resolution_ns: k.resolution.map(duration_to_ns).unwrap_or(0),
+        resolution_ms: k.resolution.map(duration_to_ms).unwrap_or(0),
         features: Some(features_to_pb(&k.features)),
     }
 }
@@ -138,10 +138,10 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> 
             message: format!("unknown enum value {}", k.time_series_type),
         }
     })?;
-    let resolution = if k.resolution_ns == 0 {
+    let resolution = if k.resolution_ms == 0 {
         None
     } else {
-        Some(Duration::nanoseconds(k.resolution_ns))
+        Some(Duration::milliseconds(k.resolution_ms))
     };
     let features = match k.features {
         Some(f) => features_from_pb(f)?,
@@ -168,10 +168,10 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .initial_timestamp
             .map(|t| t.to_rfc3339())
             .unwrap_or_default(),
-        resolution_ns: m.resolution.map(duration_to_ns).unwrap_or(0),
+        resolution_ms: m.resolution.map(duration_to_ms).unwrap_or(0),
         length: m.length.unwrap_or(0) as u64,
-        horizon_ns: m.horizon.map(duration_to_ns).unwrap_or(0),
-        interval_ns: m.interval.map(duration_to_ns).unwrap_or(0),
+        horizon_ms: m.horizon.map(duration_to_ms).unwrap_or(0),
+        interval_ms: m.interval.map(duration_to_ms).unwrap_or(0),
         count: m.count.unwrap_or(0) as u64,
         timestamps_rfc3339: m
             .timestamps
@@ -230,10 +230,10 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         name: m.name,
         data_hash,
         initial_timestamp,
-        resolution: optional_ns(m.resolution_ns),
+        resolution: optional_ms(m.resolution_ms),
         length: optional_usize(m.length),
-        horizon: optional_ns(m.horizon_ns),
-        interval: optional_ns(m.interval_ns),
+        horizon: optional_ms(m.horizon_ms),
+        interval: optional_ms(m.interval_ms),
         count: optional_usize(m.count),
         timestamps,
         features,
@@ -257,7 +257,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
-            resolution_ns: duration_to_ns(s.resolution),
+            resolution_ms: duration_to_ms(s.resolution),
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
             dtype: s.data.dtype.code(),
@@ -265,15 +265,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ns: 0,
-            interval_ns: 0,
+            horizon_ms: 0,
+            interval_ms: 0,
             count: 0,
             percentiles: Vec::new(),
             scenario_count: 0,
         },
         TimeSeriesData::NonSequentialTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: String::new(),
-            resolution_ns: 0,
+            resolution_ms: 0,
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
             dtype: s.data.dtype.code(),
@@ -281,15 +281,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
             logical_type: String::new(),
-            horizon_ns: 0,
-            interval_ns: 0,
+            horizon_ms: 0,
+            interval_ms: 0,
             count: 0,
             percentiles: Vec::new(),
             scenario_count: 0,
         },
         TimeSeriesData::Deterministic(d) => pb::GetResp {
             initial_timestamp_rfc3339: d.initial_timestamp.to_rfc3339(),
-            resolution_ns: duration_to_ns(d.resolution),
+            resolution_ms: duration_to_ms(d.resolution),
             length: d.data.shape[0] as u64,
             shape: d.data.shape.iter().map(|x| *x as u64).collect(),
             dtype: d.data.dtype.code(),
@@ -297,15 +297,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ns: duration_to_ns(d.horizon),
-            interval_ns: duration_to_ns(d.interval),
+            horizon_ms: duration_to_ms(d.horizon),
+            interval_ms: duration_to_ms(d.interval),
             count: d.count as u64,
             percentiles: Vec::new(),
             scenario_count: 0,
         },
         TimeSeriesData::Probabilistic(p) => pb::GetResp {
             initial_timestamp_rfc3339: p.initial_timestamp.to_rfc3339(),
-            resolution_ns: duration_to_ns(p.resolution),
+            resolution_ms: duration_to_ms(p.resolution),
             length: p.data.shape[0] as u64,
             shape: p.data.shape.iter().map(|x| *x as u64).collect(),
             dtype: p.data.dtype.code(),
@@ -313,15 +313,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ns: duration_to_ns(p.horizon),
-            interval_ns: duration_to_ns(p.interval),
+            horizon_ms: duration_to_ms(p.horizon),
+            interval_ms: duration_to_ms(p.interval),
             count: p.count as u64,
             percentiles: p.percentiles.clone(),
             scenario_count: 0,
         },
         TimeSeriesData::Scenarios(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
-            resolution_ns: duration_to_ns(s.resolution),
+            resolution_ms: duration_to_ms(s.resolution),
             length: s.data.shape[0] as u64,
             shape: s.data.shape.iter().map(|x| *x as u64).collect(),
             dtype: s.data.dtype.code(),
@@ -329,8 +329,8 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ns: duration_to_ns(s.horizon),
-            interval_ns: duration_to_ns(s.interval),
+            horizon_ms: duration_to_ms(s.horizon),
+            interval_ms: duration_to_ms(s.interval),
             count: s.count as u64,
             percentiles: Vec::new(),
             scenario_count: s.scenario_count as u64,
@@ -362,7 +362,7 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 .map(|d| d.with_timezone(&Utc))?;
             Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
                 initial_timestamp,
-                resolution: Duration::nanoseconds(resp.resolution_ns),
+                resolution: Duration::milliseconds(resp.resolution_ms),
                 length: resp.length as usize,
                 data,
             }))
@@ -386,9 +386,9 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 .map(|d| d.with_timezone(&Utc))?;
             let det = Deterministic::new(
                 initial_timestamp,
-                Duration::nanoseconds(resp.resolution_ns),
-                Duration::nanoseconds(resp.horizon_ns),
-                Duration::nanoseconds(resp.interval_ns),
+                Duration::milliseconds(resp.resolution_ms),
+                Duration::milliseconds(resp.horizon_ms),
+                Duration::milliseconds(resp.interval_ms),
                 resp.count as usize,
                 data,
             )
@@ -403,9 +403,9 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 .map(|d| d.with_timezone(&Utc))?;
             let prob = Probabilistic::new(
                 initial_timestamp,
-                Duration::nanoseconds(resp.resolution_ns),
-                Duration::nanoseconds(resp.horizon_ns),
-                Duration::nanoseconds(resp.interval_ns),
+                Duration::milliseconds(resp.resolution_ms),
+                Duration::milliseconds(resp.horizon_ms),
+                Duration::milliseconds(resp.interval_ms),
                 resp.count as usize,
                 resp.percentiles,
                 data,
@@ -421,9 +421,9 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 .map(|d| d.with_timezone(&Utc))?;
             let scen = Scenarios::new(
                 initial_timestamp,
-                Duration::nanoseconds(resp.resolution_ns),
-                Duration::nanoseconds(resp.horizon_ns),
-                Duration::nanoseconds(resp.interval_ns),
+                Duration::milliseconds(resp.resolution_ms),
+                Duration::milliseconds(resp.horizon_ms),
+                Duration::milliseconds(resp.interval_ms),
                 resp.count as usize,
                 resp.scenario_count as usize,
                 data,
@@ -439,16 +439,15 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
 
 // ---- Helpers ----
 
-fn duration_to_ns(d: Duration) -> i64 {
-    d.num_nanoseconds()
-        .unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
+fn duration_to_ms(d: Duration) -> i64 {
+    d.num_milliseconds()
 }
 
-fn optional_ns(ns: i64) -> Option<Duration> {
-    if ns == 0 {
+fn optional_ms(ms: i64) -> Option<Duration> {
+    if ms == 0 {
         None
     } else {
-        Some(Duration::nanoseconds(ns))
+        Some(Duration::milliseconds(ms))
     }
 }
 
@@ -521,14 +520,8 @@ mod tests {
             pb::TimeSeriesType::Deterministic as i32
         );
         assert_eq!(resp.count, 3);
-        assert_eq!(
-            resp.horizon_ns,
-            Duration::hours(4).num_nanoseconds().unwrap()
-        );
-        assert_eq!(
-            resp.interval_ns,
-            Duration::hours(6).num_nanoseconds().unwrap()
-        );
+        assert_eq!(resp.horizon_ms, Duration::hours(4).num_milliseconds());
+        assert_eq!(resp.interval_ms, Duration::hours(6).num_milliseconds());
         assert_eq!(resp.length, 4); // shape[0]
         assert!(resp.percentiles.is_empty());
         assert_eq!(resp.scenario_count, 0);

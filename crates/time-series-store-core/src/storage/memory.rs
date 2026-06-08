@@ -30,7 +30,7 @@ impl StorageBackend for MemoryBackend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        _resolution_seconds: i64,
+        _resolution_ms: i64,
         _packed: bool,
     ) -> Result<()> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.

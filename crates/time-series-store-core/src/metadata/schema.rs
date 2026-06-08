@@ -9,10 +9,10 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     name              TEXT    NOT NULL,
     data_hash         BLOB    NOT NULL,
     initial_timestamp TEXT,
-    resolution_ns     INTEGER,
+    resolution_ms     INTEGER,
     length            INTEGER,
-    horizon_ns        INTEGER,
-    interval_ns       INTEGER,
+    horizon_ms        INTEGER,
+    interval_ms       INTEGER,
     count             INTEGER,
     timestamps_json   TEXT,
     scaling_factor    TEXT,
@@ -36,13 +36,13 @@ CREATE TABLE IF NOT EXISTS features (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc ON time_series_associations
-    (owner_uuid, time_series_type, name, resolution_ns, features_hash);
+    (owner_uuid, time_series_type, name, resolution_ms, features_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_null_resolution ON time_series_associations
-    (owner_uuid, time_series_type, name, COALESCE(resolution_ns, -9223372036854775808), features_hash);
+    (owner_uuid, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
 
 CREATE INDEX IF NOT EXISTS ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_uuid);
-CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution_ns);
+CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution_ms);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 "#;

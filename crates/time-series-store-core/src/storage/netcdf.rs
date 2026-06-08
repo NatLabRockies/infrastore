@@ -52,7 +52,7 @@ struct DatasetState {
     dtype: Dtype,
     element_shape: Vec<usize>,
     length: usize,
-    resolution_seconds: i64,
+    resolution_ms: i64,
     columns: Vec<Option<String>>,
 }
 
@@ -93,14 +93,14 @@ fn dataset_base_name(
     dtype: Dtype,
     element_shape: &[usize],
     length: usize,
-    resolution_seconds: i64,
+    resolution_ms: i64,
 ) -> String {
     format!(
         "sts_{}_{}_{}_{}",
         dtype.as_str(),
         encode_shape(element_shape),
         length,
-        resolution_seconds
+        resolution_ms
     )
 }
 
@@ -325,7 +325,7 @@ impl NetCdfBackend {
                 continue;
             }
 
-            let (dtype, element_shape, length, resolution_seconds) = parse_dataset_name(&row.name)?;
+            let (dtype, element_shape, length, resolution_ms) = parse_dataset_name(&row.name)?;
             let hash_name = format!("{}{}", row.name, HASH_SUFFIX);
             let hash_strings: Vec<String> = inner.with_single(|single| {
                 let v = single.variable(&hash_name).ok_or_else(|| {
@@ -361,7 +361,7 @@ impl NetCdfBackend {
                     dtype,
                     element_shape,
                     length,
-                    resolution_seconds,
+                    resolution_ms,
                     columns,
                 },
             );
@@ -406,9 +406,9 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution_seconds: i64,
+        resolution_ms: i64,
     ) -> Result<String> {
-        let base = dataset_base_name(dtype, element_shape, length, resolution_seconds);
+        let base = dataset_base_name(dtype, element_shape, length, resolution_ms);
         let mut candidates: Vec<(String, bool)> = self
             .datasets
             .iter()
@@ -416,7 +416,7 @@ impl Inner {
                 d.dtype == dtype
                     && d.element_shape == element_shape
                     && d.length == length
-                    && d.resolution_seconds == resolution_seconds
+                    && d.resolution_ms == resolution_ms
             })
             .map(|(n, d)| (n.clone(), d.full()))
             .collect();
@@ -428,7 +428,7 @@ impl Inner {
             }
         }
         let new_name = spill_name(&base, candidates.len());
-        self.create_dataset(&new_name, dtype, element_shape, length, resolution_seconds)?;
+        self.create_dataset(&new_name, dtype, element_shape, length, resolution_ms)?;
         Ok(new_name)
     }
 
@@ -438,7 +438,7 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution_seconds: i64,
+        resolution_ms: i64,
     ) -> Result<()> {
         let dim_time = format!("{name}_t");
         let dim_col = format!("{name}_c");
@@ -481,7 +481,7 @@ impl Inner {
                 dtype,
                 element_shape: element_shape.to_vec(),
                 length,
-                resolution_seconds,
+                resolution_ms,
                 columns: vec![None; MAX_COLS_PER_DATASET],
             },
         );
@@ -504,18 +504,13 @@ impl Inner {
         ranges.as_slice().into()
     }
 
-    fn put_packed(
-        &mut self,
-        hash: &[u8; 32],
-        data: &TypedArray,
-        resolution_seconds: i64,
-    ) -> Result<()> {
+    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution_ms: i64) -> Result<()> {
         let length = data.length();
         let element_shape = data.element_shape().to_vec();
         let dtype = data.dtype;
 
         let dataset_name =
-            self.ensure_writable_dataset(dtype, &element_shape, length, resolution_seconds)?;
+            self.ensure_writable_dataset(dtype, &element_shape, length, resolution_ms)?;
         let (col_index, hash_name) = {
             let state = self.datasets.get(&dataset_name).expect("dataset ensured");
             let col = state.first_free().ok_or_else(|| {
@@ -674,7 +669,7 @@ impl StorageBackend for NetCdfBackend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution_seconds: i64,
+        resolution_ms: i64,
         packed: bool,
     ) -> Result<()> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
@@ -682,7 +677,7 @@ impl StorageBackend for NetCdfBackend {
             return Ok(());
         }
         if packed {
-            inner.put_packed(hash, data, resolution_seconds)
+            inner.put_packed(hash, data, resolution_ms)
         } else {
             inner.put_standalone(hash, data)
         }

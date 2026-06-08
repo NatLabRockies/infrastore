@@ -40,7 +40,7 @@ impl IntegrityReport {
 pub trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
     /// data is reused for content addressing). The array's dtype + shape travel
-    /// with it; `resolution_seconds` keys the packed storage pool.
+    /// with it; `resolution_ms` keys the packed storage pool.
     ///
     /// `packed = true` column-packs the array with other same-shaped arrays (for
     /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
@@ -49,7 +49,7 @@ pub trait StorageBackend: Send + Sync {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution_seconds: i64,
+        resolution_ms: i64,
         packed: bool,
     ) -> Result<()>;
 

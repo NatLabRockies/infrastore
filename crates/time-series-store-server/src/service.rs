@@ -82,8 +82,8 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         if let Some(name) = req.name {
             filter = filter.name(name);
         }
-        if let Some(ns) = req.resolution_ns {
-            filter = filter.resolution(Duration::nanoseconds(ns));
+        if let Some(ms) = req.resolution_ms {
+            filter = filter.resolution(Duration::milliseconds(ms));
         }
         if let Some(f) = req.features {
             filter = filter.features(features_from_pb(f).map_err(map_convert_err)?);
@@ -159,13 +159,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         let store = self.store.lock().await;
         let durations = store.get_resolutions(ts_type).map_err(map_err)?;
         Ok(Response::new(ResolutionsResp {
-            resolution_ns: durations
-                .iter()
-                .map(|d| {
-                    d.num_nanoseconds()
-                        .unwrap_or(d.num_seconds() * 1_000_000_000)
-                })
-                .collect(),
+            resolution_ms: durations.iter().map(|d| d.num_milliseconds()).collect(),
         }))
     }
 

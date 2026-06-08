@@ -87,9 +87,9 @@ impl MetadataStore {
     pub fn insert(tx: &Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<i64> {
         let f_hash = features_hash(&meta.features);
         let initial_ts = meta.initial_timestamp.map(|t| t.to_rfc3339());
-        let resolution_ns = meta.resolution.map(duration_to_ns);
-        let horizon_ns = meta.horizon.map(duration_to_ns);
-        let interval_ns = meta.interval.map(duration_to_ns);
+        let resolution_ms = meta.resolution.map(duration_to_ms);
+        let horizon_ms = meta.horizon.map(duration_to_ms);
+        let interval_ms = meta.interval.map(duration_to_ms);
         let timestamps_json = match &meta.timestamps {
             Some(ts) => Some(serde_json::to_string(ts)?),
             None => None,
@@ -103,7 +103,7 @@ impl MetadataStore {
         let result = tx.execute(
             "INSERT INTO time_series_associations
              (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
-              initial_timestamp, resolution_ns, length, horizon_ns, interval_ns, count,
+              initial_timestamp, resolution_ms, length, horizon_ms, interval_ms, count,
               timestamps_json, scaling_factor, units, percentiles_json,
               dtype, element_shape, logical_type, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
@@ -116,10 +116,10 @@ impl MetadataStore {
                 meta.name,
                 meta.data_hash.as_slice(),
                 initial_ts,
-                resolution_ns,
+                resolution_ms,
                 meta.length.map(|l| l as i64),
-                horizon_ns,
-                interval_ns,
+                horizon_ms,
+                interval_ms,
                 meta.count.map(|c| c as i64),
                 timestamps_json,
                 meta.scaling_factor_multiplier,
@@ -138,7 +138,7 @@ impl MetadataStore {
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
                 // The unique index covers (owner_uuid, time_series_type, name,
-                // resolution_ns, features_hash). Surface the spec error.
+                // resolution_ms, features_hash). Surface the spec error.
                 return Err(TimeSeriesError::DuplicateTimeSeries);
             }
             Err(e) => return Err(e.into()),
@@ -173,11 +173,11 @@ impl MetadataStore {
     /// caller can decide whether to drop the underlying array.
     pub fn delete_by_key(tx: &Transaction<'_>, key: &TimeSeriesKey) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
-        let resolution_ns = key.resolution.map(duration_to_ns);
+        let resolution_ms = key.resolution.map(duration_to_ms);
         let mut stmt = tx.prepare(
             "SELECT id, data_hash FROM time_series_associations
              WHERE owner_uuid = ?1 AND time_series_type = ?2 AND name = ?3
-               AND ((?4 IS NULL AND resolution_ns IS NULL) OR resolution_ns = ?4)
+               AND ((?4 IS NULL AND resolution_ms IS NULL) OR resolution_ms = ?4)
                AND features_hash = ?5",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
@@ -186,7 +186,7 @@ impl MetadataStore {
                     key.owner_uuid,
                     key.time_series_type.as_str(),
                     key.name,
-                    resolution_ns,
+                    resolution_ms,
                     f_hash.as_slice(),
                 ],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -258,8 +258,8 @@ impl MetadataStore {
         // clauses using sqlite's parameter binding.
         let mut sql = String::from(
             "SELECT id, owner_uuid, owner_type, owner_category, time_series_type, name,
-                    data_hash, initial_timestamp, resolution_ns, length, horizon_ns,
-                    interval_ns, count, timestamps_json, scaling_factor, units, percentiles_json,
+                    data_hash, initial_timestamp, resolution_ms, length, horizon_ms,
+                    interval_ms, count, timestamps_json, scaling_factor, units, percentiles_json,
                     dtype, element_shape, logical_type
              FROM time_series_associations WHERE 1=1",
         );
@@ -281,8 +281,8 @@ impl MetadataStore {
             params_vec.push(Box::new(name.clone()));
         }
         if let Some(resolution) = filter.resolution {
-            sql.push_str(" AND resolution_ns = ?");
-            params_vec.push(Box::new(duration_to_ns(resolution)));
+            sql.push_str(" AND resolution_ms = ?");
+            params_vec.push(Box::new(duration_to_ms(resolution)));
         }
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -349,15 +349,15 @@ impl MetadataStore {
 
     pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Duration>> {
         let mut sql = String::from(
-            "SELECT DISTINCT resolution_ns FROM time_series_associations
-             WHERE resolution_ns IS NOT NULL",
+            "SELECT DISTINCT resolution_ms FROM time_series_associations
+             WHERE resolution_ms IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
             sql.push_str(" AND time_series_type = ?");
             params_vec.push(Box::new(t.as_str().to_string()));
         }
-        sql.push_str(" ORDER BY resolution_ns ASC");
+        sql.push_str(" ORDER BY resolution_ms ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
             .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
@@ -367,7 +367,7 @@ impl MetadataStore {
         let rows = stmt
             .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows.into_iter().map(ns_to_duration).collect())
+        Ok(rows.into_iter().map(ms_to_duration).collect())
     }
 
     pub fn count(&self) -> Result<i64> {
@@ -433,13 +433,12 @@ impl MetadataStore {
     }
 }
 
-fn duration_to_ns(d: Duration) -> i64 {
-    d.num_nanoseconds()
-        .unwrap_or_else(|| d.num_seconds() * 1_000_000_000)
+fn duration_to_ms(d: Duration) -> i64 {
+    d.num_milliseconds()
 }
 
-fn ns_to_duration(ns: i64) -> Duration {
-    Duration::nanoseconds(ns)
+fn ms_to_duration(ms: i64) -> Duration {
+    Duration::milliseconds(ms)
 }
 
 fn is_subset(required: &Features, actual: &Features) -> bool {
@@ -530,10 +529,10 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let name: String = row.get(5)?;
     let data_hash_bytes: Vec<u8> = row.get(6)?;
     let initial_timestamp: Option<String> = row.get(7)?;
-    let resolution_ns: Option<i64> = row.get(8)?;
+    let resolution_ms: Option<i64> = row.get(8)?;
     let length: Option<i64> = row.get(9)?;
-    let horizon_ns: Option<i64> = row.get(10)?;
-    let interval_ns: Option<i64> = row.get(11)?;
+    let horizon_ms: Option<i64> = row.get(10)?;
+    let interval_ms: Option<i64> = row.get(11)?;
     let count: Option<i64> = row.get(12)?;
     let timestamps_json: Option<String> = row.get(13)?;
     let scaling_factor: Option<String> = row.get(14)?;
@@ -625,10 +624,10 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             name,
             data_hash,
             initial_timestamp,
-            resolution: resolution_ns.map(ns_to_duration),
+            resolution: resolution_ms.map(ms_to_duration),
             length: length.map(|l| l as usize),
-            horizon: horizon_ns.map(ns_to_duration),
-            interval: interval_ns.map(ns_to_duration),
+            horizon: horizon_ms.map(ms_to_duration),
+            interval: interval_ms.map(ms_to_duration),
             count: count.map(|c| c as usize),
             timestamps,
             scaling_factor,

@@ -27,8 +27,8 @@ consumer.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`logical_type`, `features_json`,
   `units`, `scaling_expr`) accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string.
-- **Timestamps** are `int64_t` Unix nanoseconds; **resolutions/horizons/intervals** are `int64_t`
-  nanoseconds (`0` means unset).
+- **Timestamps** are `int64_t` Unix milliseconds; **resolutions/horizons/intervals** are `int64_t`
+  milliseconds (`0` means unset).
 
 ## Status Codes
 
@@ -65,7 +65,7 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             const char *owner_uuid, const char *owner_type,
                             int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
                             const char *name,
-                            int64_t initial_ts_unix_ns, int64_t resolution_ns,
+                            int64_t initial_ts_unix_ms, int64_t resolution_ms,
                             int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                             const uint8_t *data_ptr, uint64_t data_byte_len,
                             const char *logical_type,         /* optional */
@@ -75,7 +75,7 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             struct TsKey **out_key);          /* owned; ts_key_free */
 
 int32_t ts_store_get_single(const struct TsStore *handle, const struct TsKey *key,
-                            int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
+                            int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
                             double **out_data, uint64_t *out_data_len);  /* decoded f64; ts_buffer_free_f64 */
 
 int32_t ts_store_remove(struct TsStore *handle, const struct TsKey *key);
@@ -84,7 +84,7 @@ int32_t ts_store_has(const struct TsStore *handle, const struct TsKey *key, bool
 
 ## NonSequentialTimeSeries
 
-`ts_store_add_non_sequential` takes an explicit `int64_t` Unix-nanosecond timestamp array alongside
+`ts_store_add_non_sequential` takes an explicit `int64_t` Unix-millisecond timestamp array alongside
 the typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and raw-byte buffers
 (free with `ts_buffer_free_i64` and `ts_buffer_free_u8`) plus the dtype code.
 
@@ -92,7 +92,7 @@ the typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and
 int32_t ts_store_add_non_sequential(struct TsStore *handle,
                                     const char *owner_uuid, const char *owner_type,
                                     int32_t owner_category, const char *name,
-                                    const int64_t *timestamps_unix_ns, uint64_t timestamps_len,
+                                    const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
                                     int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr, uint64_t data_byte_len,
                                     const char *logical_type, const char *features_json,
@@ -107,19 +107,19 @@ int32_t ts_store_get_non_sequential(const struct TsStore *handle, const struct T
 
 ## Attribute-Based Access
 
-Resolve a series by its attributes instead of a key handle. `resolution_ns = 0` means unset.
+Resolve a series by its attributes instead of a key handle. `resolution_ms = 0` means unset.
 
 ```c
 int32_t ts_store_get_metadata(const struct TsStore *handle,
                               const char *owner_uuid, const char *name,
-                              int64_t resolution_ns, const char *features_json,
-                              int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
+                              int64_t resolution_ms, const char *features_json,
+                              int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
                               uint64_t *out_length, uint8_t *out_data_hash, /* 32-byte buffer */
                               int32_t *out_dtype);
 
 int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               const char *owner_uuid, const char *name,
-                              int64_t resolution_ns, const char *features_json, bool *out_present);
+                              int64_t resolution_ms, const char *features_json, bool *out_present);
 
 /* Name-less existence query: true iff owner_uuid has any series, optionally
    filtered to a single ts_type (use_type selects whether ts_type applies). */
@@ -128,7 +128,7 @@ int32_t ts_store_has_for_owner(const struct TsStore *handle, const char *owner_u
 
 int32_t ts_store_remove_by_attrs(struct TsStore *handle,
                                  const char *owner_uuid, const char *name,
-                                 int64_t resolution_ns, const char *features_json);
+                                 int64_t resolution_ms, const char *features_json);
 
 int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *data_hash,
                                    int32_t *out_dtype,
@@ -156,8 +156,8 @@ vector for `Probabilistic`:
 int32_t ts_store_add_forecast(struct TsStore *handle,
                               const char *owner_uuid, const char *owner_type, int32_t owner_category,
                               const char *name, int32_t ts_type,
-                              int64_t initial_ts_unix_ns, int64_t resolution_ns,
-                              int64_t horizon_ns, int64_t interval_ns, uint64_t count,
+                              int64_t initial_ts_unix_ms, int64_t resolution_ms,
+                              int64_t horizon_ms, int64_t interval_ms, uint64_t count,
                               int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                               const uint8_t *data_ptr, uint64_t data_byte_len,
                               const char *logical_type,          /* optional */
@@ -167,8 +167,8 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
 int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    const char *owner_uuid, const char *owner_type,
                                    int32_t owner_category, const char *name,
-                                   int64_t initial_ts_unix_ns, int64_t resolution_ns,
-                                   int64_t horizon_ns, int64_t interval_ns, uint64_t count,
+                                   int64_t initial_ts_unix_ms, int64_t resolution_ms,
+                                   int64_t horizon_ms, int64_t interval_ms, uint64_t count,
                                    const double *percentiles_ptr, uint64_t percentiles_len,
                                    int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
@@ -181,7 +181,7 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
 `Probabilistic`, or `Scenarios` forecast by attributes (DST is synthesized into `Deterministic`) and
 returns the decoded data buffer, its out-dimensions, the metadata, and — for `Probabilistic` — the
 percentile vector. When `time_range_present` is `true`, only the windows whose start timestamp falls
-in `[time_range_start_ns, time_range_end_ns)` are returned; pass `false` to retrieve all windows.
+in `[time_range_start_ms, time_range_end_ms)` are returned; pass `false` to retrieve all windows.
 The caller owns the returned buffers: free `*out_data` with `ts_buffer_free_u8`, `*out_dims` with
 `ts_buffer_free_u64`, and `*out_percentiles` (non-NULL only for `Probabilistic`) with
 `ts_buffer_free_f64`.
@@ -189,11 +189,11 @@ The caller owns the returned buffers: free `*out_data` with `ts_buffer_free_u8`,
 ```c
 int32_t ts_store_get_forecast(const struct TsStore *handle,
                               const char *owner_uuid, const char *name, int32_t ts_type,
-                              int64_t resolution_ns, const char *features_json,
+                              int64_t resolution_ms, const char *features_json,
                               bool time_range_present,
-                              int64_t time_range_start_ns, int64_t time_range_end_ns,
-                              int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
-                              int64_t *out_horizon_ns, int64_t *out_interval_ns,
+                              int64_t time_range_start_ms, int64_t time_range_end_ms,
+                              int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
+                              int64_t *out_horizon_ms, int64_t *out_interval_ms,
                               uint64_t *out_count, uint64_t *out_scenario_count,
                               uint64_t *out_ndims, uint64_t **out_dims,  /* dims: ts_buffer_free_u64 */
                               int32_t *out_dtype,
@@ -208,26 +208,26 @@ with `ts_buffer_free_f64`):
 ```c
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        const char *owner_uuid, const char *name, int32_t ts_type,
-                                       int64_t resolution_ns, const char *features_json,
-                                       int64_t *out_initial_ts_unix_ns, int64_t *out_resolution_ns,
-                                       int64_t *out_horizon_ns, int64_t *out_interval_ns,
+                                       int64_t resolution_ms, const char *features_json,
+                                       int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
+                                       int64_t *out_horizon_ms, int64_t *out_interval_ms,
                                        uint64_t *out_count, uint64_t *out_length,
                                        uint8_t *out_data_hash);
 
 int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                              const char *owner_uuid, const char *name,
-                                             int64_t resolution_ns, const char *features_json,
-                                             int64_t *out_initial_ts_unix_ns,
-                                             int64_t *out_resolution_ns, int64_t *out_horizon_ns,
-                                             int64_t *out_interval_ns, uint64_t *out_count,
+                                             int64_t resolution_ms, const char *features_json,
+                                             int64_t *out_initial_ts_unix_ms,
+                                             int64_t *out_resolution_ms, int64_t *out_horizon_ms,
+                                             int64_t *out_interval_ms, uint64_t *out_count,
                                              uint64_t *out_length, uint8_t *out_data_hash,
                                              double **out_percentiles, uint64_t *out_percentiles_len);
 
 int32_t ts_store_has_typed(const struct TsStore *handle, const char *owner_uuid, const char *name,
-                           int32_t ts_type, int64_t resolution_ns, const char *features_json,
+                           int32_t ts_type, int64_t resolution_ms, const char *features_json,
                            bool *out_present);
 int32_t ts_store_remove_typed(struct TsStore *handle, const char *owner_uuid, const char *name,
-                              int32_t ts_type, int64_t resolution_ns, const char *features_json);
+                              int32_t ts_type, int64_t resolution_ms, const char *features_json);
 ```
 
 ## Store-Wide Operations

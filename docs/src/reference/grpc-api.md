@@ -48,7 +48,7 @@ message TimeSeriesKey {
   string         owner_uuid       = 1;
   TimeSeriesType time_series_type = 2;
   string         name             = 3;
-  int64          resolution_ns    = 4;   // 0 = unset
+  int64          resolution_ms    = 4;   // 0 = unset
   Features       features         = 5;
 }
 
@@ -60,10 +60,10 @@ message TimeSeriesMetadata {
   string          name                      = 5;
   bytes           data_hash                 = 6;   // 32 bytes
   string          initial_timestamp_rfc3339 = 7;
-  int64           resolution_ns             = 8;
+  int64           resolution_ms             = 8;
   uint64          length                    = 9;
-  int64           horizon_ns                = 10;
-  int64           interval_ns               = 11;
+  int64           horizon_ms                = 10;
+  int64           interval_ms               = 11;
   uint64          count                     = 12;
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
@@ -80,7 +80,7 @@ message ListReq {
   optional string         owner_type       = 2;
   optional TimeSeriesType time_series_type = 3;
   optional string         name             = 4;
-  optional int64          resolution_ns    = 5;
+  optional int64          resolution_ms    = 5;
   Features                features         = 6;   // subset match
 }
 message ListResp { repeated TimeSeriesMetadata metadata = 1; }
@@ -92,7 +92,7 @@ message GetReq {
 }
 message GetResp {
   string          initial_timestamp_rfc3339 = 1;
-  int64           resolution_ns             = 2;
+  int64           resolution_ms             = 2;
   uint64          length                    = 3;
   repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
   repeated double values                    = 5;   // row-major f64
@@ -104,7 +104,7 @@ message KeysReq  { string owner_uuid = 1; }
 message KeysResp { repeated TimeSeriesKey keys = 1; }
 
 message ResolutionsReq  { optional TimeSeriesType time_series_type = 1; }
-message ResolutionsResp { repeated int64 resolution_ns = 1; }
+message ResolutionsResp { repeated int64 resolution_ms = 1; }
 
 message CountsReq  {}
 message CountsResp {
@@ -124,7 +124,7 @@ message VerifyResp { repeated string errors = 1; }
 
 The service is read-only and was not extended for forecast _values_. Forecast associations created
 through the [Rust core](./rust-api.md#forecasts) or [C ABI](./c-abi.md#forecasts) do appear in
-`ListTimeSeries` — `TimeSeriesMetadata` already carries `horizon_ns`, `interval_ns`, and `count`,
+`ListTimeSeries` — `TimeSeriesMetadata` already carries `horizon_ms`, `interval_ms`, and `count`,
 and `GetCounts` includes them in `forecasts`. Two caveats:
 
 - **`percentiles` is not on the wire.** `Probabilistic` percentiles are dropped in the gRPC

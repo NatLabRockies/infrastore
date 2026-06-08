@@ -201,6 +201,6 @@ The message text comes from the FFI layer's thread-local error buffer.
 
 ## Time and Resolution Conversions
 
-- `DateTime` is converted to/from Unix nanoseconds at the boundary (millisecond precision).
-- `resolution` is passed as a `Period` and converted to nanoseconds; reads return resolution as
+- `DateTime` is converted to/from Unix milliseconds at the boundary.
+- `resolution` is passed as a `Period` and converted to milliseconds; reads return resolution as
   `Millisecond`.
