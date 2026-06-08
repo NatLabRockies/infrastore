@@ -112,6 +112,12 @@ message GetResp {
   int32              dtype                       = 8;        // Dtype code
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
   string             logical_type                = 10;
+  // Forecast-specific fields (fields 1–10 are backward-compatible).
+  int64              horizon_ns                  = 11;
+  int64              interval_ns                 = 12;
+  uint64             count                       = 13;
+  repeated double    percentiles                 = 14;       // Probabilistic only
+  uint64             scenario_count              = 15;       // Scenarios only
 }
 
 // ---- GetTimeSeriesKeys ----

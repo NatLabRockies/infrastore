@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use time_series_store_core::{
-    Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
+    Deterministic, Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory,
+    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata,
+    TimeSeriesType, TypedArray,
 };
 
 use crate::pb;
@@ -264,6 +265,11 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
+            horizon_ns: 0,
+            interval_ns: 0,
+            count: 0,
+            percentiles: Vec::new(),
+            scenario_count: 0,
         },
         TimeSeriesData::NonSequentialTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: String::new(),
@@ -275,17 +281,60 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
             logical_type: String::new(),
+            horizon_ns: 0,
+            interval_ns: 0,
+            count: 0,
+            percentiles: Vec::new(),
+            scenario_count: 0,
         },
-        // Forecast types are not yet exposed over gRPC — this path is unreachable
-        // today because the server never calls `get_time_series` for forecast keys,
-        // but the match must be exhaustive now that the enum has more variants.
-        TimeSeriesData::Deterministic(_)
-        | TimeSeriesData::Probabilistic(_)
-        | TimeSeriesData::Scenarios(_) => {
-            // Return an empty/invalid response rather than panicking; the gRPC
-            // follow-up task will add real support.
-            pb::GetResp::default()
-        }
+        TimeSeriesData::Deterministic(d) => pb::GetResp {
+            initial_timestamp_rfc3339: d.initial_timestamp.to_rfc3339(),
+            resolution_ns: duration_to_ns(d.resolution),
+            length: d.data.shape[0] as u64,
+            shape: d.data.shape.iter().map(|x| *x as u64).collect(),
+            dtype: d.data.dtype.code(),
+            value_bytes: d.data.bytes.clone(),
+            time_series_type: pb::TimeSeriesType::Deterministic as i32,
+            timestamps_rfc3339: Vec::new(),
+            logical_type: String::new(),
+            horizon_ns: duration_to_ns(d.horizon),
+            interval_ns: duration_to_ns(d.interval),
+            count: d.count as u64,
+            percentiles: Vec::new(),
+            scenario_count: 0,
+        },
+        TimeSeriesData::Probabilistic(p) => pb::GetResp {
+            initial_timestamp_rfc3339: p.initial_timestamp.to_rfc3339(),
+            resolution_ns: duration_to_ns(p.resolution),
+            length: p.data.shape[0] as u64,
+            shape: p.data.shape.iter().map(|x| *x as u64).collect(),
+            dtype: p.data.dtype.code(),
+            value_bytes: p.data.bytes.clone(),
+            time_series_type: pb::TimeSeriesType::Probabilistic as i32,
+            timestamps_rfc3339: Vec::new(),
+            logical_type: String::new(),
+            horizon_ns: duration_to_ns(p.horizon),
+            interval_ns: duration_to_ns(p.interval),
+            count: p.count as u64,
+            percentiles: p.percentiles.clone(),
+            scenario_count: 0,
+        },
+        TimeSeriesData::Scenarios(s) => pb::GetResp {
+            initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
+            resolution_ns: duration_to_ns(s.resolution),
+            length: s.data.shape[0] as u64,
+            shape: s.data.shape.iter().map(|x| *x as u64).collect(),
+            dtype: s.data.dtype.code(),
+            value_bytes: s.data.bytes.clone(),
+            time_series_type: pb::TimeSeriesType::Scenarios as i32,
+            timestamps_rfc3339: Vec::new(),
+            logical_type: String::new(),
+            horizon_ns: duration_to_ns(s.horizon),
+            interval_ns: duration_to_ns(s.interval),
+            count: s.count as u64,
+            percentiles: Vec::new(),
+            scenario_count: s.scenario_count as u64,
+        },
     }
 }
 
@@ -332,13 +381,59 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
             })?;
             Ok(TimeSeriesData::NonSequentialTimeSeries(series))
         }
-        other => Err(ConvertError::InvalidValue {
-            field: "time_series_type",
-            message: format!(
-                "{} cannot be returned by GetTimeSeries",
-                other.as_str_name()
-            ),
-        }),
+        pb::TimeSeriesType::Deterministic | pb::TimeSeriesType::DeterministicSingleTimeSeries => {
+            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
+                .map(|d| d.with_timezone(&Utc))?;
+            let det = Deterministic::new(
+                initial_timestamp,
+                Duration::nanoseconds(resp.resolution_ns),
+                Duration::nanoseconds(resp.horizon_ns),
+                Duration::nanoseconds(resp.interval_ns),
+                resp.count as usize,
+                data,
+            )
+            .map_err(|message| ConvertError::InvalidValue {
+                field: "Deterministic",
+                message,
+            })?;
+            Ok(TimeSeriesData::Deterministic(det))
+        }
+        pb::TimeSeriesType::Probabilistic => {
+            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
+                .map(|d| d.with_timezone(&Utc))?;
+            let prob = Probabilistic::new(
+                initial_timestamp,
+                Duration::nanoseconds(resp.resolution_ns),
+                Duration::nanoseconds(resp.horizon_ns),
+                Duration::nanoseconds(resp.interval_ns),
+                resp.count as usize,
+                resp.percentiles,
+                data,
+            )
+            .map_err(|message| ConvertError::InvalidValue {
+                field: "Probabilistic",
+                message,
+            })?;
+            Ok(TimeSeriesData::Probabilistic(prob))
+        }
+        pb::TimeSeriesType::Scenarios => {
+            let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
+                .map(|d| d.with_timezone(&Utc))?;
+            let scen = Scenarios::new(
+                initial_timestamp,
+                Duration::nanoseconds(resp.resolution_ns),
+                Duration::nanoseconds(resp.horizon_ns),
+                Duration::nanoseconds(resp.interval_ns),
+                resp.count as usize,
+                resp.scenario_count as usize,
+                data,
+            )
+            .map_err(|message| ConvertError::InvalidValue {
+                field: "Scenarios",
+                message,
+            })?;
+            Ok(TimeSeriesData::Scenarios(scen))
+        }
     }
 }
 
@@ -372,5 +467,250 @@ fn parse_optional_rfc3339(s: &str) -> Result<Option<DateTime<Utc>>, ConvertError
         Ok(Some(
             DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use time_series_store_core::{Dtype, TypedArray};
+
+    fn make_ts() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    /// Build an f64 TypedArray with sequential values starting from `base`.
+    fn seq_f64(shape: Vec<usize>, base: f64) -> TypedArray {
+        let n: usize = shape.iter().product();
+        let vals: Vec<f64> = (0..n).map(|i| base + i as f64).collect();
+        TypedArray::from_f64(shape, &vals)
+    }
+
+    /// Build an i64 TypedArray with sequential values starting from `base`.
+    fn seq_i64(shape: Vec<usize>, base: i64) -> TypedArray {
+        let n: usize = shape.iter().product();
+        let mut bytes = Vec::with_capacity(n * 8);
+        for i in 0..n {
+            let v: i64 = base + i as i64;
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        TypedArray::new(Dtype::I64, shape, bytes).unwrap()
+    }
+
+    // ---- Deterministic ----
+
+    #[test]
+    fn deterministic_scalar_round_trip() {
+        // shape [H=4, count=3]
+        let data = seq_f64(vec![4, 3], 1.0);
+        let ts = make_ts();
+        let det = Deterministic::new(
+            ts,
+            Duration::hours(1),
+            Duration::hours(4),
+            Duration::hours(6),
+            3,
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Deterministic(det);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(
+            resp.time_series_type,
+            pb::TimeSeriesType::Deterministic as i32
+        );
+        assert_eq!(resp.count, 3);
+        assert_eq!(
+            resp.horizon_ns,
+            Duration::hours(4).num_nanoseconds().unwrap()
+        );
+        assert_eq!(
+            resp.interval_ns,
+            Duration::hours(6).num_nanoseconds().unwrap()
+        );
+        assert_eq!(resp.length, 4); // shape[0]
+        assert!(resp.percentiles.is_empty());
+        assert_eq!(resp.scenario_count, 0);
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+    }
+
+    #[test]
+    fn deterministic_multidim_round_trip() {
+        // shape [H=2, count=3, elem=2] — multidim element shape
+        let data = seq_f64(vec![2, 3, 2], 10.0);
+        let ts = make_ts();
+        let det = Deterministic::new(
+            ts,
+            Duration::minutes(30),
+            Duration::hours(1),
+            Duration::hours(2),
+            3,
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Deterministic(det);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.shape, vec![2u64, 3, 2]);
+        assert_eq!(resp.count, 3);
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+        let d = roundtripped.as_deterministic().unwrap();
+        assert_eq!(d.data.shape, vec![2, 3, 2]);
+        assert_eq!(d.data.to_f64_vec().unwrap()[0], 10.0);
+    }
+
+    // ---- Probabilistic ----
+
+    #[test]
+    fn probabilistic_scalar_round_trip() {
+        // shape [P=3, H=4, count=2]
+        let data = seq_f64(vec![3, 4, 2], 0.0);
+        let ts = make_ts();
+        let percentiles = vec![10.0, 50.0, 90.0];
+        let prob = Probabilistic::new(
+            ts,
+            Duration::hours(1),
+            Duration::hours(4),
+            Duration::hours(6),
+            2,
+            percentiles.clone(),
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Probabilistic(prob);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(
+            resp.time_series_type,
+            pb::TimeSeriesType::Probabilistic as i32
+        );
+        assert_eq!(resp.percentiles, percentiles);
+        assert_eq!(resp.count, 2);
+        assert_eq!(resp.scenario_count, 0);
+        assert_eq!(resp.length, 3); // shape[0] = num_percentiles
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+        let p = roundtripped.as_probabilistic().unwrap();
+        assert_eq!(p.percentiles, vec![10.0, 50.0, 90.0]);
+    }
+
+    #[test]
+    fn probabilistic_multidim_round_trip() {
+        // shape [P=2, H=3, count=4, elem=5] — multidim element shape
+        let data = seq_f64(vec![2, 3, 4, 5], 100.0);
+        let ts = make_ts();
+        let percentiles = vec![25.0, 75.0];
+        let prob = Probabilistic::new(
+            ts,
+            Duration::hours(1),
+            Duration::hours(3),
+            Duration::hours(4),
+            4,
+            percentiles.clone(),
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Probabilistic(prob);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.shape, vec![2u64, 3, 4, 5]);
+        assert_eq!(resp.percentiles, percentiles);
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+    }
+
+    // ---- Scenarios ----
+
+    #[test]
+    fn scenarios_scalar_round_trip() {
+        // shape [S=4, H=6, count=3]
+        let data = seq_f64(vec![4, 6, 3], 5.0);
+        let ts = make_ts();
+        let scen = Scenarios::new(
+            ts,
+            Duration::hours(1),
+            Duration::hours(6),
+            Duration::hours(8),
+            3,
+            4,
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Scenarios(scen);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.time_series_type, pb::TimeSeriesType::Scenarios as i32);
+        assert_eq!(resp.scenario_count, 4);
+        assert_eq!(resp.count, 3);
+        assert!(resp.percentiles.is_empty());
+        assert_eq!(resp.length, 4); // shape[0] = scenario_count
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+        let s = roundtripped.as_scenarios().unwrap();
+        assert_eq!(s.scenario_count, 4);
+    }
+
+    #[test]
+    fn scenarios_multidim_round_trip() {
+        // shape [S=2, H=4, count=3, elem=2] — multidim element shape
+        let data = seq_f64(vec![2, 4, 3, 2], 0.0);
+        let ts = make_ts();
+        let scen = Scenarios::new(
+            ts,
+            Duration::hours(1),
+            Duration::hours(4),
+            Duration::hours(6),
+            3,
+            2,
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Scenarios(scen);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.shape, vec![2u64, 4, 3, 2]);
+        assert_eq!(resp.scenario_count, 2);
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+    }
+
+    // ---- Non-f64 dtype survives round trip ----
+
+    #[test]
+    fn scenarios_i64_dtype_round_trip() {
+        // shape [S=2, H=3, count=2] with i64 dtype
+        let data = seq_i64(vec![2, 3, 2], 100);
+        let ts = make_ts();
+        let scen = Scenarios::new(
+            ts,
+            Duration::hours(1),
+            Duration::hours(3),
+            Duration::hours(4),
+            2,
+            2,
+            data,
+        )
+        .unwrap();
+        let original = TimeSeriesData::Scenarios(scen);
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.dtype, Dtype::I64.code());
+
+        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        assert_eq!(roundtripped, original);
+        let s = roundtripped.as_scenarios().unwrap();
+        assert_eq!(s.data.dtype, Dtype::I64);
+        // Verify first and last i64 values
+        let vals: Vec<i64> = s
+            .data
+            .bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(vals[0], 100);
+        assert_eq!(vals[11], 111);
     }
 }
