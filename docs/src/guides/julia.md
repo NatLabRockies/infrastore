@@ -132,10 +132,10 @@ values = got.data   # Float64 matrix, shape (24, 7)
 got_by_key = get_time_series(Deterministic, store, key)
 ```
 
-`Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data)` carries
-the percentile vector, and
-`Scenarios(initial_timestamp, resolution, horizon, interval, count, data)` takes `scenario_count`
-from `data`'s leading axis. Read the corresponding type back with
+`Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)`
+carries the percentile vector, and
+`Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)` takes
+`scenario_count` from `data`'s leading axis. Read the corresponding type back with
 `get_time_series(Probabilistic, …)` / `get_time_series(Scenarios, …)`; requesting `Deterministic`
 also returns a transformed `DeterministicSingleTimeSeries` (synthesized).
 
@@ -212,4 +212,5 @@ The model is designed to back an InfrastructureSystems.jl time-series store:
   `get_array_by_hash` let an InfrastructureSystems.jl-side store keep its own key objects and reach
   the array layer without holding a `TimeSeriesKey`.
 
-See [Language Bindings](../explanation/bindings.md#isjl-integration) for how this maps onto the FFI.
+See [Language Bindings](../explanation/bindings.md#infrastructuresystemsjl-integration) for how this
+maps onto the FFI.
