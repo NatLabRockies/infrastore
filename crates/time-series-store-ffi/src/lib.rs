@@ -1059,8 +1059,12 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     horizon_ns: i64,
     interval_ns: i64,
     count: u64,
-    data_ptr: *const f64,
-    data_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     scaling_expr: *const c_char,
@@ -1121,9 +1125,15 @@ pub unsafe extern "C" fn ts_store_add_forecast(
             return TS_ERR_INVALID_PARAMETER;
         }
     };
-    let len = data_len as usize;
-    let values: &[f64] = unsafe { slice::from_raw_parts(data_ptr, len) };
-    let array = core_lib::TypedArray::from_f64(vec![len], values);
+    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
+    {
+        Ok(a) => a,
+        Err(c) => return c,
+    };
 
     match store.inner.add_forecast(
         owner_uuid,
@@ -1141,7 +1151,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         units,
         scaling_expr,
         None,
-        None,
+        logical_type,
     ) {
         Ok(key) => {
             let handle = Box::new(TsKeyHandle { inner: key });
@@ -1177,8 +1187,12 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    data_ptr: *const f64,
-    data_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     scaling_expr: *const c_char,
@@ -1234,9 +1248,15 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     };
     let percentiles =
         unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
-    let len = data_len as usize;
-    let values: &[f64] = unsafe { slice::from_raw_parts(data_ptr, len) };
-    let array = core_lib::TypedArray::from_f64(vec![len], values);
+    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
+    {
+        Ok(a) => a,
+        Err(c) => return c,
+    };
 
     match store.inner.add_forecast(
         owner_uuid,
@@ -1254,7 +1274,7 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         units,
         scaling_expr,
         Some(percentiles),
-        None,
+        logical_type,
     ) {
         Ok(key) => {
             let handle = Box::new(TsKeyHandle { inner: key });

@@ -420,6 +420,20 @@ function get_array_by_hash(store::Store, data_hash::Vector{UInt8}, ::Type{T}=Flo
 end
 
 """
+    get_array_nd(store, data_hash, T, dims) -> Array{T}
+
+Fetch a stored array and reshape it to `dims` as a column-major Julia array. The
+store hands back row-major bytes, so this is the inverse of the row-major encoding
+used on write (handles the column-major ↔ row-major transpose for rank ≥ 2).
+"""
+function get_array_nd(store::Store, data_hash::Vector{UInt8}, ::Type{T}, dims) where {T}
+    flat = get_array_by_hash(store, data_hash, T)
+    n = length(dims)
+    n <= 1 && return reshape(flat, dims...)
+    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, n)))
+end
+
+"""
     has_time_series(store, owner_uuid, name; resolution, features=Dict()) -> Bool
 """
 function has_time_series(
@@ -618,23 +632,30 @@ function add_forecast!(
     horizon::Period,
     interval::Period,
     count::Integer,
-    flat_values::Vector{Float64};
+    data::AbstractArray;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
     scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=nothing,
 )
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
     scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
+    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    dtype = _dtype_code(eltype(data))
+    dims = UInt64[size(data)...]
+    bytes = _row_major_bytes(data)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_store_add_forecast, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int32, Int64, Int64, Int64, Int64,
-         UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+         UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring,
+         Cstring, Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
         Int32(ts_type), _to_unix_ns(initial_timestamp), _resolution_to_ns(resolution),
         _resolution_to_ns(horizon), _resolution_to_ns(interval), UInt64(count),
-        flat_values, UInt64(length(flat_values)), features_json, units_ptr, scaling_ptr, out_key,
+        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
+        logical_ptr, features_json, units_ptr, scaling_ptr, out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -720,24 +741,31 @@ function add_probabilistic!(
     interval::Period,
     count::Integer,
     percentiles::Vector{Float64},
-    flat_values::Vector{Float64};
+    data::AbstractArray;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
     scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
+    logical_type::Union{Nothing,AbstractString}=nothing,
 )
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
     scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
+    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    dtype = _dtype_code(eltype(data))
+    dims = UInt64[size(data)...]
+    bytes = _row_major_bytes(data)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_store_add_probabilistic, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64, Int64, Int64, UInt64,
-         Ptr{Float64}, UInt64, Ptr{Float64}, UInt64, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+         Ptr{Float64}, UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
+         Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
         _to_unix_ns(initial_timestamp), _resolution_to_ns(resolution),
         _resolution_to_ns(horizon), _resolution_to_ns(interval), UInt64(count),
-        percentiles, UInt64(length(percentiles)), flat_values, UInt64(length(flat_values)),
-        features_json, units_ptr, scaling_ptr, out_key,
+        percentiles, UInt64(length(percentiles)),
+        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
+        logical_ptr, features_json, units_ptr, scaling_ptr, out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
