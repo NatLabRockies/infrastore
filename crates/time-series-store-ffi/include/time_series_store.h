@@ -477,6 +477,8 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
 int32_t ts_store_transform_single_time_series(struct TsStore *handle,
                                               int64_t horizon_ms,
                                               int64_t interval_ms,
+                                              int32_t owner_category,
+                                              int64_t resolution_ms,
                                               uint64_t *out_count);
 
 /**
@@ -530,7 +532,10 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        int64_t *out_interval_ms,
                                        uint64_t *out_count,
                                        uint64_t *out_length,
-                                       uint8_t *out_data_hash);
+                                       uint8_t *out_data_hash,
+                                       char *logical_type_buf,
+                                       uint64_t logical_type_cap,
+                                       uint64_t *out_logical_type_len);
 
 /**
  * Fetch a forecast by attributes and return the full data array plus metadata.

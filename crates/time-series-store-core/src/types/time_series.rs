@@ -200,9 +200,8 @@ impl Probabilistic {
         if percentiles.is_empty() {
             return Err("Probabilistic: percentiles must be non-empty".to_string());
         }
-        if percentiles.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err("Probabilistic: percentiles must be strictly increasing".to_string());
-        }
+        // Note: callers (InfrastructureSystems.jl) do not require percentiles to be
+        // sorted/strictly increasing, so the store does not enforce it either.
         let h = compute_h(horizon, resolution)?;
         let p = percentiles.len();
         if data.shape.len() < 3 {

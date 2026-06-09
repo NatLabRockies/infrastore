@@ -1650,6 +1650,8 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
     handle: *mut TsStoreHandle,
     horizon_ms: i64,
     interval_ms: i64,
+    owner_category: i32,
+    resolution_ms: i64,
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
@@ -1661,9 +1663,23 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
         set_error("a required pointer is null");
         return TS_ERR_NULL_POINTER;
     }
+    // -1 transforms every owner category; 0 = Component, 1 = SupplementalAttribute.
+    let category = match owner_category {
+        -1 => None,
+        0 => Some(core_lib::OwnerCategory::Component),
+        1 => Some(core_lib::OwnerCategory::SupplementalAttribute),
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    // 0 transforms every resolution; a positive value restricts to that resolution.
+    let resolution = (resolution_ms > 0).then(|| Duration::milliseconds(resolution_ms));
     match store.inner.transform_single_time_series(
         Duration::milliseconds(horizon_ms),
         Duration::milliseconds(interval_ms),
+        category,
+        resolution,
     ) {
         Ok(n) => {
             unsafe { *out_count = n as u64 };
@@ -1778,6 +1794,9 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     out_count: *mut u64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
+    logical_type_buf: *mut c_char,
+    logical_type_cap: u64,
+    out_logical_type_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -1791,6 +1810,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         || out_count.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
+        || out_logical_type_len.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
@@ -1821,6 +1841,12 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         *out_count = meta.count.unwrap_or(0) as u64;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
+        write_str_out(
+            meta.logical_type.as_deref().unwrap_or(""),
+            logical_type_buf,
+            logical_type_cap,
+            out_logical_type_len,
+        );
     }
     TS_OK
 }

@@ -10,7 +10,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        remove_time_series!,
        has_time_series, get_counts, get_forecast_parameters, get_compression,
        verify_integrity, compact!,
-       get_metadata, get_array_by_hash, open_store, flush!, clear!, replace_owner!,
+       get_metadata, get_forecast_metadata, get_array_by_hash, open_store, flush!, clear!, replace_owner!,
        transform_single_time_series!, has_typed, remove_typed!,
        close!,
        init_logging
@@ -530,6 +530,51 @@ function get_metadata(
         length=Int(out_length[]),
         data_hash=out_hash,
         dtype=_julia_dtype(out_dtype[]),
+        logical_type=logical_type,
+    )
+end
+
+"""
+    get_forecast_metadata(store, owner_uuid, name, ts_type; resolution, features=Dict())
+
+Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash)`
+for a stored forecast of integer `ts_type` (see the `TS_TYPE_*` constants).
+"""
+function get_forecast_metadata(
+    store::Store,
+    owner_uuid::AbstractString,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    out_initial = Ref{Int64}(0); out_resolution = Ref{Int64}(0)
+    out_horizon = Ref{Int64}(0); out_interval = Ref{Int64}(0)
+    out_count = Ref{UInt64}(0); out_length = Ref{UInt64}(0)
+    out_hash = Vector{UInt8}(undef, 32)
+    lt_buf = Vector{UInt8}(undef, 256); out_lt_len = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_get_forecast_metadata, lib_path()), Int32,
+        (Ptr{Cvoid}, Cstring, Cstring, Int32, Int64, Cstring,
+         Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
+         Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle, owner_uuid, name, Int32(ts_type), resolution_ms, features_json,
+        out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
+        lt_buf, UInt64(length(lt_buf)), out_lt_len,
+    )
+    _check(code)
+    n = min(Int(out_lt_len[]), length(lt_buf))
+    logical_type = n == 0 ? nothing : String(lt_buf[1:n])
+    return (
+        initial_timestamp=_from_unix_ms(out_initial[]),
+        resolution=Millisecond(out_resolution[]),
+        horizon=Millisecond(out_horizon[]),
+        interval=Millisecond(out_interval[]),
+        count=Int(out_count[]),
+        length=Int(out_length[]),
+        data_hash=out_hash,
         logical_type=logical_type,
     )
 end
@@ -1194,20 +1239,28 @@ function _add_dense_forecast!(
 end
 
 """
-    transform_single_time_series!(store, horizon::Period, interval::Period) -> Int
+    transform_single_time_series!(store, horizon, interval; owner_category=nothing) -> Int
 
-Derive `DeterministicSingleTimeSeries` forecasts from the stored
-`SingleTimeSeries` associations (mirrors InfrastructureSystems.jl's
-`transform_single_time_series!`). Each `SingleTimeSeries` is re-described as a
-DST sharing the same underlying array; `count` is derived from each series'
-length. Returns the number of series transformed.
+Derive `DeterministicSingleTimeSeries` forecasts from the stored `SingleTimeSeries`
+associations (mirrors InfrastructureSystems.jl's `transform_single_time_series!`):
+each is re-described as a DST sharing the same underlying array; `count` is derived
+from each series' length. When `owner_category` is given (`Component` or
+`SupplementalAttribute`) only series of that owner category are transformed;
+otherwise every category is. Returns the number of series transformed.
 """
-function transform_single_time_series!(store::Store, horizon::Period, interval::Period)
+function transform_single_time_series!(
+    store::Store, horizon::Period, interval::Period;
+    owner_category::Union{Nothing, OwnerCategory} = nothing,
+    resolution::Union{Nothing, Period} = nothing,
+)
+    cat = owner_category === nothing ? Int32(-1) : Int32(Int(owner_category))
+    res_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     out_count = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_transform_single_time_series, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int64, Ref{UInt64}),
-        store.handle, _resolution_to_ms(horizon), _resolution_to_ms(interval), out_count,
+        (Ptr{Cvoid}, Int64, Int64, Int32, Int64, Ref{UInt64}),
+        store.handle, _resolution_to_ms(horizon), _resolution_to_ms(interval), cat, res_ms,
+        out_count,
     )
     _check(code)
     return Int(out_count[])

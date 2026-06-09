@@ -909,7 +909,7 @@ impl PyStore {
         let horizon = pydelta_to_chrono(&horizon)?;
         let interval = pydelta_to_chrono(&interval)?;
         self.inner
-            .transform_single_time_series(horizon, interval)
+            .transform_single_time_series(horizon, interval, None, None)
             .map_err(map_err)
     }
 

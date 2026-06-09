@@ -151,7 +151,7 @@ fn add_forecast(
                 )
                 .unwrap();
             store
-                .transform_single_time_series(horizon, interval)
+                .transform_single_time_series(horizon, interval, None, None)
                 .unwrap();
             return TimeSeriesKey {
                 owner_uuid: owner.to_string(),

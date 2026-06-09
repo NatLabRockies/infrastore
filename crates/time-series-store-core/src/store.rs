@@ -778,20 +778,62 @@ impl Store {
         &mut self,
         horizon: Duration,
         interval: Duration,
+        owner_category: Option<crate::types::metadata::OwnerCategory>,
+        resolution: Option<Duration>,
     ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         use crate::metadata::MetadataFilter;
-        let sources = self.metadata.list(&MetadataFilter {
+        let mut sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
             ..Default::default()
         })?;
+        // Restrict the transform to one owner category (e.g. only components,
+        // leaving supplemental-attribute series untouched) when requested.
+        if let Some(cat) = owner_category {
+            sources.retain(|m| m.owner_category == cat);
+        }
+        // Restrict the transform to a single resolution when requested, so series
+        // of other resolutions (which may be incompatible with the interval) are
+        // left untouched.
+        if let Some(res) = resolution {
+            sources.retain(|m| m.resolution == Some(res));
+        }
+
+        // Series that already have a DeterministicSingleTimeSeries view are
+        // skipped so the transform is idempotent (e.g. re-deriving one series
+        // when others were transformed earlier, as during a component copy).
+        let existing_dst: std::collections::HashSet<(String, String, Option<i64>, [u8; 32])> = self
+            .metadata
+            .list(&MetadataFilter {
+                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
+                ..Default::default()
+            })?
+            .iter()
+            .map(|m| {
+                (
+                    m.owner_uuid.clone(),
+                    m.name.clone(),
+                    m.resolution.map(|r| r.num_milliseconds()),
+                    crate::hash::features_hash(&m.features),
+                )
+            })
+            .collect();
 
         // Build every DST metadata row up front so a single ineligible series
         // aborts the whole transform before any write.
         let mut new_metas = Vec::with_capacity(sources.len());
         for src in &sources {
+            let src_key = (
+                src.owner_uuid.clone(),
+                src.name.clone(),
+                src.resolution.map(|r| r.num_milliseconds()),
+                crate::hash::features_hash(&src.features),
+            );
+            if existing_dst.contains(&src_key) {
+                continue;
+            }
             let resolution = required_resolution(src, "transform_single_time_series")?;
             let total_len = src.length.ok_or_else(|| {
                 TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
