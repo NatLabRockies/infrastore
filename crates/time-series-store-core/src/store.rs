@@ -445,6 +445,19 @@ impl Store {
         Ok(count)
     }
 
+    /// Reassign every time series owned by `old_owner` to `new_owner`. The
+    /// underlying arrays are content-addressed and shared, so only the
+    /// association rows change. Returns the number of associations updated.
+    pub fn replace_owner(&mut self, old_owner: &str, new_owner: &str) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     #[tracing::instrument(skip(self, key, time_range), fields(owner = %key.owner_uuid, name = %key.name, has_time_range = time_range.is_some()))]
     pub fn get_time_series(
         &self,

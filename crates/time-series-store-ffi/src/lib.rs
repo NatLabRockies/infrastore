@@ -2349,6 +2349,134 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
     TS_OK
 }
 
+/// Encode metadata rows as a JSON array string. Each element carries the
+/// association's owner + addressing fields and the temporal parameters the
+/// binding needs to reconstruct a `TimeSeriesMetadata`. Durations are emitted
+/// as integer milliseconds, `initial_timestamp_ms` as Unix epoch milliseconds,
+/// and `data_hash` as a byte array; absent optionals are `null`.
+fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
+    let dur_ms = |d: &Option<chrono::Duration>| -> Value {
+        d.map(|x| Value::from(x.num_milliseconds()))
+            .unwrap_or(Value::Null)
+    };
+    let arr: Vec<Value> = rows
+        .iter()
+        .map(|m| {
+            let mut o = serde_json::Map::new();
+            o.insert("owner_uuid".into(), Value::from(m.owner_uuid.clone()));
+            o.insert("owner_type".into(), Value::from(m.owner_type.clone()));
+            o.insert(
+                "owner_category".into(),
+                Value::from(m.owner_category.as_str()),
+            );
+            o.insert(
+                "time_series_type".into(),
+                Value::from(m.time_series_type.as_str()),
+            );
+            o.insert("name".into(), Value::from(m.name.clone()));
+            o.insert("data_hash".into(), Value::from(m.data_hash.to_vec()));
+            o.insert(
+                "initial_timestamp_ms".into(),
+                m.initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert("resolution_ms".into(), dur_ms(&m.resolution));
+            o.insert(
+                "length".into(),
+                m.length
+                    .map(|l| Value::from(l as u64))
+                    .unwrap_or(Value::Null),
+            );
+            o.insert("horizon_ms".into(), dur_ms(&m.horizon));
+            o.insert("interval_ms".into(), dur_ms(&m.interval));
+            o.insert(
+                "count".into(),
+                m.count
+                    .map(|c| Value::from(c as u64))
+                    .unwrap_or(Value::Null),
+            );
+            o.insert(
+                "features".into(),
+                serde_json::from_str(&features_to_json(&m.features))
+                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            );
+            o.insert(
+                "scaling_factor_multiplier".into(),
+                m.scaling_factor_multiplier
+                    .clone()
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert(
+                "percentiles".into(),
+                m.percentiles
+                    .clone()
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert(
+                "logical_type".into(),
+                m.logical_type
+                    .clone()
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            Value::Object(o)
+        })
+        .collect();
+    Value::Array(arr).to_string()
+}
+
+/// List time series metadata as a JSON array string (see `metadata_rows_to_json`
+/// for the per-row shape). When `owner_uuid` is non-null only that owner's rows
+/// are returned; null lists the whole store.
+///
+/// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
+/// learn the byte length via `out_len`, then call again with a buffer of at
+/// least `len + 1` bytes. The string is NUL-terminated and truncated to `cap`;
+/// `out_len` is always the untruncated byte length.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. When non-null, `owner_uuid` must be a
+/// null-terminated UTF-8 string. `out_len` must be writable; `buf` must be null
+/// or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_metadata(
+    handle: *const TsStoreHandle,
+    owner_uuid: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let owner = match unsafe { cstr_to_optional_string(owner_uuid) } {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let mut filter = core_lib::ListFilter::new();
+    if let Some(o) = owner.as_deref() {
+        filter = filter.owner_uuid(o);
+    }
+    let rows = match store.inner.list_time_series(filter) {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let json = metadata_rows_to_json(&rows);
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
 /// Free the key-handle array returned by `ts_store_get_time_series_keys`.
 ///
 /// This releases only the array buffer, not the keys it held: transfer each
@@ -2618,6 +2746,46 @@ pub unsafe extern "C" fn ts_store_clear(
     };
     match store.inner.clear_time_series(owner.as_deref()) {
         Ok(_) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Reassign every time series owned by `old_owner_uuid` to `new_owner_uuid`.
+/// When `out_updated` is non-null it receives the number of associations
+/// changed. Returns `TS_OK` on success.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `old_owner_uuid` and
+/// `new_owner_uuid` must point to null-terminated UTF-8 strings. When non-null,
+/// `out_updated` must point to writable `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_replace_owner(
+    handle: *mut TsStoreHandle,
+    old_owner_uuid: *const c_char,
+    new_owner_uuid: *const c_char,
+    out_updated: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let old_owner = match unsafe { cstr_to_str(old_owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let new_owner = match unsafe { cstr_to_str(new_owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match store.inner.replace_owner(old_owner, new_owner) {
+        Ok(updated) => {
+            if !out_updated.is_null() {
+                unsafe { *out_updated = updated as u64 };
+            }
+            TS_OK
+        }
         Err(e) => map_core_error(e),
     }
 }

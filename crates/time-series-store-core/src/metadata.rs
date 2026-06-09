@@ -242,6 +242,17 @@ impl MetadataStore {
         Ok(hashes)
     }
 
+    /// Reassign every association from `old_owner` to `new_owner`. Only the
+    /// owning UUID changes; type/category and the underlying arrays are
+    /// untouched (arrays are content-addressed). Returns the rows updated.
+    pub fn replace_owner(tx: &Transaction<'_>, old_owner: &str, new_owner: &str) -> Result<usize> {
+        let updated = tx.execute(
+            "UPDATE time_series_associations SET owner_uuid = ?1 WHERE owner_uuid = ?2",
+            params![new_owner, old_owner],
+        )?;
+        Ok(updated)
+    }
+
     /// Delete every association in the store. Returns the removed data_hashes.
     pub fn delete_all(tx: &Transaction<'_>) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(

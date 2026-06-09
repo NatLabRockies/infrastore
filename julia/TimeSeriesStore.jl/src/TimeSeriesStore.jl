@@ -6,11 +6,11 @@ import JSON
 export Store, SingleTimeSeries, NonSequentialTimeSeries,
        Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
-       add_time_series!, get_time_series, get_time_series_keys, key_info,
+       add_time_series!, get_time_series, get_time_series_keys, key_info, list_metadata,
        remove_time_series!,
        has_time_series, get_counts, get_forecast_parameters, get_compression,
        verify_integrity, compact!,
-       get_metadata, get_array_by_hash, open_store, flush!, clear!,
+       get_metadata, get_array_by_hash, open_store, flush!, clear!, replace_owner!,
        transform_single_time_series!, has_typed, remove_typed!,
        close!,
        init_logging
@@ -808,6 +808,70 @@ _type_for_code(code::Integer) =
     code == TS_TYPE_SCENARIOS               ? Scenarios :
     throw(InvalidParameterError("unknown time series type code $code"))
 
+# The Julia time series type for a metadata row's type name (the `as_str` form).
+_type_for_name(name::AbstractString) =
+    name == "SingleTimeSeries"               ? SingleTimeSeries :
+    name == "NonSequentialTimeSeries"        ? NonSequentialTimeSeries :
+    name == "Deterministic"                  ? Deterministic :
+    name == "DeterministicSingleTimeSeries"  ? DeterministicSingleTimeSeries :
+    name == "Probabilistic"                  ? Probabilistic :
+    name == "Scenarios"                      ? Scenarios :
+    throw(InvalidParameterError("unknown time series type name $name"))
+
+_row_ms(x) = x === nothing ? nothing : Millisecond(Int64(x))
+_row_int(x) = x === nothing ? nothing : Int(x)
+
+function _decode_metadata_row(r::AbstractDict)
+    its = r["initial_timestamp_ms"]
+    pcts = r["percentiles"]
+    return (
+        owner_uuid = String(r["owner_uuid"]),
+        owner_type = String(r["owner_type"]),
+        owner_category = String(r["owner_category"]),
+        time_series_type = _type_for_name(r["time_series_type"]),
+        name = String(r["name"]),
+        data_hash = UInt8[UInt8(b) for b in r["data_hash"]],
+        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution = _row_ms(r["resolution_ms"]),
+        length = _row_int(r["length"]),
+        horizon = _row_ms(r["horizon_ms"]),
+        interval = _row_ms(r["interval_ms"]),
+        count = _row_int(r["count"]),
+        features = Dict{String, Any}(r["features"]),
+        scaling_factor_multiplier = r["scaling_factor_multiplier"] === nothing ? nothing :
+                                    String(r["scaling_factor_multiplier"]),
+        percentiles = pcts === nothing ? nothing : Float64[Float64(p) for p in pcts],
+        logical_type = r["logical_type"] === nothing ? nothing : String(r["logical_type"]),
+    )
+end
+
+"""
+    list_metadata(store; owner_uuid=nothing) -> Vector{NamedTuple}
+
+List time series metadata rows. When `owner_uuid` is given only that owner's
+rows are returned; otherwise the whole store is listed. Each row is a
+`NamedTuple` with `owner_uuid`, `owner_type`, `owner_category`,
+`time_series_type` (the Julia type), `name`, `data_hash` (`Vector{UInt8}`),
+`initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
+`features`, `scaling_factor_multiplier`, `percentiles`, and `logical_type`;
+fields that do not apply to a row are `nothing`.
+"""
+function list_metadata(store::Store; owner_uuid::Union{Nothing, AbstractString} = nothing)
+    owner_arg = owner_uuid === nothing ? C_NULL : String(owner_uuid)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_list_metadata, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, owner_arg, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_list_metadata, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, owner_arg, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [_decode_metadata_row(r) for r in rows]
+end
+
 """
     key_info(key) -> NamedTuple
 
@@ -998,12 +1062,35 @@ function flush!(store::Store)
     return nothing
 end
 
-"""Remove all time series (data + metadata) from the store."""
-function clear!(store::Store)
+"""
+    clear!(store; owner_uuid=nothing)
+
+Remove all time series (data + metadata) from the store, or only those belonging
+to `owner_uuid` when given.
+"""
+function clear!(store::Store; owner_uuid::Union{Nothing, AbstractString} = nothing)
+    owner_arg = owner_uuid === nothing ? C_NULL : String(owner_uuid)
     code = ccall((:ts_store_clear, lib_path()), Int32,
-                 (Ptr{Cvoid}, Cstring), store.handle, C_NULL)
+                 (Ptr{Cvoid}, Cstring), store.handle, owner_arg)
     _check(code)
     return nothing
+end
+
+"""
+    replace_owner!(store, old_owner_uuid, new_owner_uuid) -> Int
+
+Reassign every time series owned by `old_owner_uuid` to `new_owner_uuid`. The
+underlying arrays are content-addressed and shared, so only the association
+records change. Returns the number of associations updated.
+"""
+function replace_owner!(store::Store, old_owner_uuid::AbstractString,
+                        new_owner_uuid::AbstractString)
+    out = Ref{UInt64}(0)
+    code = ccall((:ts_store_replace_owner, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring, Cstring, Ref{UInt64}),
+                 store.handle, old_owner_uuid, new_owner_uuid, out)
+    _check(code)
+    return Int(out[])
 end
 
 # ---- Forecasts -------------------------------------------------------------

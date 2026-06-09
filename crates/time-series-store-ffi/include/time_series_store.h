@@ -682,6 +682,28 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
                                       uint64_t *out_len);
 
 /**
+ * List time series metadata as a JSON array string (see `metadata_rows_to_json`
+ * for the per-row shape). When `owner_uuid` is non-null only that owner's rows
+ * are returned; null lists the whole store.
+ *
+ * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
+ * learn the byte length via `out_len`, then call again with a buffer of at
+ * least `len + 1` bytes. The string is NUL-terminated and truncated to `cap`;
+ * `out_len` is always the untruncated byte length.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. When non-null, `owner_uuid` must be a
+ * null-terminated UTF-8 string. `out_len` must be writable; `buf` must be null
+ * or valid for `cap` bytes.
+ */
+int32_t ts_store_list_metadata(const struct TsStore *handle,
+                               const char *owner_uuid,
+                               char *buf,
+                               uint64_t cap,
+                               uint64_t *out_len);
+
+/**
  * Free the key-handle array returned by `ts_store_get_time_series_keys`.
  *
  * This releases only the array buffer, not the keys it held: transfer each
@@ -805,6 +827,22 @@ int32_t ts_store_remove_typed(struct TsStore *handle,
  * null-terminated UTF-8 string.
  */
 int32_t ts_store_clear(struct TsStore *handle, const char *owner_uuid);
+
+/**
+ * Reassign every time series owned by `old_owner_uuid` to `new_owner_uuid`.
+ * When `out_updated` is non-null it receives the number of associations
+ * changed. Returns `TS_OK` on success.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `old_owner_uuid` and
+ * `new_owner_uuid` must point to null-terminated UTF-8 strings. When non-null,
+ * `out_updated` must point to writable `u64` storage.
+ */
+int32_t ts_store_replace_owner(struct TsStore *handle,
+                               const char *old_owner_uuid,
+                               const char *new_owner_uuid,
+                               uint64_t *out_updated);
 
 /**
  * Release a key handle returned by this library.
