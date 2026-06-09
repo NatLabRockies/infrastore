@@ -30,6 +30,11 @@ pub struct MetadataFilter {
     pub resolution: Option<Duration>,
     /// Subset match: rows must contain at least these key/value pairs.
     pub features: Option<Features>,
+    /// Exact features-set match by precomputed hash. When set, this is pushed
+    /// into the SQL WHERE so the `uq_assoc` unique index can pinpoint the row,
+    /// avoiding a feature fetch+compare for siblings that share the other key
+    /// columns. Distinct from `features` (an in-memory subset filter).
+    pub features_hash: Option<[u8; 32]>,
 }
 
 impl MetadataStore {
@@ -56,6 +61,17 @@ impl MetadataStore {
 
     fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Wait, rather than failing immediately with SQLITE_BUSY, when another
+        // handle to the same on-disk artifact holds a lock (e.g. a CLI writer
+        // and the read-only gRPC server overlapping). Harmless for in-memory and
+        // read-only connections, which still acquire SHARED locks.
+        //
+        // NOTE: we intentionally do NOT switch to WAL / synchronous=NORMAL here.
+        // WAL would raise write throughput, but it persists `-wal`/`-shm` sidecar
+        // files (complicating the "move the .nc and .sqlite together" artifact
+        // contract) and can prevent a read-only connection from opening the
+        // database in some deployments. That trade-off deserves its own change.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // Try to apply schema; on a read-only connection this no-ops because
         // CREATE TABLE IF NOT EXISTS against an empty read-only DB would error,
         // so we only run it when writes are possible.
@@ -284,6 +300,10 @@ impl MetadataStore {
             sql.push_str(" AND resolution_ms = ?");
             params_vec.push(Box::new(duration_to_ms(resolution)));
         }
+        if let Some(ref f_hash) = filter.features_hash {
+            sql.push_str(" AND features_hash = ?");
+            params_vec.push(Box::new(f_hash.to_vec()));
+        }
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
@@ -333,10 +353,13 @@ impl MetadataStore {
             time_series_type: Some(key.time_series_type),
             name: Some(key.name.clone()),
             resolution: key.resolution,
-            features: Some(key.features.clone()),
+            // Pinpoint the row via the unique index rather than an in-memory
+            // subset scan; the exact `retain` below guards against the
+            // (astronomically unlikely) hash collision.
+            features: None,
+            features_hash: Some(features_hash(&key.features)),
             owner_type: None,
         })?;
-        // Features-subset filter is permissive (superset OK); narrow to exact.
         matches.retain(|m| m.features == key.features);
         match matches.len() {
             0 => Err(TimeSeriesError::NotFound),

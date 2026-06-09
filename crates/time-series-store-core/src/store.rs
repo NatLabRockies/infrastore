@@ -67,6 +67,7 @@ impl From<ListFilter> for MetadataFilter {
             name: value.name,
             resolution: value.resolution,
             features: value.features,
+            features_hash: None,
         }
     }
 }
