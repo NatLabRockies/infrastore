@@ -270,8 +270,12 @@ fn fmt_dur(d: StdDuration) -> String {
         format!("{:.2}min", d.as_secs_f64() / 60.0)
     } else if d.as_secs() >= 1 {
         format!("{:.2}s", d.as_secs_f64())
+    } else if d.as_millis() >= 1 {
+        format!("{:.2}ms", d.as_secs_f64() * 1_000.0)
+    } else if d.as_micros() >= 1 {
+        format!("{:.1}µs", d.as_secs_f64() * 1_000_000.0)
     } else {
-        format!("{}ms", d.as_millis())
+        format!("{}ns", d.as_nanos())
     }
 }
 
