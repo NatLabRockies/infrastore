@@ -533,3 +533,60 @@ end
     @test get_compression(Store(in_memory=true)).compression == :none
     @test_throws ArgumentError Store(in_memory=true, compression=:lz4)
 end
+
+@testset "AddBatch bulk add" begin
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+
+    batch = AddBatch()
+    @test length(batch) == 0
+    for i in 1:10
+        ts = SingleTimeSeries(initial, resolution, collect(Float64.(i:(i + 23))), "load")
+        add_time_series!(batch, "owner-$i", "Generator", Component, ts;
+                         features=Dict("scenario" => i), units="MW")
+    end
+    # A forecast and a non-sequential series in the same batch.
+    det_data = reshape(collect(1.0:12.0), 3, 4)  # canonical shape (H=3, count=4)
+    det = Deterministic(initial, Hour(1), Hour(3), Hour(1), 4, det_data, "fc")
+    add_time_series!(batch, "owner-fc", "Generator", Component, det)
+    ns = NonSequentialTimeSeries(
+        [DateTime(2024, 1, 1), DateTime(2024, 1, 2)], Int64[1, 2], "events")
+    add_time_series!(batch, "owner-ns", "Generator", Component, ns)
+    @test length(batch) == 12
+
+    keys = add_time_series_bulk!(store, batch)
+    @test length(keys) == 12
+    @test length(batch) == 0  # drained, reusable
+
+    for i in 1:10
+        got = get_time_series(store, keys[i])
+        @test got.data == collect(Float64.(i:(i + 23)))
+    end
+    fc = get_time_series(Deterministic, store, keys[11])
+    @test fc.data == det_data
+    got_ns = get_time_series(NonSequentialTimeSeries, store, keys[12])
+    @test got_ns.data == Int64[1, 2]
+
+    counts = get_counts(store)
+    @test counts.static_time_series == 11
+    @test counts.forecasts == 1
+end
+
+@testset "AddBatch all-or-nothing rollback" begin
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    ts = SingleTimeSeries(initial, Hour(1), collect(1.0:24.0), "load")
+
+    batch = AddBatch()
+    add_time_series!(batch, "dup", "Generator", Component, ts)
+    add_time_series!(batch, "dup", "Generator", Component, ts)
+    @test_throws TimeSeriesStore.DuplicateTimeSeriesError add_time_series_bulk!(store, batch)
+    @test length(batch) == 0
+    @test isempty(get_time_series_keys(store, "dup"))
+
+    # The batch is reusable after a failed submit.
+    add_time_series!(batch, "dup", "Generator", Component, ts)
+    keys = add_time_series_bulk!(store, batch)
+    @test length(keys) == 1
+end

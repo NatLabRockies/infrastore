@@ -30,6 +30,12 @@
 
 #define TS_ERR_INTERNAL 99
 
+/**
+ * Accumulates pending add requests for a single all-or-nothing
+ * `ts_store_add_batch` call. Building the batch performs no store I/O.
+ */
+typedef struct TsBatch TsBatch;
+
 typedef struct TsKey TsKey;
 
 typedef struct TsStore TsStore;
@@ -459,6 +465,169 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    const char *features_json,
                                    const char *units,
                                    struct TsKey **out_key);
+
+/**
+ * Create an empty add-batch. Building a batch performs no store I/O.
+ *
+ * # Safety
+ *
+ * The returned handle must be released exactly once with `ts_batch_free`
+ * (regardless of whether it was submitted via `ts_store_add_batch`).
+ */
+struct TsBatch *ts_batch_new(void);
+
+/**
+ * Free a batch handle created by `ts_batch_new`.
+ *
+ * # Safety
+ *
+ * `batch` must be null or a handle returned by `ts_batch_new` that has not
+ * already been freed.
+ */
+void ts_batch_free(struct TsBatch *batch);
+
+/**
+ * Append a SingleTimeSeries to a batch. Arguments match
+ * `ts_store_add_single` (minus the store handle and `out_key`); the data is
+ * copied into the batch, so the caller's buffers need only stay valid for
+ * this call.
+ *
+ * # Safety
+ *
+ * `batch` must be a live batch handle. Required string pointers must reference
+ * null-terminated UTF-8 strings; optional string pointers may be null.
+ * `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and
+ * `data_ptr` must reference `data_byte_len` bytes.
+ */
+int32_t ts_batch_add_single(struct TsBatch *batch,
+                            const char *owner_uuid,
+                            const char *owner_type,
+                            int32_t owner_category,
+                            const char *name,
+                            int64_t initial_ts_unix_ms,
+                            int64_t resolution_ms,
+                            int32_t dtype,
+                            uint64_t ndims,
+                            const uint64_t *dims_ptr,
+                            const uint8_t *data_ptr,
+                            uint64_t data_byte_len,
+                            const char *logical_type,
+                            const char *features_json,
+                            const char *units);
+
+/**
+ * Append a NonSequentialTimeSeries to a batch. Arguments match
+ * `ts_store_add_non_sequential` (minus the store handle and `out_key`).
+ *
+ * # Safety
+ *
+ * `batch` must be a live batch handle. Required string pointers must reference
+ * null-terminated UTF-8 strings; optional string pointers may be null.
+ * `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr`
+ * must reference `ndims` elements when `ndims` is nonzero, and `data_ptr`
+ * must reference `data_byte_len` bytes.
+ */
+int32_t ts_batch_add_non_sequential(struct TsBatch *batch,
+                                    const char *owner_uuid,
+                                    const char *owner_type,
+                                    int32_t owner_category,
+                                    const char *name,
+                                    const int64_t *timestamps_unix_ms,
+                                    uint64_t timestamps_len,
+                                    int32_t dtype,
+                                    uint64_t ndims,
+                                    const uint64_t *dims_ptr,
+                                    const uint8_t *data_ptr,
+                                    uint64_t data_byte_len,
+                                    const char *logical_type,
+                                    const char *features_json,
+                                    const char *units);
+
+/**
+ * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
+ * batch. Arguments match `ts_store_add_forecast` (minus the store handle and
+ * `out_key`).
+ *
+ * # Safety
+ *
+ * `batch` must be a live batch handle. Required string pointers must reference
+ * null-terminated UTF-8 strings; optional string pointers may be null.
+ * `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and
+ * `data_ptr` must reference `data_byte_len` bytes.
+ */
+int32_t ts_batch_add_forecast(struct TsBatch *batch,
+                              const char *owner_uuid,
+                              const char *owner_type,
+                              int32_t owner_category,
+                              const char *name,
+                              int32_t ts_type,
+                              int64_t initial_ts_unix_ms,
+                              int64_t resolution_ms,
+                              int64_t horizon_ms,
+                              int64_t interval_ms,
+                              uint64_t count,
+                              int32_t dtype,
+                              uint64_t ndims,
+                              const uint64_t *dims_ptr,
+                              const uint8_t *data_ptr,
+                              uint64_t data_byte_len,
+                              const char *logical_type,
+                              const char *features_json,
+                              const char *units);
+
+/**
+ * Append a `Probabilistic` forecast to a batch. Arguments match
+ * `ts_store_add_probabilistic` (minus the store handle and `out_key`).
+ *
+ * # Safety
+ *
+ * `batch` must be a live batch handle. Required string pointers must reference
+ * null-terminated UTF-8 strings; optional string pointers may be null.
+ * `percentiles_ptr` must reference `percentiles_len` elements, `dims_ptr`
+ * must reference `ndims` elements when `ndims` is nonzero, and `data_ptr`
+ * must reference `data_byte_len` bytes.
+ */
+int32_t ts_batch_add_probabilistic(struct TsBatch *batch,
+                                   const char *owner_uuid,
+                                   const char *owner_type,
+                                   int32_t owner_category,
+                                   const char *name,
+                                   int64_t initial_ts_unix_ms,
+                                   int64_t resolution_ms,
+                                   int64_t horizon_ms,
+                                   int64_t interval_ms,
+                                   uint64_t count,
+                                   const double *percentiles_ptr,
+                                   uint64_t percentiles_len,
+                                   int32_t dtype,
+                                   uint64_t ndims,
+                                   const uint64_t *dims_ptr,
+                                   const uint8_t *data_ptr,
+                                   uint64_t data_byte_len,
+                                   const char *logical_type,
+                                   const char *features_json,
+                                   const char *units);
+
+/**
+ * Submit every request in `batch` through one all-or-nothing bulk add. On
+ * success, writes an array of key handles (input order) to `out_keys` /
+ * `out_len`. The batch is drained by this call in all cases — on error
+ * nothing was committed and the batch is left empty; rebuild it before
+ * retrying.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `batch` a live batch
+ * handle. `out_keys` and `out_len` must each be valid for writing one value.
+ * On success the caller owns the returned array and every key handle in it:
+ * release each key with `ts_key_free`, then the array buffer itself with
+ * `ts_keys_buffer_free(*out_keys, *out_len)` (the same contract as
+ * `ts_store_get_time_series_keys`).
+ */
+int32_t ts_store_add_batch(struct TsStore *handle,
+                           struct TsBatch *batch,
+                           struct TsKey ***out_keys,
+                           uint64_t *out_len);
 
 /**
  * Derive `DeterministicSingleTimeSeries` forecasts from the stored

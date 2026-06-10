@@ -68,6 +68,12 @@ def add_time_series(
 # `name` comes from the time_series object
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
 
+def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
+# Each item dict mirrors add_time_series's parameters: required `owner_uuid`,
+# `owner_type`, `owner_category`, `time_series`; optional `features`, `units`.
+# All items commit in ONE metadata transaction (all-or-nothing), which is much
+# faster than looping over add_time_series. Keys are returned in input order.
+
 def transform_single_time_series(self, horizon: timedelta, interval: timedelta) -> int: ...
 
 def get_time_series(

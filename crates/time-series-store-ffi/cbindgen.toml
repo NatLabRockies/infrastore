@@ -14,3 +14,4 @@ exclude = []
 [export.rename]
 "TsStoreHandle" = "TsStore"
 "TsKeyHandle" = "TsKey"
+"TsBatchHandle" = "TsBatch"

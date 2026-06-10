@@ -114,8 +114,9 @@ impl IntegrityReport {
 /// `Store` layer above drives them through this trait.
 pub trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
-    /// data is reused for content addressing). The array's dtype + shape travel
-    /// with it; `resolution_ms` keys the packed storage pool.
+    /// data is reused for content addressing) and `false` is returned; a write
+    /// of new content returns `true`. The array's dtype + shape travel with it;
+    /// `resolution_ms` keys the packed storage pool.
     ///
     /// `packed = true` column-packs the array with other same-shaped arrays (for
     /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
@@ -126,7 +127,7 @@ pub trait StorageBackend: Send + Sync {
         data: &TypedArray,
         resolution_ms: i64,
         packed: bool,
-    ) -> Result<()>;
+    ) -> Result<bool>;
 
     /// Fetch the full array for `hash`.
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;

@@ -116,7 +116,9 @@ impl MetadataStore {
         };
         let element_shape_json = serde_json::to_string(&meta.element_shape)?;
 
-        let result = tx.execute(
+        // `prepare_cached` so bulk adds parse each INSERT's SQL once per
+        // connection instead of once per row.
+        let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
              (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution_ms, length, horizon_ms, interval_ms, count,
@@ -124,28 +126,28 @@ impl MetadataStore {
               dtype, element_shape, logical_type, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                      ?16, ?17, ?18, ?19)",
-            params![
-                meta.owner_uuid,
-                meta.owner_type,
-                meta.owner_category.as_str(),
-                meta.time_series_type.as_str(),
-                meta.name,
-                meta.data_hash.as_slice(),
-                initial_ts,
-                resolution_ms,
-                meta.length.map(|l| l as i64),
-                horizon_ms,
-                interval_ms,
-                meta.count.map(|c| c as i64),
-                timestamps_json,
-                meta.units,
-                percentiles_json,
-                meta.dtype.as_str(),
-                element_shape_json,
-                meta.logical_type,
-                f_hash.as_slice(),
-            ],
-        );
+        )?;
+        let result = insert_stmt.execute(params![
+            meta.owner_uuid,
+            meta.owner_type,
+            meta.owner_category.as_str(),
+            meta.time_series_type.as_str(),
+            meta.name,
+            meta.data_hash.as_slice(),
+            initial_ts,
+            resolution_ms,
+            meta.length.map(|l| l as i64),
+            horizon_ms,
+            interval_ms,
+            meta.count.map(|c| c as i64),
+            timestamps_json,
+            meta.units,
+            percentiles_json,
+            meta.dtype.as_str(),
+            element_shape_json,
+            meta.logical_type,
+            f_hash.as_slice(),
+        ]);
 
         let id = match result {
             Ok(_) => tx.last_insert_rowid(),
@@ -159,6 +161,11 @@ impl MetadataStore {
             Err(e) => return Err(e.into()),
         };
 
+        let mut feature_stmt = tx.prepare_cached(
+            "INSERT INTO features
+             (association_id, key, value_kind, value_int, value_float, value_bool, value_str)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
         for (k, v) in &meta.features {
             let (kind, vi, vf, vb, vs): (
                 &str,
@@ -172,12 +179,7 @@ impl MetadataStore {
                 FeatureValue::Bool(b) => ("bool", None, None, Some(*b as i64), None),
                 FeatureValue::Str(s) => ("str", None, None, None, Some(s.as_str())),
             };
-            tx.execute(
-                "INSERT INTO features
-                 (association_id, key, value_kind, value_int, value_float, value_bool, value_str)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, k, kind, vi, vf, vb, vs],
-            )?;
+            feature_stmt.execute(params![id, k, kind, vi, vf, vb, vs])?;
         }
 
         Ok(id)

@@ -55,7 +55,6 @@ struct DatasetState {
     dtype: Dtype,
     element_shape: Vec<usize>,
     length: usize,
-    resolution_ms: i64,
     columns: Vec<Option<String>>,
 }
 
@@ -237,10 +236,18 @@ pub struct NetCdfBackend {
     inner: Mutex<Inner>,
 }
 
+/// Key grouping packed datasets that can hold the same arrays:
+/// (dtype, element_shape, length, resolution_ms).
+type DatasetGroupKey = (Dtype, Vec<usize>, usize, i64);
+
 struct Inner {
     file: FileMut,
     path: PathBuf,
     datasets: HashMap<String, DatasetState>,
+    /// Packed dataset names per group key, kept sorted by name so writers
+    /// prefer the earliest spill with a free slot. Avoids scanning every
+    /// dataset on each put.
+    dataset_groups: HashMap<DatasetGroupKey, Vec<String>>,
     standalone_vars: HashSet<String>,
     by_hash: HashMap<[u8; 32], Location>,
     compression: Compression,
@@ -262,6 +269,7 @@ impl NetCdfBackend {
                 file,
                 path: path.to_path_buf(),
                 datasets: HashMap::new(),
+                dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
                 compression,
@@ -283,6 +291,7 @@ impl NetCdfBackend {
                 file,
                 path: path.to_path_buf(),
                 datasets: HashMap::new(),
+                dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
                 by_hash: HashMap::new(),
                 compression,
@@ -378,6 +387,11 @@ impl NetCdfBackend {
                     columns.push(Some(s));
                 }
             }
+            inner
+                .dataset_groups
+                .entry((dtype, element_shape.clone(), length, resolution_ms))
+                .or_default()
+                .push(row.name.clone());
             inner.datasets.insert(
                 row.name.clone(),
                 DatasetState {
@@ -385,10 +399,15 @@ impl NetCdfBackend {
                     dtype,
                     element_shape,
                     length,
-                    resolution_ms,
                     columns,
                 },
             );
+        }
+        // Variable iteration order is not guaranteed; sort each group so
+        // writers fill the lexicographically-first spill first (matching the
+        // historical scan-and-sort behaviour).
+        for names in inner.dataset_groups.values_mut() {
+            names.sort();
         }
         Ok(())
     }
@@ -432,26 +451,20 @@ impl Inner {
         length: usize,
         resolution_ms: i64,
     ) -> Result<String> {
-        let base = dataset_base_name(dtype, element_shape, length, resolution_ms);
-        let mut candidates: Vec<(String, bool)> = self
-            .datasets
-            .iter()
-            .filter(|(_, d)| {
-                d.dtype == dtype
-                    && d.element_shape == element_shape
-                    && d.length == length
-                    && d.resolution_ms == resolution_ms
-            })
-            .map(|(n, d)| (n.clone(), d.full()))
-            .collect();
-        candidates.sort_by_key(|(n, _)| n.clone());
-
-        for (name, full) in &candidates {
-            if !full {
-                return Ok(name.clone());
+        let key = (dtype, element_shape.to_vec(), length, resolution_ms);
+        let mut spill_count = 0;
+        if let Some(names) = self.dataset_groups.get(&key) {
+            spill_count = names.len();
+            for name in names {
+                if let Some(state) = self.datasets.get(name)
+                    && !state.full()
+                {
+                    return Ok(name.clone());
+                }
             }
         }
-        let new_name = spill_name(&base, candidates.len());
+        let base = dataset_base_name(dtype, element_shape, length, resolution_ms);
+        let new_name = spill_name(&base, spill_count);
         self.create_dataset(&new_name, dtype, element_shape, length, resolution_ms)?;
         Ok(new_name)
     }
@@ -506,10 +519,17 @@ impl Inner {
                 dtype,
                 element_shape: element_shape.to_vec(),
                 length,
-                resolution_ms,
                 columns: vec![None; MAX_COLS_PER_DATASET],
             },
         );
+        let group = self
+            .dataset_groups
+            .entry((dtype, element_shape.to_vec(), length, resolution_ms))
+            .or_default();
+        let pos = group
+            .binary_search_by(|n| n.as_str().cmp(name))
+            .unwrap_or_else(|p| p);
+        group.insert(pos, name.to_string());
         Ok(())
     }
 
@@ -546,26 +566,19 @@ impl Inner {
         };
 
         let hex = hash_hex(hash);
-        let bytes = data.bytes.clone();
-        {
-            let dataset_name = dataset_name.clone();
-            let hash_name = hash_name.clone();
-            let hex_c = hex.clone();
-            let element_shape = element_shape.clone();
-            self.with_single_mut(move |single| {
-                let mut data_var = single.variable_mut(&dataset_name).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!("missing variable {dataset_name}"))
-                })?;
-                let extents = Inner::packed_extents(0..length, col_index, &element_shape);
-                put_typed(&mut data_var, dtype, &bytes, extents)?;
-                drop(data_var);
-                let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
-                    TimeSeriesError::IntegrityError(format!("missing variable {hash_name}"))
-                })?;
-                hash_var.put_string(&hex_c, col_index).map_err(map_nc)?;
-                Ok(())
+        self.with_single_mut(|single| {
+            let mut data_var = single.variable_mut(&dataset_name).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("missing variable {dataset_name}"))
             })?;
-        }
+            let extents = Inner::packed_extents(0..length, col_index, &element_shape);
+            put_typed(&mut data_var, dtype, &data.bytes, extents)?;
+            drop(data_var);
+            let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("missing variable {hash_name}"))
+            })?;
+            hash_var.put_string(&hex, col_index).map_err(map_nc)?;
+            Ok(())
+        })?;
         self.datasets
             .get_mut(&dataset_name)
             .expect("dataset ensured")
@@ -589,26 +602,30 @@ impl Inner {
             self.by_hash.insert(*hash, Location::Standalone { var });
             return Ok(());
         }
-        let shape = data.shape.clone();
-        let dtype = data.dtype;
-        let bytes = data.bytes.clone();
-        let var_c = var.clone();
         let compression = self.compression;
-        self.with_single_mut(move |single| {
-            let dims: Vec<(String, usize)> = shape
+        self.with_single_mut(|single| {
+            let dims: Vec<(String, usize)> = data
+                .shape
                 .iter()
                 .enumerate()
-                .map(|(i, &sz)| (format!("{var_c}_d{i}"), sz))
+                .map(|(i, &sz)| (format!("{var}_d{i}"), sz))
                 .collect();
             for (dn, sz) in &dims {
                 single.add_dimension(dn, *sz).map_err(map_nc)?;
             }
             let dim_names: Vec<&str> = dims.iter().map(|(n, _)| n.as_str()).collect();
-            add_typed_variable(single, &var_c, dtype, &dim_names, &shape, compression)?;
-            let mut v = single.variable_mut(&var_c).ok_or_else(|| {
-                TimeSeriesError::IntegrityError(format!("missing variable {var_c}"))
+            add_typed_variable(
+                single,
+                &var,
+                data.dtype,
+                &dim_names,
+                &data.shape,
+                compression,
+            )?;
+            let mut v = single.variable_mut(&var).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("missing variable {var}"))
             })?;
-            put_typed(&mut v, dtype, &bytes, Extents::All)?;
+            put_typed(&mut v, data.dtype, &data.bytes, Extents::All)?;
             Ok(())
         })?;
         self.standalone_vars.insert(var.clone());
@@ -701,16 +718,17 @@ impl StorageBackend for NetCdfBackend {
         data: &TypedArray,
         resolution_ms: i64,
         packed: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
         if inner.by_hash.contains_key(hash) {
-            return Ok(());
+            return Ok(false);
         }
         if packed {
-            inner.put_packed(hash, data, resolution_ms)
+            inner.put_packed(hash, data, resolution_ms)?;
         } else {
-            inner.put_standalone(hash, data)
+            inner.put_standalone(hash, data)?;
         }
+        Ok(true)
     }
 
     #[tracing::instrument(skip(self, hash))]

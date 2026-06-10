@@ -10,11 +10,11 @@ using TimeSeriesStore
 
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
 `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
-`Component`, `SupplementalAttribute`, `add_time_series!`, `get_time_series`, `get_time_series_keys`,
-`key_info`, `remove_time_series!`, `has_time_series`, `get_counts`, `get_forecast_parameters`,
-`get_compression`, `verify_integrity`, `compact!`, `get_metadata`, `get_array_by_hash`,
-`open_store`, `flush!`, `clear!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`,
-`close!`.
+`Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
+`get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
+`get_counts`, `get_forecast_parameters`, `get_compression`, `verify_integrity`, `compact!`,
+`get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `clear!`,
+`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
 
 ## Constructors
 
@@ -148,6 +148,20 @@ Pass the type as the first argument to `get_time_series` to read a non-sequentia
 `resolution` / `features` keywords (attribute-based, the same addressing used by `get_metadata` /
 `has_time_series` / `remove_time_series!`). Both forms return the same struct. The bare
 `get_time_series(store, key)` remains a convenience alias for `SingleTimeSeries`.
+
+## Bulk Adds
+
+```julia
+batch = AddBatch()
+add_time_series!(batch, owner_uuid, owner_type, owner_category, ts; ...)  # any series type
+add_time_series_bulk!(store::Store, batch::AddBatch) -> Vector{TimeSeriesKey}
+```
+
+`AddBatch` accepts the same `add_time_series!` methods as `Store` (every series and forecast type)
+but only accumulates the requests; `add_time_series_bulk!` commits the whole batch in **one**
+metadata transaction, which is much faster than per-item adds when ingesting many series. The submit
+is all-or-nothing: on error nothing is committed. The batch is drained by the call in either case
+and may be reused. `length(batch)` returns the number of pending requests.
 
 ### Attribute-based lookups
 

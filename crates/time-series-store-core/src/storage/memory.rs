@@ -32,11 +32,14 @@ impl StorageBackend for MemoryBackend {
         data: &TypedArray,
         _resolution_ms: i64,
         _packed: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.
         self.tombstoned.remove(hash);
-        self.arrays.entry(*hash).or_insert_with(|| data.clone());
-        Ok(())
+        if self.arrays.contains_key(hash) {
+            return Ok(false);
+        }
+        self.arrays.insert(*hash, data.clone());
+        Ok(true)
     }
 
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {

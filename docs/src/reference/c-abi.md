@@ -294,6 +294,31 @@ int32_t ts_store_remove_typed(struct TsStore *handle, const char *owner_uuid, co
                               int32_t ts_type, int64_t resolution_ms, const char *features_json);
 ```
 
+## Bulk Adds
+
+A batch accumulates add requests client-side (no store I/O); `ts_store_add_batch` commits them all
+in **one** metadata transaction, which is much faster than per-item adds when ingesting many series.
+The `ts_batch_add_*` functions take the same arguments as their `ts_store_add_*` counterparts minus
+the store handle and `out_key`; data buffers are copied into the batch, so they only need to stay
+valid for the call. The submit is all-or-nothing and drains the batch in either case (on error
+nothing was committed and the batch is left empty). On success the caller owns the key-handle array:
+free each key with `ts_key_free`, then the buffer with `ts_keys_buffer_free` (same contract as
+`ts_store_get_time_series_keys`). The batch handle itself is reusable after submit and must
+eventually be released with `ts_batch_free`.
+
+```c
+struct TsBatch *ts_batch_new(void);
+void            ts_batch_free(struct TsBatch *batch);
+
+int32_t ts_batch_add_single(struct TsBatch *batch, /* ts_store_add_single args sans handle/out_key */ ...);
+int32_t ts_batch_add_non_sequential(struct TsBatch *batch, ...);
+int32_t ts_batch_add_forecast(struct TsBatch *batch, ...);       /* 2=Deterministic, 5=Scenarios */
+int32_t ts_batch_add_probabilistic(struct TsBatch *batch, ...);
+
+int32_t ts_store_add_batch(struct TsStore *handle, struct TsBatch *batch,
+                           struct TsKey ***out_keys, uint64_t *out_len);
+```
+
 ## Store-Wide Operations
 
 ```c

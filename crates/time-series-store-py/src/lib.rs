@@ -714,6 +714,58 @@ impl PyTimeSeriesKey {
     }
 }
 
+/// Extract a required key from a bulk-add item dict, with a uniform error.
+fn required_item<'py, T: pyo3::conversion::FromPyObjectOwned<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<T> {
+    let value = dict.get_item(key)?.ok_or_else(|| {
+        InvalidParameterError::new_err(format!("bulk add item is missing '{key}'"))
+    })?;
+    match value.extract::<T>() {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let e: PyErr = e.into();
+            Err(InvalidParameterError::new_err(format!(
+                "bulk add item key '{key}' is invalid: {e}"
+            )))
+        }
+    }
+}
+
+/// Pull the core data + association name off a Python time-series object
+/// (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
+/// `Probabilistic`, or `Scenarios`).
+fn extract_time_series_data(
+    time_series: &Bound<'_, PyAny>,
+) -> PyResult<(core_lib::TimeSeriesData, String)> {
+    if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
+        Ok((
+            core_lib::TimeSeriesData::SingleTimeSeries(single.inner),
+            single.name,
+        ))
+    } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
+        Ok((
+            core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner),
+            ns.name,
+        ))
+    } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
+        Ok((core_lib::TimeSeriesData::Deterministic(det.inner), det.name))
+    } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
+        Ok((
+            core_lib::TimeSeriesData::Probabilistic(prob.inner),
+            prob.name,
+        ))
+    } else if let Ok(scen) = time_series.extract::<PyScenarios>() {
+        Ok((core_lib::TimeSeriesData::Scenarios(scen.inner), scen.name))
+    } else {
+        Err(InvalidParameterError::new_err(
+            "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
+                 Deterministic, Probabilistic, or Scenarios",
+        ))
+    }
+}
+
 // ---- TimeSeriesStore ------------------------------------------------------
 
 #[pyclass(name = "TimeSeriesStore", module = "time_series_store", unsendable)]
@@ -782,31 +834,7 @@ impl PyStore {
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
         // `name` is read off the object.
-        let (data, name) = if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
-            (
-                core_lib::TimeSeriesData::SingleTimeSeries(single.inner),
-                single.name,
-            )
-        } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
-            (
-                core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner),
-                ns.name,
-            )
-        } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
-            (core_lib::TimeSeriesData::Deterministic(det.inner), det.name)
-        } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
-            (
-                core_lib::TimeSeriesData::Probabilistic(prob.inner),
-                prob.name,
-            )
-        } else if let Ok(scen) = time_series.extract::<PyScenarios>() {
-            (core_lib::TimeSeriesData::Scenarios(scen.inner), scen.name)
-        } else {
-            return Err(InvalidParameterError::new_err(
-                "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
-                     Deterministic, Probabilistic, or Scenarios",
-            ));
-        };
+        let (data, name) = extract_time_series_data(time_series)?;
         let key = self
             .inner
             .add_time_series(
@@ -820,6 +848,61 @@ impl PyStore {
             )
             .map_err(map_err)?;
         Ok(PyTimeSeriesKey { inner: key })
+    }
+
+    /// Add many time series in one call, committing the metadata catalog once
+    /// for the whole batch. This is much faster than calling
+    /// `add_time_series` in a loop, which pays one SQLite transaction per
+    /// series.
+    ///
+    /// `items` is a list of dicts whose keys mirror `add_time_series`'s
+    /// parameters: `owner_uuid`, `owner_type`, `owner_category`,
+    /// `time_series`, and optionally `features` and `units`.
+    ///
+    /// All-or-nothing: if any item fails, the entire batch is rolled back.
+    /// Returns the new keys in input order.
+    fn add_time_series_bulk(
+        &mut self,
+        items: Vec<Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<PyTimeSeriesKey>> {
+        let mut requests = Vec::with_capacity(items.len());
+        for item in &items {
+            let owner_uuid: String = required_item(item, "owner_uuid")?;
+            let owner_type: String = required_item(item, "owner_type")?;
+            let owner_category: PyOwnerCategory = required_item(item, "owner_category")?;
+            let time_series = item.get_item("time_series")?.ok_or_else(|| {
+                InvalidParameterError::new_err("bulk add item is missing 'time_series'")
+            })?;
+            let features = match item.get_item("features")? {
+                Some(f) if !f.is_none() => {
+                    let dict = f
+                        .cast_into::<PyDict>()
+                        .map_err(|_| InvalidParameterError::new_err("'features' must be a dict"))?;
+                    features_from_dict(Some(&dict))?
+                }
+                _ => features_from_dict(None)?,
+            };
+            let units: Option<String> = match item.get_item("units")? {
+                Some(u) if !u.is_none() => Some(u.extract()?),
+                _ => None,
+            };
+            let (data, name) = extract_time_series_data(&time_series)?;
+            requests.push(core_lib::AddRequest {
+                owner_uuid,
+                owner_type,
+                owner_category: owner_category.into(),
+                name,
+                data,
+                features,
+                units,
+                logical_type: None,
+            });
+        }
+        let keys = self.inner.add_time_series_bulk(requests).map_err(map_err)?;
+        Ok(keys
+            .into_iter()
+            .map(|k| PyTimeSeriesKey { inner: k })
+            .collect())
     }
 
     /// Derive `DeterministicSingleTimeSeries` forecasts from the stored

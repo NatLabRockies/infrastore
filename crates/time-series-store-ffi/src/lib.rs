@@ -106,6 +106,12 @@ pub struct TsKeyHandle {
     inner: core_lib::TimeSeriesKey,
 }
 
+/// Accumulates pending add requests for a single all-or-nothing
+/// `ts_store_add_batch` call. Building the batch performs no store I/O.
+pub struct TsBatchHandle {
+    items: Vec<core_lib::AddRequest>,
+}
+
 unsafe fn cstr_to_str<'a>(p: *const c_char) -> Result<&'a str, i32> {
     if p.is_null() {
         return Err(TS_ERR_NULL_POINTER);
@@ -303,6 +309,86 @@ unsafe fn build_typed_array(
     })
 }
 
+/// Parse the `ts_store_add_single` / `ts_batch_add_single` argument list into
+/// an [`core_lib::AddRequest`]. Shared so the one-shot and batch entry points
+/// stay behaviorally identical.
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_single_request(
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> Result<core_lib::AddRequest, i32> {
+    if data_ptr.is_null() {
+        set_error("data_ptr is null");
+        return Err(TS_ERR_NULL_POINTER);
+    }
+    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("owner_uuid is invalid");
+            return Err(c);
+        }
+    };
+    let owner_type = match unsafe { cstr_to_str(owner_type) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("owner_type is invalid");
+            return Err(c);
+        }
+    };
+    let name = match unsafe { cstr_to_str(name) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("name is invalid");
+            return Err(c);
+        }
+    };
+    let owner_category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let units = unsafe { cstr_to_optional_string(units) }?;
+    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let features = unsafe { parse_features_json(features_json) }?;
+
+    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
+        Some(d) => d,
+        None => {
+            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let resolution = Duration::milliseconds(resolution_ms);
+    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array);
+
+    Ok(core_lib::AddRequest {
+        owner_uuid: owner_uuid.to_string(),
+        owner_type: owner_type.to_string(),
+        owner_category,
+        name: name.to_string(),
+        data: core_lib::TimeSeriesData::SingleTimeSeries(single),
+        features,
+        units,
+        logical_type,
+    })
+}
+
 /// Add a SingleTimeSeries to the store.
 ///
 /// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float, or
@@ -347,76 +433,26 @@ pub unsafe extern "C" fn ts_store_add_single(
         set_error("out_key pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    if data_ptr.is_null() {
-        set_error("data_ptr is null");
-        return TS_ERR_NULL_POINTER;
-    }
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("owner_uuid is invalid");
-            return c;
-        }
-    };
-    let owner_type = match unsafe { cstr_to_str(owner_type) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("owner_type is invalid");
-            return c;
-        }
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("name is invalid");
-            return c;
-        }
-    };
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let units = match unsafe { cstr_to_optional_string(units) } {
-        Ok(v) => v,
+    let req = match unsafe {
+        build_single_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            initial_ts_unix_ms,
+            resolution_ms,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(r) => r,
         Err(c) => return c,
-    };
-    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(f) => f,
-        Err(code) => return code,
-    };
-
-    let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
-        Some(d) => d,
-        None => {
-            set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let resolution = Duration::milliseconds(resolution_ms);
-    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
-    {
-        Ok(a) => a,
-        Err(c) => return c,
-    };
-    let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array);
-
-    let req = core_lib::AddRequest {
-        owner_uuid: owner_uuid.to_string(),
-        owner_type: owner_type.to_string(),
-        owner_category,
-        name: name.to_string(),
-        data: core_lib::TimeSeriesData::SingleTimeSeries(single),
-        features,
-        units,
-        logical_type,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
@@ -431,6 +467,75 @@ pub unsafe extern "C" fn ts_store_add_single(
 }
 
 // ---- add_non_sequential --------------------------------------------------
+
+/// Parse the `ts_store_add_non_sequential` / `ts_batch_add_non_sequential`
+/// argument list into an [`core_lib::AddRequest`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_non_sequential_request(
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> Result<core_lib::AddRequest, i32> {
+    if timestamps_unix_ms.is_null() || data_ptr.is_null() {
+        set_error("an input pointer is null");
+        return Err(TS_ERR_NULL_POINTER);
+    }
+    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }?;
+    let owner_type = unsafe { cstr_to_str(owner_type) }?;
+    let name = unsafe { cstr_to_str(name) }?;
+    let owner_category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let timestamps = match unsafe {
+        slice::from_raw_parts(timestamps_unix_ms, timestamps_len as usize)
+            .iter()
+            .map(|&ns| unix_ms_to_datetime(ns).ok_or(ns))
+            .collect::<std::result::Result<Vec<_>, _>>()
+    } {
+        Ok(timestamps) => timestamps,
+        Err(ns) => {
+            set_error(format!("invalid timestamp unix milliseconds: {ns}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array) {
+        Ok(series) => series,
+        Err(error) => {
+            set_error(error);
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
+    let features = unsafe { parse_features_json(features_json) }?;
+    let units = unsafe { cstr_to_optional_string(units) }?;
+    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    Ok(core_lib::AddRequest {
+        owner_uuid: owner_uuid.to_string(),
+        owner_type: owner_type.to_string(),
+        owner_category,
+        name: name.to_string(),
+        data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
+        features,
+        units,
+        logical_type,
+    })
+}
 
 /// Add a NonSequentialTimeSeries to the store.
 ///
@@ -469,75 +574,30 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
             return TS_ERR_NULL_POINTER;
         }
     };
-    if out_key.is_null() || timestamps_unix_ms.is_null() || data_ptr.is_null() {
-        set_error("an input or output pointer is null");
+    if out_key.is_null() {
+        set_error("out_key pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
-        Err(code) => return code,
-    };
-    let owner_type = match unsafe { cstr_to_str(owner_type) } {
-        Ok(s) => s,
-        Err(code) => return code,
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(code) => return code,
-    };
-    let owner_category = match owner_category {
-        0 => core_lib::OwnerCategory::Component,
-        1 => core_lib::OwnerCategory::SupplementalAttribute,
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let timestamps = match unsafe {
-        slice::from_raw_parts(timestamps_unix_ms, timestamps_len as usize)
-            .iter()
-            .map(|&ns| unix_ms_to_datetime(ns).ok_or(ns))
-            .collect::<std::result::Result<Vec<_>, _>>()
+    let request = match unsafe {
+        build_non_sequential_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            timestamps_unix_ms,
+            timestamps_len,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
     } {
-        Ok(timestamps) => timestamps,
-        Err(ns) => {
-            set_error(format!("invalid timestamp unix milliseconds: {ns}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
-    {
-        Ok(array) => array,
-        Err(code) => return code,
-    };
-    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array) {
-        Ok(series) => series,
-        Err(error) => {
-            set_error(error);
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(features) => features,
-        Err(code) => return code,
-    };
-    let units = match unsafe { cstr_to_optional_string(units) } {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
-    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
-    let request = core_lib::AddRequest {
-        owner_uuid: owner_uuid.to_string(),
-        owner_type: owner_type.to_string(),
-        owner_category,
-        name: name.to_string(),
-        data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
-        features,
-        units,
-        logical_type,
+        Ok(r) => r,
+        Err(c) => return c,
     };
     match store.inner.add_time_series_bulk(vec![request]) {
         Ok(mut keys) => {
@@ -1361,61 +1421,103 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if out_key.is_null() || data_ptr.is_null() {
-        set_error("a required pointer is null");
+    if out_key.is_null() {
+        set_error("out_key pointer is null");
         return TS_ERR_NULL_POINTER;
+    }
+    let req = match unsafe {
+        build_forecast_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            ts_type,
+            initial_ts_unix_ms,
+            resolution_ms,
+            horizon_ms,
+            interval_ms,
+            count,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    match store.inner.add_time_series_bulk(vec![req]) {
+        Ok(mut keys) => {
+            let handle = Box::new(TsKeyHandle {
+                inner: keys.remove(0),
+            });
+            unsafe { *out_key = Box::into_raw(handle) };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Parse the `ts_store_add_forecast` / `ts_batch_add_forecast` argument list
+/// (Deterministic / Scenarios) into an [`core_lib::AddRequest`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_forecast_request(
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    ts_type: i32,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    horizon_ms: i64,
+    interval_ms: i64,
+    count: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> Result<core_lib::AddRequest, i32> {
+    if data_ptr.is_null() {
+        set_error("data_ptr is null");
+        return Err(TS_ERR_NULL_POINTER);
     }
     let time_series_type = match ts_type_from_int(ts_type) {
         Some(t) => t,
         None => {
             set_error(format!("invalid time_series_type {ts_type}"));
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let owner_type = match unsafe { cstr_to_str(owner_type) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }?;
+    let owner_type = unsafe { cstr_to_str(owner_type) }?;
+    let name = unsafe { cstr_to_str(name) }?;
     let owner_category = match owner_category {
         0 => core_lib::OwnerCategory::Component,
         1 => core_lib::OwnerCategory::SupplementalAttribute,
         other => {
             set_error(format!("invalid owner_category {other}"));
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let units = match unsafe { cstr_to_optional_string(units) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    let units = unsafe { cstr_to_optional_string(units) }?;
+    let features = unsafe { parse_features_json(features_json) }?;
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
             set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
-    {
-        Ok(a) => a,
-        Err(c) => return c,
-    };
+    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let resolution = Duration::milliseconds(resolution_ms);
     let horizon = Duration::milliseconds(horizon_ms);
@@ -1432,7 +1534,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
             Ok(d) => core_lib::TimeSeriesData::Deterministic(d),
             Err(e) => {
                 set_error(e);
-                return TS_ERR_INVALID_PARAMETER;
+                return Err(TS_ERR_INVALID_PARAMETER);
             }
         },
         core_lib::TimeSeriesType::Scenarios => {
@@ -1449,7 +1551,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
                 Ok(s) => core_lib::TimeSeriesData::Scenarios(s),
                 Err(e) => {
                     set_error(e);
-                    return TS_ERR_INVALID_PARAMETER;
+                    return Err(TS_ERR_INVALID_PARAMETER);
                 }
             }
         }
@@ -1459,11 +1561,11 @@ pub unsafe extern "C" fn ts_store_add_forecast(
                  is not directly addable (DeterministicSingleTimeSeries is derived via \
                  ts_store_transform_single_time_series)"
             ));
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
 
-    let req = core_lib::AddRequest {
+    Ok(core_lib::AddRequest {
         owner_uuid: owner_uuid.to_string(),
         owner_type: owner_type.to_string(),
         owner_category,
@@ -1472,17 +1574,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         features,
         units,
         logical_type,
-    };
-    match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
-            let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
-            });
-            unsafe { *out_key = Box::into_raw(handle) };
-            TS_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    })
 }
 
 /// Add a `Probabilistic` forecast. `data` is the flattened 3-D storage array
@@ -1525,56 +1617,100 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if out_key.is_null() || data_ptr.is_null() || percentiles_ptr.is_null() {
-        set_error("a required pointer is null");
+    if out_key.is_null() {
+        set_error("out_key pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
+    let req = match unsafe {
+        build_probabilistic_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            initial_ts_unix_ms,
+            resolution_ms,
+            horizon_ms,
+            interval_ms,
+            count,
+            percentiles_ptr,
+            percentiles_len,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(r) => r,
         Err(c) => return c,
     };
-    let owner_type = match unsafe { cstr_to_str(owner_type) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let name = match unsafe { cstr_to_str(name) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
+    match store.inner.add_time_series_bulk(vec![req]) {
+        Ok(mut keys) => {
+            let handle = Box::new(TsKeyHandle {
+                inner: keys.remove(0),
+            });
+            unsafe { *out_key = Box::into_raw(handle) };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Parse the `ts_store_add_probabilistic` / `ts_batch_add_probabilistic`
+/// argument list into an [`core_lib::AddRequest`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_probabilistic_request(
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    horizon_ms: i64,
+    interval_ms: i64,
+    count: u64,
+    percentiles_ptr: *const f64,
+    percentiles_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> Result<core_lib::AddRequest, i32> {
+    if data_ptr.is_null() || percentiles_ptr.is_null() {
+        set_error("a required pointer is null");
+        return Err(TS_ERR_NULL_POINTER);
+    }
+    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }?;
+    let owner_type = unsafe { cstr_to_str(owner_type) }?;
+    let name = unsafe { cstr_to_str(name) }?;
     let owner_category = match owner_category {
         0 => core_lib::OwnerCategory::Component,
         1 => core_lib::OwnerCategory::SupplementalAttribute,
         other => {
             set_error(format!("invalid owner_category {other}"));
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let units = match unsafe { cstr_to_optional_string(units) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    let units = unsafe { cstr_to_optional_string(units) }?;
+    let features = unsafe { parse_features_json(features_json) }?;
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
         None => {
             set_error(format!("invalid initial_ts_unix_ms: {initial_ts_unix_ms}"));
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
     let percentiles =
         unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
-    let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let array = match unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }
-    {
-        Ok(a) => a,
-        Err(c) => return c,
-    };
+    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let prob = match core_lib::Probabilistic::new(
         initial_timestamp,
@@ -1588,10 +1724,10 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         Ok(p) => p,
         Err(e) => {
             set_error(e);
-            return TS_ERR_INVALID_PARAMETER;
+            return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let req = core_lib::AddRequest {
+    Ok(core_lib::AddRequest {
         owner_uuid: owner_uuid.to_string(),
         owner_type: owner_type.to_string(),
         owner_category,
@@ -1600,13 +1736,372 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         features,
         units,
         logical_type,
+    })
+}
+
+// ---- batched adds ----------------------------------------------------------
+//
+// A batch accumulates AddRequests client-side; `ts_store_add_batch` commits
+// them through `Store::add_time_series_bulk` in ONE metadata transaction.
+// This is the fast path for ingesting many series: per-item adds pay one
+// SQLite commit each, while a batch pays a single commit for all items.
+
+/// Create an empty add-batch. Building a batch performs no store I/O.
+///
+/// # Safety
+///
+/// The returned handle must be released exactly once with `ts_batch_free`
+/// (regardless of whether it was submitted via `ts_store_add_batch`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_batch_new() -> *mut TsBatchHandle {
+    Box::into_raw(Box::new(TsBatchHandle { items: Vec::new() }))
+}
+
+/// Free a batch handle created by `ts_batch_new`.
+///
+/// # Safety
+///
+/// `batch` must be null or a handle returned by `ts_batch_new` that has not
+/// already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_batch_free(batch: *mut TsBatchHandle) {
+    if !batch.is_null() {
+        drop(unsafe { Box::from_raw(batch) });
+    }
+}
+
+/// Append a SingleTimeSeries to a batch. Arguments match
+/// `ts_store_add_single` (minus the store handle and `out_key`); the data is
+/// copied into the batch, so the caller's buffers need only stay valid for
+/// this call.
+///
+/// # Safety
+///
+/// `batch` must be a live batch handle. Required string pointers must reference
+/// null-terminated UTF-8 strings; optional string pointers may be null.
+/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and
+/// `data_ptr` must reference `data_byte_len` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_batch_add_single(
+    batch: *mut TsBatchHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
     };
-    match store.inner.add_time_series_bulk(vec![req]) {
-        Ok(mut keys) => {
-            let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
-            });
-            unsafe { *out_key = Box::into_raw(handle) };
+    match unsafe {
+        build_single_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            initial_ts_unix_ms,
+            resolution_ms,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(req) => {
+            batch.items.push(req);
+            TS_OK
+        }
+        Err(c) => c,
+    }
+}
+
+/// Append a NonSequentialTimeSeries to a batch. Arguments match
+/// `ts_store_add_non_sequential` (minus the store handle and `out_key`).
+///
+/// # Safety
+///
+/// `batch` must be a live batch handle. Required string pointers must reference
+/// null-terminated UTF-8 strings; optional string pointers may be null.
+/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr`
+/// must reference `ndims` elements when `ndims` is nonzero, and `data_ptr`
+/// must reference `data_byte_len` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_batch_add_non_sequential(
+    batch: *mut TsBatchHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    timestamps_unix_ms: *const i64,
+    timestamps_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    match unsafe {
+        build_non_sequential_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            timestamps_unix_ms,
+            timestamps_len,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(req) => {
+            batch.items.push(req);
+            TS_OK
+        }
+        Err(c) => c,
+    }
+}
+
+/// Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
+/// batch. Arguments match `ts_store_add_forecast` (minus the store handle and
+/// `out_key`).
+///
+/// # Safety
+///
+/// `batch` must be a live batch handle. Required string pointers must reference
+/// null-terminated UTF-8 strings; optional string pointers may be null.
+/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and
+/// `data_ptr` must reference `data_byte_len` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_batch_add_forecast(
+    batch: *mut TsBatchHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    ts_type: i32,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    horizon_ms: i64,
+    interval_ms: i64,
+    count: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    match unsafe {
+        build_forecast_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            ts_type,
+            initial_ts_unix_ms,
+            resolution_ms,
+            horizon_ms,
+            interval_ms,
+            count,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(req) => {
+            batch.items.push(req);
+            TS_OK
+        }
+        Err(c) => c,
+    }
+}
+
+/// Append a `Probabilistic` forecast to a batch. Arguments match
+/// `ts_store_add_probabilistic` (minus the store handle and `out_key`).
+///
+/// # Safety
+///
+/// `batch` must be a live batch handle. Required string pointers must reference
+/// null-terminated UTF-8 strings; optional string pointers may be null.
+/// `percentiles_ptr` must reference `percentiles_len` elements, `dims_ptr`
+/// must reference `ndims` elements when `ndims` is nonzero, and `data_ptr`
+/// must reference `data_byte_len` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_batch_add_probabilistic(
+    batch: *mut TsBatchHandle,
+    owner_uuid: *const c_char,
+    owner_type: *const c_char,
+    owner_category: i32,
+    name: *const c_char,
+    initial_ts_unix_ms: i64,
+    resolution_ms: i64,
+    horizon_ms: i64,
+    interval_ms: i64,
+    count: u64,
+    percentiles_ptr: *const f64,
+    percentiles_len: u64,
+    dtype: i32,
+    ndims: u64,
+    dims_ptr: *const u64,
+    data_ptr: *const u8,
+    data_byte_len: u64,
+    logical_type: *const c_char,
+    features_json: *const c_char,
+    units: *const c_char,
+) -> i32 {
+    clear_error();
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    match unsafe {
+        build_probabilistic_request(
+            owner_uuid,
+            owner_type,
+            owner_category,
+            name,
+            initial_ts_unix_ms,
+            resolution_ms,
+            horizon_ms,
+            interval_ms,
+            count,
+            percentiles_ptr,
+            percentiles_len,
+            dtype,
+            ndims,
+            dims_ptr,
+            data_ptr,
+            data_byte_len,
+            logical_type,
+            features_json,
+            units,
+        )
+    } {
+        Ok(req) => {
+            batch.items.push(req);
+            TS_OK
+        }
+        Err(c) => c,
+    }
+}
+
+/// Submit every request in `batch` through one all-or-nothing bulk add. On
+/// success, writes an array of key handles (input order) to `out_keys` /
+/// `out_len`. The batch is drained by this call in all cases — on error
+/// nothing was committed and the batch is left empty; rebuild it before
+/// retrying.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `batch` a live batch
+/// handle. `out_keys` and `out_len` must each be valid for writing one value.
+/// On success the caller owns the returned array and every key handle in it:
+/// release each key with `ts_key_free`, then the array buffer itself with
+/// `ts_keys_buffer_free(*out_keys, *out_len)` (the same contract as
+/// `ts_store_get_time_series_keys`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_add_batch(
+    handle: *mut TsStoreHandle,
+    batch: *mut TsBatchHandle,
+    out_keys: *mut *mut *mut TsKeyHandle,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let batch = match unsafe { batch.as_mut() } {
+        Some(b) => b,
+        None => {
+            set_error("batch handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_keys.is_null() || out_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let items = std::mem::take(&mut batch.items);
+    match store.inner.add_time_series_bulk(items) {
+        Ok(keys) => {
+            let mut handles: Vec<*mut TsKeyHandle> = keys
+                .into_iter()
+                .map(|k| Box::into_raw(Box::new(TsKeyHandle { inner: k })))
+                .collect();
+            // Keep capacity == length so `ts_keys_buffer_free` can reconstruct the Vec.
+            handles.shrink_to_fit();
+            let len = handles.len() as u64;
+            let ptr = if handles.is_empty() {
+                ptr::null_mut()
+            } else {
+                let p = handles.as_mut_ptr();
+                std::mem::forget(handles);
+                p
+            };
+            unsafe {
+                *out_keys = ptr;
+                *out_len = len;
+            }
             TS_OK
         }
         Err(e) => map_core_error(e),

@@ -283,3 +283,48 @@ def test_dtype_round_trip():
         arr = np.asarray(store.get_time_series(key).data)
         assert arr.dtype == dtype
         assert arr.tolist() == [1, 2, 3]
+
+
+def test_add_time_series_bulk(tmp_path):
+    """Bulk add commits all series in one transaction and returns keys in order."""
+    path = tmp_path / "bulk.nc"
+    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    items = [
+        {
+            "owner_uuid": str(i),
+            "owner_type": "Generator",
+            "owner_category": OwnerCategory.Component,
+            "time_series": make_series(base=float(i)),
+            "features": {"scenario": i},
+            "units": "MW",
+        }
+        for i in range(10)
+    ]
+    keys = store.add_time_series_bulk(items)
+    assert len(keys) == 10
+    for i, key in enumerate(keys):
+        assert key.owner_uuid == str(i)
+        got = store.get_time_series(key)
+        np.testing.assert_array_equal(
+            np.asarray(got.data), np.arange(24, dtype=np.float64) + float(i)
+        )
+
+
+def test_add_time_series_bulk_rolls_back_on_error():
+    """A duplicate in the batch rolls back every item."""
+    store = TimeSeriesStore.create(in_memory=True)
+    dup = {
+        "owner_uuid": "1",
+        "owner_type": "Generator",
+        "owner_category": OwnerCategory.Component,
+        "time_series": make_series(),
+    }
+    with pytest.raises(DuplicateTimeSeriesError):
+        store.add_time_series_bulk([dup, dict(dup)])
+    assert store.get_time_series_keys("1") == []
+
+
+def test_add_time_series_bulk_rejects_missing_keys():
+    store = TimeSeriesStore.create(in_memory=True)
+    with pytest.raises(InvalidParameterError, match="owner_uuid"):
+        store.add_time_series_bulk([{"owner_type": "Generator"}])

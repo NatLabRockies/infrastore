@@ -297,57 +297,69 @@ impl Store {
                 // native shape. `DeterministicSingleTimeSeries` is not added
                 // directly; it is derived from a stored `SingleTimeSeries` via
                 // [`Self::transform_single_time_series`].
-                TimeSeriesData::Deterministic(det) => (
-                    array_hash(&det.data),
-                    det.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Deterministic,
-                        det.initial_timestamp,
-                        det.resolution,
-                        det.horizon,
-                        det.interval,
-                        det.count,
-                        &det.data,
-                        None,
-                    ),
-                    forecast_key(item, TimeSeriesType::Deterministic, det.resolution),
-                ),
-                TimeSeriesData::Probabilistic(prob) => (
-                    array_hash(&prob.data),
-                    prob.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Probabilistic,
-                        prob.initial_timestamp,
-                        prob.resolution,
-                        prob.horizon,
-                        prob.interval,
-                        prob.count,
-                        &prob.data,
-                        Some(prob.percentiles.clone()),
-                    ),
-                    forecast_key(item, TimeSeriesType::Probabilistic, prob.resolution),
-                ),
-                TimeSeriesData::Scenarios(scen) => (
-                    array_hash(&scen.data),
-                    scen.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Scenarios,
-                        scen.initial_timestamp,
-                        scen.resolution,
-                        scen.horizon,
-                        scen.interval,
-                        scen.count,
-                        &scen.data,
-                        None,
-                    ),
-                    forecast_key(item, TimeSeriesType::Scenarios, scen.resolution),
-                ),
+                TimeSeriesData::Deterministic(det) => {
+                    let hash = array_hash(&det.data);
+                    (
+                        hash,
+                        det.resolution.num_milliseconds(),
+                        false,
+                        forecast_metadata(
+                            item,
+                            TimeSeriesType::Deterministic,
+                            hash,
+                            det.initial_timestamp,
+                            det.resolution,
+                            det.horizon,
+                            det.interval,
+                            det.count,
+                            &det.data,
+                            None,
+                        ),
+                        forecast_key(item, TimeSeriesType::Deterministic, det.resolution),
+                    )
+                }
+                TimeSeriesData::Probabilistic(prob) => {
+                    let hash = array_hash(&prob.data);
+                    (
+                        hash,
+                        prob.resolution.num_milliseconds(),
+                        false,
+                        forecast_metadata(
+                            item,
+                            TimeSeriesType::Probabilistic,
+                            hash,
+                            prob.initial_timestamp,
+                            prob.resolution,
+                            prob.horizon,
+                            prob.interval,
+                            prob.count,
+                            &prob.data,
+                            Some(prob.percentiles.clone()),
+                        ),
+                        forecast_key(item, TimeSeriesType::Probabilistic, prob.resolution),
+                    )
+                }
+                TimeSeriesData::Scenarios(scen) => {
+                    let hash = array_hash(&scen.data);
+                    (
+                        hash,
+                        scen.resolution.num_milliseconds(),
+                        false,
+                        forecast_metadata(
+                            item,
+                            TimeSeriesType::Scenarios,
+                            hash,
+                            scen.initial_timestamp,
+                            scen.resolution,
+                            scen.horizon,
+                            scen.interval,
+                            scen.count,
+                            &scen.data,
+                            None,
+                        ),
+                        forecast_key(item, TimeSeriesType::Scenarios, scen.resolution),
+                    )
+                }
             };
             let data = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => &single.data,
@@ -357,16 +369,15 @@ impl Store {
                 TimeSeriesData::Scenarios(scen) => &scen.data,
             };
 
-            let already_present = self.backend.contains(&hash)?;
+            let inserted = self.backend.put_array(&hash, data, resolution_ms, packed)?;
             tracing::debug!(
                 owner = %item.owner_uuid,
                 bytes = data.bytes.len(),
                 packed,
-                already_present,
+                inserted,
                 "backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution_ms, packed)?;
-            if !already_present {
+            if inserted {
                 staged_hashes.push(hash);
             }
 
@@ -975,12 +986,14 @@ fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
 
 /// Build the metadata row for a dense forecast (`Deterministic` /
 /// `Probabilistic` / `Scenarios`) added via [`Store::add_time_series_bulk`].
-/// The array is stored standalone in its native shape; `percentiles` is `Some`
-/// only for `Probabilistic`.
+/// The array is stored standalone in its native shape; `data_hash` is the
+/// caller's already-computed [`array_hash`] of `data` (avoiding a second pass
+/// over the array bytes); `percentiles` is `Some` only for `Probabilistic`.
 #[allow(clippy::too_many_arguments)]
 fn forecast_metadata(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
+    data_hash: [u8; 32],
     initial_timestamp: chrono::DateTime<chrono::Utc>,
     resolution: Duration,
     horizon: Duration,
@@ -995,7 +1008,7 @@ fn forecast_metadata(
         owner_category: item.owner_category,
         time_series_type,
         name: item.name.clone(),
-        data_hash: array_hash(data),
+        data_hash,
         initial_timestamp: Some(initial_timestamp),
         resolution: Some(resolution),
         length: Some(data.length()),
