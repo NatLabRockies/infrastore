@@ -251,18 +251,15 @@ fn numpy_from_typed<'py>(
 pub struct PyDeterministic {
     inner: core_lib::Deterministic,
     name: String,
-    scaling_factor_multiplier: Option<String>,
 }
 
 #[pymethods]
 impl PyDeterministic {
     /// Build a `Deterministic` forecast. `data` is a numpy array of shape
-    /// `[H, count, *E]`. `name` is required; `scaling_factor_multiplier` is an
-    /// optional association attribute carried on the object.
+    /// `[H, count, *E]`. `name` is required.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, data, name,
-        scaling_factor_multiplier=None
+        initial_timestamp, resolution, horizon, interval, count, data, name
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -273,7 +270,6 @@ impl PyDeterministic {
         count: usize,
         data: &Bound<'_, PyAny>,
         name: String,
-        scaling_factor_multiplier: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pydelta_to_chrono(&resolution)?;
         let horizon = pydelta_to_chrono(&horizon)?;
@@ -288,21 +284,12 @@ impl PyDeterministic {
             typed,
         )
         .map_err(InvalidParameterError::new_err)?;
-        Ok(Self {
-            inner,
-            name,
-            scaling_factor_multiplier,
-        })
+        Ok(Self { inner, name })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.name.clone()
-    }
-
-    #[getter]
-    fn scaling_factor_multiplier(&self) -> Option<String> {
-        self.scaling_factor_multiplier.clone()
     }
 
     #[getter]
@@ -356,18 +343,15 @@ impl PyDeterministic {
 pub struct PyProbabilistic {
     inner: core_lib::Probabilistic,
     name: String,
-    scaling_factor_multiplier: Option<String>,
 }
 
 #[pymethods]
 impl PyProbabilistic {
     /// Build a `Probabilistic` forecast. `data` is a numpy array of shape
-    /// `[num_percentiles, H, count, *E]`. `name` is required;
-    /// `scaling_factor_multiplier` is an optional association attribute.
+    /// `[num_percentiles, H, count, *E]`. `name` is required.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, percentiles, data, name,
-        scaling_factor_multiplier=None
+        initial_timestamp, resolution, horizon, interval, count, percentiles, data, name
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -379,7 +363,6 @@ impl PyProbabilistic {
         percentiles: Vec<f64>,
         data: &Bound<'_, PyAny>,
         name: String,
-        scaling_factor_multiplier: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pydelta_to_chrono(&resolution)?;
         let horizon = pydelta_to_chrono(&horizon)?;
@@ -395,21 +378,12 @@ impl PyProbabilistic {
             typed,
         )
         .map_err(InvalidParameterError::new_err)?;
-        Ok(Self {
-            inner,
-            name,
-            scaling_factor_multiplier,
-        })
+        Ok(Self { inner, name })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.name.clone()
-    }
-
-    #[getter]
-    fn scaling_factor_multiplier(&self) -> Option<String> {
-        self.scaling_factor_multiplier.clone()
     }
 
     #[getter]
@@ -469,19 +443,16 @@ impl PyProbabilistic {
 pub struct PyScenarios {
     inner: core_lib::Scenarios,
     name: String,
-    scaling_factor_multiplier: Option<String>,
 }
 
 #[pymethods]
 impl PyScenarios {
     /// Build a `Scenarios` forecast. `data` is a numpy array of shape
     /// `[scenario_count, H, count, *E]`; `scenario_count` is taken from the
-    /// leading axis. `name` is required; `scaling_factor_multiplier` is an
-    /// optional association attribute.
+    /// leading axis. `name` is required.
     #[new]
     #[pyo3(signature = (
-        initial_timestamp, resolution, horizon, interval, count, data, name,
-        scaling_factor_multiplier=None
+        initial_timestamp, resolution, horizon, interval, count, data, name
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -492,7 +463,6 @@ impl PyScenarios {
         count: usize,
         data: &Bound<'_, PyAny>,
         name: String,
-        scaling_factor_multiplier: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pydelta_to_chrono(&resolution)?;
         let horizon = pydelta_to_chrono(&horizon)?;
@@ -511,21 +481,12 @@ impl PyScenarios {
             typed,
         )
         .map_err(InvalidParameterError::new_err)?;
-        Ok(Self {
-            inner,
-            name,
-            scaling_factor_multiplier,
-        })
+        Ok(Self { inner, name })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.name.clone()
-    }
-
-    #[getter]
-    fn scaling_factor_multiplier(&self) -> Option<String> {
-        self.scaling_factor_multiplier.clone()
     }
 
     #[getter]
@@ -589,39 +550,30 @@ impl PyScenarios {
 pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
     name: String,
-    scaling_factor_multiplier: Option<String>,
 }
 
 #[pymethods]
 impl PySingleTimeSeries {
-    /// `name` is required; `scaling_factor_multiplier` is an optional
-    /// association attribute carried on the object.
+    /// `name` is required.
     #[new]
-    #[pyo3(signature = (initial_timestamp, resolution, data, name, scaling_factor_multiplier=None))]
+    #[pyo3(signature = (initial_timestamp, resolution, data, name))]
     fn new(
         initial_timestamp: DateTime<Utc>,
         resolution: Bound<'_, PyDelta>,
         data: &Bound<'_, PyAny>,
         name: String,
-        scaling_factor_multiplier: Option<String>,
     ) -> PyResult<Self> {
         let resolution = pydelta_to_chrono(&resolution)?;
         let typed = typed_array_from_numpy(data)?;
         Ok(Self {
             inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed),
             name,
-            scaling_factor_multiplier,
         })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.name.clone()
-    }
-
-    #[getter]
-    fn scaling_factor_multiplier(&self) -> Option<String> {
-        self.scaling_factor_multiplier.clone()
     }
 
     #[getter]
@@ -667,39 +619,27 @@ impl PySingleTimeSeries {
 pub struct PyNonSequentialTimeSeries {
     inner: core_lib::NonSequentialTimeSeries,
     name: String,
-    scaling_factor_multiplier: Option<String>,
 }
 
 #[pymethods]
 impl PyNonSequentialTimeSeries {
-    /// `name` is required; `scaling_factor_multiplier` is an optional
-    /// association attribute carried on the object.
+    /// `name` is required.
     #[new]
-    #[pyo3(signature = (timestamps, data, name, scaling_factor_multiplier=None))]
+    #[pyo3(signature = (timestamps, data, name))]
     fn new(
         timestamps: Vec<DateTime<Utc>>,
         data: &Bound<'_, PyAny>,
         name: String,
-        scaling_factor_multiplier: Option<String>,
     ) -> PyResult<Self> {
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::NonSequentialTimeSeries::new(timestamps, typed)
             .map_err(InvalidParameterError::new_err)?;
-        Ok(Self {
-            inner,
-            name,
-            scaling_factor_multiplier,
-        })
+        Ok(Self { inner, name })
     }
 
     #[getter]
     fn name(&self) -> String {
         self.name.clone()
-    }
-
-    #[getter]
-    fn scaling_factor_multiplier(&self) -> Option<String> {
-        self.scaling_factor_multiplier.clone()
     }
 
     #[getter]
@@ -825,9 +765,8 @@ impl PyStore {
         self.inner.read_only()
     }
 
-    /// Add a time series. The association `name` and `scaling_factor_multiplier`
-    /// come from the time series object (`time_series.name`,
-    /// `time_series.scaling_factor_multiplier`).
+    /// Add a time series. The association `name` comes from the time series
+    /// object (`time_series.name`).
     ///
     /// `features` is a `dict[str, int|float|bool|str]`. `units` is an optional
     /// string.
@@ -842,44 +781,32 @@ impl PyStore {
         units: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
-        // `name` and `scaling_factor_multiplier` are read off the object.
-        let (data, name, scaling_factor_multiplier) =
-            if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
-                (
-                    core_lib::TimeSeriesData::SingleTimeSeries(single.inner),
-                    single.name,
-                    single.scaling_factor_multiplier,
-                )
-            } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
-                (
-                    core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner),
-                    ns.name,
-                    ns.scaling_factor_multiplier,
-                )
-            } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
-                (
-                    core_lib::TimeSeriesData::Deterministic(det.inner),
-                    det.name,
-                    det.scaling_factor_multiplier,
-                )
-            } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
-                (
-                    core_lib::TimeSeriesData::Probabilistic(prob.inner),
-                    prob.name,
-                    prob.scaling_factor_multiplier,
-                )
-            } else if let Ok(scen) = time_series.extract::<PyScenarios>() {
-                (
-                    core_lib::TimeSeriesData::Scenarios(scen.inner),
-                    scen.name,
-                    scen.scaling_factor_multiplier,
-                )
-            } else {
-                return Err(InvalidParameterError::new_err(
-                    "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
+        // `name` is read off the object.
+        let (data, name) = if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
+            (
+                core_lib::TimeSeriesData::SingleTimeSeries(single.inner),
+                single.name,
+            )
+        } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
+            (
+                core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner),
+                ns.name,
+            )
+        } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
+            (core_lib::TimeSeriesData::Deterministic(det.inner), det.name)
+        } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
+            (
+                core_lib::TimeSeriesData::Probabilistic(prob.inner),
+                prob.name,
+            )
+        } else if let Ok(scen) = time_series.extract::<PyScenarios>() {
+            (core_lib::TimeSeriesData::Scenarios(scen.inner), scen.name)
+        } else {
+            return Err(InvalidParameterError::new_err(
+                "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
                      Deterministic, Probabilistic, or Scenarios",
-                ));
-            };
+            ));
+        };
         let key = self
             .inner
             .add_time_series(
@@ -890,7 +817,6 @@ impl PyStore {
                 data,
                 features,
                 units,
-                scaling_factor_multiplier,
             )
             .map_err(map_err)?;
         Ok(PyTimeSeriesKey { inner: key })
@@ -937,64 +863,33 @@ impl PyStore {
             .inner
             .get_time_series(&key.inner, time_range)
             .map_err(map_err)?;
-        // `name` / `scaling_factor_multiplier` are per-association attributes, not
-        // part of the core data type — resolve them from the metadata (consistent
-        // with the read, which resolves the same key).
+        // `name` is a per-association attribute, not part of the core data type
+        // — resolve it from the metadata (consistent with the read, which
+        // resolves the same key).
         let meta = self.inner.get_metadata(&key.inner).map_err(map_err)?;
         let name = meta.name;
-        let scaling = meta.scaling_factor_multiplier;
         match data {
-            core_lib::TimeSeriesData::SingleTimeSeries(s) => Ok(Py::new(
-                py,
-                PySingleTimeSeries {
-                    inner: s,
-                    name,
-                    scaling_factor_multiplier: scaling,
-                },
-            )?
-            .into_any()),
-            core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => Ok(Py::new(
-                py,
-                PyNonSequentialTimeSeries {
-                    inner: s,
-                    name,
-                    scaling_factor_multiplier: scaling,
-                },
-            )?
-            .into_any()),
-            core_lib::TimeSeriesData::Deterministic(d) => Ok(Py::new(
-                py,
-                PyDeterministic {
-                    inner: d,
-                    name,
-                    scaling_factor_multiplier: scaling,
-                },
-            )?
-            .into_any()),
-            core_lib::TimeSeriesData::Probabilistic(p) => Ok(Py::new(
-                py,
-                PyProbabilistic {
-                    inner: p,
-                    name,
-                    scaling_factor_multiplier: scaling,
-                },
-            )?
-            .into_any()),
-            core_lib::TimeSeriesData::Scenarios(s) => Ok(Py::new(
-                py,
-                PyScenarios {
-                    inner: s,
-                    name,
-                    scaling_factor_multiplier: scaling,
-                },
-            )?
-            .into_any()),
+            core_lib::TimeSeriesData::SingleTimeSeries(s) => {
+                Ok(Py::new(py, PySingleTimeSeries { inner: s, name })?.into_any())
+            }
+            core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
+                Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s, name })?.into_any())
+            }
+            core_lib::TimeSeriesData::Deterministic(d) => {
+                Ok(Py::new(py, PyDeterministic { inner: d, name })?.into_any())
+            }
+            core_lib::TimeSeriesData::Probabilistic(p) => {
+                Ok(Py::new(py, PyProbabilistic { inner: p, name })?.into_any())
+            }
+            core_lib::TimeSeriesData::Scenarios(s) => {
+                Ok(Py::new(py, PyScenarios { inner: s, name })?.into_any())
+            }
         }
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
     /// `owner_uuid`, `owner_type`, `time_series_type`, `name`, `length`,
-    /// `resolution_seconds`, `features`, `units`, `scaling_factor_multiplier`.
+    /// `resolution_seconds`, `features`, `units`.
     #[pyo3(signature = (
         owner_uuid=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None
@@ -1052,10 +947,6 @@ impl PyStore {
             )?;
             d.set_item("features", features_to_dict(py, &m.features)?)?;
             d.set_item("units", m.units.clone())?;
-            d.set_item(
-                "scaling_factor_multiplier",
-                m.scaling_factor_multiplier.clone(),
-            )?;
             out.push(d);
         }
         Ok(out)

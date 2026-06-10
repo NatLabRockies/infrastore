@@ -54,7 +54,6 @@ fn fixture_store() -> Store {
             TimeSeriesData::SingleTimeSeries(s),
             features,
             Some("MW".into()),
-            None,
         )
         .unwrap();
     let s2 = series(2024, 24, 5.0);
@@ -66,7 +65,6 @@ fn fixture_store() -> Store {
             "load",
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
-            None,
             None,
         )
         .unwrap();
@@ -196,7 +194,6 @@ async fn non_sequential_round_trip_over_grpc() {
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
 
@@ -234,7 +231,6 @@ async fn dtype_preserved_over_grpc() {
             "load",
             TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(initial, resolution, data)),
             Features::new(),
-            None,
             None,
         )
         .unwrap();

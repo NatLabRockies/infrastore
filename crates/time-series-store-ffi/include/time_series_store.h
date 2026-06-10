@@ -109,7 +109,7 @@ void ts_store_free(struct TsStore *handle);
  * Add a SingleTimeSeries to the store.
  *
  * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float, or
- * bool. `logical_type`, `units`, and `scaling_expr` are optional.
+ * bool. `logical_type` and `units` are optional.
  *
  * # Safety
  *
@@ -134,7 +134,6 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             const char *logical_type,
                             const char *features_json,
                             const char *units,
-                            const char *scaling_expr,
                             struct TsKey **out_key);
 
 /**
@@ -163,7 +162,6 @@ int32_t ts_store_add_non_sequential(struct TsStore *handle,
                                     const char *logical_type,
                                     const char *features_json,
                                     const char *units,
-                                    const char *scaling_expr,
                                     struct TsKey **out_key);
 
 /**
@@ -426,7 +424,6 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               const char *logical_type,
                               const char *features_json,
                               const char *units,
-                              const char *scaling_expr,
                               struct TsKey **out_key);
 
 /**
@@ -461,7 +458,6 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    const char *logical_type,
                                    const char *features_json,
                                    const char *units,
-                                   const char *scaling_expr,
                                    struct TsKey **out_key);
 
 /**
@@ -757,29 +753,24 @@ int32_t ts_key_attributes(const struct TsKey *key,
                           uint64_t *out_features_len);
 
 /**
- * Read an association's `name` and `scaling_factor_multiplier` by key, resolved
- * through the stored metadata (`Store::get_metadata`). This surfaces the
- * per-association attributes that are not carried on the key itself — the read
- * path uses it to populate the returned time series object.
+ * Read an association's `name` by key, resolved through the stored metadata
+ * (`Store::get_metadata`). This surfaces the per-association `name` that is not
+ * carried on the key itself — the read path uses it to populate the returned
+ * time series object.
  *
- * Both strings use the probe-then-fetch convention (see [`ts_key_attributes`]).
- * An absent `scaling_factor_multiplier` reports length 0.
+ * `name` uses the probe-then-fetch convention (see [`ts_key_attributes`]).
  *
  * # Safety
  *
  * `handle` and `key` must be live handles created by this library.
- * `out_name_len` and `out_scaling_len` must each be valid for writing one
- * `u64`. `name_buf` / `scaling_buf` may be null; when non-null they must be
- * valid for writing `name_cap` / `scaling_cap` bytes respectively.
+ * `out_name_len` must be valid for writing one `u64`. `name_buf` may be null;
+ * when non-null it must be valid for writing `name_cap` bytes.
  */
 int32_t ts_store_get_association(const struct TsStore *handle,
                                  const struct TsKey *key,
                                  char *name_buf,
                                  uint64_t name_cap,
-                                 uint64_t *out_name_len,
-                                 char *scaling_buf,
-                                 uint64_t scaling_cap,
-                                 uint64_t *out_scaling_len);
+                                 uint64_t *out_name_len);
 
 /**
  * Release a `u64` dims buffer returned by `ts_store_get_forecast`.

@@ -306,7 +306,7 @@ unsafe fn build_typed_array(
 /// Add a SingleTimeSeries to the store.
 ///
 /// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float, or
-/// bool. `logical_type`, `units`, and `scaling_expr` are optional.
+/// bool. `logical_type` and `units` are optional.
 ///
 /// # Safety
 ///
@@ -333,7 +333,6 @@ pub unsafe extern "C" fn ts_store_add_single(
     logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
-    scaling_expr: *const c_char,
     out_key: *mut *mut TsKeyHandle,
 ) -> i32 {
     clear_error();
@@ -385,10 +384,6 @@ pub unsafe extern "C" fn ts_store_add_single(
         Ok(v) => v,
         Err(c) => return c,
     };
-    let scaling_expr = match unsafe { cstr_to_optional_string(scaling_expr) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
     let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
         Ok(v) => v,
         Err(c) => return c,
@@ -421,7 +416,6 @@ pub unsafe extern "C" fn ts_store_add_single(
         data: core_lib::TimeSeriesData::SingleTimeSeries(single),
         features,
         units,
-        scaling_factor_multiplier: scaling_expr,
         logical_type,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
@@ -465,7 +459,6 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
     logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
-    scaling_expr: *const c_char,
     out_key: *mut *mut TsKeyHandle,
 ) -> i32 {
     clear_error();
@@ -532,10 +525,6 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
         Ok(value) => value,
         Err(code) => return code,
     };
-    let scaling_factor_multiplier = match unsafe { cstr_to_optional_string(scaling_expr) } {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
     let logical_type = match unsafe { cstr_to_optional_string(logical_type) } {
         Ok(value) => value,
         Err(code) => return code,
@@ -548,7 +537,6 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
         data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
         features,
         units,
-        scaling_factor_multiplier,
         logical_type,
     };
     match store.inner.add_time_series_bulk(vec![request]) {
@@ -1366,7 +1354,6 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
-    scaling_expr: *const c_char,
     out_key: *mut *mut TsKeyHandle,
 ) -> i32 {
     clear_error();
@@ -1406,10 +1393,6 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         }
     };
     let units = match unsafe { cstr_to_optional_string(units) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let scaling_expr = match unsafe { cstr_to_optional_string(scaling_expr) } {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -1488,7 +1471,6 @@ pub unsafe extern "C" fn ts_store_add_forecast(
         data,
         features,
         units,
-        scaling_factor_multiplier: scaling_expr,
         logical_type,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
@@ -1536,7 +1518,6 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     logical_type: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
-    scaling_expr: *const c_char,
     out_key: *mut *mut TsKeyHandle,
 ) -> i32 {
     clear_error();
@@ -1569,10 +1550,6 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         }
     };
     let units = match unsafe { cstr_to_optional_string(units) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    let scaling_expr = match unsafe { cstr_to_optional_string(scaling_expr) } {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -1622,7 +1599,6 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
         data: core_lib::TimeSeriesData::Probabilistic(prob),
         features,
         units,
-        scaling_factor_multiplier: scaling_expr,
         logical_type,
     };
     match store.inner.add_time_series_bulk(vec![req]) {
@@ -2429,13 +2405,6 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
                     .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
             );
             o.insert(
-                "scaling_factor_multiplier".into(),
-                m.scaling_factor_multiplier
-                    .clone()
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-            );
-            o.insert(
                 "percentiles".into(),
                 m.percentiles
                     .clone()
@@ -2607,31 +2576,25 @@ pub unsafe extern "C" fn ts_key_attributes(
     TS_OK
 }
 
-/// Read an association's `name` and `scaling_factor_multiplier` by key, resolved
-/// through the stored metadata (`Store::get_metadata`). This surfaces the
-/// per-association attributes that are not carried on the key itself — the read
-/// path uses it to populate the returned time series object.
+/// Read an association's `name` by key, resolved through the stored metadata
+/// (`Store::get_metadata`). This surfaces the per-association `name` that is not
+/// carried on the key itself — the read path uses it to populate the returned
+/// time series object.
 ///
-/// Both strings use the probe-then-fetch convention (see [`ts_key_attributes`]).
-/// An absent `scaling_factor_multiplier` reports length 0.
+/// `name` uses the probe-then-fetch convention (see [`ts_key_attributes`]).
 ///
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library.
-/// `out_name_len` and `out_scaling_len` must each be valid for writing one
-/// `u64`. `name_buf` / `scaling_buf` may be null; when non-null they must be
-/// valid for writing `name_cap` / `scaling_cap` bytes respectively.
+/// `out_name_len` must be valid for writing one `u64`. `name_buf` may be null;
+/// when non-null it must be valid for writing `name_cap` bytes.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_association(
     handle: *const TsStoreHandle,
     key: *const TsKeyHandle,
     name_buf: *mut c_char,
     name_cap: u64,
     out_name_len: *mut u64,
-    scaling_buf: *mut c_char,
-    scaling_cap: u64,
-    out_scaling_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -2648,7 +2611,7 @@ pub unsafe extern "C" fn ts_store_get_association(
             return TS_ERR_NULL_POINTER;
         }
     };
-    if out_name_len.is_null() || out_scaling_len.is_null() {
+    if out_name_len.is_null() {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
@@ -2656,10 +2619,8 @@ pub unsafe extern "C" fn ts_store_get_association(
         Ok(m) => m,
         Err(e) => return map_core_error(e),
     };
-    let scaling = meta.scaling_factor_multiplier.unwrap_or_default();
     unsafe {
         write_str_out(&meta.name, name_buf, name_cap, out_name_len);
-        write_str_out(&scaling, scaling_buf, scaling_cap, out_scaling_len);
     }
     TS_OK
 }

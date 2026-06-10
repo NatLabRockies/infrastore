@@ -63,7 +63,6 @@ impl Store {
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
-        scaling_factor_multiplier: Option<String>,
     ) -> Result<TimeSeriesKey>;
 
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>>;
@@ -143,7 +142,7 @@ let forecast = Deterministic::new(
 let key = store.add_time_series(
     owner_uuid, owner_type, OwnerCategory::Component, name,
     TimeSeriesData::Deterministic(forecast),
-    features, units, scaling_factor_multiplier,
+    features, units,
 )?;
 ```
 
@@ -367,9 +366,9 @@ canonicalizes `NaN` for hashing and equality.
 
 The full record returned by `list_time_series` and `get_metadata`: owner fields, `time_series_type`,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
-`length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `scaling_factor_multiplier`,
-`units`, `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing:
-`dtype: Dtype`, `element_shape: Vec<usize>`, and `logical_type: Option<String>`.
+`length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `units`,
+`percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
+`element_shape: Vec<usize>`, and `logical_type: Option<String>`.
 
 ### `ListFilter`
 

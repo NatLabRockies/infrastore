@@ -82,7 +82,6 @@ pub struct AddRequest {
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
-    pub scaling_factor_multiplier: Option<String>,
     /// Opaque logical-type label for domain reconstruction (binding-owned).
     pub logical_type: Option<String>,
 }
@@ -192,7 +191,6 @@ impl Store {
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
-        scaling_factor_multiplier: Option<String>,
     ) -> Result<TimeSeriesKey> {
         self.add_time_series_bulk(vec![AddRequest {
             owner_uuid: owner_uuid.to_string(),
@@ -202,7 +200,6 @@ impl Store {
             data,
             features,
             units,
-            scaling_factor_multiplier,
             logical_type: None,
         }])
         .map(|mut keys| keys.remove(0))
@@ -244,7 +241,6 @@ impl Store {
                             count: None,
                             timestamps: None,
                             features: item.features.clone(),
-                            scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
                             units: item.units.clone(),
                             percentiles: None,
                             dtype: single.data.dtype,
@@ -282,7 +278,6 @@ impl Store {
                             count: None,
                             timestamps: Some(non_sequential.timestamps.clone()),
                             features: item.features.clone(),
-                            scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
                             units: item.units.clone(),
                             percentiles: None,
                             dtype: non_sequential.data.dtype,
@@ -1009,7 +1004,6 @@ fn forecast_metadata(
         count: Some(count),
         timestamps: None,
         features: item.features.clone(),
-        scaling_factor_multiplier: item.scaling_factor_multiplier.clone(),
         units: item.units.clone(),
         percentiles,
         dtype: data.dtype,

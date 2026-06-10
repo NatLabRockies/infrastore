@@ -53,7 +53,6 @@ fn add_single(store: &mut Store, owner: &str, s: SingleTimeSeries) -> TimeSeries
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,
-            None,
         )
         .unwrap()
 }
@@ -482,7 +481,6 @@ fn non_sequential_boundary_semantics() {
                         "events",
                         TimeSeriesData::NonSequentialTimeSeries(series),
                         Features::new(),
-                        None,
                         None,
                     )
                     .unwrap()

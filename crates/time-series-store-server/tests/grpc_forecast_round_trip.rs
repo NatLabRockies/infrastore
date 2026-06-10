@@ -50,7 +50,6 @@ fn add_time_series(store: &mut Store, owner: &str, data: TimeSeriesData) {
             data,
             Features::new(),
             None,
-            None,
         )
         .unwrap();
 }

@@ -25,7 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         TimeSeriesData::SingleTimeSeries(ts),
         Features::new(),
         Some("MW".into()),
-        None,
     )?;
 
     let got = store.get_time_series(&key, None)?;

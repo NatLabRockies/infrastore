@@ -147,7 +147,6 @@ fn add_forecast(
                     )),
                     Features::new(),
                     None,
-                    None,
                 )
                 .unwrap();
             store
@@ -171,7 +170,6 @@ fn add_forecast(
             name,
             data,
             Features::new(),
-            None,
             None,
         )
         .unwrap()

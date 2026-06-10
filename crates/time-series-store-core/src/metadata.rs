@@ -120,10 +120,10 @@ impl MetadataStore {
             "INSERT INTO time_series_associations
              (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution_ms, length, horizon_ms, interval_ms, count,
-              timestamps_json, scaling_factor, units, percentiles_json,
+              timestamps_json, units, percentiles_json,
               dtype, element_shape, logical_type, features_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17, ?18, ?19)",
             params![
                 meta.owner_uuid,
                 meta.owner_type,
@@ -138,7 +138,6 @@ impl MetadataStore {
                 interval_ms,
                 meta.count.map(|c| c as i64),
                 timestamps_json,
-                meta.scaling_factor_multiplier,
                 meta.units,
                 percentiles_json,
                 meta.dtype.as_str(),
@@ -286,7 +285,7 @@ impl MetadataStore {
         let mut sql = String::from(
             "SELECT id, owner_uuid, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution_ms, length, horizon_ms,
-                    interval_ms, count, timestamps_json, scaling_factor, units, percentiles_json,
+                    interval_ms, count, timestamps_json, units, percentiles_json,
                     dtype, element_shape, logical_type
              FROM time_series_associations WHERE 1=1",
         );
@@ -519,7 +518,6 @@ struct MetaRow {
     interval: Option<Duration>,
     count: Option<usize>,
     timestamps: Option<Vec<DateTime<Utc>>>,
-    scaling_factor: Option<String>,
     units: Option<String>,
     percentiles: Option<Vec<f64>>,
     dtype: crate::types::array::Dtype,
@@ -544,7 +542,6 @@ impl MetaRow {
             count: self.count,
             timestamps: self.timestamps,
             features,
-            scaling_factor_multiplier: self.scaling_factor,
             units: self.units,
             percentiles: self.percentiles,
             dtype: self.dtype,
@@ -569,12 +566,11 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let interval_ms: Option<i64> = row.get(11)?;
     let count: Option<i64> = row.get(12)?;
     let timestamps_json: Option<String> = row.get(13)?;
-    let scaling_factor: Option<String> = row.get(14)?;
-    let units: Option<String> = row.get(15)?;
-    let percentiles_json: Option<String> = row.get(16)?;
-    let dtype_str: String = row.get(17)?;
-    let element_shape_json: Option<String> = row.get(18)?;
-    let logical_type: Option<String> = row.get(19)?;
+    let units: Option<String> = row.get(14)?;
+    let percentiles_json: Option<String> = row.get(15)?;
+    let dtype_str: String = row.get(16)?;
+    let element_shape_json: Option<String> = row.get(17)?;
+    let logical_type: Option<String> = row.get(18)?;
 
     let owner_category = OwnerCategory::parse(&owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -627,12 +623,12 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
         .map(|s| serde_json::from_str::<Vec<f64>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(16, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let dtype = crate::types::array::Dtype::parse(&dtype_str).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            17,
+            16,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -644,7 +640,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
         .map(|s| serde_json::from_str::<Vec<usize>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(e))
         })?
         .unwrap_or_default();
 
@@ -664,7 +660,6 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             interval: interval_ms.map(ms_to_duration),
             count: count.map(|c| c as usize),
             timestamps,
-            scaling_factor,
             units,
             percentiles,
             dtype,

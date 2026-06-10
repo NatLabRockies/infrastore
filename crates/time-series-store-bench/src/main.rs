@@ -200,7 +200,6 @@ fn make_sts_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 )),
                 features: Features::default(),
                 units: Some("MW".to_string()),
-                scaling_factor_multiplier: None,
                 logical_type: None,
             }
         })
@@ -228,7 +227,6 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 data: TimeSeriesData::Deterministic(det),
                 features: Features::default(),
                 units: Some("MW".to_string()),
-                scaling_factor_multiplier: None,
                 logical_type: None,
             }
         })

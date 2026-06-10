@@ -22,7 +22,6 @@ using TimeSeriesStore
     @test got.initial_timestamp == initial
     @test got.data == values
     @test got.name == "load"
-    @test got.scaling_factor_multiplier === nothing
     @test length(got.data) == 24
 
     # The same series is reachable attribute-addressed (both conventions unified).
@@ -44,34 +43,6 @@ using TimeSeriesStore
     @test has_time_series(store, key) == false
 
     @test_throws TimeSeriesStore.NotFoundError get_time_series(store, key)
-end
-
-@testset "name + scaling_factor_multiplier round-trip" begin
-    store = Store(in_memory=true)
-    t0 = DateTime(2024, 1, 1)
-    res = Hour(1)
-    values = collect(1.0:6.0)
-    # name is required on the struct; scaling_factor_multiplier is optional.
-    ts = SingleTimeSeries(t0, res, values, "load"; scaling_factor_multiplier="get_max_active_power")
-    key = add_time_series!(store, "sfm-owner", "Generator", Component, ts)
-
-    # Key-based read preserves both attributes.
-    got = get_time_series(store, key)
-    @test got.name == "load"
-    @test got.scaling_factor_multiplier == "get_max_active_power"
-
-    # Attribute-based read does too.
-    got_attr = get_time_series(SingleTimeSeries, store, "sfm-owner", "load"; resolution=res)
-    @test got_attr.name == "load"
-    @test got_attr.scaling_factor_multiplier == "get_max_active_power"
-
-    # The same array reused under a different name (features-like reuse).
-    ts2 = SingleTimeSeries(t0, res, values, "wind")
-    add_time_series!(store, "sfm-owner-2", "Generator", Component, ts2)
-    other = get_time_series(SingleTimeSeries, store, "sfm-owner-2", "wind"; resolution=res)
-    @test other.name == "wind"
-    @test other.scaling_factor_multiplier === nothing
-    @test other.data == values
 end
 
 @testset "non-sequential round-trip" begin
@@ -191,7 +162,7 @@ end
 
     key = add_time_series!(
         store, "det-owner", "Generator", Component,
-        Deterministic(t0, res, hor, ivl, count, data, "pf"; scaling_factor_multiplier="sfm"),
+        Deterministic(t0, res, hor, ivl, count, data, "pf"),
     )
 
     fc = get_time_series(Deterministic, store, "det-owner", "pf")
@@ -204,14 +175,12 @@ end
     @test eltype(fc.data) == Float64
     @test fc.data == data
     @test fc.name == "pf"
-    @test fc.scaling_factor_multiplier == "sfm"
 
     # The same forecast is reachable key-based (both conventions unified).
     fc_key = get_time_series(Deterministic, store, key)
     @test fc_key.count == count
     @test fc_key.data == data
     @test fc_key.name == "pf"
-    @test fc_key.scaling_factor_multiplier == "sfm"
 end
 
 @testset "Deterministic forecast window-selected read" begin

@@ -37,7 +37,6 @@ fn add_and_get_round_trip() {
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             Some("MW".into()),
-            None,
         )
         .unwrap();
 
@@ -63,7 +62,6 @@ fn duplicate_key_rejected() {
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
 
@@ -75,7 +73,6 @@ fn duplicate_key_rejected() {
             "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
             None,
         )
         .unwrap_err();
@@ -97,7 +94,6 @@ fn features_disambiguate_keys() {
             TimeSeriesData::SingleTimeSeries(s1.clone()),
             features_with_year(2030),
             None,
-            None,
         )
         .unwrap();
     store
@@ -108,7 +104,6 @@ fn features_disambiguate_keys() {
             "load",
             TimeSeriesData::SingleTimeSeries(s2.clone()),
             features_with_year(2035),
-            None,
             None,
         )
         .unwrap();
@@ -145,7 +140,6 @@ fn deduplication_via_content_addressing() {
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
     store
@@ -156,7 +150,6 @@ fn deduplication_via_content_addressing() {
             "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
             None,
         )
         .unwrap();
@@ -183,7 +176,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
     let k2 = store
@@ -194,7 +186,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
             None,
         )
         .unwrap();
@@ -228,7 +219,6 @@ fn bulk_add_atomic_rollback() {
             TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
 
@@ -242,7 +232,6 @@ fn bulk_add_atomic_rollback() {
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             features: Features::new(),
             units: None,
-            scaling_factor_multiplier: None,
             logical_type: None,
         },
         AddRequest {
@@ -253,7 +242,6 @@ fn bulk_add_atomic_rollback() {
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
             features: Features::new(),
             units: None,
-            scaling_factor_multiplier: None,
             logical_type: None,
         },
     ];
@@ -284,7 +272,6 @@ fn time_range_slicing() {
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
 
@@ -312,7 +299,6 @@ fn clear_by_owner() {
                 "load",
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
-                None,
                 None,
             )
             .unwrap();
@@ -348,7 +334,6 @@ fn read_only_blocks_writes() {
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
                 None,
-                None,
             )
             .unwrap();
     }
@@ -364,7 +349,6 @@ fn read_only_blocks_writes() {
             "load",
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
             None,
         )
         .unwrap_err();
@@ -394,7 +378,6 @@ fn distinct_resolutions_returned_sorted() {
                 "load",
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
                 None,
             )
             .unwrap();
@@ -432,7 +415,6 @@ fn non_sequential_round_trip_and_time_slice() {
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
             Some("MW".into()),
-            None,
         )
         .unwrap();
 
@@ -490,7 +472,6 @@ fn duplicate_non_sequential_key_is_rejected() {
             "events",
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
-            None,
             None,
         );
         if values[0] == 1.0 {

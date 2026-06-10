@@ -29,7 +29,6 @@ fn make_store() -> Store {
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
     store

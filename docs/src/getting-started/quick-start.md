@@ -24,8 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data = TypedArray::from_f64(vec![24], &values);
     let ts = SingleTimeSeries::new(initial, resolution, data);
 
-    // The owner is identified by a UUID-like string plus a category. Features,
-    // units, and a scaling expression are optional.
+    // The owner is identified by a UUID-like string plus a category. Features
+    // and units are optional.
     let key = store.add_time_series(
         "42",                                       // owner_uuid
         "Generator",                                // owner_type
@@ -34,7 +34,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         TimeSeriesData::SingleTimeSeries(ts),
         Features::new(),                            // no features
         Some("MW".into()),                          // units
-        None,                                       // scaling_factor_multiplier
     )?;
 
     let got = store.get_time_series(&key, None)?;

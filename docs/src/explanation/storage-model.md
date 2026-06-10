@@ -85,7 +85,7 @@ The catalog holds two tables:
 - **`time_series_associations`** — one row per `(owner, name, resolution, features)` association,
   including the `data_hash` that links it to a packed column or standalone variable, the array
   typing (`dtype`, `element_shape`, `logical_type`), plus temporal fields, forecast parameters
-  (`horizon`, `interval`, `count`, `percentiles`), units, and the scaling expression.
+  (`horizon`, `interval`, `count`, `percentiles`), and units.
 - **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
   a `value_kind` discriminator.
 

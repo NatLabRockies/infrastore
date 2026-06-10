@@ -43,8 +43,7 @@ The store is finalized automatically, but you can release it eagerly with `close
 ## Add a Series
 
 ```julia
-# `name` ("load") is a required field on the struct; pass
-# scaling_factor_multiplier=... for the optional scaling expression.
+# `name` ("load") is a required field on the struct.
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
 
 key = add_time_series!(
@@ -52,7 +51,7 @@ key = add_time_series!(
     "42",
     "Generator",
     Component,
-    ts;                                   # name / scaling_factor_multiplier come from ts
+    ts;                                   # name comes from ts
     features = Dict("model_year" => 2030),
     units = "MW",
 )
@@ -120,7 +119,7 @@ key = add_time_series!(
     "42",
     "Generator",
     Component,
-    fc;                         # name / scaling_factor_multiplier come from fc
+    fc;                         # name comes from fc
     units = "MW",
 )
 

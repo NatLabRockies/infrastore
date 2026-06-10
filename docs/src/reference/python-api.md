@@ -65,7 +65,7 @@ def add_time_series(
     features: dict[str, int | float | bool | str] | None = None,
     units: str | None = None,
 ) -> TimeSeriesKey: ...
-# `name` and `scaling_factor_multiplier` come from the time_series object
+# `name` comes from the time_series object
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
 
 def transform_single_time_series(self, horizon: timedelta, interval: timedelta) -> int: ...
@@ -109,9 +109,9 @@ def flush(self) -> None: ...
   matches the stored type.
 - **`list_time_series`** returns a list of dicts, each with the keys: `owner_uuid`, `owner_type`,
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`,
-  `resolution_seconds`, `timestamps`, `features`, `units`, `scaling_factor_multiplier`. `timestamps`
-  is a list of RFC 3339 strings for non-sequential series and `None` otherwise. The `features`
-  filter is a subset match — rows must contain at least the given pairs.
+  `resolution_seconds`, `timestamps`, `features`, `units`. `timestamps` is a list of RFC 3339
+  strings for non-sequential series and `None` otherwise. The `features` filter is a subset match —
+  rows must contain at least the given pairs.
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
 - **`get_forecast_parameters`** returns
@@ -132,16 +132,14 @@ SingleTimeSeries(
     resolution: timedelta,
     data: numpy.ndarray,   # shape (length,) or (length, k1, ...)
     name: str,
-    scaling_factor_multiplier: str | None = None,
 )
 ```
 
 Read-only properties: `initial_timestamp -> datetime`, `resolution -> timedelta`, `length -> int`,
-`data -> numpy.ndarray`, `name -> str`, `scaling_factor_multiplier -> str | None`. `name` is a
-required association attribute (the same array may be stored under different names);
-`scaling_factor_multiplier` is optional. Both are read off the object by `add_time_series` and
-populated on `get_time_series`. The array's dtype (one of `float64`, `float32`, `int64`, `int32`,
-`uint64`, `bool`) and per-step element shape are preserved through a round-trip.
+`data -> numpy.ndarray`, `name -> str`. `name` is a required association attribute (the same array
+may be stored under different names). It is read off the object by `add_time_series` and populated
+on `get_time_series`. The array's dtype (one of `float64`, `float32`, `int64`, `int32`, `uint64`,
+`bool`) and per-step element shape are preserved through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
@@ -150,13 +148,12 @@ NonSequentialTimeSeries(
     timestamps: list[datetime],
     data: numpy.ndarray,
     name: str,
-    scaling_factor_multiplier: str | None = None,
 )
 ```
 
-Read-only properties: `timestamps`, `length`, `data`, `name`, and `scaling_factor_multiplier`.
-Timestamps must be timezone-aware, strictly increasing, and match the first data dimension.
-`get_time_series` returns this class for a non-sequential key.
+Read-only properties: `timestamps`, `length`, `data`, and `name`. Timestamps must be timezone-aware,
+strictly increasing, and match the first data dimension. `get_time_series` returns this class for a
+non-sequential key.
 
 ## `TimeSeriesKey`
 
@@ -200,8 +197,8 @@ key = store.add_time_series("42", "Generator", OwnerCategory.Component, ts, unit
 ```
 
 `data` is a NumPy array in the canonical shape for the forecast type, where `H` is
-`horizon / resolution`. Every forecast also takes a required `name` and optional
-`scaling_factor_multiplier` (after `data`), exposed as read-only properties:
+`horizon / resolution`. Every forecast also takes a required `name` (after `data`), exposed as a
+read-only property:
 
 | Type            | `data` shape                       | extra constructor arg                 |
 | --------------- | ---------------------------------- | ------------------------------------- |
@@ -220,7 +217,6 @@ Deterministic(
     count: int,
     data: numpy.ndarray,
     name: str,
-    scaling_factor_multiplier: str | None = None,
 )
 ```
 
@@ -234,7 +230,6 @@ forecast.interval          -> timedelta
 forecast.count             -> int
 forecast.data              -> numpy.ndarray
 forecast.name              -> str
-forecast.scaling_factor_multiplier -> str | None
 ```
 
 ### `Probabilistic`
@@ -249,7 +244,6 @@ Probabilistic(
     percentiles: list[float],
     data: numpy.ndarray,
     name: str,
-    scaling_factor_multiplier: str | None = None,
 )
 ```
 
@@ -270,7 +264,6 @@ Scenarios(
     count: int,
     data: numpy.ndarray,   # leading axis is scenario_count
     name: str,
-    scaling_factor_multiplier: str | None = None,
 )
 ```
 

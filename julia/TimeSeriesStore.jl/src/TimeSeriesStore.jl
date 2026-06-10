@@ -149,9 +149,9 @@ function _row_major_bytes(arr::AbstractArray)
     return collect(reinterpret(UInt8, flat))
 end
 
-# `name` and `scaling_factor_multiplier` are per-association attributes carried on
-# the binding structs (matching InfrastructureSystems.jl); they are not part of
-# the deduplicated core data type. `name` is required; the rest are optional.
+# `name` is a per-association attribute carried on the binding structs (matching
+# InfrastructureSystems.jl); it is not part of the deduplicated core data type.
+# `name` is required.
 _maybe_string(::Nothing) = nothing
 _maybe_string(s::AbstractString) = String(s)
 
@@ -164,17 +164,14 @@ struct SingleTimeSeries
     data              :: AbstractArray
     "Association name (required; the same array may be stored under different names)."
     name              :: String
-    "Optional scaling-factor-multiplier expression."
-    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type      :: Union{Nothing,String}
 end
 
 SingleTimeSeries(initial, resolution, data::AbstractArray, name::AbstractString;
-                 scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
                  logical_type::Union{Nothing,AbstractString}=nothing) =
     SingleTimeSeries(initial, resolution, data, String(name),
-                     _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+                     _maybe_string(logical_type))
 
 # ---- Non-sequential time series -------------------------------------------
 
@@ -184,20 +181,17 @@ struct NonSequentialTimeSeries
     data        :: AbstractVector
     "Association name (required)."
     name        :: String
-    "Optional scaling-factor-multiplier expression."
-    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type :: Union{Nothing,String}
 
     function NonSequentialTimeSeries(timestamps, data, name::AbstractString;
-            scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
             logical_type::Union{Nothing,AbstractString}=nothing)
         length(timestamps) == length(data) ||
             throw(InvalidParameterError("timestamp count must match data length"))
         all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
             throw(InvalidParameterError("timestamps must be strictly increasing"))
         new(Vector{DateTime}(timestamps), data, String(name),
-            _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+            _maybe_string(logical_type))
     end
 end
 
@@ -220,18 +214,15 @@ struct Deterministic
     data              :: AbstractArray
     "Association name (required)."
     name              :: String
-    "Optional scaling-factor-multiplier expression."
-    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type      :: Union{Nothing,String}
 end
 
 Deterministic(initial, resolution, horizon, interval, count, data::AbstractArray,
               name::AbstractString;
-              scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
               logical_type::Union{Nothing,AbstractString}=nothing) =
     Deterministic(initial, resolution, horizon, interval, Int(count), data, String(name),
-                  _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+                  _maybe_string(logical_type))
 
 struct Probabilistic
     initial_timestamp :: DateTime
@@ -244,19 +235,16 @@ struct Probabilistic
     data              :: AbstractArray
     "Association name (required)."
     name              :: String
-    "Optional scaling-factor-multiplier expression."
-    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type      :: Union{Nothing,String}
 end
 
 Probabilistic(initial, resolution, horizon, interval, count, percentiles, data::AbstractArray,
               name::AbstractString;
-              scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
               logical_type::Union{Nothing,AbstractString}=nothing) =
     Probabilistic(initial, resolution, horizon, interval, Int(count),
                   Vector{Float64}(percentiles), data, String(name),
-                  _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+                  _maybe_string(logical_type))
 
 struct Scenarios
     initial_timestamp :: DateTime
@@ -269,8 +257,6 @@ struct Scenarios
     data              :: AbstractArray
     "Association name (required)."
     name              :: String
-    "Optional scaling-factor-multiplier expression."
-    scaling_factor_multiplier :: Union{Nothing,String}
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type      :: Union{Nothing,String}
 end
@@ -278,10 +264,9 @@ end
 # `scenario_count` defaults to the leading axis of `data`.
 Scenarios(initial, resolution, horizon, interval, count, data::AbstractArray,
           name::AbstractString;
-          scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
           logical_type::Union{Nothing,AbstractString}=nothing) =
     Scenarios(initial, resolution, horizon, interval, Int(count), size(data, 1), data,
-              String(name), _maybe_string(scaling_factor_multiplier), _maybe_string(logical_type))
+              String(name), _maybe_string(logical_type))
 
 """
     DeterministicSingleTimeSeries
@@ -398,9 +383,8 @@ end
                      features=Dict(), units=nothing)
 
 `owner_uuid` identifies the owning component / supplemental attribute (a string,
-typically the stringified UUID). The association `name` and
-`scaling_factor_multiplier` come from the time series object (`ts.name`,
-`ts.scaling_factor_multiplier`).
+typically the stringified UUID). The association `name` comes from the time
+series object (`ts.name`).
 """
 function add_time_series!(
     store::Store,
@@ -413,7 +397,6 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     name = ts.name
-    scaling_factor_multiplier = ts.scaling_factor_multiplier
     initial_ms = _to_unix_ms(ts.initial_timestamp)
     resolution_ms = _resolution_to_ms(ts.resolution)
     dtype = _dtype_code(eltype(ts.data))
@@ -421,7 +404,6 @@ function add_time_series!(
     bytes = _row_major_bytes(ts.data)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     units_ptr = units === nothing ? C_NULL : pointer(String(units))
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : pointer(String(scaling_factor_multiplier))
     logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
 
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
@@ -429,7 +411,7 @@ function add_time_series!(
         (:ts_store_add_single, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64,
          Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
-         Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+         Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle,
         owner_uuid,
         owner_type,
@@ -445,7 +427,6 @@ function add_time_series!(
         logical_ptr,
         features_json,
         units_ptr,
-        scaling_ptr,
         out_key,
     )
     _check(code)
@@ -463,25 +444,22 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     name = ts.name
-    scaling_factor_multiplier = ts.scaling_factor_multiplier
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[length(ts.data)]
     bytes = _row_major_bytes(ts.data)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     units_ptr = units === nothing ? C_NULL : pointer(String(units))
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL :
-                  pointer(String(scaling_factor_multiplier))
     logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_store_add_non_sequential, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Ptr{Int64}, UInt64,
          Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
-         Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+         Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, Int32(Int(owner_category)), name,
         timestamps, UInt64(length(timestamps)), dtype, UInt64(1), dims, bytes,
-        UInt64(length(bytes)), logical_ptr, features_json, units_ptr, scaling_ptr,
+        UInt64(length(bytes)), logical_ptr, features_json, units_ptr,
         out_key,
     )
     _check(code)
@@ -706,8 +684,7 @@ function get_time_series(store::Store, key::TimeSeriesKey)
     # resolution_ms is integer milliseconds.
     resolution = Millisecond(out_resolution[])
     assoc = _get_association(store, key)
-    return SingleTimeSeries(initial, resolution, data, assoc.name;
-                            scaling_factor_multiplier=assoc.scaling_factor_multiplier)
+    return SingleTimeSeries(initial, resolution, data, assoc.name)
 end
 
 function get_time_series(
@@ -744,8 +721,7 @@ function get_time_series(
     dtype = _julia_dtype(out_dtype[])
     values = collect(reinterpret(dtype, bytes))
     assoc = _get_association(store, key)
-    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), values, assoc.name;
-                                   scaling_factor_multiplier=assoc.scaling_factor_multiplier)
+    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), values, assoc.name)
 end
 
 # ---- Attribute-addressed static reads --------------------------------------
@@ -777,34 +753,30 @@ function _make_key(
     return TimeSeriesKey(out_key[])
 end
 
-# Fetch the per-association `name` and `scaling_factor_multiplier` for a key (the
-# attributes the read FFIs don't return), to populate the struct on read.
+# Fetch the per-association `name` for a key (the attribute the read FFIs don't
+# return), to populate the struct on read.
 function _get_association(store::Store, key::TimeSeriesKey)
     name_len = Ref{UInt64}(0)
-    scal_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_association, lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, key.handle, C_NULL, UInt64(0), name_len, C_NULL, UInt64(0), scal_len,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle, key.handle, C_NULL, UInt64(0), name_len,
     )
     _check(code)
     name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
-    scal_buf = Vector{UInt8}(undef, Int(scal_len[]) + 1)
     code = ccall(
         (:ts_store_get_association, lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
         store.handle, key.handle,
         name_buf, UInt64(length(name_buf)), name_len,
-        scal_buf, UInt64(length(scal_buf)), scal_len,
     )
     _check(code)
     name = String(name_buf[1:Int(name_len[])])
-    scaling = Int(scal_len[]) == 0 ? nothing : String(scal_buf[1:Int(scal_len[])])
-    return (name=name, scaling_factor_multiplier=scaling)
+    return (name=name,)
 end
 
 # Association attributes for an attribute-addressed read: build the matching key,
-# then look up `name` / `scaling_factor_multiplier`.
+# then look up `name`.
 _assoc_attrs(store::Store, owner_uuid::AbstractString, name::AbstractString, ts_type::Integer;
              resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}()) =
     _get_association(store, _make_key(owner_uuid, name, ts_type; resolution=resolution, features=features))
@@ -883,8 +855,6 @@ function _decode_metadata_row(r::AbstractDict)
         interval = _row_ms(r["interval_ms"]),
         count = _row_int(r["count"]),
         features = Dict{String, Any}(r["features"]),
-        scaling_factor_multiplier = r["scaling_factor_multiplier"] === nothing ? nothing :
-                                    String(r["scaling_factor_multiplier"]),
         percentiles = pcts === nothing ? nothing : Float64[Float64(p) for p in pcts],
         logical_type = r["logical_type"] === nothing ? nothing : String(r["logical_type"]),
     )
@@ -898,7 +868,7 @@ rows are returned; otherwise the whole store is listed. Each row is a
 `NamedTuple` with `owner_uuid`, `owner_type`, `owner_category`,
 `time_series_type` (the Julia type), `name`, `data_hash` (`Vector{UInt8}`),
 `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
-`features`, `scaling_factor_multiplier`, `percentiles`, and `logical_type`;
+`features`, `percentiles`, and `logical_type`;
 fields that do not apply to a row are `nothing`.
 """
 function list_metadata(store::Store; owner_uuid::Union{Nothing, AbstractString} = nothing)
@@ -1156,8 +1126,7 @@ _category_int(c::OwnerCategory) = Int32(Int(c))
     add_time_series!(store, owner_uuid, owner_type, owner_category, ts::Scenarios; ...)
 
 Add a dense forecast. `ts.data` is the canonical-shape Julia array and is stored
-as a standalone array. The association `name` / `scaling_factor_multiplier` come
-from the time series object.
+as a standalone array. The association `name` comes from the time series object.
 """
 function add_time_series!(
     store::Store,
@@ -1172,8 +1141,7 @@ function add_time_series!(
     return _add_dense_forecast!(
         store, owner_uuid, owner_type, owner_category, ts.name, TS_TYPE_DETERMINISTIC,
         ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
-        features=features, units=units,
-        scaling_factor_multiplier=ts.scaling_factor_multiplier, logical_type=logical_type,
+        features=features, units=units, logical_type=logical_type,
     )
 end
 
@@ -1190,8 +1158,7 @@ function add_time_series!(
     return _add_dense_forecast!(
         store, owner_uuid, owner_type, owner_category, ts.name, TS_TYPE_SCENARIOS,
         ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
-        features=features, units=units,
-        scaling_factor_multiplier=ts.scaling_factor_multiplier, logical_type=logical_type,
+        features=features, units=units, logical_type=logical_type,
     )
 end
 
@@ -1212,12 +1179,10 @@ function _add_dense_forecast!(
     data::AbstractArray;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    scaling_factor_multiplier::Union{Nothing,AbstractString}=nothing,
     logical_type::Union{Nothing,AbstractString}=nothing,
 )
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
     logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
@@ -1227,12 +1192,12 @@ function _add_dense_forecast!(
         (:ts_store_add_forecast, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int32, Int64, Int64, Int64, Int64,
          UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring,
-         Cstring, Ref{Ptr{Cvoid}}),
+         Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
         Int32(ts_type), _to_unix_ms(initial_timestamp), _resolution_to_ms(resolution),
         _resolution_to_ms(horizon), _resolution_to_ms(interval), UInt64(count),
         dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        logical_ptr, features_json, units_ptr, scaling_ptr, out_key,
+        logical_ptr, features_json, units_ptr, out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -1303,7 +1268,7 @@ end
     add_time_series!(store, owner_uuid, owner_type, owner_category, ts::Probabilistic; ...)
 
 Add a `Probabilistic` forecast (carries a `percentiles` vector). The association
-`name` / `scaling_factor_multiplier` come from the time series object.
+`name` comes from the time series object.
 """
 function add_time_series!(
     store::Store,
@@ -1316,7 +1281,6 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     name = ts.name
-    scaling_factor_multiplier = ts.scaling_factor_multiplier
     initial_timestamp = ts.initial_timestamp
     resolution = ts.resolution
     horizon = ts.horizon
@@ -1326,7 +1290,6 @@ function add_time_series!(
     data = ts.data
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
-    scaling_ptr = scaling_factor_multiplier === nothing ? C_NULL : String(scaling_factor_multiplier)
     logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
@@ -1336,13 +1299,13 @@ function add_time_series!(
         (:ts_store_add_probabilistic, lib_path()), Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Int64, Int64, Int64, Int64, UInt64,
          Ptr{Float64}, UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
-         Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+         Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle, owner_uuid, owner_type, _category_int(owner_category), name,
         _to_unix_ms(initial_timestamp), _resolution_to_ms(resolution),
         _resolution_to_ms(horizon), _resolution_to_ms(interval), UInt64(count),
         percentiles, UInt64(length(percentiles)),
         dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        logical_ptr, features_json, units_ptr, scaling_ptr, out_key,
+        logical_ptr, features_json, units_ptr, out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -1613,7 +1576,7 @@ function get_time_series(
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _assoc_attrs(store, owner_uuid, name, matched_type; resolution=resolution, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+                         a.name)
 end
 
 """
@@ -1640,7 +1603,7 @@ function get_time_series(
     a = _assoc_attrs(store, owner_uuid, name, TS_TYPE_DETERMINISTIC_SINGLE;
                      resolution=resolution, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+                         a.name)
 end
 
 """
@@ -1667,7 +1630,7 @@ function get_time_series(
                      resolution=resolution, features=features)
     return Probabilistic(
         r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
-        a.name; scaling_factor_multiplier=a.scaling_factor_multiplier,
+        a.name,
     )
 end
 
@@ -1695,7 +1658,7 @@ function get_time_series(
                      resolution=resolution, features=features)
     # `scenario_count` is the leading axis of the decoded data.
     return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                     a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+                     a.name)
 end
 
 # ---- Key-based forecast reads ----------------------------------------------
@@ -1722,7 +1685,7 @@ function get_time_series(
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _get_association(store, key)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+                         a.name)
 end
 
 """
@@ -1757,7 +1720,7 @@ function get_time_series(
     a = _get_association(store, key)
     return Probabilistic(
         r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
-        a.name; scaling_factor_multiplier=a.scaling_factor_multiplier,
+        a.name,
     )
 end
 
@@ -1776,7 +1739,7 @@ function get_time_series(
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _get_association(store, key)
     return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                     a.name; scaling_factor_multiplier=a.scaling_factor_multiplier)
+                     a.name)
 end
 
 

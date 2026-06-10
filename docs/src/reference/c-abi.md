@@ -25,7 +25,7 @@ consumer.
   convenience that decodes to `f64`.
 - **`logical_type`** is an optional opaque domain label passed to the add functions.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`logical_type`, `features_json`,
-  `units`, `scaling_expr`) accept `NULL`.
+  `units`) accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string.
 - **Timestamps** are `int64_t` Unix milliseconds; **resolutions/horizons/intervals** are `int64_t`
   milliseconds (`0` means unset).
@@ -74,7 +74,6 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             const char *logical_type,         /* optional */
                             const char *features_json,        /* optional */
                             const char *units,                /* optional */
-                            const char *scaling_expr,         /* optional */
                             struct TsKey **out_key);          /* owned; ts_key_free */
 
 int32_t ts_store_get_single(const struct TsStore *handle, const struct TsKey *key,
@@ -99,7 +98,7 @@ int32_t ts_store_add_non_sequential(struct TsStore *handle,
                                     int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr, uint64_t data_byte_len,
                                     const char *logical_type, const char *features_json,
-                                    const char *units, const char *scaling_expr,
+                                    const char *units,
                                     struct TsKey **out_key);
 
 int32_t ts_store_get_non_sequential(const struct TsStore *handle, const struct TsKey *key,
@@ -203,7 +202,7 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                               const uint8_t *data_ptr, uint64_t data_byte_len,
                               const char *logical_type,          /* optional */
-                              const char *features_json, const char *units, const char *scaling_expr,
+                              const char *features_json, const char *units,
                               struct TsKey **out_key);
 
 int32_t ts_store_add_probabilistic(struct TsStore *handle,
@@ -216,7 +215,7 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
                                    const char *logical_type,     /* optional */
                                    const char *features_json, const char *units,
-                                   const char *scaling_expr, struct TsKey **out_key);
+                                   struct TsKey **out_key);
 
 int32_t ts_store_transform_single_time_series(struct TsStore *handle,
                                               int64_t horizon_ms, int64_t interval_ms,

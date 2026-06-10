@@ -37,10 +37,9 @@ The store registers a finalizer; close it eagerly with `close!(store)`.
 
 ## Types
 
-Each struct carries the association `name` (required) and `scaling_factor_multiplier` (optional).
-Construct with `name` as the positional after `data`, and pass `scaling_factor_multiplier=` /
-`logical_type=` as keywords — e.g.
-`SingleTimeSeries(initial, resolution, data, name; scaling_factor_multiplier=nothing, logical_type=nothing)`.
+Each struct carries the association `name` (required). Construct with `name` as the positional after
+`data`, and pass `logical_type=` as a keyword — e.g.
+`SingleTimeSeries(initial, resolution, data, name; logical_type=nothing)`.
 
 ```julia
 struct SingleTimeSeries
@@ -48,7 +47,6 @@ struct SingleTimeSeries
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: AbstractArray   # any element type; multi-dim allowed
     name              :: String          # required association name
-    scaling_factor_multiplier :: Union{Nothing,String}
     logical_type      :: Union{Nothing,String}
 end
 
@@ -56,7 +54,6 @@ struct NonSequentialTimeSeries
     timestamps   :: Vector{DateTime}     # strictly increasing
     data         :: AbstractArray
     name         :: String
-    scaling_factor_multiplier :: Union{Nothing,String}
     logical_type :: Union{Nothing,String}
 end
 
@@ -68,7 +65,6 @@ struct Deterministic
     count             :: Integer
     data              :: AbstractArray   # (H, count, element_dims...)
     name              :: String
-    scaling_factor_multiplier :: Union{Nothing,String}
 end
 
 struct Probabilistic
@@ -80,7 +76,6 @@ struct Probabilistic
     percentiles       :: Vector{Float64}
     data              :: AbstractArray   # (num_percentiles, H, count, element_dims...)
     name              :: String
-    scaling_factor_multiplier :: Union{Nothing,String}
 end
 
 struct Scenarios
@@ -91,7 +86,6 @@ struct Scenarios
     count             :: Integer
     data              :: AbstractArray   # (scenario_count, H, count, element_dims...); scenario_count from leading axis
     name              :: String
-    scaling_factor_multiplier :: Union{Nothing,String}
 end
 
 # Marker type; never constructed. Derived via transform_single_time_series! and
@@ -112,11 +106,10 @@ end
 end
 ```
 
-Every struct carries a required `name` and an optional `scaling_factor_multiplier` (default
-`nothing`), plus an optional `logical_type` — an opaque label the binding can use to reconstruct a
-domain object on read. `add_time_series!` reads `name` / `scaling_factor_multiplier` off the object
-(they are not call arguments), so the same array can be stored under different names. `data` keeps
-its Julia element type: the binding maps it to a stored dtype (`Float64`, `Float32`, `Int64`,
+Every struct carries a required `name`, plus an optional `logical_type` — an opaque label the
+binding can use to reconstruct a domain object on read. `add_time_series!` reads `name` off the
+object (it is not a call argument), so the same array can be stored under different names. `data`
+keeps its Julia element type: the binding maps it to a stored dtype (`Float64`, `Float32`, `Int64`,
 `Int32`, `UInt64`, `Bool`) and converts to row-major bytes on the way down.
 
 ## Static Series
@@ -214,8 +207,8 @@ Dense forecasts are constructed as `Deterministic`, `Probabilistic`, or `Scenari
 dims and converts to row-major bytes, just like the static `add_time_series!` (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes).
 
-The forecast `name` / `scaling_factor_multiplier` come from the struct, e.g.
-`Deterministic(initial, resolution, horizon, interval, count, data, name; scaling_factor_multiplier=nothing)`.
+The forecast `name` comes from the struct, e.g.
+`Deterministic(initial, resolution, horizon, interval, count, data, name)`.
 
 ```julia
 add_time_series!(

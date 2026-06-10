@@ -57,7 +57,6 @@ let key = store.add_time_series(
     TimeSeriesData::SingleTimeSeries(ts),
     features,
     Some("MW".into()),                      // units
-    None,                                   // scaling_factor_multiplier
 )?;
 ```
 
@@ -77,7 +76,7 @@ let keys = store.add_time_series_bulk(vec![
     AddRequest { owner_uuid: "42".into(), owner_type: "Generator".into(),
         owner_category: OwnerCategory::Component, name: "load".into(),
         data: TimeSeriesData::SingleTimeSeries(ts_a), features: Features::new(),
-        units: Some("MW".into()), scaling_factor_multiplier: None },
+        units: Some("MW".into()) },
     // ...
 ])?;
 ```
@@ -161,7 +160,7 @@ let key = store.add_time_series(
     "42", "Generator", OwnerCategory::Component, "load_forecast",
     TimeSeriesData::Deterministic(forecast),
     Features::new(),
-    Some("MW".into()), None,          // units, scaling_factor_multiplier
+    Some("MW".into()),                // units
 )?;
 ```
 

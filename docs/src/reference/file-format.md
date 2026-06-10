@@ -128,7 +128,6 @@ One row per association between an owner and a stored array.
 | `interval_ms`       | INTEGER | Forecast interval, milliseconds; `NULL` for non-forecasts       |
 | `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                 |
 | `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (`NonSequentialTimeSeries`)   |
-| `scaling_factor`    | TEXT    | Opaque scaling expression, stored verbatim, never evaluated     |
 | `units`             | TEXT    | Free-form units label                                           |
 | `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else      |
 | `dtype`             | TEXT    | Element dtype string (`NOT NULL DEFAULT 'f64'`)                 |

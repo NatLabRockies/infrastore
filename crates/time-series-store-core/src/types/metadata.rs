@@ -110,7 +110,6 @@ pub struct TimeSeriesMetadata {
     pub timestamps: Option<Vec<DateTime<Utc>>>,
 
     pub features: Features,
-    pub scaling_factor_multiplier: Option<String>,
     pub units: Option<String>,
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,

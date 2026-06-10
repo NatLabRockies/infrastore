@@ -68,7 +68,6 @@ message TimeSeriesMetadata {
   uint64          count                     = 12;
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
-  string          scaling_factor_multiplier = 15;
   string          units                     = 16;
 }
 ```

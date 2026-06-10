@@ -159,8 +159,6 @@ is a metadata concept; the array is shared by [content addressing](./content-add
 Each association can also carry:
 
 - **`units`** — a free-form label such as `"MW"`. No dimensional analysis is performed.
-- **`scaling_factor_multiplier`** — an opaque expression string such as `"x * 1.05"`. It is stored
-  verbatim and never evaluated.
 - **`logical_type`** — an opaque, binding-owned label (e.g. `"QuadraticFunctionData"`) for
   reconstructing a domain object on read. The store never interprets it.
 

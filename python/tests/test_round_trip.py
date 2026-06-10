@@ -25,14 +25,11 @@ def make_series(
     length: int = 24,
     base: float = 100.0,
     name: str = "load",
-    scaling_factor_multiplier: str | None = None,
 ) -> SingleTimeSeries:
     initial = datetime(initial_year, 1, 1, tzinfo=timezone.utc)
     resolution = timedelta(hours=1)
     data = np.arange(length, dtype=np.float64) + base
-    return SingleTimeSeries(
-        initial, resolution, data, name, scaling_factor_multiplier=scaling_factor_multiplier
-    )
+    return SingleTimeSeries(initial, resolution, data, name)
 
 
 def test_in_memory_round_trip():
@@ -52,27 +49,7 @@ def test_in_memory_round_trip():
     assert got.length == 24
     assert got.initial_timestamp == s.initial_timestamp
     assert got.name == "load"
-    assert got.scaling_factor_multiplier is None
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
-
-
-def test_name_and_scaling_round_trip():
-    store = TimeSeriesStore.create(in_memory=True)
-    # `name` is required on the struct; `scaling_factor_multiplier` is optional.
-    s = make_series(name="load", scaling_factor_multiplier="get_max_active_power")
-    key = store.add_time_series("g", "Generator", OwnerCategory.Component, s)
-
-    got = store.get_time_series(key)
-    assert got.name == "load"
-    assert got.scaling_factor_multiplier == "get_max_active_power"
-
-    # The same array reused under a different name (features-like reuse).
-    s2 = make_series(name="wind")
-    store.add_time_series("g2", "Generator", OwnerCategory.Component, s2)
-    keys2 = store.get_time_series_keys("g2")
-    other = store.get_time_series(keys2[0])
-    assert other.name == "wind"
-    assert other.scaling_factor_multiplier is None
 
 
 def test_persistent_round_trip(tmp_path):

@@ -29,7 +29,6 @@ pub struct Descriptor {
     pub ts_type: String,
     pub dtype: String,
     pub units: Option<String>,
-    pub scaling_factor_multiplier: Option<String>,
     /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
     pub csv: Option<String>,
     #[serde(default = "default_true")]
@@ -147,7 +146,6 @@ impl Descriptor {
             data,
             features: self.features()?,
             units: self.units.clone(),
-            scaling_factor_multiplier: self.scaling_factor_multiplier.clone(),
             logical_type: None,
         })
     }

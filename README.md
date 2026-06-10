@@ -101,12 +101,12 @@ ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
     np.arange(24, dtype=np.float64) + 100,
-    "load",   # name (required); scaling_factor_multiplier=... is optional
+    "load",   # name (required)
 )
 key = store.add_time_series(
     owner_uuid="42", owner_type="Generator",
     owner_category=OwnerCategory.Component,
-    time_series=ts,   # name / scaling_factor_multiplier come from ts
+    time_series=ts,   # name comes from ts
     features={"model_year": 2030}, units="MW",
 )
 got = store.get_time_series(key)
@@ -182,13 +182,12 @@ Metadata lives in a catalog SQLite file at `<path>.sqlite`. Two artifacts ship t
 
 ## Open questions resolved for v0
 
-|                             | Decision                                                  |
-| --------------------------- | --------------------------------------------------------- |
-| Compaction trigger          | Explicit `Store::compact()` only                          |
-| Server auth                 | `none` default, `api_key` implemented, `oauth` deferred   |
-| `scaling_factor_multiplier` | Stored as opaque TEXT (e.g. `"x * 1.05"`); not evaluated  |
-| Units                       | `Option<String>` free-form label, no dimensional analysis |
-| NetCDF chunking             | `(1, num_arrays)` — per-timestep reads contiguous         |
+|                    | Decision                                                  |
+| ------------------ | --------------------------------------------------------- |
+| Compaction trigger | Explicit `Store::compact()` only                          |
+| Server auth        | `none` default, `api_key` implemented, `oauth` deferred   |
+| Units              | `Option<String>` free-form label, no dimensional analysis |
+| NetCDF chunking    | `(1, num_arrays)` — per-timestep reads contiguous         |
 
 ## Status
 

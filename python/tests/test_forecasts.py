@@ -47,8 +47,7 @@ def test_deterministic_scalar_round_trip():
 
     key = store.add_time_series(
         OWNER_UUID, OWNER_TYPE, OWNER_CAT,
-        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_scalar",
-                      scaling_factor_multiplier="sfm"),
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_scalar"),
     )
 
     assert key.time_series_type == TimeSeriesType.Deterministic
@@ -60,7 +59,6 @@ def test_deterministic_scalar_round_trip():
     assert got.interval == INTERVAL_12H
     assert got.initial_timestamp == T0
     assert got.name == "det_scalar"
-    assert got.scaling_factor_multiplier == "sfm"
     np.testing.assert_array_equal(np.asarray(got.data), data)
     assert np.asarray(got.data).shape == (H, C)
 

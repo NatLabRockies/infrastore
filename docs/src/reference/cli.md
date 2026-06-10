@@ -81,7 +81,6 @@ The CSV holds only numbers (plus a leading timestamp column for `non_sequential`
 | `has_header`                   | optional                    | Skip the first CSV row. Default `true`.             |
 | `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).      |
 | `units`                        | optional                    | Free-form label.                                    |
-| `scaling_factor_multiplier`    | optional                    | Opaque label, stored verbatim.                      |
 | `features`                     | optional                    | JSON object; int/float/bool/string values.          |
 | `initial_timestamp`            | all except `non_sequential` |                                                     |
 | `resolution`                   | all except `non_sequential` |                                                     |

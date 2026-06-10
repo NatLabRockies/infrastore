@@ -35,7 +35,6 @@ fn persistent_round_trip() {
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
                 Some("MW".into()),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -89,7 +88,6 @@ fn compression_policies_round_trip() {
                     TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
                     Features::new(),
                     None,
-                    None,
                 )
                 .unwrap();
             store.flush().unwrap();
@@ -109,7 +107,6 @@ fn compression_policies_round_trip() {
                     "load",
                     TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
                     Features::new(),
-                    None,
                     None,
                 )
                 .unwrap();
@@ -166,7 +163,6 @@ fn deduplication_persists() {
                     TimeSeriesData::SingleTimeSeries(s.clone()),
                     Features::new(),
                     None,
-                    None,
                 )
                 .unwrap();
         }
@@ -210,7 +206,6 @@ fn multiple_resolutions_separate_datasets() {
                     TimeSeriesData::SingleTimeSeries(s),
                     Features::new(),
                     None,
-                    None,
                 )
                 .unwrap();
         }
@@ -247,7 +242,6 @@ fn time_range_slicing_through_netcdf() {
                 "load",
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
-                None,
                 None,
             )
             .unwrap();
@@ -298,7 +292,6 @@ fn spill_into_new_dataset_past_capacity() {
                 data: TimeSeriesData::SingleTimeSeries(s),
                 features: Features::new(),
                 units: None,
-                scaling_factor_multiplier: None,
                 logical_type: None,
             });
         }
@@ -355,7 +348,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             TimeSeriesData::SingleTimeSeries(s1),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
     let _k2 = store
@@ -367,7 +359,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
             None,
-            None,
         )
         .unwrap();
     let _k3 = store
@@ -378,7 +369,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             "load",
             TimeSeriesData::SingleTimeSeries(s3),
             Features::new(),
-            None,
             None,
         )
         .unwrap();
@@ -402,7 +392,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             "load",
             TimeSeriesData::SingleTimeSeries(s4),
             Features::new(),
-            None,
             None,
         )
         .unwrap();
@@ -456,7 +445,6 @@ fn netcdf_roundtrips_multidim_element_tuples() {
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
                 None,
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -508,7 +496,6 @@ fn non_sequential_persistent_round_trip() {
                 "events",
                 TimeSeriesData::NonSequentialTimeSeries(series),
                 Features::new(),
-                None,
                 None,
             )
             .unwrap();

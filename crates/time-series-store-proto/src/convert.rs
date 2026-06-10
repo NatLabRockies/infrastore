@@ -179,7 +179,6 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .map(|ts| ts.iter().map(|t| t.to_rfc3339()).collect())
             .unwrap_or_default(),
         features: Some(features_to_pb(&m.features)),
-        scaling_factor_multiplier: m.scaling_factor_multiplier.clone().unwrap_or_default(),
         units: m.units.clone().unwrap_or_default(),
         dtype: m.dtype.code(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
@@ -237,7 +236,6 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         count: optional_usize(m.count),
         timestamps,
         features,
-        scaling_factor_multiplier: optional_string(m.scaling_factor_multiplier),
         units: optional_string(m.units),
         percentiles: if m.percentiles.is_empty() {
             None
