@@ -336,7 +336,10 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     }
 }
 
-pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData, ConvertError> {
+pub fn get_resp_to_time_series_data(
+    resp: pb::GetResp,
+    name: String,
+) -> Result<TimeSeriesData, ConvertError> {
     let ts_type = pb::TimeSeriesType::try_from(resp.time_series_type).map_err(|_| {
         ConvertError::InvalidValue {
             field: "time_series_type",
@@ -363,6 +366,7 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 resolution: Duration::milliseconds(resp.resolution_ms),
                 length: resp.length as usize,
                 data,
+                name,
             }))
         }
         pb::TimeSeriesType::NonSequentialTimeSeries => {
@@ -371,12 +375,13 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 .iter()
                 .map(|s| DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
                 .collect::<Result<Vec<_>, _>>()?;
-            let series = NonSequentialTimeSeries::new(timestamps, data).map_err(|message| {
-                ConvertError::InvalidValue {
-                    field: "timestamps_rfc3339",
-                    message,
-                }
-            })?;
+            let series =
+                NonSequentialTimeSeries::new(timestamps, data, name).map_err(|message| {
+                    ConvertError::InvalidValue {
+                        field: "timestamps_rfc3339",
+                        message,
+                    }
+                })?;
             Ok(TimeSeriesData::NonSequentialTimeSeries(series))
         }
         pb::TimeSeriesType::Deterministic | pb::TimeSeriesType::DeterministicSingleTimeSeries => {
@@ -389,6 +394,7 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 Duration::milliseconds(resp.interval_ms),
                 resp.count as usize,
                 data,
+                name,
             )
             .map_err(|message| ConvertError::InvalidValue {
                 field: "Deterministic",
@@ -407,6 +413,7 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 resp.count as usize,
                 resp.percentiles,
                 data,
+                name,
             )
             .map_err(|message| ConvertError::InvalidValue {
                 field: "Probabilistic",
@@ -425,6 +432,7 @@ pub fn get_resp_to_time_series_data(resp: pb::GetResp) -> Result<TimeSeriesData,
                 resp.count as usize,
                 resp.scenario_count as usize,
                 data,
+                name,
             )
             .map_err(|message| ConvertError::InvalidValue {
                 field: "Scenarios",
@@ -509,6 +517,7 @@ mod tests {
             Duration::hours(6),
             3,
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
@@ -524,7 +533,7 @@ mod tests {
         assert!(resp.percentiles.is_empty());
         assert_eq!(resp.scenario_count, 0);
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
     }
 
@@ -540,6 +549,7 @@ mod tests {
             Duration::hours(2),
             3,
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
@@ -547,7 +557,7 @@ mod tests {
         assert_eq!(resp.shape, vec![2u64, 3, 2]);
         assert_eq!(resp.count, 3);
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
         let d = roundtripped.as_deterministic().unwrap();
         assert_eq!(d.data.shape, vec![2, 3, 2]);
@@ -570,6 +580,7 @@ mod tests {
             2,
             percentiles.clone(),
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Probabilistic(prob);
@@ -583,7 +594,7 @@ mod tests {
         assert_eq!(resp.scenario_count, 0);
         assert_eq!(resp.length, 3); // shape[0] = num_percentiles
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
         let p = roundtripped.as_probabilistic().unwrap();
         assert_eq!(p.percentiles, vec![10.0, 50.0, 90.0]);
@@ -603,6 +614,7 @@ mod tests {
             4,
             percentiles.clone(),
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Probabilistic(prob);
@@ -610,7 +622,7 @@ mod tests {
         assert_eq!(resp.shape, vec![2u64, 3, 4, 5]);
         assert_eq!(resp.percentiles, percentiles);
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
     }
 
@@ -629,6 +641,7 @@ mod tests {
             3,
             4,
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
@@ -639,7 +652,7 @@ mod tests {
         assert!(resp.percentiles.is_empty());
         assert_eq!(resp.length, 4); // shape[0] = scenario_count
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
         let s = roundtripped.as_scenarios().unwrap();
         assert_eq!(s.scenario_count, 4);
@@ -658,6 +671,7 @@ mod tests {
             3,
             2,
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
@@ -665,7 +679,7 @@ mod tests {
         assert_eq!(resp.shape, vec![2u64, 4, 3, 2]);
         assert_eq!(resp.scenario_count, 2);
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
     }
 
@@ -684,13 +698,14 @@ mod tests {
             2,
             2,
             data,
+            "test",
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
         let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.dtype, Dtype::I64.code());
 
-        let roundtripped = get_resp_to_time_series_data(resp).unwrap();
+        let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
         let s = roundtripped.as_scenarios().unwrap();
         assert_eq!(s.data.dtype, Dtype::I64);

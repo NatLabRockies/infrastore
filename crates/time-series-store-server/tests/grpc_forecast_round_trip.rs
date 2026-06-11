@@ -46,7 +46,6 @@ fn add_time_series(store: &mut Store, owner: &str, data: TimeSeriesData) {
             owner,
             "Generator",
             OwnerCategory::Component,
-            "price",
             data,
             Features::new(),
             None,
@@ -64,6 +63,7 @@ fn add_det_forecast(store: &mut Store) {
         Duration::hours(2),
         6,
         data,
+        "price",
     )
     .unwrap();
     add_time_series(store, "det-owner", TimeSeriesData::Deterministic(det));
@@ -80,6 +80,7 @@ fn add_prob_forecast(store: &mut Store) {
         5,
         vec![10.0, 50.0, 90.0],
         data,
+        "price",
     )
     .unwrap();
     add_time_series(store, "prob-owner", TimeSeriesData::Probabilistic(prob));
@@ -96,6 +97,7 @@ fn add_scen_forecast(store: &mut Store) {
         5,
         4,
         data,
+        "price",
     )
     .unwrap();
     add_time_series(store, "scen-owner", TimeSeriesData::Scenarios(scen));

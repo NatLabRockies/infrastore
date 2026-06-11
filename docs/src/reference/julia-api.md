@@ -252,7 +252,7 @@ transform_single_time_series!(store, horizon::Period, interval::Period) -> Int  
 ```
 
 `has_typed` and `remove_typed!` operate on forecast types by `ts_type` integer code
-(`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`, `5 = Scenarios`):
+(`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`):
 
 ```julia
 has_typed(store, owner_uuid, name, ts_type::Integer; resolution=nothing, features=Dict()) -> Bool

@@ -375,16 +375,16 @@ unsafe fn build_single_request(
     };
     let resolution = Duration::milliseconds(resolution_ms);
     let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-    let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array);
+    let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
 
     Ok(core_lib::AddRequest {
         owner_uuid: owner_uuid.to_string(),
         owner_type: owner_type.to_string(),
         owner_category,
-        name: name.to_string(),
         data: core_lib::TimeSeriesData::SingleTimeSeries(single),
         features,
         units,
+
         logical_type,
     })
 }
@@ -515,7 +515,7 @@ unsafe fn build_non_sequential_request(
         }
     };
     let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
-    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array) {
+    let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array, name) {
         Ok(series) => series,
         Err(error) => {
             set_error(error);
@@ -529,10 +529,10 @@ unsafe fn build_non_sequential_request(
         owner_uuid: owner_uuid.to_string(),
         owner_type: owner_type.to_string(),
         owner_category,
-        name: name.to_string(),
         data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
         features,
         units,
+
         logical_type,
     })
 }
@@ -1530,6 +1530,7 @@ unsafe fn build_forecast_request(
             interval,
             count as usize,
             array,
+            name,
         ) {
             Ok(d) => core_lib::TimeSeriesData::Deterministic(d),
             Err(e) => {
@@ -1547,6 +1548,7 @@ unsafe fn build_forecast_request(
                 count as usize,
                 scenario_count,
                 array,
+                name,
             ) {
                 Ok(s) => core_lib::TimeSeriesData::Scenarios(s),
                 Err(e) => {
@@ -1569,10 +1571,10 @@ unsafe fn build_forecast_request(
         owner_uuid: owner_uuid.to_string(),
         owner_type: owner_type.to_string(),
         owner_category,
-        name: name.to_string(),
         data,
         features,
         units,
+
         logical_type,
     })
 }
@@ -1720,6 +1722,7 @@ unsafe fn build_probabilistic_request(
         count as usize,
         percentiles,
         array,
+        name,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -1731,10 +1734,10 @@ unsafe fn build_probabilistic_request(
         owner_uuid: owner_uuid.to_string(),
         owner_type: owner_type.to_string(),
         owner_category,
-        name: name.to_string(),
         data: core_lib::TimeSeriesData::Probabilistic(prob),
         features,
         units,
+
         logical_type,
     })
 }
@@ -2121,8 +2124,8 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
     handle: *mut TsStoreHandle,
     horizon_ms: i64,
     interval_ms: i64,
-    owner_category: i32,
-    resolution_ms: i64,
+    _owner_category: i32,
+    _resolution_ms: i64,
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
@@ -2134,23 +2137,9 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
         set_error("a required pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    // -1 transforms every owner category; 0 = Component, 1 = SupplementalAttribute.
-    let category = match owner_category {
-        -1 => None,
-        0 => Some(core_lib::OwnerCategory::Component),
-        1 => Some(core_lib::OwnerCategory::SupplementalAttribute),
-        other => {
-            set_error(format!("invalid owner_category {other}"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    // 0 transforms every resolution; a positive value restricts to that resolution.
-    let resolution = (resolution_ms > 0).then(|| Duration::milliseconds(resolution_ms));
     match store.inner.transform_single_time_series(
         Duration::milliseconds(horizon_ms),
         Duration::milliseconds(interval_ms),
-        category,
-        resolution,
     ) {
         Ok(n) => {
             unsafe { *out_count = n as u64 };

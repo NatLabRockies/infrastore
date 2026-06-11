@@ -104,7 +104,7 @@ fn add_forecast(
 ) -> TimeSeriesKey {
     let data = match ts_type {
         TimeSeriesType::Deterministic => TimeSeriesData::Deterministic(
-            Deterministic::new(initial, resolution, horizon, interval, count, data).unwrap(),
+            Deterministic::new(initial, resolution, horizon, interval, count, data, name).unwrap(),
         ),
         TimeSeriesType::Probabilistic => TimeSeriesData::Probabilistic(
             Probabilistic::new(
@@ -115,6 +115,7 @@ fn add_forecast(
                 count,
                 percentiles.expect("Probabilistic requires percentiles"),
                 data,
+                name,
             )
             .unwrap(),
         ),
@@ -129,6 +130,7 @@ fn add_forecast(
                     count,
                     scenario_count,
                     data,
+                    name,
                 )
                 .unwrap(),
             )
@@ -141,16 +143,15 @@ fn add_forecast(
                     owner,
                     "Generator",
                     OwnerCategory::Component,
-                    name,
                     TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
-                        initial, resolution, data,
+                        initial, resolution, data, name,
                     )),
                     Features::new(),
                     None,
                 )
                 .unwrap();
             store
-                .transform_single_time_series(horizon, interval, None, None)
+                .transform_single_time_series(horizon, interval)
                 .unwrap();
             return TimeSeriesKey {
                 owner_uuid: owner.to_string(),
@@ -167,7 +168,6 @@ fn add_forecast(
             owner,
             "Generator",
             OwnerCategory::Component,
-            name,
             data,
             Features::new(),
             None,

@@ -642,8 +642,8 @@ int32_t ts_store_add_batch(struct TsStore *handle,
 int32_t ts_store_transform_single_time_series(struct TsStore *handle,
                                               int64_t horizon_ms,
                                               int64_t interval_ms,
-                                              int32_t owner_category,
-                                              int64_t resolution_ms,
+                                              int32_t _owner_category,
+                                              int64_t _resolution_ms,
                                               uint64_t *out_count);
 
 /**

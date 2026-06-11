@@ -37,7 +37,7 @@ fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
     let resolution = Duration::hours(1);
     let values: Vec<f64> = (0..length).map(|i| base + i as f64).collect();
     let data = TypedArray::from_f64(vec![length], &values);
-    SingleTimeSeries::new(initial, resolution, data)
+    SingleTimeSeries::new(initial, resolution, data, "load")
 }
 
 fn fixture_store() -> Store {
@@ -50,7 +50,6 @@ fn fixture_store() -> Store {
             "42",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s),
             features,
             Some("MW".into()),
@@ -62,7 +61,6 @@ fn fixture_store() -> Store {
             "43",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
             None,
@@ -183,6 +181,7 @@ async fn non_sequential_round_trip_over_grpc() {
     let series = NonSequentialTimeSeries::new(
         timestamps.clone(),
         TypedArray::from_f64(vec![3], &[4.0, 5.0, 6.0]),
+        "events",
     )
     .unwrap();
     store
@@ -190,7 +189,6 @@ async fn non_sequential_round_trip_over_grpc() {
             "44",
             "Generator",
             OwnerCategory::Component,
-            "events",
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
             None,
@@ -228,8 +226,9 @@ async fn dtype_preserved_over_grpc() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
-            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(initial, resolution, data)),
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial, resolution, data, "load",
+            )),
             Features::new(),
             None,
         )

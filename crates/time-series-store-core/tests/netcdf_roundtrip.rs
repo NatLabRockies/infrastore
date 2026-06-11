@@ -15,7 +15,7 @@ fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
     let resolution = Duration::hours(1);
     let values: Vec<f64> = (0..length).map(|i| base + i as f64).collect();
     let data = TypedArray::from_f64(vec![length], &values);
-    SingleTimeSeries::new(initial_timestamp, resolution, data)
+    SingleTimeSeries::new(initial_timestamp, resolution, data, "load")
 }
 
 #[test]
@@ -31,7 +31,6 @@ fn persistent_round_trip() {
                 "42",
                 "Generator",
                 OwnerCategory::Component,
-                "load",
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
                 Some("MW".into()),
@@ -84,7 +83,6 @@ fn compression_policies_round_trip() {
                     "7",
                     "Generator",
                     OwnerCategory::Component,
-                    "load",
                     TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
                     Features::new(),
                     None,
@@ -104,7 +102,6 @@ fn compression_policies_round_trip() {
                     "8",
                     "Generator",
                     OwnerCategory::Component,
-                    "load",
                     TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
                     Features::new(),
                     None,
@@ -159,7 +156,6 @@ fn deduplication_persists() {
                     owner,
                     "Generator",
                     OwnerCategory::Component,
-                    "load",
                     TimeSeriesData::SingleTimeSeries(s.clone()),
                     Features::new(),
                     None,
@@ -196,13 +192,12 @@ fn multiple_resolutions_separate_datasets() {
         .into_iter()
         .enumerate()
         {
-            let s = SingleTimeSeries::new(initial, res, data.clone());
+            let s = SingleTimeSeries::new(initial, res, data.clone(), "load");
             store
                 .add_time_series(
                     &(i + 1).to_string(),
                     "Generator",
                     OwnerCategory::Component,
-                    "load",
                     TimeSeriesData::SingleTimeSeries(s),
                     Features::new(),
                     None,
@@ -230,7 +225,7 @@ fn time_range_slicing_through_netcdf() {
         vec![10],
         &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0],
     );
-    let s = SingleTimeSeries::new(initial, resolution, data);
+    let s = SingleTimeSeries::new(initial, resolution, data, "load");
 
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -239,7 +234,6 @@ fn time_range_slicing_through_netcdf() {
                 "1",
                 "Generator",
                 OwnerCategory::Component,
-                "load",
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
                 None,
@@ -283,15 +277,15 @@ fn spill_into_new_dataset_past_capacity() {
         for i in 0..total {
             let vals = [i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0];
             let data = TypedArray::from_f64(vec![4], &vals);
-            let s = SingleTimeSeries::new(initial, resolution, data);
+            let s = SingleTimeSeries::new(initial, resolution, data, "load");
             bulk.push(AddRequest {
                 owner_uuid: (i + 1).to_string(),
                 owner_type: "Generator".into(),
                 owner_category: OwnerCategory::Component,
-                name: "load".into(),
                 data: TimeSeriesData::SingleTimeSeries(s),
                 features: Features::new(),
                 units: None,
+
                 logical_type: None,
             });
         }
@@ -344,7 +338,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s1),
             Features::new(),
             None,
@@ -355,7 +348,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             "2",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
             None,
@@ -366,7 +358,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             "3",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s3),
             Features::new(),
             None,
@@ -389,7 +380,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             "4",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s4),
             Features::new(),
             None,
@@ -432,7 +422,7 @@ fn netcdf_roundtrips_multidim_element_tuples() {
     // A (4, 3) array — a 3-tuple per step (e.g. quadratic curve coeffs).
     let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
     let data = TypedArray::from_f64(vec![4, 3], &values);
-    let s = SingleTimeSeries::new(initial, resolution, data.clone());
+    let s = SingleTimeSeries::new(initial, resolution, data.clone(), "load");
 
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -441,7 +431,6 @@ fn netcdf_roundtrips_multidim_element_tuples() {
                 "1",
                 "Generator",
                 OwnerCategory::Component,
-                "load",
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
                 None,
@@ -487,13 +476,13 @@ fn non_sequential_persistent_round_trip() {
     let data = TypedArray::from_f64(vec![3], &[1.5, 2.5, 3.5]);
     let key = {
         let mut store = create_store(Some(&path), false).unwrap();
-        let series = NonSequentialTimeSeries::new(timestamps.clone(), data.clone()).unwrap();
+        let series =
+            NonSequentialTimeSeries::new(timestamps.clone(), data.clone(), "events").unwrap();
         let key = store
             .add_time_series(
                 "1",
                 "Generator",
                 OwnerCategory::Component,
-                "events",
                 TimeSeriesData::NonSequentialTimeSeries(series),
                 Features::new(),
                 None,

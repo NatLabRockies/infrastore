@@ -19,13 +19,12 @@ fn make_store() -> Store {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
-    let s = SingleTimeSeries::new(initial, resolution, data);
+    let s = SingleTimeSeries::new(initial, resolution, data, "load");
     store
         .add_time_series(
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,

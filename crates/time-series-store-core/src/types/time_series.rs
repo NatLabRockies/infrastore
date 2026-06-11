@@ -62,16 +62,23 @@ pub struct SingleTimeSeries {
     pub resolution: Duration,
     pub length: usize,
     pub data: TypedArray,
+    pub name: String,
 }
 
 impl SingleTimeSeries {
-    pub fn new(initial_timestamp: DateTime<Utc>, resolution: Duration, data: TypedArray) -> Self {
+    pub fn new(
+        initial_timestamp: DateTime<Utc>,
+        resolution: Duration,
+        data: TypedArray,
+        name: impl Into<String>,
+    ) -> Self {
         let length = data.length();
         Self {
             initial_timestamp,
             resolution,
             length,
             data,
+            name: name.into(),
         }
     }
 }
@@ -85,10 +92,15 @@ pub struct NonSequentialTimeSeries {
     pub timestamps: Vec<DateTime<Utc>>,
     pub length: usize,
     pub data: TypedArray,
+    pub name: String,
 }
 
 impl NonSequentialTimeSeries {
-    pub fn new(timestamps: Vec<DateTime<Utc>>, data: TypedArray) -> Result<Self, String> {
+    pub fn new(
+        timestamps: Vec<DateTime<Utc>>,
+        data: TypedArray,
+        name: impl Into<String>,
+    ) -> Result<Self, String> {
         let length = data.length();
         if timestamps.len() != length {
             return Err(format!(
@@ -103,6 +115,7 @@ impl NonSequentialTimeSeries {
             timestamps,
             length,
             data,
+            name: name.into(),
         })
     }
 }
@@ -120,6 +133,7 @@ pub struct Deterministic {
     pub count: usize,
     /// Shape `[H, count, *E]`.
     pub data: TypedArray,
+    pub name: String,
 }
 
 impl Deterministic {
@@ -135,6 +149,7 @@ impl Deterministic {
         interval: Duration,
         count: usize,
         data: TypedArray,
+        name: impl Into<String>,
     ) -> Result<Self, String> {
         validate_positive_durations(resolution, horizon, interval)?;
         let h = compute_h(horizon, resolution)?;
@@ -163,6 +178,7 @@ impl Deterministic {
             interval,
             count,
             data,
+            name: name.into(),
         })
     }
 }
@@ -180,6 +196,7 @@ pub struct Probabilistic {
     pub percentiles: Vec<f64>,
     /// Shape `[num_percentiles, H, count, *E]`.
     pub data: TypedArray,
+    pub name: String,
 }
 
 impl Probabilistic {
@@ -187,6 +204,7 @@ impl Probabilistic {
     ///
     /// Returns `Err(String)` if any constraint is violated. Shape must be
     /// `[num_percentiles, H, count, *E]` where `H = horizon / resolution`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_timestamp: DateTime<Utc>,
         resolution: Duration,
@@ -195,13 +213,15 @@ impl Probabilistic {
         count: usize,
         percentiles: Vec<f64>,
         data: TypedArray,
+        name: impl Into<String>,
     ) -> Result<Self, String> {
         validate_positive_durations(resolution, horizon, interval)?;
         if percentiles.is_empty() {
             return Err("Probabilistic: percentiles must be non-empty".to_string());
         }
-        // Note: callers (InfrastructureSystems.jl) do not require percentiles to be
-        // sorted/strictly increasing, so the store does not enforce it either.
+        if percentiles.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("Probabilistic: percentiles must be strictly increasing".to_string());
+        }
         let h = compute_h(horizon, resolution)?;
         let p = percentiles.len();
         if data.shape.len() < 3 {
@@ -231,6 +251,7 @@ impl Probabilistic {
             count,
             percentiles,
             data,
+            name: name.into(),
         })
     }
 }
@@ -248,10 +269,12 @@ pub struct Scenarios {
     pub scenario_count: usize,
     /// Shape `[scenario_count, H, count, *E]`.
     pub data: TypedArray,
+    pub name: String,
 }
 
 impl Scenarios {
     /// Construct, validating shape against the canonical layout.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_timestamp: DateTime<Utc>,
         resolution: Duration,
@@ -260,6 +283,7 @@ impl Scenarios {
         count: usize,
         scenario_count: usize,
         data: TypedArray,
+        name: impl Into<String>,
     ) -> Result<Self, String> {
         validate_positive_durations(resolution, horizon, interval)?;
         let h = compute_h(horizon, resolution)?;
@@ -288,6 +312,7 @@ impl Scenarios {
             count,
             scenario_count,
             data,
+            name: name.into(),
         })
     }
 }
@@ -351,6 +376,16 @@ impl TimeSeriesData {
             TimeSeriesData::Deterministic(_) => TimeSeriesType::Deterministic,
             TimeSeriesData::Probabilistic(_) => TimeSeriesType::Probabilistic,
             TimeSeriesData::Scenarios(_) => TimeSeriesType::Scenarios,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => &s.name,
+            TimeSeriesData::NonSequentialTimeSeries(s) => &s.name,
+            TimeSeriesData::Deterministic(d) => &d.name,
+            TimeSeriesData::Probabilistic(p) => &p.name,
+            TimeSeriesData::Scenarios(s) => &s.name,
         }
     }
 

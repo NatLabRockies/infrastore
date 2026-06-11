@@ -250,7 +250,6 @@ fn numpy_from_typed<'py>(
 #[derive(Clone)]
 pub struct PyDeterministic {
     inner: core_lib::Deterministic,
-    name: String,
 }
 
 #[pymethods]
@@ -282,14 +281,15 @@ impl PyDeterministic {
             interval,
             count,
             typed,
+            name,
         )
         .map_err(InvalidParameterError::new_err)?;
-        Ok(Self { inner, name })
+        Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.inner.name.clone()
     }
 
     #[getter]
@@ -325,7 +325,7 @@ impl PyDeterministic {
     fn __repr__(&self) -> String {
         format!(
             "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, shape={:?})",
-            self.name,
+            self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
             self.inner.horizon.num_seconds(),
@@ -342,7 +342,6 @@ impl PyDeterministic {
 #[derive(Clone)]
 pub struct PyProbabilistic {
     inner: core_lib::Probabilistic,
-    name: String,
 }
 
 #[pymethods]
@@ -376,14 +375,15 @@ impl PyProbabilistic {
             count,
             percentiles,
             typed,
+            name,
         )
         .map_err(InvalidParameterError::new_err)?;
-        Ok(Self { inner, name })
+        Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.inner.name.clone()
     }
 
     #[getter]
@@ -424,7 +424,7 @@ impl PyProbabilistic {
     fn __repr__(&self) -> String {
         format!(
             "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, percentiles={:?}, shape={:?})",
-            self.name,
+            self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
             self.inner.horizon.num_seconds(),
@@ -442,7 +442,6 @@ impl PyProbabilistic {
 #[derive(Clone)]
 pub struct PyScenarios {
     inner: core_lib::Scenarios,
-    name: String,
 }
 
 #[pymethods]
@@ -479,14 +478,15 @@ impl PyScenarios {
             count,
             scenario_count,
             typed,
+            name,
         )
         .map_err(InvalidParameterError::new_err)?;
-        Ok(Self { inner, name })
+        Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.inner.name.clone()
     }
 
     #[getter]
@@ -527,7 +527,7 @@ impl PyScenarios {
     fn __repr__(&self) -> String {
         format!(
             "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, scenario_count={}, shape={:?})",
-            self.name,
+            self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
             self.inner.horizon.num_seconds(),
@@ -549,7 +549,6 @@ impl PyScenarios {
 #[derive(Clone)]
 pub struct PySingleTimeSeries {
     inner: core_lib::SingleTimeSeries,
-    name: String,
 }
 
 #[pymethods]
@@ -566,14 +565,13 @@ impl PySingleTimeSeries {
         let resolution = pydelta_to_chrono(&resolution)?;
         let typed = typed_array_from_numpy(data)?;
         Ok(Self {
-            inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed),
-            name,
+            inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed, name),
         })
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.inner.name.clone()
     }
 
     #[getter]
@@ -599,7 +597,7 @@ impl PySingleTimeSeries {
     fn __repr__(&self) -> String {
         format!(
             "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}s, shape={:?})",
-            self.name,
+            self.inner.name,
             self.inner.initial_timestamp,
             self.inner.length,
             self.inner.resolution.num_seconds(),
@@ -618,7 +616,6 @@ impl PySingleTimeSeries {
 #[derive(Clone)]
 pub struct PyNonSequentialTimeSeries {
     inner: core_lib::NonSequentialTimeSeries,
-    name: String,
 }
 
 #[pymethods]
@@ -632,14 +629,14 @@ impl PyNonSequentialTimeSeries {
         name: String,
     ) -> PyResult<Self> {
         let typed = typed_array_from_numpy(data)?;
-        let inner = core_lib::NonSequentialTimeSeries::new(timestamps, typed)
+        let inner = core_lib::NonSequentialTimeSeries::new(timestamps, typed, name)
             .map_err(InvalidParameterError::new_err)?;
-        Ok(Self { inner, name })
+        Ok(Self { inner })
     }
 
     #[getter]
     fn name(&self) -> String {
-        self.name.clone()
+        self.inner.name.clone()
     }
 
     #[getter]
@@ -733,31 +730,19 @@ fn required_item<'py, T: pyo3::conversion::FromPyObjectOwned<'py>>(
     }
 }
 
-/// Pull the core data + association name off a Python time-series object
-/// (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
-/// `Probabilistic`, or `Scenarios`).
-fn extract_time_series_data(
-    time_series: &Bound<'_, PyAny>,
-) -> PyResult<(core_lib::TimeSeriesData, String)> {
+/// Pull the core data off a Python time-series object (`SingleTimeSeries`,
+/// `NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, or `Scenarios`).
+fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib::TimeSeriesData> {
     if let Ok(single) = time_series.extract::<PySingleTimeSeries>() {
-        Ok((
-            core_lib::TimeSeriesData::SingleTimeSeries(single.inner),
-            single.name,
-        ))
+        Ok(core_lib::TimeSeriesData::SingleTimeSeries(single.inner))
     } else if let Ok(ns) = time_series.extract::<PyNonSequentialTimeSeries>() {
-        Ok((
-            core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner),
-            ns.name,
-        ))
+        Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(ns.inner))
     } else if let Ok(det) = time_series.extract::<PyDeterministic>() {
-        Ok((core_lib::TimeSeriesData::Deterministic(det.inner), det.name))
+        Ok(core_lib::TimeSeriesData::Deterministic(det.inner))
     } else if let Ok(prob) = time_series.extract::<PyProbabilistic>() {
-        Ok((
-            core_lib::TimeSeriesData::Probabilistic(prob.inner),
-            prob.name,
-        ))
+        Ok(core_lib::TimeSeriesData::Probabilistic(prob.inner))
     } else if let Ok(scen) = time_series.extract::<PyScenarios>() {
-        Ok((core_lib::TimeSeriesData::Scenarios(scen.inner), scen.name))
+        Ok(core_lib::TimeSeriesData::Scenarios(scen.inner))
     } else {
         Err(InvalidParameterError::new_err(
             "time_series must be SingleTimeSeries, NonSequentialTimeSeries, \
@@ -833,15 +818,13 @@ impl PyStore {
         units: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
-        // `name` is read off the object.
-        let (data, name) = extract_time_series_data(time_series)?;
+        let data = extract_time_series_data(time_series)?;
         let key = self
             .inner
             .add_time_series(
                 owner_uuid,
                 owner_type,
                 owner_category.into(),
-                &name,
                 data,
                 features,
                 units,
@@ -886,15 +869,15 @@ impl PyStore {
                 Some(u) if !u.is_none() => Some(u.extract()?),
                 _ => None,
             };
-            let (data, name) = extract_time_series_data(&time_series)?;
+            let data = extract_time_series_data(&time_series)?;
             requests.push(core_lib::AddRequest {
                 owner_uuid,
                 owner_type,
                 owner_category: owner_category.into(),
-                name,
                 data,
                 features,
                 units,
+
                 logical_type: None,
             });
         }
@@ -918,7 +901,7 @@ impl PyStore {
         let horizon = pydelta_to_chrono(&horizon)?;
         let interval = pydelta_to_chrono(&interval)?;
         self.inner
-            .transform_single_time_series(horizon, interval, None, None)
+            .transform_single_time_series(horizon, interval)
             .map_err(map_err)
     }
 
@@ -946,26 +929,21 @@ impl PyStore {
             .inner
             .get_time_series(&key.inner, time_range)
             .map_err(map_err)?;
-        // `name` is a per-association attribute, not part of the core data type
-        // — resolve it from the metadata (consistent with the read, which
-        // resolves the same key).
-        let meta = self.inner.get_metadata(&key.inner).map_err(map_err)?;
-        let name = meta.name;
         match data {
             core_lib::TimeSeriesData::SingleTimeSeries(s) => {
-                Ok(Py::new(py, PySingleTimeSeries { inner: s, name })?.into_any())
+                Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
             }
             core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
-                Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s, name })?.into_any())
+                Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
             }
             core_lib::TimeSeriesData::Deterministic(d) => {
-                Ok(Py::new(py, PyDeterministic { inner: d, name })?.into_any())
+                Ok(Py::new(py, PyDeterministic { inner: d })?.into_any())
             }
             core_lib::TimeSeriesData::Probabilistic(p) => {
-                Ok(Py::new(py, PyProbabilistic { inner: p, name })?.into_any())
+                Ok(Py::new(py, PyProbabilistic { inner: p })?.into_any())
             }
             core_lib::TimeSeriesData::Scenarios(s) => {
-                Ok(Py::new(py, PyScenarios { inner: s, name })?.into_any())
+                Ok(Py::new(py, PyScenarios { inner: s })?.into_any())
             }
         }
     }

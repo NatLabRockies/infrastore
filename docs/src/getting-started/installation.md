@@ -54,13 +54,14 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 
 ## Crates in the Workspace
 
-| Crate                      | What it builds                                     |
-| -------------------------- | -------------------------------------------------- |
-| `time-series-store-core`   | Types, NetCDF + SQLite storage, hashing, Rust API  |
-| `time-series-store-proto`  | Protobuf service definition + `tonic` codegen      |
-| `time-series-store-server` | gRPC server binary + Rust client                   |
-| `time-series-store-py`     | PyO3 bindings, `abi3-py310` wheel                  |
-| `time-series-store-ffi`    | C ABI cdylib (the foundation of the Julia binding) |
+| Crate                      | What it builds                                          |
+| -------------------------- | ------------------------------------------------------- |
+| `time-series-store-core`   | Types, NetCDF + SQLite storage, hashing, Rust API       |
+| `time-series-store-proto`  | Protobuf service definition + `tonic` codegen           |
+| `time-series-store-server` | gRPC server binary + Rust client                        |
+| `time-series-store-py`     | PyO3 bindings, `abi3-py310` wheel                       |
+| `time-series-store-ffi`    | C ABI cdylib (the foundation of the Julia binding)      |
+| `time-series-store-cli`    | `tss` CLI binary (CSV add/read, inspect on-disk stores) |
 
 ## Next Steps
 

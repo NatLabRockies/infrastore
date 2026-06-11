@@ -49,7 +49,6 @@ fn add_single(store: &mut Store, owner: &str, s: SingleTimeSeries) -> TimeSeries
             owner,
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,
@@ -78,6 +77,7 @@ fn single_6(initial: DateTime<Utc>) -> SingleTimeSeries {
         initial,
         Duration::hours(1),
         TypedArray::from_f64(vec![6], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        "load",
     )
 }
 
@@ -101,6 +101,7 @@ fn cross_contamination_across_packed_columns() {
                     initial,
                     resolution,
                     TypedArray::from_f64(vec![len], &vals),
+                    "load",
                 );
                 keys.push(add_single(store, &i.to_string(), s));
             }
@@ -165,6 +166,7 @@ fn multidim_slice_at_nonzero_column() {
                         initial,
                         resolution,
                         TypedArray::from_f64(vec![4, 3], &a),
+                        "load",
                     ),
                 );
                 let kb = add_single(
@@ -174,6 +176,7 @@ fn multidim_slice_at_nonzero_column() {
                         initial,
                         resolution,
                         TypedArray::from_f64(vec![4, 3], &b),
+                        "load",
                     ),
                 );
                 (ka, kb)
@@ -287,7 +290,7 @@ fn slice_preserves_all_dtypes() {
                     add_single(
                         store,
                         "x",
-                        SingleTimeSeries::new(initial, resolution, arr.clone()),
+                        SingleTimeSeries::new(initial, resolution, arr.clone(), "load"),
                     )
                 }
             },
@@ -404,6 +407,7 @@ fn length_one_series_slicing() {
                     initial,
                     Duration::hours(1),
                     TypedArray::from_f64(vec![1], &[42.0]),
+                    "load",
                 ),
             )
         },
@@ -471,6 +475,7 @@ fn non_sequential_boundary_semantics() {
                 let series = NonSequentialTimeSeries::new(
                     timestamps.clone(),
                     TypedArray::from_f64(vec![4], &[1.0, 2.0, 3.0, 4.0]),
+                    "events",
                 )
                 .unwrap();
                 store
@@ -478,7 +483,6 @@ fn non_sequential_boundary_semantics() {
                         "ns",
                         "Generator",
                         OwnerCategory::Component,
-                        "events",
                         TimeSeriesData::NonSequentialTimeSeries(series),
                         Features::new(),
                         None,

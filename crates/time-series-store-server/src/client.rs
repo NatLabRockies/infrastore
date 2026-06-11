@@ -111,7 +111,7 @@ impl RemoteClient {
             .await
             .map_err(Self::map_status)?
             .into_inner();
-        get_resp_to_time_series_data(resp)
+        get_resp_to_time_series_data(resp, key.name.clone())
             .map_err(|e| TimeSeriesError::IntegrityError(format!("get convert: {e}")))
     }
 

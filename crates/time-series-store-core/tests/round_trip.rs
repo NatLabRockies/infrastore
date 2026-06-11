@@ -14,7 +14,7 @@ fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
     let resolution = Duration::hours(1);
     let values: Vec<f64> = (0..length).map(|i| base + i as f64).collect();
     let data = TypedArray::from_f64(vec![length], &values);
-    SingleTimeSeries::new(initial_timestamp, resolution, data)
+    SingleTimeSeries::new(initial_timestamp, resolution, data, "load")
 }
 
 fn features_with_year(year: i64) -> Features {
@@ -33,7 +33,6 @@ fn add_and_get_round_trip() {
             "42",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             Some("MW".into()),
@@ -58,7 +57,6 @@ fn duplicate_key_rejected() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
@@ -70,7 +68,6 @@ fn duplicate_key_rejected() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
@@ -90,7 +87,6 @@ fn features_disambiguate_keys() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s1.clone()),
             features_with_year(2030),
             None,
@@ -101,7 +97,6 @@ fn features_disambiguate_keys() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s2.clone()),
             features_with_year(2035),
             None,
@@ -136,7 +131,6 @@ fn deduplication_via_content_addressing() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
@@ -147,7 +141,6 @@ fn deduplication_via_content_addressing() {
             "2",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
@@ -172,7 +165,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
@@ -183,7 +175,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             "2",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
             None,
@@ -215,7 +206,6 @@ fn bulk_add_atomic_rollback() {
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             Features::new(),
             None,
@@ -228,20 +218,20 @@ fn bulk_add_atomic_rollback() {
             owner_uuid: "2".into(),
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            name: "load".into(),
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             features: Features::new(),
             units: None,
+
             logical_type: None,
         },
         AddRequest {
             owner_uuid: "1".into(),
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
-            name: "load".into(),
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
             features: Features::new(),
             units: None,
+
             logical_type: None,
         },
     ];
@@ -261,14 +251,13 @@ fn time_range_slicing() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let data = TypedArray::from_f64(vec![6], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
-    let s = SingleTimeSeries::new(initial, resolution, data);
+    let s = SingleTimeSeries::new(initial, resolution, data, "load");
 
     let key = store
         .add_time_series(
             "1",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,
@@ -296,7 +285,6 @@ fn clear_by_owner() {
                 owner,
                 "Generator",
                 OwnerCategory::Component,
-                "load",
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
                 None,
@@ -330,7 +318,6 @@ fn read_only_blocks_writes() {
                 "1",
                 "Generator",
                 OwnerCategory::Component,
-                "load",
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
                 None,
@@ -346,7 +333,6 @@ fn read_only_blocks_writes() {
             "2",
             "Generator",
             OwnerCategory::Component,
-            "load",
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
             None,
@@ -369,13 +355,12 @@ fn distinct_resolutions_returned_sorted() {
     .into_iter()
     .enumerate()
     {
-        let s = SingleTimeSeries::new(initial, resolution, data.clone());
+        let s = SingleTimeSeries::new(initial, resolution, data.clone(), "load");
         store
             .add_time_series(
                 &(i + 1).to_string(),
                 "Generator",
                 OwnerCategory::Component,
-                "load",
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
                 None,
@@ -405,13 +390,12 @@ fn non_sequential_round_trip_and_time_slice() {
         initial + Duration::days(2),
     ];
     let data = TypedArray::from_f64(vec![4], &[10.0, 20.0, 30.0, 40.0]);
-    let series = NonSequentialTimeSeries::new(timestamps.clone(), data).unwrap();
+    let series = NonSequentialTimeSeries::new(timestamps.clone(), data, "availability").unwrap();
     let key = store
         .add_time_series(
             "irregular",
             "Generator",
             OwnerCategory::Component,
-            "availability",
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
             Some("MW".into()),
@@ -451,8 +435,8 @@ fn non_sequential_round_trip_and_time_slice() {
 fn non_sequential_validates_timestamps() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let data = TypedArray::from_f64(vec![2], &[1.0, 2.0]);
-    assert!(NonSequentialTimeSeries::new(vec![initial], data.clone()).is_err());
-    assert!(NonSequentialTimeSeries::new(vec![initial, initial], data).is_err());
+    assert!(NonSequentialTimeSeries::new(vec![initial], data.clone(), "test").is_err());
+    assert!(NonSequentialTimeSeries::new(vec![initial, initial], data, "test").is_err());
 }
 
 #[test]
@@ -463,13 +447,13 @@ fn duplicate_non_sequential_key_is_rejected() {
         let series = NonSequentialTimeSeries::new(
             vec![initial, initial + Duration::hours(1)],
             TypedArray::from_f64(vec![2], &values),
+            "events",
         )
         .unwrap();
         let result = store.add_time_series(
             "1",
             "Generator",
             OwnerCategory::Component,
-            "events",
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
             None,

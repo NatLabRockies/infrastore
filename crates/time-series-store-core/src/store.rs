@@ -78,7 +78,6 @@ pub struct AddRequest {
     pub owner_uuid: String,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
-    pub name: String,
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
@@ -181,13 +180,11 @@ impl Store {
     /// Mirrors the spec's `add_time_series` signature; the public surface is
     /// intentionally wide here. Use [`AddRequest`] + [`Self::add_time_series_bulk`]
     /// for ergonomic call sites.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_time_series(
         &mut self,
         owner_uuid: &str,
         owner_type: &str,
         owner_category: OwnerCategory,
-        name: &str,
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
@@ -196,7 +193,6 @@ impl Store {
             owner_uuid: owner_uuid.to_string(),
             owner_type: owner_type.to_string(),
             owner_category,
-            name: name.to_string(),
             data,
             features,
             units,
@@ -231,7 +227,7 @@ impl Store {
                             owner_type: item.owner_type.clone(),
                             owner_category: item.owner_category,
                             time_series_type: TimeSeriesType::SingleTimeSeries,
-                            name: item.name.clone(),
+                            name: single.name.clone(),
                             data_hash: hash,
                             initial_timestamp: Some(single.initial_timestamp),
                             resolution: Some(single.resolution),
@@ -250,7 +246,7 @@ impl Store {
                         TimeSeriesKey {
                             owner_uuid: item.owner_uuid.clone(),
                             time_series_type: TimeSeriesType::SingleTimeSeries,
-                            name: item.name.clone(),
+                            name: single.name.clone(),
                             resolution: Some(single.resolution),
                             features: item.features.clone(),
                         },
@@ -268,7 +264,7 @@ impl Store {
                             owner_type: item.owner_type.clone(),
                             owner_category: item.owner_category,
                             time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                            name: item.name.clone(),
+                            name: non_sequential.name.clone(),
                             data_hash: hash,
                             initial_timestamp: None,
                             resolution: None,
@@ -287,7 +283,7 @@ impl Store {
                         TimeSeriesKey {
                             owner_uuid: item.owner_uuid.clone(),
                             time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                            name: item.name.clone(),
+                            name: non_sequential.name.clone(),
                             resolution: None,
                             features: item.features.clone(),
                         },
@@ -297,69 +293,70 @@ impl Store {
                 // native shape. `DeterministicSingleTimeSeries` is not added
                 // directly; it is derived from a stored `SingleTimeSeries` via
                 // [`Self::transform_single_time_series`].
-                TimeSeriesData::Deterministic(det) => {
-                    let hash = array_hash(&det.data);
-                    (
-                        hash,
-                        det.resolution.num_milliseconds(),
-                        false,
-                        forecast_metadata(
-                            item,
-                            TimeSeriesType::Deterministic,
-                            hash,
-                            det.initial_timestamp,
-                            det.resolution,
-                            det.horizon,
-                            det.interval,
-                            det.count,
-                            &det.data,
-                            None,
-                        ),
-                        forecast_key(item, TimeSeriesType::Deterministic, det.resolution),
-                    )
-                }
-                TimeSeriesData::Probabilistic(prob) => {
-                    let hash = array_hash(&prob.data);
-                    (
-                        hash,
-                        prob.resolution.num_milliseconds(),
-                        false,
-                        forecast_metadata(
-                            item,
-                            TimeSeriesType::Probabilistic,
-                            hash,
-                            prob.initial_timestamp,
-                            prob.resolution,
-                            prob.horizon,
-                            prob.interval,
-                            prob.count,
-                            &prob.data,
-                            Some(prob.percentiles.clone()),
-                        ),
-                        forecast_key(item, TimeSeriesType::Probabilistic, prob.resolution),
-                    )
-                }
-                TimeSeriesData::Scenarios(scen) => {
-                    let hash = array_hash(&scen.data);
-                    (
-                        hash,
-                        scen.resolution.num_milliseconds(),
-                        false,
-                        forecast_metadata(
-                            item,
-                            TimeSeriesType::Scenarios,
-                            hash,
-                            scen.initial_timestamp,
-                            scen.resolution,
-                            scen.horizon,
-                            scen.interval,
-                            scen.count,
-                            &scen.data,
-                            None,
-                        ),
-                        forecast_key(item, TimeSeriesType::Scenarios, scen.resolution),
-                    )
-                }
+                TimeSeriesData::Deterministic(det) => (
+                    array_hash(&det.data),
+                    det.resolution.num_milliseconds(),
+                    false,
+                    forecast_metadata(
+                        item,
+                        TimeSeriesType::Deterministic,
+                        &det.name,
+                        det.initial_timestamp,
+                        det.resolution,
+                        det.horizon,
+                        det.interval,
+                        det.count,
+                        &det.data,
+                        None,
+                    ),
+                    forecast_key(
+                        item,
+                        TimeSeriesType::Deterministic,
+                        &det.name,
+                        det.resolution,
+                    ),
+                ),
+                TimeSeriesData::Probabilistic(prob) => (
+                    array_hash(&prob.data),
+                    prob.resolution.num_milliseconds(),
+                    false,
+                    forecast_metadata(
+                        item,
+                        TimeSeriesType::Probabilistic,
+                        &prob.name,
+                        prob.initial_timestamp,
+                        prob.resolution,
+                        prob.horizon,
+                        prob.interval,
+                        prob.count,
+                        &prob.data,
+                        Some(prob.percentiles.clone()),
+                    ),
+                    forecast_key(
+                        item,
+                        TimeSeriesType::Probabilistic,
+                        &prob.name,
+                        prob.resolution,
+                    ),
+                ),
+                TimeSeriesData::Scenarios(scen) => (
+                    array_hash(&scen.data),
+                    scen.resolution.num_milliseconds(),
+                    false,
+                    forecast_metadata(
+                        item,
+                        TimeSeriesType::Scenarios,
+                        &scen.name,
+                        scen.initial_timestamp,
+                        scen.resolution,
+                        scen.horizon,
+                        scen.interval,
+                        scen.count,
+                        &scen.data,
+                        None,
+                    ),
+                    forecast_key(item, TimeSeriesType::Scenarios, &scen.name, scen.resolution),
+                ),
             };
             let data = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => &single.data,
@@ -369,15 +366,16 @@ impl Store {
                 TimeSeriesData::Scenarios(scen) => &scen.data,
             };
 
-            let inserted = self.backend.put_array(&hash, data, resolution_ms, packed)?;
+            let already_present = self.backend.contains(&hash)?;
             tracing::debug!(
                 owner = %item.owner_uuid,
                 bytes = data.bytes.len(),
                 packed,
-                inserted,
+                already_present,
                 "backend put_array",
             );
-            if inserted {
+            self.backend.put_array(&hash, data, resolution_ms, packed)?;
+            if !already_present {
                 staged_hashes.push(hash);
             }
 
@@ -530,6 +528,7 @@ impl Store {
                     resolution,
                     length: sliced_length,
                     data,
+                    name: meta.name.clone(),
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
@@ -562,7 +561,7 @@ impl Store {
                         (data, timestamps[start_idx..end_idx].to_vec())
                     }
                 };
-                let series = NonSequentialTimeSeries::new(timestamps, data)
+                let series = NonSequentialTimeSeries::new(timestamps, data, meta.name.clone())
                     .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
@@ -590,6 +589,7 @@ impl Store {
                     interval,
                     w1 - w0,
                     windowed,
+                    meta.name.clone(),
                 )
                 .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::Deterministic(det))
@@ -624,6 +624,7 @@ impl Store {
                     w1 - w0,
                     percentiles,
                     windowed,
+                    meta.name.clone(),
                 )
                 .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::Probabilistic(prob))
@@ -661,6 +662,7 @@ impl Store {
                     w1 - w0,
                     scenario_count,
                     windowed,
+                    meta.name.clone(),
                 )
                 .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::Scenarios(scen))
@@ -737,6 +739,7 @@ impl Store {
                     interval,
                     selected,
                     out_arr,
+                    meta.name.clone(),
                 )
                 .map_err(TimeSeriesError::IntegrityError)?;
                 Ok(TimeSeriesData::Deterministic(det))
@@ -784,62 +787,20 @@ impl Store {
         &mut self,
         horizon: Duration,
         interval: Duration,
-        owner_category: Option<crate::types::metadata::OwnerCategory>,
-        resolution: Option<Duration>,
     ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         use crate::metadata::MetadataFilter;
-        let mut sources = self.metadata.list(&MetadataFilter {
+        let sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
             ..Default::default()
         })?;
-        // Restrict the transform to one owner category (e.g. only components,
-        // leaving supplemental-attribute series untouched) when requested.
-        if let Some(cat) = owner_category {
-            sources.retain(|m| m.owner_category == cat);
-        }
-        // Restrict the transform to a single resolution when requested, so series
-        // of other resolutions (which may be incompatible with the interval) are
-        // left untouched.
-        if let Some(res) = resolution {
-            sources.retain(|m| m.resolution == Some(res));
-        }
-
-        // Series that already have a DeterministicSingleTimeSeries view are
-        // skipped so the transform is idempotent (e.g. re-deriving one series
-        // when others were transformed earlier, as during a component copy).
-        let existing_dst: std::collections::HashSet<(String, String, Option<i64>, [u8; 32])> = self
-            .metadata
-            .list(&MetadataFilter {
-                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
-                ..Default::default()
-            })?
-            .iter()
-            .map(|m| {
-                (
-                    m.owner_uuid.clone(),
-                    m.name.clone(),
-                    m.resolution.map(|r| r.num_milliseconds()),
-                    crate::hash::features_hash(&m.features),
-                )
-            })
-            .collect();
 
         // Build every DST metadata row up front so a single ineligible series
         // aborts the whole transform before any write.
         let mut new_metas = Vec::with_capacity(sources.len());
         for src in &sources {
-            let src_key = (
-                src.owner_uuid.clone(),
-                src.name.clone(),
-                src.resolution.map(|r| r.num_milliseconds()),
-                crate::hash::features_hash(&src.features),
-            );
-            if existing_dst.contains(&src_key) {
-                continue;
-            }
             let resolution = required_resolution(src, "transform_single_time_series")?;
             let total_len = src.length.ok_or_else(|| {
                 TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
@@ -986,14 +947,13 @@ fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
 
 /// Build the metadata row for a dense forecast (`Deterministic` /
 /// `Probabilistic` / `Scenarios`) added via [`Store::add_time_series_bulk`].
-/// The array is stored standalone in its native shape; `data_hash` is the
-/// caller's already-computed [`array_hash`] of `data` (avoiding a second pass
-/// over the array bytes); `percentiles` is `Some` only for `Probabilistic`.
+/// The array is stored standalone in its native shape; `percentiles` is `Some`
+/// only for `Probabilistic`.
 #[allow(clippy::too_many_arguments)]
 fn forecast_metadata(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
-    data_hash: [u8; 32],
+    name: &str,
     initial_timestamp: chrono::DateTime<chrono::Utc>,
     resolution: Duration,
     horizon: Duration,
@@ -1007,8 +967,8 @@ fn forecast_metadata(
         owner_type: item.owner_type.clone(),
         owner_category: item.owner_category,
         time_series_type,
-        name: item.name.clone(),
-        data_hash,
+        name: name.to_owned(),
+        data_hash: array_hash(data),
         initial_timestamp: Some(initial_timestamp),
         resolution: Some(resolution),
         length: Some(data.length()),
@@ -1030,12 +990,13 @@ fn forecast_metadata(
 fn forecast_key(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
+    name: &str,
     resolution: Duration,
 ) -> TimeSeriesKey {
     TimeSeriesKey {
         owner_uuid: item.owner_uuid.clone(),
         time_series_type,
-        name: item.name.clone(),
+        name: name.to_owned(),
         resolution: Some(resolution),
         features: item.features.clone(),
     }

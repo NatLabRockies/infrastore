@@ -142,7 +142,6 @@ impl Descriptor {
             owner_uuid: self.owner_uuid.clone(),
             owner_type: self.owner_type.clone(),
             owner_category,
-            name: self.name.clone(),
             data,
             features: self.features()?,
             units: self.units.clone(),
@@ -165,7 +164,7 @@ impl Descriptor {
                 let shape = with_elem(vec![length], elem);
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
                 Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
-                    initial, resolution, arr,
+                    initial, resolution, arr, &self.name,
                 )))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
@@ -177,7 +176,7 @@ impl Descriptor {
                 let length = timestamps.len();
                 let shape = with_elem(vec![length], elem);
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
-                let ns = NonSequentialTimeSeries::new(timestamps, arr)?;
+                let ns = NonSequentialTimeSeries::new(timestamps, arr, &self.name)?;
                 Ok(TimeSeriesData::NonSequentialTimeSeries(ns))
             }
             TimeSeriesType::Deterministic => {
@@ -188,7 +187,9 @@ impl Descriptor {
                 let h = parse::horizon_steps(horizon, resolution)?;
                 let shape = with_elem(vec![h, count], elem);
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
-                let det = Deterministic::new(initial, resolution, horizon, interval, count, arr)?;
+                let det = Deterministic::new(
+                    initial, resolution, horizon, interval, count, arr, &self.name,
+                )?;
                 Ok(TimeSeriesData::Deterministic(det))
             }
             TimeSeriesType::Probabilistic => {
@@ -211,6 +212,7 @@ impl Descriptor {
                     count,
                     percentiles,
                     arr,
+                    &self.name,
                 )?;
                 Ok(TimeSeriesData::Probabilistic(prob))
             }
@@ -243,6 +245,7 @@ impl Descriptor {
                     count,
                     scenario_count,
                     arr,
+                    &self.name,
                 )?;
                 Ok(TimeSeriesData::Scenarios(scen))
             }
