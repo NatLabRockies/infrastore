@@ -107,6 +107,13 @@ impl IntegrityReport {
     }
 }
 
+pub struct ArrayPut<'a> {
+    pub hash: &'a [u8; 32],
+    pub data: &'a TypedArray,
+    pub resolution_ms: i64,
+    pub packed: bool,
+}
+
 /// Pluggable array-storage backend.
 ///
 /// Each array is identified by its 32-byte content hash. Implementations are
@@ -129,11 +136,28 @@ pub trait StorageBackend: Send + Sync {
         packed: bool,
     ) -> Result<bool>;
 
+    /// Insert several arrays, returning one `true`/`false` per input to signal
+    /// whether new content was written. Backends may override this to batch I/O.
+    fn put_arrays(&mut self, arrays: &[ArrayPut<'_>]) -> Result<Vec<bool>> {
+        arrays
+            .iter()
+            .map(|put| self.put_array(put.hash, put.data, put.resolution_ms, put.packed))
+            .collect()
+    }
+
     /// Fetch the full array for `hash`.
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
     /// Fetch a slice of the array along axis 0 (the time axis). End is exclusive.
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
+
+    /// Fetch a slice of the array along an arbitrary axis. End is exclusive.
+    fn get_axis_slice(
+        &self,
+        hash: &[u8; 32],
+        axis: usize,
+        range: Range<usize>,
+    ) -> Result<TypedArray>;
 
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
@@ -156,4 +180,40 @@ pub trait StorageBackend: Send + Sync {
     fn compression(&self) -> Compression {
         Compression::None
     }
+}
+
+pub(crate) fn slice_axis(arr: &TypedArray, axis: usize, range: Range<usize>) -> Result<TypedArray> {
+    if axis >= arr.shape.len() {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "axis {axis} out of bounds for shape {:?}",
+            arr.shape
+        )));
+    }
+    let axis_len = arr.shape[axis];
+    if range.start > range.end || range.end > axis_len {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "slice {:?} out of bounds for axis {axis} length {axis_len}",
+            range
+        )));
+    }
+
+    let outer: usize = arr.shape[..axis].iter().product();
+    let inner_bytes: usize = arr.shape[axis + 1..].iter().product::<usize>() * arr.dtype.size();
+    let window_bytes = (range.end - range.start) * inner_bytes;
+
+    let mut out_bytes = Vec::with_capacity(outer * window_bytes);
+    for o in 0..outer {
+        let block_start = o * axis_len * inner_bytes;
+        let src_start = block_start + range.start * inner_bytes;
+        let src_end = block_start + range.end * inner_bytes;
+        out_bytes.extend_from_slice(&arr.bytes[src_start..src_end]);
+    }
+
+    let mut shape = arr.shape.clone();
+    shape[axis] = range.end - range.start;
+    Ok(TypedArray {
+        dtype: arr.dtype,
+        shape,
+        bytes: out_bytes,
+    })
 }

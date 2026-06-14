@@ -455,7 +455,7 @@ fn run_read(args: &ReadArgs) -> Result<(), Error> {
     );
     println!("  total get_time_series calls: {}", c.count * actual_steps);
     println!(
-        "  note: each call fetches the full [{}×{}] array from storage, then slices to 1 window",
+        "  note: each call fetches a 1-window slice from the stored [{}×{}] array",
         DET_HORIZON_H, c.length,
     );
     if !c.in_memory {
