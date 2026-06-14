@@ -6,6 +6,7 @@
 //! must bump [`crate::DATA_FORMAT_VERSION`].
 
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::metadata::{FeatureValue, Features};
@@ -29,28 +30,8 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     }
 
     match data.dtype {
-        Dtype::F64 => {
-            for c in data.bytes.chunks_exact(8) {
-                let v = f64::from_le_bytes(c.try_into().unwrap());
-                let bits = if v.is_nan() {
-                    f64::NAN.to_bits()
-                } else {
-                    v.to_bits()
-                };
-                hasher.update(bits.to_le_bytes());
-            }
-        }
-        Dtype::F32 => {
-            for c in data.bytes.chunks_exact(4) {
-                let v = f32::from_le_bytes(c.try_into().unwrap());
-                let bits = if v.is_nan() {
-                    f32::NAN.to_bits()
-                } else {
-                    v.to_bits()
-                };
-                hasher.update(bits.to_le_bytes());
-            }
-        }
+        Dtype::F64 => update_f64_bytes_canonicalizing_nans(&mut hasher, &data.bytes),
+        Dtype::F32 => update_f32_bytes_canonicalizing_nans(&mut hasher, &data.bytes),
         Dtype::I64 | Dtype::I32 | Dtype::U64 | Dtype::Bool => {
             hasher.update(&data.bytes);
         }
@@ -62,12 +43,63 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     out
 }
 
+fn update_f64_bytes_canonicalizing_nans(hasher: &mut Sha256, bytes: &[u8]) {
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    const FRAC_MASK: u64 = 0x000f_ffff_ffff_ffff;
+
+    let mut segment_start = 0;
+    for (idx, chunk) in bytes.chunks_exact(8).enumerate() {
+        let bits = u64::from_le_bytes(chunk.try_into().unwrap());
+        if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
+            let offset = idx * 8;
+            if segment_start < offset {
+                hasher.update(&bytes[segment_start..offset]);
+            }
+            hasher.update(f64::NAN.to_bits().to_le_bytes());
+            segment_start = offset + 8;
+        }
+    }
+    if segment_start < bytes.len() {
+        hasher.update(&bytes[segment_start..]);
+    }
+}
+
+fn update_f32_bytes_canonicalizing_nans(hasher: &mut Sha256, bytes: &[u8]) {
+    const EXP_MASK: u32 = 0x7f80_0000;
+    const FRAC_MASK: u32 = 0x007f_ffff;
+
+    let mut segment_start = 0;
+    for (idx, chunk) in bytes.chunks_exact(4).enumerate() {
+        let bits = u32::from_le_bytes(chunk.try_into().unwrap());
+        if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
+            let offset = idx * 4;
+            if segment_start < offset {
+                hasher.update(&bytes[segment_start..offset]);
+            }
+            hasher.update(f32::NAN.to_bits().to_le_bytes());
+            segment_start = offset + 4;
+        }
+    }
+    if segment_start < bytes.len() {
+        hasher.update(&bytes[segment_start..]);
+    }
+}
+
 /// Compute the canonical content hash for a `Features` map.
 ///
 /// Iteration order is the BTreeMap's sorted-by-key order. Each entry contributes
 /// a length-prefixed key, a kind tag, and the value bytes. NaNs in `Float`
 /// values are canonicalized like `array_hash`.
 pub fn features_hash(features: &Features) -> [u8; 32] {
+    static EMPTY_FEATURES_HASH: OnceLock<[u8; 32]> = OnceLock::new();
+    if features.is_empty() {
+        return *EMPTY_FEATURES_HASH.get_or_init(|| features_hash_nonempty(features));
+    }
+
+    features_hash_nonempty(features)
+}
+
+fn features_hash_nonempty(features: &Features) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"features\0");
     hasher.update((features.len() as u64).to_le_bytes());
@@ -112,11 +144,15 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
 
 /// Hex-encode a 32-byte hash for storage in TEXT columns / NetCDF string vars.
 pub fn hash_hex(hash: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for byte in hash {
-        s.push_str(&format!("{:02x}", byte));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    // SAFETY: every byte written below is valid ASCII hex.
+    let bytes = unsafe { out.as_mut_vec() };
+    for &byte in hash {
+        bytes.push(HEX[(byte >> 4) as usize]);
+        bytes.push(HEX[(byte & 0x0f) as usize]);
     }
-    s
+    out
 }
 
 #[cfg(test)]

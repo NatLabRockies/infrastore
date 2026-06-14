@@ -1,6 +1,8 @@
 //! High-level `Store` composing the storage backend and metadata store.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::Duration;
 
@@ -8,7 +10,8 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
 use crate::storage::{
-    CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
+    ArrayPut, CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend,
+    StorageBackend,
 };
 use crate::types::array::TypedArray;
 use crate::types::key::TimeSeriesKey;
@@ -103,6 +106,7 @@ pub struct ForecastParameters {
 pub struct Store {
     backend: Box<dyn StorageBackend>,
     metadata: MetadataStore,
+    metadata_cache: Mutex<HashMap<TimeSeriesKey, TimeSeriesMetadata>>,
     read_only: bool,
     /// Filesystem path for the NetCDF file (None if `in_memory`).
     #[allow(dead_code)]
@@ -133,6 +137,7 @@ impl Store {
             return Ok(Self {
                 backend: Box::new(MemoryBackend::new()),
                 metadata: MetadataStore::open_in_memory()?,
+                metadata_cache: Mutex::new(HashMap::new()),
                 read_only: false,
                 netcdf_path: None,
             });
@@ -146,6 +151,7 @@ impl Store {
         Ok(Self {
             backend: Box::new(backend),
             metadata,
+            metadata_cache: Mutex::new(HashMap::new()),
             read_only: false,
             netcdf_path: Some(nc_path.to_path_buf()),
         })
@@ -161,6 +167,7 @@ impl Store {
         Ok(Self {
             backend: Box::new(backend),
             metadata,
+            metadata_cache: Mutex::new(HashMap::new()),
             read_only,
             netcdf_path: Some(path.to_path_buf()),
         })
@@ -175,6 +182,32 @@ impl Store {
     /// from the file); in-memory stores report [`Compression::None`].
     pub fn compression(&self) -> Compression {
         self.backend.compression()
+    }
+
+    fn clear_metadata_cache(&self) {
+        self.metadata_cache
+            .lock()
+            .expect("metadata cache mutex poisoned")
+            .clear();
+    }
+
+    fn get_metadata_cached(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
+        if let Some(meta) = self
+            .metadata_cache
+            .lock()
+            .expect("metadata cache mutex poisoned")
+            .get(key)
+            .cloned()
+        {
+            return Ok(meta);
+        }
+
+        let meta = self.metadata.get_by_key(key)?;
+        self.metadata_cache
+            .lock()
+            .expect("metadata cache mutex poisoned")
+            .insert(key.clone(), meta.clone());
+        Ok(meta)
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is
@@ -209,11 +242,16 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
 
-        // Stage backend writes so we can roll them back on metadata error.
-        let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
-        let tx = self.metadata.transaction()?;
-        let mut keys = Vec::with_capacity(items.len());
+        struct PendingAdd<'a> {
+            hash: [u8; 32],
+            resolution_ms: i64,
+            packed: bool,
+            meta: TimeSeriesMetadata,
+            key: TimeSeriesKey,
+            data: &'a TypedArray,
+        }
 
+        let mut pending = Vec::with_capacity(items.len());
         for item in &items {
             let (hash, resolution_ms, packed, meta, key) = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => {
@@ -289,74 +327,88 @@ impl Store {
                         },
                     )
                 }
-                // Dense forecast types are stored as standalone arrays in their
-                // native shape. `DeterministicSingleTimeSeries` is not added
-                // directly; it is derived from a stored `SingleTimeSeries` via
-                // [`Self::transform_single_time_series`].
-                TimeSeriesData::Deterministic(det) => (
-                    array_hash(&det.data),
-                    det.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Deterministic,
-                        &det.name,
-                        det.initial_timestamp,
-                        det.resolution,
-                        det.horizon,
-                        det.interval,
-                        det.count,
-                        &det.data,
-                        None,
-                    ),
-                    forecast_key(
-                        item,
-                        TimeSeriesType::Deterministic,
-                        &det.name,
-                        det.resolution,
-                    ),
-                ),
-                TimeSeriesData::Probabilistic(prob) => (
-                    array_hash(&prob.data),
-                    prob.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Probabilistic,
-                        &prob.name,
-                        prob.initial_timestamp,
-                        prob.resolution,
-                        prob.horizon,
-                        prob.interval,
-                        prob.count,
-                        &prob.data,
-                        Some(prob.percentiles.clone()),
-                    ),
-                    forecast_key(
-                        item,
-                        TimeSeriesType::Probabilistic,
-                        &prob.name,
-                        prob.resolution,
-                    ),
-                ),
-                TimeSeriesData::Scenarios(scen) => (
-                    array_hash(&scen.data),
-                    scen.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Scenarios,
-                        &scen.name,
-                        scen.initial_timestamp,
-                        scen.resolution,
-                        scen.horizon,
-                        scen.interval,
-                        scen.count,
-                        &scen.data,
-                        None,
-                    ),
-                    forecast_key(item, TimeSeriesType::Scenarios, &scen.name, scen.resolution),
-                ),
+                // Deterministic forecasts are column-packed like regular dense
+                // arrays when their full shape matches. Probabilistic and
+                // scenario forecasts stay standalone because their leading
+                // axes vary by percentile/scenario set. `DeterministicSingleTimeSeries`
+                // is not added directly; it is derived from a stored
+                // `SingleTimeSeries` via [`Self::transform_single_time_series`].
+                TimeSeriesData::Deterministic(det) => {
+                    let hash = array_hash(&det.data);
+                    (
+                        hash,
+                        det.resolution.num_milliseconds(),
+                        true,
+                        forecast_metadata(
+                            item,
+                            TimeSeriesType::Deterministic,
+                            &det.name,
+                            det.initial_timestamp,
+                            det.resolution,
+                            det.horizon,
+                            det.interval,
+                            det.count,
+                            &det.data,
+                            hash,
+                            None,
+                        ),
+                        forecast_key(
+                            item,
+                            TimeSeriesType::Deterministic,
+                            &det.name,
+                            det.resolution,
+                        ),
+                    )
+                }
+                TimeSeriesData::Probabilistic(prob) => {
+                    let hash = array_hash(&prob.data);
+                    (
+                        hash,
+                        prob.resolution.num_milliseconds(),
+                        false,
+                        forecast_metadata(
+                            item,
+                            TimeSeriesType::Probabilistic,
+                            &prob.name,
+                            prob.initial_timestamp,
+                            prob.resolution,
+                            prob.horizon,
+                            prob.interval,
+                            prob.count,
+                            &prob.data,
+                            hash,
+                            Some(prob.percentiles.clone()),
+                        ),
+                        forecast_key(
+                            item,
+                            TimeSeriesType::Probabilistic,
+                            &prob.name,
+                            prob.resolution,
+                        ),
+                    )
+                }
+                TimeSeriesData::Scenarios(scen) => {
+                    let hash = array_hash(&scen.data);
+                    (
+                        hash,
+                        scen.resolution.num_milliseconds(),
+                        false,
+                        forecast_metadata(
+                            item,
+                            TimeSeriesType::Scenarios,
+                            &scen.name,
+                            scen.initial_timestamp,
+                            scen.resolution,
+                            scen.horizon,
+                            scen.interval,
+                            scen.count,
+                            &scen.data,
+                            hash,
+                            None,
+                        ),
+                        forecast_key(item, TimeSeriesType::Scenarios, &scen.name, scen.resolution),
+                    )
+                }
             };
             let data = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => &single.data,
@@ -366,36 +418,53 @@ impl Store {
                 TimeSeriesData::Scenarios(scen) => &scen.data,
             };
 
-            let already_present = self.backend.contains(&hash)?;
             tracing::debug!(
                 owner = %item.owner_uuid,
                 bytes = data.bytes.len(),
                 packed,
-                already_present,
-                "backend put_array",
+                "stage backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution_ms, packed)?;
-            if !already_present {
-                staged_hashes.push(hash);
-            }
-
-            match MetadataStore::insert(&tx, &meta) {
-                Ok(_) => {
-                    keys.push(key);
-                }
-                Err(e) => {
-                    // Rollback metadata via Drop; also undo any array puts we
-                    // staged in this call so the store returns to its prior state.
-                    drop(tx);
-                    for staged in &staged_hashes {
-                        let _ = self.backend.remove_array(staged);
-                    }
-                    return Err(e);
-                }
-            }
+            pending.push(PendingAdd {
+                hash,
+                resolution_ms,
+                packed,
+                meta,
+                key,
+                data,
+            });
         }
 
+        // Stage backend writes so we can roll them back on metadata error.
+        let put_requests = pending
+            .iter()
+            .map(|item| ArrayPut {
+                hash: &item.hash,
+                data: item.data,
+                resolution_ms: item.resolution_ms,
+                packed: item.packed,
+            })
+            .collect::<Vec<_>>();
+        let write_results = self.backend.put_arrays(&put_requests)?;
+        let staged_hashes = pending
+            .iter()
+            .zip(write_results)
+            .filter_map(|(item, wrote)| wrote.then_some(item.hash))
+            .collect::<Vec<_>>();
+
+        let tx = self.metadata.transaction()?;
+        if let Err(e) = MetadataStore::insert_many(&tx, pending.iter().map(|item| &item.meta)) {
+            // Rollback metadata via Drop; also undo any array puts we
+            // staged in this call so the store returns to its prior state.
+            drop(tx);
+            for staged in &staged_hashes {
+                let _ = self.backend.remove_array(staged);
+            }
+            return Err(e);
+        }
+        let keys = pending.into_iter().map(|item| item.key).collect::<Vec<_>>();
+
         tx.commit()?;
+        self.clear_metadata_cache();
         tracing::debug!(count = keys.len(), "transaction committed");
         Ok(keys)
     }
@@ -419,6 +488,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        self.clear_metadata_cache();
         for h in to_drop {
             self.backend.remove_array(&h)?;
         }
@@ -443,6 +513,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        self.clear_metadata_cache();
         for h in to_drop {
             self.backend.remove_array(&h)?;
         }
@@ -459,6 +530,7 @@ impl Store {
         let tx = self.metadata.transaction()?;
         let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner)?;
         tx.commit()?;
+        self.clear_metadata_cache();
         Ok(updated)
     }
 
@@ -468,7 +540,7 @@ impl Store {
         key: &TimeSeriesKey,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
-        let meta = self.metadata.get_by_key(key)?;
+        let meta = self.get_metadata_cached(key)?;
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
@@ -566,21 +638,21 @@ impl Store {
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
             TimeSeriesType::Deterministic => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
                 let initial = required_initial(&meta, "Deterministic")?;
                 let resolution = required_resolution(&meta, "Deterministic")?;
                 let horizon = required_horizon(&meta, "Deterministic")?;
                 let interval = required_interval(&meta, "Deterministic")?;
                 let count = required_count(&meta, "Deterministic")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                // Validate stored shape: [H, count, *E].
-                validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
                 let (w0, w1, window_initial) =
                     resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
                 let windowed = if w0 == 0 && w1 == count {
+                    let arr = self.backend.get_array(&meta.data_hash)?;
+                    // Validate stored shape: [H, count, *E].
+                    validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
                     arr
                 } else {
-                    slice_count_axis(&arr, 1, w0, w1)
+                    self.backend.get_axis_slice(&meta.data_hash, 1, w0..w1)?
                 };
                 let det = Deterministic::new(
                     window_initial,
@@ -596,7 +668,6 @@ impl Store {
             }
 
             TimeSeriesType::Probabilistic => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
                 let initial = required_initial(&meta, "Probabilistic")?;
                 let resolution = required_resolution(&meta, "Probabilistic")?;
                 let horizon = required_horizon(&meta, "Probabilistic")?;
@@ -607,14 +678,15 @@ impl Store {
                 })?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 let p = percentiles.len();
-                // Validate stored shape: [P, H, count, *E].
-                validate_forecast_shape(&arr, &[p, h, count], "Probabilistic")?;
                 let (w0, w1, window_initial) =
                     resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
                 let windowed = if w0 == 0 && w1 == count {
+                    let arr = self.backend.get_array(&meta.data_hash)?;
+                    // Validate stored shape: [P, H, count, *E].
+                    validate_forecast_shape(&arr, &[p, h, count], "Probabilistic")?;
                     arr
                 } else {
-                    slice_count_axis(&arr, 2, w0, w1)
+                    self.backend.get_axis_slice(&meta.data_hash, 2, w0..w1)?
                 };
                 let prob = Probabilistic::new(
                     window_initial,
@@ -631,29 +703,36 @@ impl Store {
             }
 
             TimeSeriesType::Scenarios => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
                 let initial = required_initial(&meta, "Scenarios")?;
                 let resolution = required_resolution(&meta, "Scenarios")?;
                 let horizon = required_horizon(&meta, "Scenarios")?;
                 let interval = required_interval(&meta, "Scenarios")?;
                 let count = required_count(&meta, "Scenarios")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                // scenario_count = arr.shape[0]; validate remaining dims.
-                if arr.shape.len() < 3 {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "Scenarios: stored shape {:?} must have at least 3 dims",
-                        arr.shape
-                    )));
-                }
-                let scenario_count = arr.shape[0];
-                validate_forecast_shape(&arr, &[scenario_count, h, count], "Scenarios")?;
                 let (w0, w1, window_initial) =
                     resolve_windows(initial, resolution, horizon, interval, count, time_range)?;
                 let windowed = if w0 == 0 && w1 == count {
+                    let arr = self.backend.get_array(&meta.data_hash)?;
+                    // scenario_count = arr.shape[0]; validate remaining dims.
+                    if arr.shape.len() < 3 {
+                        return Err(TimeSeriesError::IntegrityError(format!(
+                            "Scenarios: stored shape {:?} must have at least 3 dims",
+                            arr.shape
+                        )));
+                    }
+                    let scenario_count = arr.shape[0];
+                    validate_forecast_shape(&arr, &[scenario_count, h, count], "Scenarios")?;
                     arr
                 } else {
-                    slice_count_axis(&arr, 2, w0, w1)
+                    self.backend.get_axis_slice(&meta.data_hash, 2, w0..w1)?
                 };
+                if windowed.shape.len() < 3 {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "Scenarios: stored shape {:?} must have at least 3 dims",
+                        windowed.shape
+                    )));
+                }
+                let scenario_count = windowed.shape[0];
                 let scen = Scenarios::new(
                     window_initial,
                     resolution,
@@ -755,7 +834,7 @@ impl Store {
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
     pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
-        self.metadata.get_by_key(key)
+        self.get_metadata_cached(key)
     }
 
     /// Fetch the full stored array for a content hash. The metadata-owning
@@ -845,6 +924,7 @@ impl Store {
             }
         }
         tx.commit()?;
+        self.clear_metadata_cache();
         Ok(new_metas.len())
     }
 
@@ -960,6 +1040,7 @@ fn forecast_metadata(
     interval: Duration,
     count: usize,
     data: &TypedArray,
+    data_hash: [u8; 32],
     percentiles: Option<Vec<f64>>,
 ) -> TimeSeriesMetadata {
     TimeSeriesMetadata {
@@ -968,7 +1049,7 @@ fn forecast_metadata(
         owner_category: item.owner_category,
         time_series_type,
         name: name.to_owned(),
-        data_hash: array_hash(data),
+        data_hash,
         initial_timestamp: Some(initial_timestamp),
         resolution: Some(resolution),
         length: Some(data.length()),
@@ -1016,51 +1097,6 @@ fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {
 // Forecast read-path helpers
 // ---------------------------------------------------------------------------
 
-/// Slice a contiguous range `[w0, w1)` along `axis` of a row-major array.
-///
-/// This is a strided gather: axis `a` is not necessarily the leading axis, so
-/// the bytes for each "outer" block are not contiguous in the source buffer.
-///
-/// - `outer = product(shape[0..axis])` — number of outer blocks.
-/// - `inner_bytes = product(shape[axis+1..]) * dtype.size()` — bytes per
-///   element in the axis-stride.
-/// - For each outer block `o`, the source bytes for windows `[w0, w1)` live at
-///   `o * axis_len * inner_bytes + w0 * inner_bytes .. + w1 * inner_bytes`.
-///
-/// The returned array has the same dtype and all the same shape dims except
-/// `shape[axis]` which becomes `w1 - w0`.
-pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usize) -> TypedArray {
-    assert!(
-        axis < arr.shape.len(),
-        "axis {axis} out of bounds for shape {:?}",
-        arr.shape
-    );
-    assert!(w0 <= w1, "w0 ({w0}) must be <= w1 ({w1})");
-    let axis_len = arr.shape[axis];
-    assert!(w1 <= axis_len, "w1 ({w1}) > axis_len ({axis_len})");
-
-    let outer: usize = arr.shape[..axis].iter().product();
-    let inner_bytes: usize = arr.shape[axis + 1..].iter().product::<usize>() * arr.dtype.size();
-    let window_bytes = (w1 - w0) * inner_bytes;
-
-    let mut out_bytes = Vec::with_capacity(outer * window_bytes);
-    for o in 0..outer {
-        let block_start = o * axis_len * inner_bytes;
-        let src_start = block_start + w0 * inner_bytes;
-        let src_end = block_start + w1 * inner_bytes;
-        out_bytes.extend_from_slice(&arr.bytes[src_start..src_end]);
-    }
-
-    let mut new_shape = arr.shape.clone();
-    new_shape[axis] = w1 - w0;
-
-    TypedArray {
-        dtype: arr.dtype,
-        shape: new_shape,
-        bytes: out_bytes,
-    }
-}
-
 /// Resolve the window range `[w0, w1)` from an optional `time_range`.
 ///
 /// Implements the IS.jl rule: `start_time` must be the first timestamp of a
@@ -1100,22 +1136,16 @@ fn resolve_windows(
             }
             let start_k = (offset_ms / interval_ms) as usize;
 
-            // Collect all k in [0, count) whose window start is in [start, end).
-            let mut w0 = count; // sentinel: no window selected yet
-            let mut w1 = 0usize;
-            for k in 0..count {
-                let window_start = initial + Duration::milliseconds(k as i64 * interval_ms);
-                if window_start >= start && window_start < end {
-                    if w0 == count {
-                        w0 = k;
-                    }
-                    w1 = k + 1;
-                }
-            }
+            let end_offset_ms = (end - initial).num_milliseconds();
+            let end_k = if end_offset_ms <= 0 {
+                0
+            } else {
+                ((end_offset_ms - 1) / interval_ms + 1) as usize
+            };
 
-            // Empty selection.
-            if w0 == count {
-                // Return initial_timestamp aligned to start (the requested start).
+            let w0 = start_k;
+            let w1 = end_k.min(count);
+            if w0 >= count || w1 <= w0 {
                 let first_ts = initial + Duration::milliseconds(start_k as i64 * interval_ms);
                 return Ok((0, 0, first_ts));
             }

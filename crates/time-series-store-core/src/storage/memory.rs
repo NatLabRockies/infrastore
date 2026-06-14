@@ -6,7 +6,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::types::array::TypedArray;
 
-use super::{CompactionReport, IntegrityReport, StorageBackend};
+use super::{CompactionReport, IntegrityReport, StorageBackend, slice_axis};
 
 /// Pure in-memory storage backend.
 ///
@@ -70,6 +70,16 @@ impl StorageBackend for MemoryBackend {
             shape,
             bytes,
         })
+    }
+
+    fn get_axis_slice(
+        &self,
+        hash: &[u8; 32],
+        axis: usize,
+        range: Range<usize>,
+    ) -> Result<TypedArray> {
+        let array = self.arrays.get(hash).ok_or(TimeSeriesError::NotFound)?;
+        slice_axis(array, axis, range)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {

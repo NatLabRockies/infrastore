@@ -31,7 +31,7 @@ use crate::storage::Compression;
 use crate::types::array::{Dtype, TypedArray};
 use crate::version::DATA_FORMAT_VERSION;
 
-use super::{CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayPut, CompactionReport, IntegrityReport, StorageBackend};
 
 /// Max columns per compacted dataset before we spill into a new dataset.
 pub const MAX_COLS_PER_DATASET: usize = 1000;
@@ -42,6 +42,8 @@ const HASH_SUFFIX: &str = "_h";
 const STANDALONE_PREFIX: &str = "arr_";
 /// Global attribute recording the compression policy a store was created with.
 const COMPRESSION_ATTR: &str = "compression";
+const PACKED_COLUMN_CHUNK: usize = 16;
+const PACKED_ELEMENT_CHUNK: usize = 128;
 
 #[derive(Debug, Clone)]
 enum Location {
@@ -176,21 +178,94 @@ macro_rules! le_from_vec {
     };
 }
 
+#[cfg(target_endian = "little")]
+fn aligned_values<T>(bytes: &[u8]) -> Option<&[T]> {
+    // All integer and IEEE float bit patterns used with this helper are valid
+    // values of T. The prefix/suffix checks keep the typed view aligned and
+    // exactly sized; otherwise callers fall back to byte-wise conversion.
+    let (prefix, values, suffix) = unsafe { bytes.align_to::<T>() };
+    if prefix.is_empty() && suffix.is_empty() {
+        Some(values)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_endian = "little"))]
+fn aligned_values<T>(_bytes: &[u8]) -> Option<&[T]> {
+    None
+}
+
 fn put_typed(
     var: &mut netcdf::VariableMut<'_>,
     dtype: Dtype,
     bytes: &[u8],
     extents: Extents,
 ) -> Result<()> {
+    macro_rules! put_numeric {
+        ($t:ty, $n:expr) => {{
+            if let Some(values) = aligned_values::<$t>(bytes) {
+                var.put_values(values, extents)
+            } else {
+                var.put_values(&vec_from_le!(bytes, $t, $n), extents)
+            }
+        }};
+    }
     match dtype {
-        Dtype::F64 => var.put_values(&vec_from_le!(bytes, f64, 8), extents),
-        Dtype::F32 => var.put_values(&vec_from_le!(bytes, f32, 4), extents),
-        Dtype::I64 => var.put_values(&vec_from_le!(bytes, i64, 8), extents),
-        Dtype::I32 => var.put_values(&vec_from_le!(bytes, i32, 4), extents),
-        Dtype::U64 => var.put_values(&vec_from_le!(bytes, u64, 8), extents),
+        Dtype::F64 => put_numeric!(f64, 8),
+        Dtype::F32 => put_numeric!(f32, 4),
+        Dtype::I64 => put_numeric!(i64, 8),
+        Dtype::I32 => put_numeric!(i32, 4),
+        Dtype::U64 => put_numeric!(u64, 8),
         Dtype::Bool => var.put_values(bytes, extents),
     }
     .map_err(map_nc)
+}
+
+fn put_packed_batch_typed(
+    var: &mut netcdf::VariableMut<'_>,
+    dtype: Dtype,
+    arrays: &[ArrayPut<'_>],
+    length: usize,
+    row_elements: usize,
+    extents: Extents,
+) -> Result<()> {
+    macro_rules! put_numeric {
+        ($t:ty, $n:expr) => {{
+            let mut values = Vec::<$t>::with_capacity(length * arrays.len() * row_elements);
+            for t in 0..length {
+                let src_start = t * row_elements * $n;
+                let src_end = src_start + row_elements * $n;
+                for put in arrays {
+                    values.extend(
+                        put.data.bytes[src_start..src_end]
+                            .chunks_exact($n)
+                            .map(|chunk| <$t>::from_le_bytes(chunk.try_into().unwrap())),
+                    );
+                }
+            }
+            var.put_values(&values, extents).map_err(map_nc)
+        }};
+    }
+
+    match dtype {
+        Dtype::F64 => put_numeric!(f64, 8),
+        Dtype::F32 => put_numeric!(f32, 4),
+        Dtype::I64 => put_numeric!(i64, 8),
+        Dtype::I32 => put_numeric!(i32, 4),
+        Dtype::U64 => put_numeric!(u64, 8),
+        Dtype::Bool => {
+            let mut values = Vec::<u8>::with_capacity(length * arrays.len() * row_elements);
+            for t in 0..length {
+                let src_start = t * row_elements;
+                let src_end = src_start + row_elements;
+                for put in arrays {
+                    values.extend_from_slice(&put.data.bytes[src_start..src_end]);
+                }
+            }
+            var.put_values(&values, extents).map_err(map_nc)
+        }
+    }
 }
 
 fn get_typed(var: &netcdf::Variable<'_>, dtype: Dtype, extents: Extents) -> Result<Vec<u8>> {
@@ -488,8 +563,12 @@ impl Inner {
         let name_owned = name.to_string();
         let hash_name_for_closure = hash_name.clone();
         let chunks: Vec<usize> = std::iter::once(length)
-            .chain(std::iter::once(1usize))
-            .chain(element_shape.iter().copied())
+            .chain(std::iter::once(PACKED_COLUMN_CHUNK))
+            .chain(
+                element_shape
+                    .iter()
+                    .map(|&len| len.clamp(1, PACKED_ELEMENT_CHUNK)),
+            )
             .collect();
         let compression = self.compression;
 
@@ -549,6 +628,18 @@ impl Inner {
         ranges.as_slice().into()
     }
 
+    fn axis_extents(shape: &[usize], axis: usize, range: Range<usize>) -> Extents {
+        let mut ranges = Vec::with_capacity(shape.len());
+        for (dim, &len) in shape.iter().enumerate() {
+            if dim == axis {
+                ranges.push(range.clone());
+            } else {
+                ranges.push(0..len);
+            }
+        }
+        ranges.as_slice().into()
+    }
+
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len(), resolution_ms))]
     fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution_ms: i64) -> Result<()> {
         let length = data.length();
@@ -591,6 +682,113 @@ impl Inner {
             },
         );
         Ok(())
+    }
+
+    fn put_packed_batch(&mut self, arrays: &[ArrayPut<'_>]) -> Result<Option<Vec<bool>>> {
+        let Some(first) = arrays.first() else {
+            return Ok(Some(Vec::new()));
+        };
+        if !first.packed || self.by_hash.contains_key(first.hash) {
+            return Ok(None);
+        }
+
+        let dtype = first.data.dtype;
+        let length = first.data.length();
+        let element_shape = first.data.element_shape().to_vec();
+        let resolution_ms = first.resolution_ms;
+        if arrays.len() > MAX_COLS_PER_DATASET {
+            return Ok(None);
+        }
+        if arrays.iter().any(|put| {
+            !put.packed
+                || self.by_hash.contains_key(put.hash)
+                || put.resolution_ms != resolution_ms
+                || put.data.dtype != dtype
+                || put.data.length() != length
+                || put.data.element_shape() != element_shape.as_slice()
+        }) {
+            return Ok(None);
+        }
+
+        let dataset_name =
+            self.ensure_writable_dataset(dtype, &element_shape, length, resolution_ms)?;
+        let (col_start, hash_name) = {
+            let state = self.datasets.get(&dataset_name).expect("dataset ensured");
+            let mut run_start = None;
+            let mut run_len = 0usize;
+            for (idx, col) in state.columns.iter().enumerate() {
+                if col.is_none() {
+                    if run_start.is_none() {
+                        run_start = Some(idx);
+                    }
+                    run_len += 1;
+                    if run_len == arrays.len() {
+                        break;
+                    }
+                } else {
+                    run_start = None;
+                    run_len = 0;
+                }
+            }
+            if run_len < arrays.len() {
+                return Ok(None);
+            }
+            (run_start.expect("run found"), state.hash_name.clone())
+        };
+
+        let row_elements = element_shape.iter().product::<usize>().max(1);
+
+        let hexes = arrays
+            .iter()
+            .map(|put| hash_hex(put.hash))
+            .collect::<Vec<_>>();
+        self.with_single_mut(|single| {
+            let mut data_var = single.variable_mut(&dataset_name).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("missing variable {dataset_name}"))
+            })?;
+            let mut ranges: Vec<Range<usize>> =
+                vec![0..length, col_start..col_start + arrays.len()];
+            for &k in &element_shape {
+                ranges.push(0..k);
+            }
+            put_packed_batch_typed(
+                &mut data_var,
+                dtype,
+                arrays,
+                length,
+                row_elements,
+                ranges.as_slice().into(),
+            )?;
+            drop(data_var);
+
+            let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("missing variable {hash_name}"))
+            })?;
+            for (col_offset, hex) in hexes.iter().enumerate() {
+                hash_var
+                    .put_string(hex, col_start + col_offset)
+                    .map_err(map_nc)?;
+            }
+            Ok(())
+        })?;
+
+        let state = self
+            .datasets
+            .get_mut(&dataset_name)
+            .expect("dataset ensured");
+        for (col_offset, (put, hex)) in arrays.iter().zip(hexes).enumerate() {
+            let col = col_start + col_offset;
+            state.columns[col] = Some(hex);
+            self.by_hash.insert(
+                *put.hash,
+                Location::Packed {
+                    dataset: dataset_name.clone(),
+                    col,
+                },
+            );
+        }
+
+        Ok(Some(vec![true; arrays.len()]))
     }
 
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
@@ -690,6 +888,91 @@ impl Inner {
             }),
         }
     }
+
+    #[tracing::instrument(skip(self, hash, range))]
+    fn read_axis_locked(
+        &self,
+        hash: &[u8; 32],
+        axis: usize,
+        range: Range<usize>,
+    ) -> Result<TypedArray> {
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
+        match loc {
+            Location::Packed { dataset, col } => {
+                let state = self.datasets.get(&dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                })?;
+                let full_shape: Vec<usize> = std::iter::once(state.length)
+                    .chain(state.element_shape.iter().copied())
+                    .collect();
+                if axis >= full_shape.len() {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "axis {axis} out of bounds for shape {full_shape:?}"
+                    )));
+                }
+                let axis_len = full_shape[axis];
+                if range.start > range.end || range.end > axis_len {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "slice {:?} out of bounds for axis {axis} length {axis_len}",
+                        range
+                    )));
+                }
+
+                let mut ranges: Vec<Range<usize>> = Vec::with_capacity(full_shape.len() + 1);
+                ranges.push(if axis == 0 {
+                    range.clone()
+                } else {
+                    0..state.length
+                });
+                ranges.push(col..col + 1);
+                for (element_axis, &len) in state.element_shape.iter().enumerate() {
+                    if axis == element_axis + 1 {
+                        ranges.push(range.clone());
+                    } else {
+                        ranges.push(0..len);
+                    }
+                }
+                let extents = ranges.as_slice().into();
+                let bytes = self.with_single(|single| {
+                    let var = single.variable(&dataset).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("missing variable {dataset}"))
+                    })?;
+                    get_typed(&var, state.dtype, extents)
+                })?;
+                let mut shape = full_shape;
+                shape[axis] = range.end - range.start;
+                TypedArray::new(state.dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
+            }
+            Location::Standalone { var } => self.with_single(|single| {
+                let v = single.variable(&var).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {var}"))
+                })?;
+                let full_shape: Vec<usize> = v.dimensions().iter().map(|d| d.len()).collect();
+                if axis >= full_shape.len() {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "axis {axis} out of bounds for shape {full_shape:?}"
+                    )));
+                }
+                let axis_len = full_shape[axis];
+                if range.start > range.end || range.end > axis_len {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "slice {:?} out of bounds for axis {axis} length {axis_len}",
+                        range
+                    )));
+                }
+                let dtype = dtype_of_variable(&v)?;
+                let extents = Inner::axis_extents(&full_shape, axis, range.clone());
+                let bytes = get_typed(&v, dtype, extents)?;
+                let mut shape = full_shape;
+                shape[axis] = range.end - range.start;
+                TypedArray::new(dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
+            }),
+        }
+    }
 }
 
 /// Map a NetCDF variable's element type back to a [`Dtype`].
@@ -731,6 +1014,29 @@ impl StorageBackend for NetCdfBackend {
         Ok(true)
     }
 
+    #[tracing::instrument(skip(self, arrays), fields(count = arrays.len()))]
+    fn put_arrays(&mut self, arrays: &[ArrayPut<'_>]) -> Result<Vec<bool>> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        if let Some(results) = inner.put_packed_batch(arrays)? {
+            return Ok(results);
+        }
+
+        let mut results = Vec::with_capacity(arrays.len());
+        for put in arrays {
+            if inner.by_hash.contains_key(put.hash) {
+                results.push(false);
+                continue;
+            }
+            if put.packed {
+                inner.put_packed(put.hash, put.data, put.resolution_ms)?;
+            } else {
+                inner.put_standalone(put.hash, put.data)?;
+            }
+            results.push(true);
+        }
+        Ok(results)
+    }
+
     #[tracing::instrument(skip(self, hash))]
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
@@ -741,6 +1047,21 @@ impl StorageBackend for NetCdfBackend {
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_locked(hash, Some(range))
+    }
+
+    #[tracing::instrument(skip(self, hash), fields(axis, start = range.start, end = range.end))]
+    fn get_axis_slice(
+        &self,
+        hash: &[u8; 32],
+        axis: usize,
+        range: Range<usize>,
+    ) -> Result<TypedArray> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        if axis == 0 {
+            inner.read_locked(hash, Some(range))
+        } else {
+            inner.read_axis_locked(hash, axis, range)
+        }
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {

@@ -101,23 +101,16 @@ impl MetadataStore {
     /// Insert a metadata record + its features inside the supplied transaction.
     /// Returns the association id. Caller is responsible for committing.
     pub fn insert(tx: &Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<i64> {
-        let f_hash = features_hash(&meta.features);
-        let initial_ts = meta.initial_timestamp.map(|t| t.to_rfc3339());
-        let resolution_ms = meta.resolution.map(duration_to_ms);
-        let horizon_ms = meta.horizon.map(duration_to_ms);
-        let interval_ms = meta.interval.map(duration_to_ms);
-        let timestamps_json = match &meta.timestamps {
-            Some(ts) => Some(serde_json::to_string(ts)?),
-            None => None,
-        };
-        let percentiles_json = match &meta.percentiles {
-            Some(p) => Some(serde_json::to_string(p)?),
-            None => None,
-        };
-        let element_shape_json = serde_json::to_string(&meta.element_shape)?;
+        let mut ids = Self::insert_many(tx, std::iter::once(meta))?;
+        Ok(ids.remove(0))
+    }
 
-        // `prepare_cached` so bulk adds parse each INSERT's SQL once per
-        // connection instead of once per row.
+    /// Insert many metadata records + their features inside the supplied transaction.
+    /// Returns association ids in input order. Caller is responsible for committing.
+    pub fn insert_many<'a>(
+        tx: &Transaction<'_>,
+        metas: impl IntoIterator<Item = &'a TimeSeriesMetadata>,
+    ) -> Result<Vec<i64>> {
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
              (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
@@ -127,62 +120,101 @@ impl MetadataStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                      ?16, ?17, ?18, ?19)",
         )?;
-        let result = insert_stmt.execute(params![
-            meta.owner_uuid,
-            meta.owner_type,
-            meta.owner_category.as_str(),
-            meta.time_series_type.as_str(),
-            meta.name,
-            meta.data_hash.as_slice(),
-            initial_ts,
-            resolution_ms,
-            meta.length.map(|l| l as i64),
-            horizon_ms,
-            interval_ms,
-            meta.count.map(|c| c as i64),
-            timestamps_json,
-            meta.units,
-            percentiles_json,
-            meta.dtype.as_str(),
-            element_shape_json,
-            meta.logical_type,
-            f_hash.as_slice(),
-        ]);
 
-        let id = match result {
-            Ok(_) => tx.last_insert_rowid(),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                // The unique index covers (owner_uuid, time_series_type, name,
-                // resolution_ms, features_hash). Surface the spec error.
-                return Err(TimeSeriesError::DuplicateTimeSeries);
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        let mut feature_stmt = tx.prepare_cached(
-            "INSERT INTO features
-             (association_id, key, value_kind, value_int, value_float, value_bool, value_str)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-        for (k, v) in &meta.features {
-            let (kind, vi, vf, vb, vs): (
-                &str,
-                Option<i64>,
-                Option<f64>,
-                Option<i64>,
-                Option<&str>,
-            ) = match v {
-                FeatureValue::Int(i) => ("int", Some(*i), None, None, None),
-                FeatureValue::Float(f) => ("float", None, Some(*f), None, None),
-                FeatureValue::Bool(b) => ("bool", None, None, Some(*b as i64), None),
-                FeatureValue::Str(s) => ("str", None, None, None, Some(s.as_str())),
+        let mut feature_stmt = None;
+        let mut last_initial_ts: Option<(DateTime<Utc>, String)> = None;
+        let mut ids = Vec::new();
+        for meta in metas {
+            let f_hash = features_hash(&meta.features);
+            let initial_ts = meta.initial_timestamp.map(|t| match &last_initial_ts {
+                Some((cached, s)) if *cached == t => s.clone(),
+                _ => {
+                    let s = t.to_rfc3339();
+                    last_initial_ts = Some((t, s.clone()));
+                    s
+                }
+            });
+            let resolution_ms = meta.resolution.map(duration_to_ms);
+            let horizon_ms = meta.horizon.map(duration_to_ms);
+            let interval_ms = meta.interval.map(duration_to_ms);
+            let timestamps_json = match &meta.timestamps {
+                Some(ts) => Some(serde_json::to_string(ts)?),
+                None => None,
             };
-            feature_stmt.execute(params![id, k, kind, vi, vf, vb, vs])?;
+            let percentiles_json = match &meta.percentiles {
+                Some(p) => Some(serde_json::to_string(p)?),
+                None => None,
+            };
+            let element_shape_json = if meta.element_shape.is_empty() {
+                "[]".to_string()
+            } else {
+                serde_json::to_string(&meta.element_shape)?
+            };
+
+            let result = insert_stmt.execute(params![
+                meta.owner_uuid,
+                meta.owner_type,
+                meta.owner_category.as_str(),
+                meta.time_series_type.as_str(),
+                meta.name,
+                meta.data_hash.as_slice(),
+                initial_ts,
+                resolution_ms,
+                meta.length.map(|l| l as i64),
+                horizon_ms,
+                interval_ms,
+                meta.count.map(|c| c as i64),
+                timestamps_json,
+                meta.units,
+                percentiles_json,
+                meta.dtype.as_str(),
+                element_shape_json,
+                meta.logical_type,
+                f_hash.as_slice(),
+            ]);
+
+            let id = match result {
+                Ok(_) => tx.last_insert_rowid(),
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    // The unique index covers (owner_uuid, time_series_type, name,
+                    // resolution_ms, features_hash). Surface the spec error.
+                    return Err(TimeSeriesError::DuplicateTimeSeries);
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            if !meta.features.is_empty() {
+                let feature_stmt = match &mut feature_stmt {
+                    Some(stmt) => stmt,
+                    None => feature_stmt.insert(tx.prepare_cached(
+                        "INSERT INTO features
+                         (association_id, key, value_kind, value_int, value_float, value_bool, value_str)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    )?),
+                };
+                for (k, v) in &meta.features {
+                    let (kind, vi, vf, vb, vs): (
+                        &str,
+                        Option<i64>,
+                        Option<f64>,
+                        Option<i64>,
+                        Option<&str>,
+                    ) = match v {
+                        FeatureValue::Int(i) => ("int", Some(*i), None, None, None),
+                        FeatureValue::Float(f) => ("float", None, Some(*f), None, None),
+                        FeatureValue::Bool(b) => ("bool", None, None, Some(*b as i64), None),
+                        FeatureValue::Str(s) => ("str", None, None, None, Some(s.as_str())),
+                    };
+                    feature_stmt.execute(params![id, k, kind, vi, vf, vb, vs])?;
+                }
+            }
+
+            ids.push(id);
         }
 
-        Ok(id)
+        Ok(ids)
     }
 
     /// Delete an association by primary-key tuple. Returns the number of rows
