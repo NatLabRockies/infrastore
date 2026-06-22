@@ -191,7 +191,7 @@ fn make_sts_requests(count: usize, length: usize) -> Vec<AddRequest> {
             let values: Vec<f64> = (0..length).map(|t| i as f64 * 1000.0 + t as f64).collect();
             let data = TypedArray::from_f64(vec![length], &values);
             AddRequest {
-                owner_uuid: format!("comp-{i:08}"),
+                owner_id: i as i64,
                 owner_type: "Generator".to_string(),
                 owner_category: OwnerCategory::Component,
                 data: TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
@@ -231,7 +231,7 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
             )
             .expect("valid Deterministic shape");
             AddRequest {
-                owner_uuid: format!("comp-{i:08}"),
+                owner_id: i as i64,
                 owner_type: "Generator".to_string(),
                 owner_category: OwnerCategory::Component,
                 data: TimeSeriesData::Deterministic(det),
@@ -246,11 +246,11 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
 
 /// Reconstruct TimeSeriesKeys for SingleTimeSeries without querying the store.
 ///
-/// This works because the bench creates deterministic owner_uuids and names.
+/// This works because the bench creates deterministic owner_ids and names.
 fn sts_keys(count: usize) -> Vec<TimeSeriesKey> {
     (0..count)
         .map(|i| TimeSeriesKey {
-            owner_uuid: format!("comp-{i:08}"),
+            owner_id: i as i64,
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: "active_power".to_string(),
             resolution: Some(chrono::Duration::hours(1)),
@@ -263,7 +263,7 @@ fn sts_keys(count: usize) -> Vec<TimeSeriesKey> {
 fn det_keys(count: usize) -> Vec<TimeSeriesKey> {
     (0..count)
         .map(|i| TimeSeriesKey {
-            owner_uuid: format!("comp-{i:08}"),
+            owner_id: i as i64,
             time_series_type: TimeSeriesType::Deterministic,
             name: "active_power_forecast".to_string(),
             resolution: Some(chrono::Duration::hours(1)),

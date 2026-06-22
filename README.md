@@ -104,7 +104,7 @@ ts = SingleTimeSeries(
     "load",   # name (required)
 )
 key = store.add_time_series(
-    owner_uuid="42", owner_type="Generator",
+    owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,   # name comes from ts
     features={"model_year": 2030}, units="MW",
@@ -146,9 +146,9 @@ TSS=target/debug/tss
 $TSS template single > load.json       # print an example descriptor to edit
 $TSS --store demo.nc add --descriptor load.json
 $TSS --store demo.nc list
-$TSS --store demo.nc get  --owner-uuid 42 --name load            # pretty table
-$TSS --store demo.nc -f csv  get  --owner-uuid 42 --name load    # round-trippable CSV
-$TSS --store demo.nc -f json info --owner-uuid 42 --name load    # metadata + stats
+$TSS --store demo.nc get  --owner-id 42 --name load              # pretty table
+$TSS --store demo.nc -f csv  get  --owner-id 42 --name load      # round-trippable CSV
+$TSS --store demo.nc -f json info --owner-id 42 --name load      # metadata + stats
 ```
 
 The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,

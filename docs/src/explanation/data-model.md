@@ -9,14 +9,13 @@ several variants distinguished by **features**.
 
 Every time series belongs to an owner, identified by three fields:
 
-| Field            | Type            | Meaning                                                                              |
-| ---------------- | --------------- | ------------------------------------------------------------------------------------ |
-| `owner_uuid`     | string          | Stable identity of the owning object (an InfrastructureSystems.jl UUID, for example) |
-| `owner_type`     | string          | The owner's concrete type, e.g. `"Generator"`                                        |
-| `owner_category` | `OwnerCategory` | `Component` or `SupplementalAttribute`                                               |
+| Field            | Type            | Meaning                                                       |
+| ---------------- | --------------- | ------------------------------------------------------------- |
+| `owner_id`       | `i64`           | Stable identity of the owning object (a component identifier) |
+| `owner_type`     | string          | The owner's concrete type, e.g. `"Generator"`                 |
+| `owner_category` | `OwnerCategory` | `Component` or `SupplementalAttribute`                        |
 
-`owner_uuid` is a free-form string, so it interoperates with InfrastructureSystems.jl UUIDs, integer
-IDs rendered as text, or any other stable identifier scheme. Only `owner_uuid` participates in the
+`owner_id` is a signed 64-bit integer component identifier. Only `owner_id` participates in the
 association's uniqueness constraint; `owner_type` and `owner_category` are descriptive.
 
 ## Time-Series Types
@@ -125,7 +124,7 @@ A **`TimeSeriesKey`** is the logical handle that re-finds a series. It is exactl
 must be unique:
 
 ```text
-TimeSeriesKey = (owner_uuid, time_series_type, name, resolution, features)
+TimeSeriesKey = (owner_id, time_series_type, name, resolution, features)
 ```
 
 `add_time_series` returns a key; `get_time_series`, `has_time_series`, and `remove_time_series` take
@@ -135,7 +134,7 @@ feature, a different `resolution`) and you have a distinct series.
 
 ```mermaid
 flowchart LR
-    OWNER["Owner<br/>uuid=42, type=Generator"]
+    OWNER["Owner<br/>id=42, type=Generator"]
     OWNER --> K1["name=load<br/>year=2030"]
     OWNER --> K2["name=load<br/>year=2050"]
     OWNER --> K3["name=max_active_power"]

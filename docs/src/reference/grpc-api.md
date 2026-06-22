@@ -46,7 +46,7 @@ message FeatureValue {
 message Features { map<string, FeatureValue> entries = 1; }
 
 message TimeSeriesKey {
-  string         owner_uuid       = 1;
+  int64          owner_id         = 1;
   TimeSeriesType time_series_type = 2;
   string         name             = 3;
   int64          resolution_ms    = 4;   // 0 = unset
@@ -54,7 +54,7 @@ message TimeSeriesKey {
 }
 
 message TimeSeriesMetadata {
-  string          owner_uuid                = 1;
+  int64           owner_id                  = 1;
   string          owner_type                = 2;
   OwnerCategory   owner_category            = 3;
   TimeSeriesType  time_series_type          = 4;
@@ -76,7 +76,7 @@ message TimeSeriesMetadata {
 
 ```proto
 message ListReq {
-  optional string         owner_uuid       = 1;
+  optional int64          owner_id         = 1;
   optional string         owner_type       = 2;
   optional TimeSeriesType time_series_type = 3;
   optional string         name             = 4;
@@ -100,7 +100,7 @@ message GetResp {
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
 }
 
-message KeysReq  { string owner_uuid = 1; }
+message KeysReq  { int64 owner_id = 1; }
 message KeysResp { repeated TimeSeriesKey keys = 1; }
 
 message ResolutionsReq  { optional TimeSeriesType time_series_type = 1; }

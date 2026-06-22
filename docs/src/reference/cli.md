@@ -48,7 +48,7 @@ the same flags as filters:
 
 | Flag                  | Meaning                                                                    |
 | --------------------- | -------------------------------------------------------------------------- |
-| `--owner-uuid <U>`    | Owner UUID.                                                                |
+| `--owner-id <I>`      | Owner identifier (`i64` integer).                                          |
 | `--name <N>`          | Series name.                                                               |
 | `--type <T>`          | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
 | `--resolution <DUR>`  | Resolution, e.g. `1h`, `15min`.                                            |
@@ -71,7 +71,7 @@ The CSV holds only numbers (plus a leading timestamp column for `non_sequential`
 
 | Key                            | Required for                | Notes                                               |
 | ------------------------------ | --------------------------- | --------------------------------------------------- |
-| `owner_uuid`                   | all                         |                                                     |
+| `owner_id`                     | all                         | Integer component identifier (`i64`).               |
 | `owner_type`                   | all                         |                                                     |
 | `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.  |
 | `name`                         | all                         |                                                     |

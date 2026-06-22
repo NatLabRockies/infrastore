@@ -50,7 +50,7 @@ let mut features = Features::new();
 features.insert("model_year".into(), FeatureValue::Int(2030));
 
 let key = store.add_time_series(
-    "42",                                   // owner_uuid
+    42,                                     // owner_id
     "Generator",                            // owner_type
     OwnerCategory::Component,
     "load",                                 // name
@@ -73,7 +73,7 @@ batch atomically — any error rolls back every array and association in the cal
 use time_series_store_core::AddRequest;
 
 let keys = store.add_time_series_bulk(vec![
-    AddRequest { owner_uuid: "42".into(), owner_type: "Generator".into(),
+    AddRequest { owner_id: 42, owner_type: "Generator".into(),
         owner_category: OwnerCategory::Component, name: "load".into(),
         data: TimeSeriesData::SingleTimeSeries(ts_a), features: Features::new(),
         units: Some("MW".into()) },
@@ -108,7 +108,7 @@ use time_series_store_core::{ListFilter, TimeSeriesType};
 
 let metas = store.list_time_series(
     ListFilter::new()
-        .owner_uuid("42")
+        .owner_id(42)
         .time_series_type(TimeSeriesType::SingleTimeSeries)
         .name("load"),
 )?;

@@ -116,14 +116,14 @@ keeps its Julia element type: the binding maps it to a stored dtype (`Float64`, 
 
 ```julia
 add_time_series!(
-    store::Store, owner_uuid, owner_type, owner_category::OwnerCategory,
+    store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::SingleTimeSeries;
     features::AbstractDict = Dict(), units = nothing,
     logical_type = ts.logical_type,
 ) -> TimeSeriesKey
 
 add_time_series!(
-    store::Store, owner_uuid, owner_type, owner_category::OwnerCategory,
+    store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
     features = Dict(), units = nothing,
     logical_type = ts.logical_type,
@@ -133,18 +133,18 @@ get_time_series(store::Store, key::TimeSeriesKey) -> SingleTimeSeries
 get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey) -> SingleTimeSeries
 get_time_series(NonSequentialTimeSeries, store::Store, key::TimeSeriesKey) -> NonSequentialTimeSeries
 
-get_time_series(SingleTimeSeries, store, owner_uuid, name;
+get_time_series(SingleTimeSeries, store, owner_id, name;
                resolution=nothing, features=Dict()) -> SingleTimeSeries
-get_time_series(NonSequentialTimeSeries, store, owner_uuid, name;
+get_time_series(NonSequentialTimeSeries, store, owner_id, name;
                resolution=nothing, features=Dict()) -> NonSequentialTimeSeries
 ```
 
-`owner_uuid` is a string (typically the stringified InfrastructureSystems.jl UUID). `features` is
-serialized to JSON and must contain only JSON-scalar values (`Int`, `Float64`, `Bool`, `String`).
-Pass the type as the first argument to `get_time_series` to read a non-sequential series back.
+`owner_id` is an integer component identifier (`Int64`). `features` is serialized to JSON and must
+contain only JSON-scalar values (`Int`, `Float64`, `Bool`, `String`). Pass the type as the first
+argument to `get_time_series` to read a non-sequential series back.
 
 `get_time_series` supports two unified calling conventions for **every** type: pass the
-`TimeSeriesKey` returned by `add_time_series!` (key-based), or pass `owner_uuid, name` plus optional
+`TimeSeriesKey` returned by `add_time_series!` (key-based), or pass `owner_id, name` plus optional
 `resolution` / `features` keywords (attribute-based, the same addressing used by `get_metadata` /
 `has_time_series` / `remove_time_series!`). Both forms return the same struct. The bare
 `get_time_series(store, key)` remains a convenience alias for `SingleTimeSeries`.
@@ -153,7 +153,7 @@ Pass the type as the first argument to `get_time_series` to read a non-sequentia
 
 ```julia
 batch = AddBatch()
-add_time_series!(batch, owner_uuid, owner_type, owner_category, ts; ...)  # any series type
+add_time_series!(batch, owner_id, owner_type, owner_category, ts; ...)  # any series type
 add_time_series_bulk!(store::Store, batch::AddBatch) -> Vector{TimeSeriesKey}
 ```
 
@@ -166,9 +166,9 @@ and may be reused. `length(batch)` returns the number of pending requests.
 ### Attribute-based lookups
 
 ```julia
-get_metadata(store, owner_uuid, name; resolution=nothing, features=Dict()) -> NamedTuple
-has_time_series(store, owner_uuid, name; resolution=nothing, features=Dict()) -> Bool
-remove_time_series!(store, owner_uuid, name; resolution=nothing, features=Dict()) -> Nothing
+get_metadata(store, owner_id, name; resolution=nothing, features=Dict()) -> NamedTuple
+has_time_series(store, owner_id, name; resolution=nothing, features=Dict()) -> Bool
+remove_time_series!(store, owner_id, name; resolution=nothing, features=Dict()) -> Nothing
 ```
 
 `get_metadata` returns `(initial_timestamp, resolution, length, data_hash, dtype)`, where
@@ -191,11 +191,11 @@ remove_time_series!(store, key::TimeSeriesKey) -> Nothing
 ### Enumerating keys
 
 ```julia
-get_time_series_keys(store, owner_uuid) -> Vector{TimeSeriesKey}
-key_info(key::TimeSeriesKey) -> NamedTuple   # (owner_uuid, name, time_series_type, resolution, features)
+get_time_series_keys(store, owner_id) -> Vector{TimeSeriesKey}
+key_info(key::TimeSeriesKey) -> NamedTuple   # (owner_id, name, time_series_type, resolution, features)
 ```
 
-`get_time_series_keys` returns one key per stored association for `owner_uuid`, including
+`get_time_series_keys` returns one key per stored association for `owner_id`, including
 `DeterministicSingleTimeSeries` rows derived by `transform_single_time_series!` — the way to read a
 transform-derived forecast by key (it returns no key of its own). The keys are opaque; `key_info`
 inspects one. `time_series_type` is the **actual Julia type** (`SingleTimeSeries`,
@@ -204,7 +204,7 @@ inspects one. `time_series_type` is the **actual Julia type** (`SingleTimeSeries
 a `Dict` (empty when none) that round-trips the JSON-scalar feature values. For example:
 
 ```julia
-for k in get_time_series_keys(store, "component-uuid")
+for k in get_time_series_keys(store, 12345)
     info = key_info(k)
     series = get_time_series(info.time_series_type, store, k)
 end
@@ -226,19 +226,19 @@ The forecast `name` comes from the struct, e.g.
 
 ```julia
 add_time_series!(
-    store, owner_uuid, owner_type, owner_category::OwnerCategory,
+    store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Deterministic;
     features=Dict(), units=nothing, logical_type=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
-    store, owner_uuid, owner_type, owner_category::OwnerCategory,
+    store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Probabilistic;
     features=Dict(), units=nothing, logical_type=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
-    store, owner_uuid, owner_type, owner_category::OwnerCategory,
+    store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Scenarios;
     features=Dict(), units=nothing, logical_type=nothing,
 ) -> TimeSeriesKey
@@ -255,8 +255,8 @@ transform_single_time_series!(store, horizon::Period, interval::Period) -> Int  
 (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`):
 
 ```julia
-has_typed(store, owner_uuid, name, ts_type::Integer; resolution=nothing, features=Dict()) -> Bool
-remove_typed!(store, owner_uuid, name, ts_type::Integer; resolution=nothing, features=Dict())
+has_typed(store, owner_id, name, ts_type::Integer; resolution=nothing, features=Dict()) -> Bool
+remove_typed!(store, owner_id, name, ts_type::Integer; resolution=nothing, features=Dict())
 ```
 
 ### Reading forecast values
@@ -267,21 +267,21 @@ native Julia indexing). Pass `time_range = (start::DateTime, end::DateTime)` (ex
 select a window sub-range.
 
 Like the static readers, forecasts support both calling conventions: attribute-based
-(`owner_uuid, name` plus optional `resolution` / `features`) or key-based (the `TimeSeriesKey`
+(`owner_id, name` plus optional `resolution` / `features`) or key-based (the `TimeSeriesKey`
 returned by `add_time_series!`).
 
 ```julia
-get_time_series(Deterministic, store, owner_uuid, name;
+get_time_series(Deterministic, store, owner_id, name;
                 resolution=nothing, features=Dict(), time_range=nothing) -> Deterministic
 get_time_series(Deterministic, store, key::TimeSeriesKey; time_range=nothing) -> Deterministic
                 # data shape: (H, count, element_dims...)
 
-get_time_series(Probabilistic, store, owner_uuid, name;
+get_time_series(Probabilistic, store, owner_id, name;
                 resolution=nothing, features=Dict(), time_range=nothing) -> Probabilistic
 get_time_series(Probabilistic, store, key::TimeSeriesKey; time_range=nothing) -> Probabilistic
                 # data shape: (num_percentiles, H, count, element_dims...)
 
-get_time_series(Scenarios, store, owner_uuid, name;
+get_time_series(Scenarios, store, owner_id, name;
                 resolution=nothing, features=Dict(), time_range=nothing) -> Scenarios
 get_time_series(Scenarios, store, key::TimeSeriesKey; time_range=nothing) -> Scenarios
                 # data shape: (scenario_count, H, count, element_dims...)

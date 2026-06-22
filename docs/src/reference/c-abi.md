@@ -65,7 +65,7 @@ void    ts_buffer_free_u64(uint64_t *ptr, uint64_t len);
 
 ```c
 int32_t ts_store_add_single(struct TsStore *handle,
-                            const char *owner_uuid, const char *owner_type,
+                            int64_t owner_id, const char *owner_type,
                             int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
                             const char *name,
                             int64_t initial_ts_unix_ms, int64_t resolution_ms,
@@ -92,7 +92,7 @@ the typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and
 
 ```c
 int32_t ts_store_add_non_sequential(struct TsStore *handle,
-                                    const char *owner_uuid, const char *owner_type,
+                                    int64_t owner_id, const char *owner_type,
                                     int32_t owner_category, const char *name,
                                     const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
                                     int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
@@ -113,23 +113,23 @@ Resolve a series by its attributes instead of a key handle. `resolution_ms = 0` 
 
 ```c
 int32_t ts_store_get_metadata(const struct TsStore *handle,
-                              const char *owner_uuid, const char *name,
+                              int64_t owner_id, const char *name,
                               int64_t resolution_ms, const char *features_json,
                               int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
                               uint64_t *out_length, uint8_t *out_data_hash, /* 32-byte buffer */
                               int32_t *out_dtype);
 
 int32_t ts_store_has_by_attrs(const struct TsStore *handle,
-                              const char *owner_uuid, const char *name,
+                              int64_t owner_id, const char *name,
                               int64_t resolution_ms, const char *features_json, bool *out_present);
 
-/* Name-less existence query: true iff owner_uuid has any series, optionally
+/* Name-less existence query: true iff owner_id has any series, optionally
    filtered to a single ts_type (use_type selects whether ts_type applies). */
-int32_t ts_store_has_for_owner(const struct TsStore *handle, const char *owner_uuid,
+int32_t ts_store_has_for_owner(const struct TsStore *handle, int64_t owner_id,
                                int32_t ts_type, bool use_type, bool *out_present);
 
 int32_t ts_store_remove_by_attrs(struct TsStore *handle,
-                                 const char *owner_uuid, const char *name,
+                                 int64_t owner_id, const char *name,
                                  int64_t resolution_ms, const char *features_json);
 
 int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *data_hash,
@@ -140,26 +140,26 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *
    caller can reuse the key-based readers (ts_store_get_single,
    ts_store_get_non_sequential, ts_store_get_forecast_by_key). resolution_ms <= 0
    means unset. The returned key is owned; free it with ts_key_free. */
-int32_t ts_make_key_from_attrs(const char *owner_uuid, const char *name, int32_t ts_type,
+int32_t ts_make_key_from_attrs(int64_t owner_id, const char *name, int32_t ts_type,
                                int64_t resolution_ms, const char *features_json,
                                struct TsKey **out_key);
 
-/* List every key for owner_uuid (one per association, including derived
+/* List every key for owner_id (one per association, including derived
    DeterministicSingleTimeSeries rows). Ownership is two-tiered: free each TsKey
    with ts_key_free, then free the array with ts_keys_buffer_free. An owner with
    no series yields *out_keys = NULL and *out_len = 0. */
-int32_t ts_store_get_time_series_keys(const struct TsStore *handle, const char *owner_uuid,
+int32_t ts_store_get_time_series_keys(const struct TsStore *handle, int64_t owner_id,
                                       struct TsKey ***out_keys, uint64_t *out_len);
 void    ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
 
-/* Inspect an opaque key: type code, resolution (0 = unset), owner UUID, name,
+/* Inspect an opaque key: type code, resolution (0 = unset), owner id, name,
    and features (a JSON object string, "{}" when empty — the shape the
    attribute-addressed entry points accept). Strings use probe-then-fetch — pass
    NULL buffers / 0 caps to read the required lengths, then call again with
    len+1-byte buffers. */
 int32_t ts_key_attributes(const struct TsKey *key,
                           int32_t *out_type, int64_t *out_resolution_ms,
-                          char *owner_buf, uint64_t owner_cap, uint64_t *out_owner_len,
+                          int64_t *out_owner_id,
                           char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
                           char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
 ```
@@ -195,7 +195,7 @@ backing array) and writes the number transformed to `*out_count`:
 
 ```c
 int32_t ts_store_add_forecast(struct TsStore *handle,
-                              const char *owner_uuid, const char *owner_type, int32_t owner_category,
+                              int64_t owner_id, const char *owner_type, int32_t owner_category,
                               const char *name, int32_t ts_type,
                               int64_t initial_ts_unix_ms, int64_t resolution_ms,
                               int64_t horizon_ms, int64_t interval_ms, uint64_t count,
@@ -206,7 +206,7 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               struct TsKey **out_key);
 
 int32_t ts_store_add_probabilistic(struct TsStore *handle,
-                                   const char *owner_uuid, const char *owner_type,
+                                   int64_t owner_id, const char *owner_type,
                                    int32_t owner_category, const char *name,
                                    int64_t initial_ts_unix_ms, int64_t resolution_ms,
                                    int64_t horizon_ms, int64_t interval_ms, uint64_t count,
@@ -233,7 +233,7 @@ The caller owns the returned buffers: free `*out_data` with `ts_buffer_free_u8`,
 
 ```c
 int32_t ts_store_get_forecast(const struct TsStore *handle,
-                              const char *owner_uuid, const char *name, int32_t ts_type,
+                              int64_t owner_id, const char *name, int32_t ts_type,
                               int64_t resolution_ms, const char *features_json,
                               bool time_range_present,
                               int64_t time_range_start_ms, int64_t time_range_end_ms,
@@ -247,7 +247,7 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
 ```
 
 `ts_store_get_forecast_by_key` is the key-based counterpart: it takes a `TsKey` handle (the type
-comes from the key) instead of the `owner_uuid, name, ts_type, resolution_ms, features_json`
+comes from the key) instead of the `owner_id, name, ts_type, resolution_ms, features_json`
 arguments, and produces identical outputs with the same buffer-ownership rules. Because the key
 names the exact stored type there is no DST→`Deterministic` fallback (a
 `DeterministicSingleTimeSeries` key still decodes as a `Deterministic`).
@@ -271,7 +271,7 @@ with `ts_buffer_free_f64`):
 
 ```c
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
-                                       const char *owner_uuid, const char *name, int32_t ts_type,
+                                       int64_t owner_id, const char *name, int32_t ts_type,
                                        int64_t resolution_ms, const char *features_json,
                                        int64_t *out_initial_ts_unix_ms, int64_t *out_resolution_ms,
                                        int64_t *out_horizon_ms, int64_t *out_interval_ms,
@@ -279,7 +279,7 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        uint8_t *out_data_hash);
 
 int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
-                                             const char *owner_uuid, const char *name,
+                                             int64_t owner_id, const char *name,
                                              int64_t resolution_ms, const char *features_json,
                                              int64_t *out_initial_ts_unix_ms,
                                              int64_t *out_resolution_ms, int64_t *out_horizon_ms,
@@ -287,10 +287,10 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                              uint64_t *out_length, uint8_t *out_data_hash,
                                              double **out_percentiles, uint64_t *out_percentiles_len);
 
-int32_t ts_store_has_typed(const struct TsStore *handle, const char *owner_uuid, const char *name,
+int32_t ts_store_has_typed(const struct TsStore *handle, int64_t owner_id, const char *name,
                            int32_t ts_type, int64_t resolution_ms, const char *features_json,
                            bool *out_present);
-int32_t ts_store_remove_typed(struct TsStore *handle, const char *owner_uuid, const char *name,
+int32_t ts_store_remove_typed(struct TsStore *handle, int64_t owner_id, const char *name,
                               int32_t ts_type, int64_t resolution_ms, const char *features_json);
 ```
 
@@ -334,7 +334,7 @@ int32_t ts_store_get_compression(const struct TsStore *handle, uint8_t *out_kind
 int32_t ts_store_verify(const struct TsStore *handle, uint64_t *out_error_count);
 int32_t ts_store_compact(struct TsStore *handle);
 int32_t ts_store_flush(struct TsStore *handle);
-int32_t ts_store_clear(struct TsStore *handle, const char *owner_uuid); /* NULL = clear all */
+int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id); /* has_owner=false clears all */
 ```
 
 ## Error Messages

@@ -48,7 +48,7 @@ ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load
 
 key = add_time_series!(
     store,
-    "42",
+    42,
     "Generator",
     Component,
     ts;                                   # name comes from ts
@@ -59,8 +59,7 @@ key = add_time_series!(
 
 Notes:
 
-- **`owner_uuid` is a string** — typically the stringified InfrastructureSystems.jl UUID.
-  (Integer-looking owners must still be passed as strings, e.g. `"42"`.)
+- **`owner_id` is an integer** (`Int64`) — the component identifier, e.g. `42`.
 - **`resolution` is a `Period`** such as `Hour(1)` or `Minute(5)`.
 - **`features`** is a `Dict` serialized to JSON, so values must be JSON scalars (`Int`, `Float64`,
   `Bool`, `String`). String features are supported and round-trip unchanged.
@@ -84,7 +83,7 @@ convenient when a caller keeps its own identifiers (as an InfrastructureSystems.
 ```julia
 meta = get_metadata(
     store,
-    "42",
+    42,
     "load";
     resolution = Hour(1),
     features = Dict("model_year" => 2030),
@@ -95,14 +94,14 @@ meta = get_metadata(
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
 # get_time_series itself resolves by attributes too (pass the type as the first argument):
-got = get_time_series(SingleTimeSeries, store, "42", "load"; resolution = Hour(1))
+got = get_time_series(SingleTimeSeries, store, 42, "load"; resolution = Hour(1))
 
-present = has_time_series(store, "42", "load"; resolution = Hour(1))
-remove_time_series!(store, "42", "load"; resolution = Hour(1))
+present = has_time_series(store, 42, "load"; resolution = Hour(1))
+remove_time_series!(store, 42, "load"; resolution = Hour(1))
 ```
 
 `get_time_series`, `has_time_series`, and `remove_time_series!` all accept either a `TimeSeriesKey`
-or `(owner_uuid, name; resolution, features)` attributes — the conventions are interchangeable for
+or `(owner_id, name; resolution, features)` attributes — the conventions are interchangeable for
 every time series type, static or forecast.
 
 ## Forecasts
@@ -116,14 +115,14 @@ data = zeros(Float64, 24, 7)   # (horizon_count, count)
 fc = Deterministic(DateTime(2024, 1, 1), Hour(1), Hour(24), Hour(24), 7, data, "load_fc")
 key = add_time_series!(
     store,
-    "42",
+    42,
     "Generator",
     Component,
     fc;                         # name comes from fc
     units = "MW",
 )
 
-got = get_time_series(Deterministic, store, "42", "load_fc"; resolution = Hour(1))
+got = get_time_series(Deterministic, store, 42, "load_fc"; resolution = Hour(1))
 values = got.data   # Float64 matrix, shape (24, 7)
 
 # Same forecast, read by the key returned from add_time_series! — forecasts and
@@ -147,12 +146,12 @@ n = transform_single_time_series!(store, Hour(24), Hour(24))
 ```
 
 `transform_single_time_series!` returns no keys, so to read a derived forecast by key, enumerate the
-owner's keys with `get_time_series_keys(store, owner_uuid)` and use `key_info`, whose
+owner's keys with `get_time_series_keys(store, owner_id)` and use `key_info`, whose
 `time_series_type` is the actual Julia type — pass it straight to `get_time_series` (a
 `DeterministicSingleTimeSeries` reads back as a `Deterministic`):
 
 ```julia
-for k in get_time_series_keys(store, "42")
+for k in get_time_series_keys(store, 42)
     info = key_info(k)
     series = get_time_series(info.time_series_type, store, k)
 end
@@ -185,7 +184,7 @@ reference them module-qualified. Catch broadly or narrowly:
 
 ```julia
 try
-    add_time_series!(store, "42", "Generator", Component, ts)
+    add_time_series!(store, 42, "Generator", Component, ts)
 catch e
     if e isa TimeSeriesStore.DuplicateTimeSeriesError
         @warn "already present"
@@ -204,8 +203,8 @@ status `code`).
 
 The model is designed to back an InfrastructureSystems.jl time-series store:
 
-- Owners are string UUIDs, so InfrastructureSystems.jl component/attribute UUIDs map straight
-  through.
+- Owners are integer component identifiers (`Int64`), matching InfrastructureSystems.jl
+  component/attribute IDs.
 - `OwnerCategory` distinguishes `Component` from `SupplementalAttribute`.
 - The attribute-based accessors (`get_metadata`, `has_time_series`, `remove_time_series!`) plus
   `get_array_by_hash` let an InfrastructureSystems.jl-side store keep its own key objects and reach

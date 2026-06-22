@@ -1,6 +1,6 @@
 //! SQLite-backed metadata store.
 //!
-//! Stores [`TimeSeriesMetadata`] records and the (owner_uuid, type, name,
+//! Stores [`TimeSeriesMetadata`] records and the (owner_id, type, name,
 //! resolution, features) uniqueness invariant.
 
 pub mod schema;
@@ -23,7 +23,7 @@ pub struct MetadataStore {
 
 #[derive(Debug, Default, Clone)]
 pub struct MetadataFilter {
-    pub owner_uuid: Option<String>,
+    pub owner_id: Option<i64>,
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
@@ -120,7 +120,7 @@ impl MetadataStore {
         // connection instead of once per row.
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
-             (owner_uuid, owner_type, owner_category, time_series_type, name, data_hash,
+             (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution_ms, length, horizon_ms, interval_ms, count,
               timestamps_json, units, percentiles_json,
               dtype, element_shape, logical_type, features_hash)
@@ -128,7 +128,7 @@ impl MetadataStore {
                      ?16, ?17, ?18, ?19)",
         )?;
         let result = insert_stmt.execute(params![
-            meta.owner_uuid,
+            meta.owner_id,
             meta.owner_type,
             meta.owner_category.as_str(),
             meta.time_series_type.as_str(),
@@ -154,7 +154,7 @@ impl MetadataStore {
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // The unique index covers (owner_uuid, time_series_type, name,
+                // The unique index covers (owner_id, time_series_type, name,
                 // resolution_ms, features_hash). Surface the spec error.
                 return Err(TimeSeriesError::DuplicateTimeSeries);
             }
@@ -193,14 +193,14 @@ impl MetadataStore {
         let resolution_ms = key.resolution.map(duration_to_ms);
         let mut stmt = tx.prepare(
             "SELECT id, data_hash FROM time_series_associations
-             WHERE owner_uuid = ?1 AND time_series_type = ?2 AND name = ?3
+             WHERE owner_id = ?1 AND time_series_type = ?2 AND name = ?3
                AND ((?4 IS NULL AND resolution_ms IS NULL) OR resolution_ms = ?4)
                AND features_hash = ?5",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
             .query_map(
                 params![
-                    key.owner_uuid,
+                    key.owner_id,
                     key.time_series_type.as_str(),
                     key.name,
                     resolution_ms,
@@ -225,30 +225,30 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// Delete all associations for `owner_uuid`. Returns the data_hashes of removed rows.
-    pub fn delete_by_owner(tx: &Transaction<'_>, owner_uuid: &str) -> Result<Vec<[u8; 32]>> {
+    /// Delete all associations for `owner_id`. Returns the data_hashes of removed rows.
+    pub fn delete_by_owner(tx: &Transaction<'_>, owner_id: i64) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
             tx,
-            "SELECT data_hash FROM time_series_associations WHERE owner_uuid = ?1",
-            params![owner_uuid],
+            "SELECT data_hash FROM time_series_associations WHERE owner_id = ?1",
+            params![owner_id],
         )?;
         let hashes = bytes_list
             .into_iter()
             .filter_map(|bytes| bytes_to_hash32(&bytes))
             .collect::<Vec<_>>();
         tx.execute(
-            "DELETE FROM time_series_associations WHERE owner_uuid = ?1",
-            params![owner_uuid],
+            "DELETE FROM time_series_associations WHERE owner_id = ?1",
+            params![owner_id],
         )?;
         Ok(hashes)
     }
 
     /// Reassign every association from `old_owner` to `new_owner`. Only the
-    /// owning UUID changes; type/category and the underlying arrays are
+    /// owning id changes; type/category and the underlying arrays are
     /// untouched (arrays are content-addressed). Returns the rows updated.
-    pub fn replace_owner(tx: &Transaction<'_>, old_owner: &str, new_owner: &str) -> Result<usize> {
+    pub fn replace_owner(tx: &Transaction<'_>, old_owner: i64, new_owner: i64) -> Result<usize> {
         let updated = tx.execute(
-            "UPDATE time_series_associations SET owner_uuid = ?1 WHERE owner_uuid = ?2",
+            "UPDATE time_series_associations SET owner_id = ?1 WHERE owner_id = ?2",
             params![new_owner, old_owner],
         )?;
         Ok(updated)
@@ -285,16 +285,16 @@ impl MetadataStore {
         // Build a SELECT with the always-on columns; layer on optional WHERE
         // clauses using sqlite's parameter binding.
         let mut sql = String::from(
-            "SELECT id, owner_uuid, owner_type, owner_category, time_series_type, name,
+            "SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution_ms, length, horizon_ms,
                     interval_ms, count, timestamps_json, units, percentiles_json,
                     dtype, element_shape, logical_type
              FROM time_series_associations WHERE 1=1",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(ref owner_uuid) = filter.owner_uuid {
-            sql.push_str(" AND owner_uuid = ?");
-            params_vec.push(Box::new(owner_uuid.clone()));
+        if let Some(owner_id) = filter.owner_id {
+            sql.push_str(" AND owner_id = ?");
+            params_vec.push(Box::new(owner_id));
         }
         if let Some(ref owner_type) = filter.owner_type {
             sql.push_str(" AND owner_type = ?");
@@ -342,15 +342,15 @@ impl MetadataStore {
         Ok(out)
     }
 
-    pub fn list_keys_for_owner(&self, owner_uuid: &str) -> Result<Vec<TimeSeriesKey>> {
+    pub fn list_keys_for_owner(&self, owner_id: i64) -> Result<Vec<TimeSeriesKey>> {
         let metas = self.list(&MetadataFilter {
-            owner_uuid: Some(owner_uuid.to_string()),
+            owner_id: Some(owner_id),
             ..Default::default()
         })?;
         Ok(metas
             .into_iter()
             .map(|m| TimeSeriesKey {
-                owner_uuid: m.owner_uuid,
+                owner_id: m.owner_id,
                 time_series_type: m.time_series_type,
                 name: m.name,
                 resolution: m.resolution,
@@ -361,7 +361,7 @@ impl MetadataStore {
 
     pub fn get_by_key(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
-            owner_uuid: Some(key.owner_uuid.clone()),
+            owner_id: Some(key.owner_id),
             time_series_type: Some(key.time_series_type),
             name: Some(key.name.clone()),
             resolution: key.resolution,
@@ -425,7 +425,7 @@ impl MetadataStore {
 
     pub fn count_distinct_owners(&self) -> Result<i64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT owner_uuid) FROM time_series_associations",
+            "SELECT COUNT(DISTINCT owner_id) FROM time_series_associations",
             [],
             |r| r.get(0),
         )?;
@@ -507,7 +507,7 @@ fn collect_data_hashes(
 }
 
 struct MetaRow {
-    owner_uuid: String,
+    owner_id: i64,
     owner_type: String,
     owner_category: OwnerCategory,
     time_series_type: TimeSeriesType,
@@ -530,7 +530,7 @@ struct MetaRow {
 impl MetaRow {
     fn into_metadata(self, features: Features) -> TimeSeriesMetadata {
         TimeSeriesMetadata {
-            owner_uuid: self.owner_uuid,
+            owner_id: self.owner_id,
             owner_type: self.owner_type,
             owner_category: self.owner_category,
             time_series_type: self.time_series_type,
@@ -555,7 +555,7 @@ impl MetaRow {
 
 fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let id: i64 = row.get(0)?;
-    let owner_uuid: String = row.get(1)?;
+    let owner_id: i64 = row.get(1)?;
     let owner_type: String = row.get(2)?;
     let owner_category: String = row.get(3)?;
     let time_series_type: String = row.get(4)?;
@@ -649,7 +649,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     Ok((
         id,
         MetaRow {
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             time_series_type: ts_type,

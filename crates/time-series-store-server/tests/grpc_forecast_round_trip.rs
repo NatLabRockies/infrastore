@@ -40,7 +40,7 @@ fn seq_f64(shape: Vec<usize>, base: f64) -> TypedArray {
     TypedArray::from_f64(shape, &vals)
 }
 
-fn add_time_series(store: &mut Store, owner: &str, data: TimeSeriesData) {
+fn add_time_series(store: &mut Store, owner: i64, data: TimeSeriesData) {
     store
         .add_time_series(
             owner,
@@ -66,7 +66,7 @@ fn add_det_forecast(store: &mut Store) {
         "price",
     )
     .unwrap();
-    add_time_series(store, "det-owner", TimeSeriesData::Deterministic(det));
+    add_time_series(store, 1, TimeSeriesData::Deterministic(det));
 }
 
 fn add_prob_forecast(store: &mut Store) {
@@ -83,7 +83,7 @@ fn add_prob_forecast(store: &mut Store) {
         "price",
     )
     .unwrap();
-    add_time_series(store, "prob-owner", TimeSeriesData::Probabilistic(prob));
+    add_time_series(store, 2, TimeSeriesData::Probabilistic(prob));
 }
 
 fn add_scen_forecast(store: &mut Store) {
@@ -100,7 +100,7 @@ fn add_scen_forecast(store: &mut Store) {
         "price",
     )
     .unwrap();
-    add_time_series(store, "scen-owner", TimeSeriesData::Scenarios(scen));
+    add_time_series(store, 3, TimeSeriesData::Scenarios(scen));
 }
 
 // ---- Deterministic ----
@@ -113,10 +113,7 @@ async fn deterministic_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys("det-owner".to_string())
-        .await
-        .unwrap();
+    let keys = client.get_time_series_keys(1).await.unwrap();
     assert_eq!(keys.len(), 1);
 
     let data = client.get_time_series(&keys[0], None).await.unwrap();
@@ -142,10 +139,7 @@ async fn deterministic_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys("det-owner".to_string())
-        .await
-        .unwrap();
+    let keys = client.get_time_series_keys(1).await.unwrap();
 
     // Windows start at t0 + k*2h. Select windows 2,3,4 (start=t0+4h, end=t0+10h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -176,10 +170,7 @@ async fn probabilistic_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys("prob-owner".to_string())
-        .await
-        .unwrap();
+    let keys = client.get_time_series_keys(2).await.unwrap();
     assert_eq!(keys.len(), 1);
 
     let data = client.get_time_series(&keys[0], None).await.unwrap();
@@ -201,10 +192,7 @@ async fn probabilistic_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys("prob-owner".to_string())
-        .await
-        .unwrap();
+    let keys = client.get_time_series_keys(2).await.unwrap();
 
     // Windows start at t0 + k*2h. Select windows 1,2 (start=t0+2h, end=t0+6h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -235,10 +223,7 @@ async fn scenarios_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys("scen-owner".to_string())
-        .await
-        .unwrap();
+    let keys = client.get_time_series_keys(3).await.unwrap();
     assert_eq!(keys.len(), 1);
 
     let data = client.get_time_series(&keys[0], None).await.unwrap();
@@ -260,10 +245,7 @@ async fn scenarios_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client
-        .get_time_series_keys("scen-owner".to_string())
-        .await
-        .unwrap();
+    let keys = client.get_time_series_keys(3).await.unwrap();
 
     // Windows start at t0 + k*2h. Select windows 0,1 (start=t0, end=t0+4h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

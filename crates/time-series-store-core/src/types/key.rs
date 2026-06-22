@@ -7,7 +7,7 @@ use super::time_series::TimeSeriesType;
 /// Carries enough state to look the time series up again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimeSeriesKey {
-    pub owner_uuid: String,
+    pub owner_id: i64,
     pub time_series_type: TimeSeriesType,
     pub name: String,
     pub resolution: Option<Duration>,

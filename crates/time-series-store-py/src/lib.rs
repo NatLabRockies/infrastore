@@ -673,8 +673,8 @@ pub struct PyTimeSeriesKey {
 #[pymethods]
 impl PyTimeSeriesKey {
     #[getter]
-    fn owner_uuid(&self) -> String {
-        self.inner.owner_uuid.clone()
+    fn owner_id(&self) -> i64 {
+        self.inner.owner_id
     }
 
     #[getter]
@@ -702,8 +702,8 @@ impl PyTimeSeriesKey {
 
     fn __repr__(&self) -> String {
         format!(
-            "TimeSeriesKey(owner_uuid={:?}, time_series_type={:?}, name={:?}, features={:?})",
-            self.inner.owner_uuid,
+            "TimeSeriesKey(owner_id={:?}, time_series_type={:?}, name={:?}, features={:?})",
+            self.inner.owner_id,
             self.inner.time_series_type.as_str(),
             self.inner.name,
             self.inner.features,
@@ -807,10 +807,10 @@ impl PyStore {
     ///
     /// `features` is a `dict[str, int|float|bool|str]`. `units` is an optional
     /// string.
-    #[pyo3(signature = (owner_uuid, owner_type, owner_category, time_series, features=None, units=None))]
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, features=None, units=None))]
     fn add_time_series(
         &mut self,
-        owner_uuid: &str,
+        owner_id: i64,
         owner_type: &str,
         owner_category: PyOwnerCategory,
         time_series: &Bound<'_, PyAny>,
@@ -822,7 +822,7 @@ impl PyStore {
         let key = self
             .inner
             .add_time_series(
-                owner_uuid,
+                owner_id,
                 owner_type,
                 owner_category.into(),
                 data,
@@ -839,7 +839,7 @@ impl PyStore {
     /// series.
     ///
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
-    /// parameters: `owner_uuid`, `owner_type`, `owner_category`,
+    /// parameters: `owner_id`, `owner_type`, `owner_category`,
     /// `time_series`, and optionally `features` and `units`.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
@@ -850,7 +850,7 @@ impl PyStore {
     ) -> PyResult<Vec<PyTimeSeriesKey>> {
         let mut requests = Vec::with_capacity(items.len());
         for item in &items {
-            let owner_uuid: String = required_item(item, "owner_uuid")?;
+            let owner_id: i64 = required_item(item, "owner_id")?;
             let owner_type: String = required_item(item, "owner_type")?;
             let owner_category: PyOwnerCategory = required_item(item, "owner_category")?;
             let time_series = item.get_item("time_series")?.ok_or_else(|| {
@@ -871,7 +871,7 @@ impl PyStore {
             };
             let data = extract_time_series_data(&time_series)?;
             requests.push(core_lib::AddRequest {
-                owner_uuid,
+                owner_id,
                 owner_type,
                 owner_category: owner_category.into(),
                 data,
@@ -909,11 +909,9 @@ impl PyStore {
         self.inner.remove_time_series(&key.inner).map_err(map_err)
     }
 
-    #[pyo3(signature = (owner_uuid=None))]
-    fn clear_time_series(&mut self, owner_uuid: Option<String>) -> PyResult<usize> {
-        self.inner
-            .clear_time_series(owner_uuid.as_deref())
-            .map_err(map_err)
+    #[pyo3(signature = (owner_id=None))]
+    fn clear_time_series(&mut self, owner_id: Option<i64>) -> PyResult<usize> {
+        self.inner.clear_time_series(owner_id).map_err(map_err)
     }
 
     /// Fetch a static time series by key. `time_range`, if given, is a tuple of
@@ -949,17 +947,17 @@ impl PyStore {
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
-    /// `owner_uuid`, `owner_type`, `time_series_type`, `name`, `length`,
+    /// `owner_id`, `owner_type`, `time_series_type`, `name`, `length`,
     /// `resolution_seconds`, `features`, `units`.
     #[pyo3(signature = (
-        owner_uuid=None, owner_type=None, time_series_type=None,
+        owner_id=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_time_series<'py>(
         &self,
         py: Python<'py>,
-        owner_uuid: Option<String>,
+        owner_id: Option<i64>,
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
@@ -967,8 +965,8 @@ impl PyStore {
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let mut filter = core_lib::ListFilter::new();
-        if let Some(uuid) = owner_uuid {
-            filter = filter.owner_uuid(uuid);
+        if let Some(id) = owner_id {
+            filter = filter.owner_id(id);
         }
         if let Some(t) = owner_type {
             filter = filter.owner_type(t);
@@ -989,7 +987,7 @@ impl PyStore {
         let mut out = Vec::with_capacity(metas.len());
         for m in &metas {
             let d = PyDict::new(py);
-            d.set_item("owner_uuid", &m.owner_uuid)?;
+            d.set_item("owner_id", m.owner_id)?;
             d.set_item("owner_type", &m.owner_type)?;
             d.set_item("owner_category", m.owner_category.as_str())?;
             d.set_item("time_series_type", m.time_series_type.as_str())?;
@@ -1013,10 +1011,10 @@ impl PyStore {
         Ok(out)
     }
 
-    fn get_time_series_keys(&self, owner_uuid: &str) -> PyResult<Vec<PyTimeSeriesKey>> {
+    fn get_time_series_keys(&self, owner_id: i64) -> PyResult<Vec<PyTimeSeriesKey>> {
         Ok(self
             .inner
-            .get_time_series_keys(owner_uuid)
+            .get_time_series_keys(owner_id)
             .map_err(map_err)?
             .into_iter()
             .map(|k| PyTimeSeriesKey { inner: k })

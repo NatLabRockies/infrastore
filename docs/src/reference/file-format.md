@@ -16,14 +16,14 @@ the authoritative description of both. For the rationale behind the split, see t
 The NetCDF root carries a global attribute:
 
 ```text
-data_format_version = "0.2.0"
+data_format_version = "0.5.0"
 ```
 
 This is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when the NetCDF
 layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md) changes in
-a backward-incompatible way. Readers should check it before trusting a file. (`0.2.0` introduced
-typed, multi-dimensional arrays and the two-mode NetCDF layout below; `0.1.0` stored only 1-D
-`f64`.)
+a backward-incompatible way. Readers should check it before trusting a file. (`0.5.0` changed the
+owner identifier to a signed 64-bit integer (`owner_id`); `0.2.0` introduced typed,
+multi-dimensional arrays and the two-mode NetCDF layout below; `0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -115,7 +115,7 @@ One row per association between an owner and a stored array.
 | Column              | Type    | Notes                                                           |
 | ------------------- | ------- | --------------------------------------------------------------- |
 | `id`                | INTEGER | Primary key                                                     |
-| `owner_uuid`        | TEXT    | Owner identity (e.g. an InfrastructureSystems.jl UUID string)   |
+| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer component identifier      |
 | `owner_type`        | TEXT    | Owner's concrete type, descriptive                              |
 | `owner_category`    | TEXT    | `CHECK` in (`Component`, `SupplementalAttribute`)               |
 | `time_series_type`  | TEXT    | One of the six `TimeSeriesType` names                           |
@@ -159,12 +159,12 @@ A single-column table holding the metadata schema version.
 
 ```sql
 CREATE UNIQUE INDEX uq_assoc ON time_series_associations
-    (owner_uuid, time_series_type, name, resolution_ms, features_hash);
+    (owner_id, time_series_type, name, resolution_ms, features_hash);
 CREATE UNIQUE INDEX uq_assoc_null_resolution ON time_series_associations
-    (owner_uuid, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
+    (owner_id, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
 
 CREATE INDEX ix_hash       ON time_series_associations(data_hash);
-CREATE INDEX ix_owner      ON time_series_associations(owner_uuid);
+CREATE INDEX ix_owner      ON time_series_associations(owner_id);
 CREATE INDEX ix_resolution ON time_series_associations(resolution_ms);
 ```
 

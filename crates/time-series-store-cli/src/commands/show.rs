@@ -55,7 +55,7 @@ pub fn list(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
 
 fn list_row(m: &TimeSeriesMetadata) -> Vec<String> {
     vec![
-        m.owner_uuid.clone(),
+        m.owner_id.to_string(),
         m.owner_type.clone(),
         m.time_series_type.as_str().to_string(),
         m.name.clone(),
@@ -72,7 +72,7 @@ fn list_row(m: &TimeSeriesMetadata) -> Vec<String> {
 
 fn list_json(m: &TimeSeriesMetadata) -> Value {
     let mut obj = Map::new();
-    obj.insert("owner_uuid".into(), json!(m.owner_uuid));
+    obj.insert("owner_id".into(), json!(m.owner_id));
     obj.insert("owner_type".into(), json!(m.owner_type));
     obj.insert("type".into(), json!(m.time_series_type.as_str()));
     obj.insert("name".into(), json!(m.name));
@@ -132,7 +132,7 @@ pub fn info(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
 
     let mut fields: Vec<(String, String)> = Vec::new();
     fields.push(("name".into(), meta.name.clone()));
-    fields.push(("owner_uuid".into(), meta.owner_uuid.clone()));
+    fields.push(("owner_id".into(), meta.owner_id.to_string()));
     fields.push(("owner_type".into(), meta.owner_type.clone()));
     fields.push(("owner_category".into(), meta.owner_category.as_str().into()));
     fields.push(("type".into(), meta.time_series_type.as_str().into()));
@@ -340,7 +340,7 @@ fn data_array(d: &TimeSeriesData) -> &TypedArray {
 
 fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String, Value>) {
     obj.insert("name".into(), json!(meta.name));
-    obj.insert("owner_uuid".into(), json!(meta.owner_uuid));
+    obj.insert("owner_id".into(), json!(meta.owner_id));
     obj.insert("owner_type".into(), json!(meta.owner_type));
     obj.insert("owner_category".into(), json!(meta.owner_category.as_str()));
     obj.insert("type".into(), json!(meta.time_series_type.as_str()));

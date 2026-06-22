@@ -31,7 +31,7 @@ pub fn run(
             "added {} '{}' (owner {})",
             k.time_series_type.as_str(),
             k.name,
-            k.owner_uuid
+            k.owner_id
         );
     }
     println!(

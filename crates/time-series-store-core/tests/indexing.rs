@@ -43,7 +43,7 @@ fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&Stor
     }
 }
 
-fn add_single(store: &mut Store, owner: &str, s: SingleTimeSeries) -> TimeSeriesKey {
+fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesKey {
     store
         .add_time_series(
             owner,
@@ -103,7 +103,7 @@ fn cross_contamination_across_packed_columns() {
                     TypedArray::from_f64(vec![len], &vals),
                     "load",
                 );
-                keys.push(add_single(store, &i.to_string(), s));
+                keys.push(add_single(store, i as i64, s));
             }
             keys
         },
@@ -161,7 +161,7 @@ fn multidim_slice_at_nonzero_column() {
             move |store| {
                 let ka = add_single(
                     store,
-                    "a",
+                    11,
                     SingleTimeSeries::new(
                         initial,
                         resolution,
@@ -171,7 +171,7 @@ fn multidim_slice_at_nonzero_column() {
                 );
                 let kb = add_single(
                     store,
-                    "b",
+                    12,
                     SingleTimeSeries::new(
                         initial,
                         resolution,
@@ -289,7 +289,7 @@ fn slice_preserves_all_dtypes() {
                 move |store| {
                     add_single(
                         store,
-                        "x",
+                        13,
                         SingleTimeSeries::new(initial, resolution, arr.clone(), "load"),
                     )
                 }
@@ -331,7 +331,7 @@ fn single_slice_boundary_semantics() {
     let h = move |n: i64| initial + Duration::hours(n);
 
     for_each_backend(
-        |store| add_single(store, "b", single_6(initial)),
+        |store| add_single(store, 12, single_6(initial)),
         |store, key, backend| {
             // Aligned window [2, 5) -> 30, 40, 50.
             let (_, init, vals) = sliced(store, key, h(2), h(5));
@@ -402,7 +402,7 @@ fn length_one_series_slicing() {
         |store| {
             add_single(
                 store,
-                "one",
+                14,
                 SingleTimeSeries::new(
                     initial,
                     Duration::hours(1),
@@ -441,7 +441,7 @@ fn far_future_end_does_not_overflow() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
     for_each_backend(
-        |store| add_single(store, "ff", single_6(initial)),
+        |store| add_single(store, 15, single_6(initial)),
         |store, key, backend| {
             let end = initial + Duration::nanoseconds(i64::MAX);
             let got = store.get_time_series(key, Some((initial, end))).unwrap();
@@ -480,7 +480,7 @@ fn non_sequential_boundary_semantics() {
                 .unwrap();
                 store
                     .add_time_series(
-                        "ns",
+                        999,
                         "Generator",
                         OwnerCategory::Component,
                         TimeSeriesData::NonSequentialTimeSeries(series),

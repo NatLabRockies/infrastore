@@ -59,7 +59,7 @@ impl RemoteClient {
 
     pub async fn list_time_series(
         &self,
-        owner_uuid: Option<String>,
+        owner_id: Option<i64>,
         owner_type: Option<String>,
         time_series_type: Option<TimeSeriesType>,
         name: Option<String>,
@@ -67,7 +67,7 @@ impl RemoteClient {
         features: Option<&time_series_store_core::Features>,
     ) -> CoreResult<Vec<TimeSeriesMetadata>> {
         let req = ListReq {
-            owner_uuid,
+            owner_id,
             owner_type,
             time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
             name,
@@ -115,10 +115,10 @@ impl RemoteClient {
             .map_err(|e| TimeSeriesError::IntegrityError(format!("get convert: {e}")))
     }
 
-    pub async fn get_time_series_keys(&self, owner_uuid: String) -> CoreResult<Vec<TimeSeriesKey>> {
+    pub async fn get_time_series_keys(&self, owner_id: i64) -> CoreResult<Vec<TimeSeriesKey>> {
         let mut inner = self.inner.lock().await;
         let resp = inner
-            .get_time_series_keys(KeysReq { owner_uuid })
+            .get_time_series_keys(KeysReq { owner_id })
             .await
             .map_err(Self::map_status)?
             .into_inner();

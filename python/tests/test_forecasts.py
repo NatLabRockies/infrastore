@@ -24,7 +24,7 @@ from time_series_store import (
     TimeSeriesType,
 )
 
-OWNER_UUID = "forecast-owner-1"
+OWNER_ID = 1
 OWNER_TYPE = "Generator"
 OWNER_CAT = OwnerCategory.Component
 
@@ -46,7 +46,7 @@ def test_deterministic_scalar_round_trip():
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_scalar"),
     )
 
@@ -71,7 +71,7 @@ def test_deterministic_multidim_element():
     data = np.arange(H * C * E, dtype=np.float32).reshape(H, C, E)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_multidim"),
     )
 
@@ -90,7 +90,7 @@ def test_deterministic_window_selection():
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_window"),
     )
 
@@ -115,7 +115,7 @@ def test_deterministic_int64_dtype():
     data = np.arange(H * C, dtype=np.int64).reshape(H, C) * 100
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, horizon, INTERVAL_12H, C, data, "det_int64"),
     )
 
@@ -138,7 +138,7 @@ def test_probabilistic_round_trip():
     data = np.arange(P * H * C, dtype=np.float64).reshape(P, H, C)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_basic"),
     )
 
@@ -165,7 +165,7 @@ def test_probabilistic_window_selection():
     data = np.arange(P * H * C, dtype=np.float64).reshape(P, H, C)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, percentiles, data, "prob_window"),
     )
 
@@ -195,7 +195,7 @@ def test_scenarios_round_trip():
     data = np.arange(S * H * C, dtype=np.float64).reshape(S, H, C)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_basic"),
     )
 
@@ -221,7 +221,7 @@ def test_scenarios_window_selection():
     data = np.arange(S * H * C, dtype=np.float64).reshape(S, H, C)
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "scen_window"),
     )
 
@@ -247,7 +247,7 @@ def test_scenarios_int64_dtype():
     data = np.arange(S * H * C, dtype=np.int64).reshape(S, H, C) * 7
 
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, horizon, INTERVAL_12H, C, data, "scen_int64"),
     )
 
@@ -271,14 +271,14 @@ def test_transform_single_time_series_to_dst():
     interval = timedelta(hours=2)
     underlying = np.arange(8, dtype=np.float64)
     store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         SingleTimeSeries(T0, RES_1H, underlying, "dst_series"),
     )
 
     transformed = store.transform_single_time_series(horizon, interval)
     assert transformed == 1
 
-    keys = store.get_time_series_keys(OWNER_UUID)
+    keys = store.get_time_series_keys(OWNER_ID)
     dst_key = next(
         k for k in keys
         if k.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
@@ -310,7 +310,7 @@ def test_misaligned_window_start_raises():
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_misalign"),
     )
 
@@ -327,7 +327,7 @@ def test_end_before_start_raises():
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_backwards"),
     )
 
@@ -344,7 +344,7 @@ def test_empty_window_range():
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
     key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_empty"),
     )
 
@@ -369,7 +369,7 @@ def test_get_forecast_parameters():
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
     store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_params"),
     )
 
@@ -404,7 +404,7 @@ def test_repr_smoke():
 
     det_data = np.zeros((H, C), dtype=np.float64)
     det_key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, det_data, "det_repr"),
     )
     det = store.get_time_series(det_key)
@@ -413,7 +413,7 @@ def test_repr_smoke():
     P = 2
     prob_data = np.zeros((P, H, C), dtype=np.float64)
     prob_key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Probabilistic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, [0.1, 0.9], prob_data, "prob_repr"),
     )
     prob = store.get_time_series(prob_key)
@@ -422,7 +422,7 @@ def test_repr_smoke():
     S = 3
     scen_data = np.zeros((S, H, C), dtype=np.float64)
     scen_key = store.add_time_series(
-        OWNER_UUID, OWNER_TYPE, OWNER_CAT,
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
         Scenarios(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, scen_data, "scen_repr"),
     )
     scen = store.get_time_series(scen_key)

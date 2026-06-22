@@ -171,7 +171,7 @@ interpolated strings:
 ```rust
 use tracing::{info, warn};
 
-info!(owner_uuid, name, "added time series");
+info!(owner_id, name, "added time series");
 ```
 
 Enable debug logging with:

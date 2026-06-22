@@ -62,7 +62,7 @@ fn single_round_trip_all_dtypes() {
         write(dir.path(), "data.csv", csv_body);
         let json = format!(
             r#"{{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "name": "load",
   "type": "single",
@@ -81,7 +81,7 @@ fn single_round_trip_all_dtypes() {
 
         let out = run(
             &store,
-            &["-f", "csv", "get", "--owner-uuid", "42", "--name", "load"],
+            &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
         );
         assert_eq!(data_lines(&out), *expected, "dtype {dtype} round-trip");
     }
@@ -100,7 +100,7 @@ fn non_sequential_round_trip() {
         dir.path(),
         "ns.json",
         r#"{
-  "owner_uuid": "9",
+  "owner_id": 9,
   "owner_type": "Generator",
   "name": "events",
   "type": "non_sequential",
@@ -116,7 +116,7 @@ fn non_sequential_round_trip() {
 
     let out = run(
         &store,
-        &["-f", "csv", "get", "--owner-uuid", "9", "--name", "events"],
+        &["-f", "csv", "get", "--owner-id", "9", "--name", "events"],
     );
     // CSV: "timestamp,value" header, then ts,value rows. Check the value column.
     let values: Vec<String> = data_lines(&out)
@@ -137,7 +137,7 @@ fn forecast_round_trips() {
         dir.path(),
         "det.json",
         r#"{
-  "owner_uuid": "1",
+  "owner_id": 1,
   "owner_type": "Generator",
   "name": "det",
   "type": "deterministic",
@@ -154,7 +154,7 @@ fn forecast_round_trips() {
     run(&det_store, &["add", "--descriptor", det.to_str().unwrap()]);
     let out = run(
         &det_store,
-        &["-f", "csv", "get", "--owner-uuid", "1", "--name", "det"],
+        &["-f", "csv", "get", "--owner-id", "1", "--name", "det"],
     );
     assert_eq!(flat_values(&out), ["1", "2", "3", "4", "5", "6"]);
 
@@ -166,7 +166,7 @@ fn forecast_round_trips() {
         dir.path(),
         "prob.json",
         r#"{
-  "owner_uuid": "2",
+  "owner_id": 2,
   "owner_type": "Generator",
   "name": "prob",
   "type": "probabilistic",
@@ -187,7 +187,7 @@ fn forecast_round_trips() {
     );
     let out = run(
         &prob_store,
-        &["-f", "csv", "get", "--owner-uuid", "2", "--name", "prob"],
+        &["-f", "csv", "get", "--owner-id", "2", "--name", "prob"],
     );
     assert_eq!(flat_values(&out).len(), 12);
 
@@ -199,7 +199,7 @@ fn forecast_round_trips() {
         dir.path(),
         "scen.json",
         r#"{
-  "owner_uuid": "3",
+  "owner_id": 3,
   "owner_type": "Generator",
   "name": "scen",
   "type": "scenarios",
@@ -219,7 +219,7 @@ fn forecast_round_trips() {
     );
     let out = run(
         &scen_store,
-        &["-f", "csv", "get", "--owner-uuid", "3", "--name", "scen"],
+        &["-f", "csv", "get", "--owner-id", "3", "--name", "scen"],
     );
     assert_eq!(flat_values(&out).len(), 8);
 }
@@ -233,7 +233,7 @@ fn multidim_single_round_trip() {
         dir.path(),
         "md.json",
         r#"{
-  "owner_uuid": "5",
+  "owner_id": 5,
   "owner_type": "Generator",
   "name": "curve",
   "type": "single",
@@ -251,7 +251,7 @@ fn multidim_single_round_trip() {
     );
     let out = run(
         &store,
-        &["-f", "csv", "get", "--owner-uuid", "5", "--name", "curve"],
+        &["-f", "csv", "get", "--owner-id", "5", "--name", "curve"],
     );
     assert_eq!(flat_values(&out), ["1", "2", "3", "4", "5", "6"]);
 }
@@ -265,7 +265,7 @@ fn list_info_and_json_succeed() {
         dir.path(),
         "d.json",
         r#"{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "name": "load",
   "type": "single",
@@ -291,7 +291,7 @@ fn list_info_and_json_succeed() {
     // info json carries stats
     let info = run(
         &store,
-        &["-f", "json", "info", "--owner-uuid", "42", "--name", "load"],
+        &["-f", "json", "info", "--owner-id", "42", "--name", "load"],
     );
     assert!(info.contains("\"mean\""), "info json includes stats");
 }
@@ -307,7 +307,7 @@ fn batch_json_array_adds_multiple() {
         "batch.json",
         r#"[
   {
-    "owner_uuid": "10",
+    "owner_id": 10,
     "owner_type": "Generator",
     "name": "series_a",
     "type": "single",
@@ -318,7 +318,7 @@ fn batch_json_array_adds_multiple() {
     "resolution": "1h"
   },
   {
-    "owner_uuid": "10",
+    "owner_id": 10,
     "owner_type": "Generator",
     "name": "series_b",
     "type": "single",
@@ -337,29 +337,13 @@ fn batch_json_array_adds_multiple() {
 
     let out_a = run(
         &store,
-        &[
-            "-f",
-            "csv",
-            "get",
-            "--owner-uuid",
-            "10",
-            "--name",
-            "series_a",
-        ],
+        &["-f", "csv", "get", "--owner-id", "10", "--name", "series_a"],
     );
     assert_eq!(data_lines(&out_a), ["1", "2", "3"]);
 
     let out_b = run(
         &store,
-        &[
-            "-f",
-            "csv",
-            "get",
-            "--owner-uuid",
-            "10",
-            "--name",
-            "series_b",
-        ],
+        &["-f", "csv", "get", "--owner-id", "10", "--name", "series_b"],
     );
     assert_eq!(data_lines(&out_b), ["4", "5", "6"]);
 }

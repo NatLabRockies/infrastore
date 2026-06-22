@@ -28,7 +28,7 @@ Edit it to point at your data and metadata:
 
 ```json
 {
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "load",
@@ -69,15 +69,14 @@ also be a JSON array of objects to add many series in one transaction.
 
 ```sh
 tss --store demo.nc list                                       # what's in the store
-tss --store demo.nc get  --owner-uuid 42 --name load           # pretty table
-tss --store demo.nc -f csv  get  --owner-uuid 42 --name load   # round-trippable CSV
-tss --store demo.nc -f json info --owner-uuid 42 --name load   # metadata + min/max/mean
+tss --store demo.nc get  --owner-id 42 --name load             # pretty table
+tss --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable CSV
+tss --store demo.nc -f json info --owner-id 42 --name load     # metadata + min/max/mean
 ```
 
-`get`/`info`/`remove` select a single series with `--owner-uuid`, `--name`, `--type`,
-`--resolution`, and repeated `--feature key=value`; if more than one series matches, `tss` lists the
-candidates so you can narrow the query. Large series truncate in `table` output — pass `--limit N`
-or `--full`.
+`get`/`info`/`remove` select a single series with `--owner-id`, `--name`, `--type`, `--resolution`,
+and repeated `--feature key=value`; if more than one series matches, `tss` lists the candidates so
+you can narrow the query. Large series truncate in `table` output — pass `--limit N` or `--full`.
 
 ## 5. Forecasts
 

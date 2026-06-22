@@ -73,7 +73,7 @@ println("ok")
 - **`could not load library`** — Check the path exists and has the right extension for your OS
   (`.dylib` on macOS, `.so` on Linux, `.dll` on Windows), and that you built with `--release` if
   your variable points at `target/release`.
-- **`InvalidParameterError` on add** — `owner_uuid` must be a string (e.g. `"42"`, not `42`), and
+- **`InvalidParameterError` on add** — `owner_id` must be an integer (e.g. `42`, an `Int64`), and
   `features` values must be JSON scalars.
 
 ## Next

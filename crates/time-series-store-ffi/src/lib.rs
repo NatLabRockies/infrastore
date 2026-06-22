@@ -314,7 +314,7 @@ unsafe fn build_typed_array(
 /// stay behaviorally identical.
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_single_request(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -333,13 +333,6 @@ unsafe fn build_single_request(
         set_error("data_ptr is null");
         return Err(TS_ERR_NULL_POINTER);
     }
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("owner_uuid is invalid");
-            return Err(c);
-        }
-    };
     let owner_type = match unsafe { cstr_to_str(owner_type) } {
         Ok(s) => s,
         Err(c) => {
@@ -378,7 +371,7 @@ unsafe fn build_single_request(
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
 
     Ok(core_lib::AddRequest {
-        owner_uuid: owner_uuid.to_string(),
+        owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
         data: core_lib::TimeSeriesData::SingleTimeSeries(single),
@@ -396,16 +389,16 @@ unsafe fn build_single_request(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null. `dims_ptr` must reference
-/// `ndims` elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
-/// `out_key` must be valid for writing one pointer. The returned key must be released with
-/// `ts_key_free`.
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
+/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
+/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and `data_ptr` must reference
+/// `data_byte_len` bytes. `out_key` must be valid for writing one pointer. The returned key must be
+/// released with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_single(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -435,7 +428,7 @@ pub unsafe extern "C" fn ts_store_add_single(
     }
     let req = match unsafe {
         build_single_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -472,7 +465,7 @@ pub unsafe extern "C" fn ts_store_add_single(
 /// argument list into an [`core_lib::AddRequest`].
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_non_sequential_request(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -491,7 +484,6 @@ unsafe fn build_non_sequential_request(
         set_error("an input pointer is null");
         return Err(TS_ERR_NULL_POINTER);
     }
-    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }?;
     let owner_type = unsafe { cstr_to_str(owner_type) }?;
     let name = unsafe { cstr_to_str(name) }?;
     let owner_category = match owner_category {
@@ -526,7 +518,7 @@ unsafe fn build_non_sequential_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
     Ok(core_lib::AddRequest {
-        owner_uuid: owner_uuid.to_string(),
+        owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
         data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
@@ -541,16 +533,16 @@ unsafe fn build_non_sequential_request(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null. `timestamps_unix_ms` must
-/// reference `timestamps_len` elements, `dims_ptr` must reference `ndims` elements when `ndims` is
-/// nonzero, and `data_ptr` must reference `data_byte_len` bytes. `out_key` must be valid for
-/// writing one pointer. The returned key must be released with `ts_key_free`.
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required string
+/// pointers must reference null-terminated UTF-8 strings; optional string pointers may be null.
+/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr` must reference `ndims`
+/// elements when `ndims` is nonzero, and `data_ptr` must reference `data_byte_len` bytes. `out_key`
+/// must be valid for writing one pointer. The returned key must be released with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_non_sequential(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -580,7 +572,7 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
     }
     let request = match unsafe {
         build_non_sequential_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -1036,20 +1028,17 @@ pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
 
 // ---- Attribute-based metadata access --------------------------------------
 //
-// The Julia `RustTimeSeriesStore` works in terms of (owner_uuid, name,
+// The Julia `RustTimeSeriesStore` works in terms of (owner_id, name,
 // resolution, features) rather than opaque key handles, so these entry points
 // build a `TimeSeriesKey` internally and route to the core store. v0 only
 // resolves SingleTimeSeries.
 
 unsafe fn build_key_from_attrs(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
 ) -> Result<core_lib::TimeSeriesKey, i32> {
-    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }.inspect_err(|_| {
-        set_error("owner_uuid is invalid");
-    })?;
     let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
         set_error("name is invalid");
     })?;
@@ -1060,7 +1049,7 @@ unsafe fn build_key_from_attrs(
         Some(Duration::milliseconds(resolution_ms))
     };
     Ok(core_lib::TimeSeriesKey {
-        owner_uuid: owner_uuid.to_string(),
+        owner_id,
         time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
         name: name.to_string(),
         resolution,
@@ -1075,14 +1064,14 @@ unsafe fn build_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
-/// `features_json` may be null. Scalar output pointers must be valid for one value and
-/// `out_data_hash` must be valid for 32 bytes.
+/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
+/// value and `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_metadata(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1110,8 +1099,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }
-    {
+    let key = match unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) } {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1155,12 +1143,13 @@ pub unsafe extern "C" fn ts_store_get_metadata(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
-/// `features_json` may be null. `out_present` must be valid for writing one `bool`.
+/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
+/// `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_by_attrs(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1174,8 +1163,7 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     if out_present.is_null() {
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }
-    {
+    let key = match unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) } {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1188,18 +1176,18 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     }
 }
 
-/// True iff `owner_uuid` has any time series, optionally filtered to a single
+/// True iff `owner_id` has any time series, optionally filtered to a single
 /// time series type (`use_type` selects whether `ts_type` is applied). Answers
 /// the name-less `has_time_series(owner)` / `has_time_series(owner, T)` queries.
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; `owner_uuid` a null-terminated UTF-8
-/// string; `out_present` valid for writing one bool.
+/// `handle` must be a live store handle; `owner_id` is a plain integer;
+/// `out_present` valid for writing one bool.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_for_owner(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     ts_type: i32,
     use_type: bool,
     out_present: *mut bool,
@@ -1212,11 +1200,7 @@ pub unsafe extern "C" fn ts_store_has_for_owner(
     if out_present.is_null() {
         return TS_ERR_NULL_POINTER;
     }
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let mut filter = core_lib::ListFilter::new().owner_uuid(owner_uuid);
+    let mut filter = core_lib::ListFilter::new().owner_id(owner_id);
     if use_type {
         let t = match ts_type_from_int(ts_type) {
             Some(t) => t,
@@ -1241,12 +1225,12 @@ pub unsafe extern "C" fn ts_store_has_for_owner(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8,
-/// and `features_json` may be null.
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+/// must be null-terminated UTF-8, and `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_remove_by_attrs(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1256,8 +1240,7 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let key = match unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }
-    {
+    let key = match unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) } {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1363,7 +1346,7 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
 }
 
 unsafe fn build_typed_key_from_attrs(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -1376,7 +1359,7 @@ unsafe fn build_typed_key_from_attrs(
             return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let mut key = unsafe { build_key_from_attrs(owner_uuid, name, resolution_ms, features_json) }?;
+    let mut key = unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) }?;
     key.time_series_type = time_series_type;
     Ok(key)
 }
@@ -1389,14 +1372,15 @@ unsafe fn build_typed_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8;
-/// optional strings may be null. `data_ptr` must reference `data_len` elements and `out_key` must
-/// be valid for writing one pointer. The returned key must be released with `ts_key_free`.
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+/// must be null-terminated UTF-8; optional strings may be null. `data_ptr` must reference `data_len`
+/// elements and `out_key` must be valid for writing one pointer. The returned key must be released
+/// with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_forecast(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1427,7 +1411,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     }
     let req = match unsafe {
         build_forecast_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -1466,7 +1450,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
 /// (Deterministic / Scenarios) into an [`core_lib::AddRequest`].
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_forecast_request(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1496,7 +1480,6 @@ unsafe fn build_forecast_request(
             return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }?;
     let owner_type = unsafe { cstr_to_str(owner_type) }?;
     let name = unsafe { cstr_to_str(name) }?;
     let owner_category = match owner_category {
@@ -1568,7 +1551,7 @@ unsafe fn build_forecast_request(
     };
 
     Ok(core_lib::AddRequest {
-        owner_uuid: owner_uuid.to_string(),
+        owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
         data,
@@ -1585,15 +1568,15 @@ unsafe fn build_forecast_request(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8;
-/// optional strings may be null. `percentiles_ptr` and `data_ptr` must reference their respective
-/// element counts, and `out_key` must be valid for writing one pointer. The returned key must be
-/// released with `ts_key_free`.
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+/// must be null-terminated UTF-8; optional strings may be null. `percentiles_ptr` and `data_ptr`
+/// must reference their respective element counts, and `out_key` must be valid for writing one
+/// pointer. The returned key must be released with `ts_key_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_add_probabilistic(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1625,7 +1608,7 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     }
     let req = match unsafe {
         build_probabilistic_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -1665,7 +1648,7 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
 /// argument list into an [`core_lib::AddRequest`].
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_probabilistic_request(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1689,7 +1672,6 @@ unsafe fn build_probabilistic_request(
         set_error("a required pointer is null");
         return Err(TS_ERR_NULL_POINTER);
     }
-    let owner_uuid = unsafe { cstr_to_str(owner_uuid) }?;
     let owner_type = unsafe { cstr_to_str(owner_type) }?;
     let name = unsafe { cstr_to_str(name) }?;
     let owner_category = match owner_category {
@@ -1731,7 +1713,7 @@ unsafe fn build_probabilistic_request(
         }
     };
     Ok(core_lib::AddRequest {
-        owner_uuid: owner_uuid.to_string(),
+        owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
         data: core_lib::TimeSeriesData::Probabilistic(prob),
@@ -1780,15 +1762,15 @@ pub unsafe extern "C" fn ts_batch_free(batch: *mut TsBatchHandle) {
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null.
-/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and
-/// `data_ptr` must reference `data_byte_len` bytes.
+/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+/// string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims`
+/// is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_batch_add_single(
     batch: *mut TsBatchHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1813,7 +1795,7 @@ pub unsafe extern "C" fn ts_batch_add_single(
     };
     match unsafe {
         build_single_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -1842,16 +1824,16 @@ pub unsafe extern "C" fn ts_batch_add_single(
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null.
-/// `timestamps_unix_ms` must reference `timestamps_len` elements, `dims_ptr`
-/// must reference `ndims` elements when `ndims` is nonzero, and `data_ptr`
-/// must reference `data_byte_len` bytes.
+/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+/// string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `timestamps_unix_ms` must reference `timestamps_len`
+/// elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
+/// and `data_ptr` must reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_batch_add_non_sequential(
     batch: *mut TsBatchHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1876,7 +1858,7 @@ pub unsafe extern "C" fn ts_batch_add_non_sequential(
     };
     match unsafe {
         build_non_sequential_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -1906,15 +1888,15 @@ pub unsafe extern "C" fn ts_batch_add_non_sequential(
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null.
-/// `dims_ptr` must reference `ndims` elements when `ndims` is nonzero, and
-/// `data_ptr` must reference `data_byte_len` bytes.
+/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+/// string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `dims_ptr` must reference `ndims` elements when `ndims`
+/// is nonzero, and `data_ptr` must reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_batch_add_forecast(
     batch: *mut TsBatchHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -1943,7 +1925,7 @@ pub unsafe extern "C" fn ts_batch_add_forecast(
     };
     match unsafe {
         build_forecast_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -1976,16 +1958,16 @@ pub unsafe extern "C" fn ts_batch_add_forecast(
 ///
 /// # Safety
 ///
-/// `batch` must be a live batch handle. Required string pointers must reference
-/// null-terminated UTF-8 strings; optional string pointers may be null.
-/// `percentiles_ptr` must reference `percentiles_len` elements, `dims_ptr`
-/// must reference `ndims` elements when `ndims` is nonzero, and `data_ptr`
-/// must reference `data_byte_len` bytes.
+/// `batch` must be a live batch handle. `owner_id` is a plain integer. Required
+/// string pointers must reference null-terminated UTF-8 strings; optional string
+/// pointers may be null. `percentiles_ptr` must reference `percentiles_len`
+/// elements, `dims_ptr` must reference `ndims` elements when `ndims` is nonzero,
+/// and `data_ptr` must reference `data_byte_len` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_batch_add_probabilistic(
     batch: *mut TsBatchHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     owner_type: *const c_char,
     owner_category: i32,
     name: *const c_char,
@@ -2015,7 +1997,7 @@ pub unsafe extern "C" fn ts_batch_add_probabilistic(
     };
     match unsafe {
         build_probabilistic_request(
-            owner_uuid,
+            owner_id,
             owner_type,
             owner_category,
             name,
@@ -2155,16 +2137,16 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
-/// `features_json` may be null. Scalar output pointers must each be valid for one value,
-/// `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for writing one
-/// pointer. The returned percentile buffer must be released exactly once with
+/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
+/// one value, `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for
+/// writing one pointer. The returned percentile buffer must be released exactly once with
 /// `ts_buffer_free_f64` using the returned length.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -2189,7 +2171,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     }
     let key = match unsafe {
         build_typed_key_from_attrs(
-            owner_uuid,
+            owner_id,
             name,
             4, // Probabilistic
             resolution_ms,
@@ -2235,14 +2217,14 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
-/// `features_json` may be null. Scalar output pointers must each be valid for one value and
-/// `out_data_hash` must be valid for 32 bytes.
+/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
+/// one value and `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -2276,7 +2258,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2334,8 +2316,8 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 ///
 /// - `handle` must be a live, non-null store handle created by this library.
 ///   No concurrent mutation is permitted for the duration of the call.
-/// - `owner_uuid`, `name` must point to valid, null-terminated UTF-8 strings
-///   for the duration of the call; `features_json` may be null.
+/// - `owner_id` is a plain integer. `name` must point to a valid, null-terminated
+///   UTF-8 string for the duration of the call; `features_json` may be null.
 /// - All `out_*` scalar pointers must be valid for writing one value each.
 /// - `out_dims` must be valid for writing one pointer; the returned pointer
 ///   must be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
@@ -2352,7 +2334,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -2405,7 +2387,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2729,7 +2711,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
     }
 }
 
-/// Construct a `TimeSeriesKey` handle from attributes `(owner_uuid, name,
+/// Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,
 /// ts_type, resolution, features)`.
 ///
 /// The returned key can be passed to the key-based read functions (e.g.
@@ -2740,13 +2722,13 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
 ///
 /// # Safety
 ///
-/// `owner_uuid` and `name` must point to valid, null-terminated UTF-8 strings.
-/// `features_json`, when non-null, must be a null-terminated UTF-8 JSON object.
-/// `out_key` must be valid for writing one pointer. The returned key must be
-/// released exactly once with `ts_key_free`.
+/// `owner_id` is a plain integer. `name` must point to a valid, null-terminated
+/// UTF-8 string. `features_json`, when non-null, must be a null-terminated UTF-8
+/// JSON object. `out_key` must be valid for writing one pointer. The returned key
+/// must be released exactly once with `ts_key_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_make_key_from_attrs(
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -2759,7 +2741,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2769,7 +2751,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
     TS_OK
 }
 
-/// List every time series key associated with `owner_uuid`. On success
+/// List every time series key associated with `owner_id`. On success
 /// `*out_keys` points to an array of `*out_len` owned key handles (one per
 /// association, including derived `DeterministicSingleTimeSeries` rows), each
 /// usable with the key-based read functions.
@@ -2781,13 +2763,13 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `owner_uuid` a null-terminated UTF-8
-/// string. `out_keys` must be valid for writing one pointer and `out_len` for
-/// writing one `u64`.
+/// `handle` must be a live store handle and `owner_id` is a plain integer.
+/// `out_keys` must be valid for writing one pointer and `out_len` for writing one
+/// `u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_get_time_series_keys(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     out_keys: *mut *mut *mut TsKeyHandle,
     out_len: *mut u64,
 ) -> i32 {
@@ -2803,14 +2785,7 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let owner_uuid = match unsafe { cstr_to_str(owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => {
-            set_error("owner_uuid is invalid");
-            return c;
-        }
-    };
-    let keys = match store.inner.get_time_series_keys(owner_uuid) {
+    let keys = match store.inner.get_time_series_keys(owner_id) {
         Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
@@ -2849,7 +2824,7 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
         .iter()
         .map(|m| {
             let mut o = serde_json::Map::new();
-            o.insert("owner_uuid".into(), Value::from(m.owner_uuid.clone()));
+            o.insert("owner_id".into(), Value::from(m.owner_id));
             o.insert("owner_type".into(), Value::from(m.owner_type.clone()));
             o.insert(
                 "owner_category".into(),
@@ -2909,8 +2884,8 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
 }
 
 /// List time series metadata as a JSON array string (see `metadata_rows_to_json`
-/// for the per-row shape). When `owner_uuid` is non-null only that owner's rows
-/// are returned; null lists the whole store.
+/// for the per-row shape). When `has_owner` is true only `owner_id`'s rows
+/// are returned; otherwise the whole store is listed.
 ///
 /// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
 /// learn the byte length via `out_len`, then call again with a buffer of at
@@ -2919,13 +2894,14 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. When non-null, `owner_uuid` must be a
-/// null-terminated UTF-8 string. `out_len` must be writable; `buf` must be null
-/// or valid for `cap` bytes.
+/// `handle` must be a live store handle. `has_owner` and `owner_id` are plain
+/// scalars. `out_len` must be writable; `buf` must be null or valid for `cap`
+/// bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_list_metadata(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    has_owner: bool,
+    owner_id: i64,
     buf: *mut c_char,
     cap: u64,
     out_len: *mut u64,
@@ -2939,13 +2915,9 @@ pub unsafe extern "C" fn ts_store_list_metadata(
         set_error("out_len is null");
         return TS_ERR_NULL_POINTER;
     }
-    let owner = match unsafe { cstr_to_optional_string(owner_uuid) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
     let mut filter = core_lib::ListFilter::new();
-    if let Some(o) = owner.as_deref() {
-        filter = filter.owner_uuid(o);
+    if has_owner {
+        filter = filter.owner_id(owner_id);
     }
     let rows = match store.inner.list_time_series(filter) {
         Ok(r) => r,
@@ -2995,31 +2967,31 @@ fn features_to_json(features: &core_lib::Features) -> String {
 
 /// Read the attributes of a key handle: its time series type code (see
 /// `ts_type_from_int`), resolution in milliseconds (`0` when unset), the owner
-/// UUID and name strings, and the features as a JSON object string (`"{}"` when
-/// empty — the same shape the attribute-addressed entry points accept).
+/// id (an integer), the name string, and the features as a JSON object string
+/// (`"{}"` when empty — the same shape the attribute-addressed entry points
+/// accept).
 ///
-/// Strings follow the probe-then-fetch convention: call with `owner_buf` /
-/// `name_buf` / `features_buf` null (and capacities `0`) to learn the required
-/// lengths via the matching `out_*_len`, then call again with buffers of at
-/// least `len + 1` bytes. Each returned string is NUL-terminated and truncated
-/// to its capacity; the reported length is always the untruncated byte length.
+/// `out_owner_id` receives the owner id directly. The `name` and `features`
+/// strings follow the probe-then-fetch convention: call with `name_buf` /
+/// `features_buf` null (and capacities `0`) to learn the required lengths via the
+/// matching `out_*_len`, then call again with buffers of at least `len + 1`
+/// bytes. Each returned string is NUL-terminated and truncated to its capacity;
+/// the reported length is always the untruncated byte length.
 ///
 /// # Safety
 ///
 /// `key` must be a live key handle created by this library. `out_type`,
-/// `out_resolution_ms`, `out_owner_len`, `out_name_len`, and `out_features_len`
-/// must each be valid for writing one value. `owner_buf` / `name_buf` /
-/// `features_buf` may be null; when non-null they must be valid for writing
-/// `owner_cap` / `name_cap` / `features_cap` bytes respectively.
+/// `out_resolution_ms`, `out_owner_id`, `out_name_len`, and `out_features_len`
+/// must each be valid for writing one value. `name_buf` / `features_buf` may be
+/// null; when non-null they must be valid for writing `name_cap` / `features_cap`
+/// bytes respectively.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_key_attributes(
     key: *const TsKeyHandle,
     out_type: *mut i32,
     out_resolution_ms: *mut i64,
-    owner_buf: *mut c_char,
-    owner_cap: u64,
-    out_owner_len: *mut u64,
+    out_owner_id: *mut i64,
     name_buf: *mut c_char,
     name_cap: u64,
     out_name_len: *mut u64,
@@ -3037,7 +3009,7 @@ pub unsafe extern "C" fn ts_key_attributes(
     };
     if out_type.is_null()
         || out_resolution_ms.is_null()
-        || out_owner_len.is_null()
+        || out_owner_id.is_null()
         || out_name_len.is_null()
         || out_features_len.is_null()
     {
@@ -3048,7 +3020,7 @@ pub unsafe extern "C" fn ts_key_attributes(
     unsafe {
         *out_type = ts_type_to_int(k.time_series_type);
         *out_resolution_ms = k.resolution.map(|r| r.num_milliseconds()).unwrap_or(0);
-        write_str_out(&k.owner_uuid, owner_buf, owner_cap, out_owner_len);
+        *out_owner_id = k.owner_id;
         write_str_out(&k.name, name_buf, name_cap, out_name_len);
         write_str_out(
             &features_to_json(&k.features),
@@ -3127,12 +3099,13 @@ pub unsafe extern "C" fn ts_buffer_free_u64(ptr: *mut u64, len: u64) {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Required strings must be null-terminated UTF-8;
-/// `features_json` may be null. `out_present` must be valid for writing one `bool`.
+/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
+/// `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_typed(
     handle: *const TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -3148,7 +3121,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -3166,12 +3139,12 @@ pub unsafe extern "C" fn ts_store_has_typed(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. Required strings must be null-terminated UTF-8,
-/// and `features_json` may be null.
+/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+/// must be null-terminated UTF-8, and `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_remove_typed(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    owner_id: i64,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -3183,7 +3156,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
         None => return TS_ERR_NULL_POINTER,
     };
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_uuid, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -3194,47 +3167,45 @@ pub unsafe extern "C" fn ts_store_remove_typed(
     }
 }
 
-/// Remove all time series, or all for a single owner when `owner_uuid` is
-/// non-null. Returns `TS_OK` on success.
+/// Remove all time series, or all for a single owner when `has_owner` is true.
+/// Returns `TS_OK` on success.
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. When non-null, `owner_uuid` must point to a
-/// null-terminated UTF-8 string.
+/// `handle` must be a live mutable store handle. `has_owner` and `owner_id` are
+/// plain scalars.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_clear(
     handle: *mut TsStoreHandle,
-    owner_uuid: *const c_char,
+    has_owner: bool,
+    owner_id: i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let owner = match unsafe { cstr_to_optional_string(owner_uuid) } {
-        Ok(v) => v,
-        Err(c) => return c,
-    };
-    match store.inner.clear_time_series(owner.as_deref()) {
+    let owner = if has_owner { Some(owner_id) } else { None };
+    match store.inner.clear_time_series(owner) {
         Ok(_) => TS_OK,
         Err(e) => map_core_error(e),
     }
 }
 
-/// Reassign every time series owned by `old_owner_uuid` to `new_owner_uuid`.
+/// Reassign every time series owned by `old_owner_id` to `new_owner_id`.
 /// When `out_updated` is non-null it receives the number of associations
 /// changed. Returns `TS_OK` on success.
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `old_owner_uuid` and
-/// `new_owner_uuid` must point to null-terminated UTF-8 strings. When non-null,
-/// `out_updated` must point to writable `u64` storage.
+/// `handle` must be a live mutable store handle. `old_owner_id` and
+/// `new_owner_id` are plain integers. When non-null, `out_updated` must point to
+/// writable `u64` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_replace_owner(
     handle: *mut TsStoreHandle,
-    old_owner_uuid: *const c_char,
-    new_owner_uuid: *const c_char,
+    old_owner_id: i64,
+    new_owner_id: i64,
     out_updated: *mut u64,
 ) -> i32 {
     clear_error();
@@ -3242,15 +3213,7 @@ pub unsafe extern "C" fn ts_store_replace_owner(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let old_owner = match unsafe { cstr_to_str(old_owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let new_owner = match unsafe { cstr_to_str(new_owner_uuid) } {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    match store.inner.replace_owner(old_owner, new_owner) {
+    match store.inner.replace_owner(old_owner_id, new_owner_id) {
         Ok(updated) => {
             if !out_updated.is_null() {
                 unsafe { *out_updated = updated as u64 };

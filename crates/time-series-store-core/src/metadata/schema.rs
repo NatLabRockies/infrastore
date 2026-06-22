@@ -2,7 +2,7 @@
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
-    owner_uuid        TEXT    NOT NULL,
+    owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
     owner_category    TEXT    NOT NULL CHECK(owner_category IN ('Component','SupplementalAttribute')),
     time_series_type  TEXT    NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS features (
 );
 
 -- The store's uniqueness invariant is
---   (owner_uuid, time_series_type, name, resolution, features).
+--   (owner_id, time_series_type, name, resolution, features).
 -- Two indexes are required to enforce and serve it, and BOTH must be kept:
 --
 --   * uq_assoc indexes resolution_ms as a plain column. It serves the
@@ -51,12 +51,12 @@ CREATE TABLE IF NOT EXISTS features (
 -- Do not "deduplicate" these into one index: dropping uq_assoc loses the query
 -- index; dropping uq_assoc_null_resolution loses NULL-resolution uniqueness.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc ON time_series_associations
-    (owner_uuid, time_series_type, name, resolution_ms, features_hash);
+    (owner_id, time_series_type, name, resolution_ms, features_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_null_resolution ON time_series_associations
-    (owner_uuid, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
+    (owner_id, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
 
 CREATE INDEX IF NOT EXISTS ix_hash       ON time_series_associations(data_hash);
-CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_uuid);
+CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_id);
 CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution_ms);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);

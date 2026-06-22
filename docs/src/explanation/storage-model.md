@@ -89,11 +89,11 @@ The catalog holds two tables:
 - **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
   a `value_kind` discriminator.
 
-A unique index over `(owner_uuid, time_series_type, name, resolution_ms, features_hash)` enforces
-the [key uniqueness](./data-model.md#keys) invariant at the database level. Because SQLite treats
-`NULL` as distinct in a `UNIQUE` index, a second index folds a `NULL` `resolution_ms` to a sentinel
-so series without a resolution (e.g. `NonSequentialTimeSeries`) are still constrained. Indexes on
-`data_hash`, `owner_uuid`, and `resolution_ms` keep lookups fast.
+A unique index over `(owner_id, time_series_type, name, resolution_ms, features_hash)` enforces the
+[key uniqueness](./data-model.md#keys) invariant at the database level. Because SQLite treats `NULL`
+as distinct in a `UNIQUE` index, a second index folds a `NULL` `resolution_ms` to a sentinel so
+series without a resolution (e.g. `NonSequentialTimeSeries`) are still constrained. Indexes on
+`data_hash`, `owner_id`, and `resolution_ms` keep lookups fast.
 
 ## Keeping the Two Files Consistent
 
