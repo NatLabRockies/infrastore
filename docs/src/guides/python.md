@@ -53,7 +53,7 @@ series.
 
 ```python
 key = store.add_time_series(
-    owner_uuid="42",
+    owner_id=42,
     owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,   # name comes from ts
@@ -64,8 +64,8 @@ key = store.add_time_series(
 
 `features` is a plain dict whose values are `int`, `float`, `bool`, or `str`. Adding a series whose
 [key](../explanation/data-model.md#keys) already exists raises `DuplicateTimeSeriesError`. The
-returned `key` exposes `owner_uuid`, `time_series_type`, `name`, `resolution`, and `features` as
-read-only properties.
+returned `key` exposes `owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`, and
+`features` as read-only properties.
 
 ## Read a Series
 
@@ -93,10 +93,15 @@ window = store.get_time_series(
 `features` argument is a subset match):
 
 ```python
-for m in store.list_time_series(owner_uuid="42", time_series_type=TimeSeriesType.SingleTimeSeries):
+for m in store.list_time_series(
+    owner_id=42,
+    owner_category=OwnerCategory.Component,
+    time_series_type=TimeSeriesType.SingleTimeSeries,
+):
     print(m["name"], m["resolution_seconds"], m["units"], m["features"])
 
-keys = store.get_time_series_keys("42")
+# The owner is the (owner_id, owner_category) pair.
+keys = store.get_time_series_keys(42, OwnerCategory.Component)
 exists = store.has_time_series(key)
 resolutions = store.get_resolutions()          # list[timedelta]
 counts = store.get_time_series_counts()        # dict
@@ -106,8 +111,9 @@ counts = store.get_time_series_counts()        # dict
 
 ```python
 store.remove_time_series(key)
-n = store.clear_time_series("42")   # remove all series for owner "42"; returns count
-store.clear_time_series()           # remove everything
+# The owner is the (owner_id, owner_category) pair.
+n = store.clear_time_series(42, OwnerCategory.Component)   # all series for one owner; returns count
+store.clear_time_series()                                  # remove everything
 
 report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...}
 errors = store.verify_integrity()   # [] when intact
@@ -154,7 +160,7 @@ ts = SingleTimeSeries(
     "load",
 )
 key = store.add_time_series(
-    owner_uuid="42", owner_type="Generator",
+    owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030}, units="MW",

@@ -9,15 +9,18 @@ several variants distinguished by **features**.
 
 Every time series belongs to an owner, identified by three fields:
 
-| Field            | Type            | Meaning                                                                              |
-| ---------------- | --------------- | ------------------------------------------------------------------------------------ |
-| `owner_uuid`     | string          | Stable identity of the owning object (an InfrastructureSystems.jl UUID, for example) |
-| `owner_type`     | string          | The owner's concrete type, e.g. `"Generator"`                                        |
-| `owner_category` | `OwnerCategory` | `Component` or `SupplementalAttribute`                                               |
+| Field            | Type            | Meaning                                                       |
+| ---------------- | --------------- | ------------------------------------------------------------- |
+| `owner_id`       | `i64`           | Stable identity of the owning object (a component identifier) |
+| `owner_type`     | string          | The owner's concrete type, e.g. `"Generator"`                 |
+| `owner_category` | `OwnerCategory` | `Component` or `SupplementalAttribute`                        |
 
-`owner_uuid` is a free-form string, so it interoperates with InfrastructureSystems.jl UUIDs, integer
-IDs rendered as text, or any other stable identifier scheme. Only `owner_uuid` participates in the
-association's uniqueness constraint; `owner_type` and `owner_category` are descriptive.
+`owner_id` is a signed 64-bit integer identifier. The **owner identity is the pair
+`(owner_id, owner_category)`**: both participate in the association's uniqueness constraint, while
+`owner_type` is descriptive. Component and supplemental-attribute integer-id streams are
+independent, so the same `owner_id` can name a component **and** a supplemental attribute at once —
+the category disambiguates them, keeping the two owners' series distinct. Owner-scoped operations
+therefore take the category alongside the id (see [Keys](#keys)).
 
 ## Time-Series Types
 
@@ -125,17 +128,19 @@ A **`TimeSeriesKey`** is the logical handle that re-finds a series. It is exactl
 must be unique:
 
 ```text
-TimeSeriesKey = (owner_uuid, time_series_type, name, resolution, features)
+TimeSeriesKey = (owner_id, owner_category, time_series_type, name, resolution, features)
 ```
 
 `add_time_series` returns a key; `get_time_series`, `has_time_series`, and `remove_time_series` take
 one. Two series with the same key cannot coexist — attempting to add a duplicate raises
 `DuplicateTimeSeries`. Change any element of the tuple (a different `name`, a different `model_year`
-feature, a different `resolution`) and you have a distinct series.
+feature, a different `resolution`, or a different `owner_category`) and you have a distinct series.
+Because `owner_category` is part of the key, a component and a supplemental attribute that share a
+numeric `owner_id` keep entirely separate sets of series.
 
 ```mermaid
 flowchart LR
-    OWNER["Owner<br/>uuid=42, type=Generator"]
+    OWNER["Owner<br/>id=42, category=Component, type=Generator"]
     OWNER --> K1["name=load<br/>year=2030"]
     OWNER --> K2["name=load<br/>year=2050"]
     OWNER --> K3["name=max_active_power"]

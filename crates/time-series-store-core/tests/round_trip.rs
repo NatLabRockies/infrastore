@@ -30,7 +30,7 @@ fn add_and_get_round_trip() {
 
     let key = store
         .add_time_series(
-            "42",
+            42,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -54,7 +54,7 @@ fn duplicate_key_rejected() {
 
     store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -65,7 +65,7 @@ fn duplicate_key_rejected() {
 
     let err = store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -84,7 +84,7 @@ fn features_disambiguate_keys() {
 
     store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s1.clone()),
@@ -94,7 +94,7 @@ fn features_disambiguate_keys() {
         .unwrap();
     store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s2.clone()),
@@ -104,7 +104,7 @@ fn features_disambiguate_keys() {
         .unwrap();
 
     let all = store
-        .list_time_series(ListFilter::new().owner_uuid("1"))
+        .list_time_series(ListFilter::new().owner_id(1))
         .unwrap();
     assert_eq!(all.len(), 2);
 
@@ -112,7 +112,7 @@ fn features_disambiguate_keys() {
     let only_2035 = store
         .list_time_series(
             ListFilter::new()
-                .owner_uuid("1")
+                .owner_id(1)
                 .features(features_with_year(2035)),
         )
         .unwrap();
@@ -128,7 +128,7 @@ fn deduplication_via_content_addressing() {
 
     store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -138,7 +138,7 @@ fn deduplication_via_content_addressing() {
         .unwrap();
     store
         .add_time_series(
-            "2",
+            2,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -162,7 +162,7 @@ fn remove_keeps_array_when_other_refs_exist() {
 
     let k1 = store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -172,7 +172,7 @@ fn remove_keeps_array_when_other_refs_exist() {
         .unwrap();
     let k2 = store
         .add_time_series(
-            "2",
+            2,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
@@ -203,7 +203,7 @@ fn bulk_add_atomic_rollback() {
 
     store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s_ok.clone()),
@@ -215,7 +215,7 @@ fn bulk_add_atomic_rollback() {
     // Bulk: first item succeeds, second collides with the existing (1,"load",None,{}).
     let bulk = vec![
         AddRequest {
-            owner_uuid: "2".into(),
+            owner_id: 2,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
@@ -225,7 +225,7 @@ fn bulk_add_atomic_rollback() {
             logical_type: None,
         },
         AddRequest {
-            owner_uuid: "1".into(),
+            owner_id: 1,
             owner_type: "Generator".into(),
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
@@ -240,7 +240,7 @@ fn bulk_add_atomic_rollback() {
 
     // The first item must have been rolled back: owner 2 has nothing.
     let rows = store
-        .list_time_series(ListFilter::new().owner_uuid("2"))
+        .list_time_series(ListFilter::new().owner_id(2))
         .unwrap();
     assert!(rows.is_empty(), "rollback failed: {:?}", rows);
 }
@@ -255,7 +255,7 @@ fn time_range_slicing() {
 
     let key = store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
@@ -279,7 +279,7 @@ fn clear_by_owner() {
     let mut store = create_store(None, true).unwrap();
     let s = series(2024, 12, 1.0);
 
-    for owner in ["1", "2", "3"] {
+    for owner in [1i64, 2, 3] {
         store
             .add_time_series(
                 owner,
@@ -295,7 +295,9 @@ fn clear_by_owner() {
         store.get_time_series_counts().unwrap().static_time_series,
         3
     );
-    let removed = store.clear_time_series(Some("2")).unwrap();
+    let removed = store
+        .clear_time_series(Some((2, OwnerCategory::Component)))
+        .unwrap();
     assert_eq!(removed, 1);
     let remaining = store
         .list_time_series(ListFilter::new().time_series_type(TimeSeriesType::SingleTimeSeries))
@@ -315,7 +317,7 @@ fn read_only_blocks_writes() {
         let s = series(2024, 12, 1.0);
         store
             .add_time_series(
-                "1",
+                1,
                 "Generator",
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
@@ -330,7 +332,7 @@ fn read_only_blocks_writes() {
     let s = series(2024, 12, 1.0);
     let err = ro
         .add_time_series(
-            "2",
+            2,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
@@ -358,7 +360,7 @@ fn distinct_resolutions_returned_sorted() {
         let s = SingleTimeSeries::new(initial, resolution, data.clone(), "load");
         store
             .add_time_series(
-                &(i + 1).to_string(),
+                (i + 1) as i64,
                 "Generator",
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
@@ -393,7 +395,7 @@ fn non_sequential_round_trip_and_time_slice() {
     let series = NonSequentialTimeSeries::new(timestamps.clone(), data, "availability").unwrap();
     let key = store
         .add_time_series(
-            "irregular",
+            7,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),
@@ -451,7 +453,7 @@ fn duplicate_non_sequential_key_is_rejected() {
         )
         .unwrap();
         let result = store.add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),

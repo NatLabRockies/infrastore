@@ -40,7 +40,7 @@ fn seq_f64(shape: Vec<usize>, base: f64) -> TypedArray {
     TypedArray::from_f64(shape, &vals)
 }
 
-fn add_time_series(store: &mut Store, owner: &str, data: TimeSeriesData) {
+fn add_time_series(store: &mut Store, owner: i64, data: TimeSeriesData) {
     store
         .add_time_series(
             owner,
@@ -66,7 +66,7 @@ fn add_det_forecast(store: &mut Store) {
         "price",
     )
     .unwrap();
-    add_time_series(store, "det-owner", TimeSeriesData::Deterministic(det));
+    add_time_series(store, 1, TimeSeriesData::Deterministic(det));
 }
 
 fn add_prob_forecast(store: &mut Store) {
@@ -83,7 +83,7 @@ fn add_prob_forecast(store: &mut Store) {
         "price",
     )
     .unwrap();
-    add_time_series(store, "prob-owner", TimeSeriesData::Probabilistic(prob));
+    add_time_series(store, 2, TimeSeriesData::Probabilistic(prob));
 }
 
 fn add_scen_forecast(store: &mut Store) {
@@ -100,7 +100,7 @@ fn add_scen_forecast(store: &mut Store) {
         "price",
     )
     .unwrap();
-    add_time_series(store, "scen-owner", TimeSeriesData::Scenarios(scen));
+    add_time_series(store, 3, TimeSeriesData::Scenarios(scen));
 }
 
 // ---- Deterministic ----
@@ -114,7 +114,7 @@ async fn deterministic_full_round_trip_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let keys = client
-        .get_time_series_keys("det-owner".to_string())
+        .get_time_series_keys(1, OwnerCategory::Component)
         .await
         .unwrap();
     assert_eq!(keys.len(), 1);
@@ -143,7 +143,7 @@ async fn deterministic_time_range_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let keys = client
-        .get_time_series_keys("det-owner".to_string())
+        .get_time_series_keys(1, OwnerCategory::Component)
         .await
         .unwrap();
 
@@ -177,7 +177,7 @@ async fn probabilistic_full_round_trip_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let keys = client
-        .get_time_series_keys("prob-owner".to_string())
+        .get_time_series_keys(2, OwnerCategory::Component)
         .await
         .unwrap();
     assert_eq!(keys.len(), 1);
@@ -202,7 +202,7 @@ async fn probabilistic_time_range_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let keys = client
-        .get_time_series_keys("prob-owner".to_string())
+        .get_time_series_keys(2, OwnerCategory::Component)
         .await
         .unwrap();
 
@@ -236,7 +236,7 @@ async fn scenarios_full_round_trip_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let keys = client
-        .get_time_series_keys("scen-owner".to_string())
+        .get_time_series_keys(3, OwnerCategory::Component)
         .await
         .unwrap();
     assert_eq!(keys.len(), 1);
@@ -261,7 +261,7 @@ async fn scenarios_time_range_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let keys = client
-        .get_time_series_keys("scen-owner".to_string())
+        .get_time_series_keys(3, OwnerCategory::Component)
         .await
         .unwrap();
 

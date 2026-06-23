@@ -1,5 +1,5 @@
 {
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "load",

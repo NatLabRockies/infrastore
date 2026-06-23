@@ -91,7 +91,7 @@ fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&Stor
 #[allow(clippy::too_many_arguments)]
 fn add_forecast(
     store: &mut Store,
-    owner: &str,
+    owner: i64,
     name: &str,
     ts_type: TimeSeriesType,
     initial: chrono::DateTime<chrono::Utc>,
@@ -151,10 +151,11 @@ fn add_forecast(
                 )
                 .unwrap();
             store
-                .transform_single_time_series(horizon, interval)
+                .transform_single_time_series(horizon, interval, None, None)
                 .unwrap();
             return TimeSeriesKey {
-                owner_uuid: owner.to_string(),
+                owner_id: owner,
+                owner_category: OwnerCategory::Component,
                 time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
                 name: name.to_string(),
                 resolution: Some(resolution),
@@ -216,7 +217,7 @@ fn deterministic_scalar_roundtrip() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner1",
+                    1,
                     "load",
                     TimeSeriesType::Deterministic,
                     initial,
@@ -264,7 +265,7 @@ fn deterministic_multidim_element_shape() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner2",
+                    2,
                     "cost",
                     TimeSeriesType::Deterministic,
                     initial,
@@ -310,7 +311,7 @@ fn probabilistic_roundtrip() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner3",
+                    3,
                     "prob_load",
                     TimeSeriesType::Probabilistic,
                     initial,
@@ -358,7 +359,7 @@ fn scenarios_roundtrip() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner4",
+                    4,
                     "scenarios_load",
                     TimeSeriesType::Scenarios,
                     initial,
@@ -412,7 +413,7 @@ fn window_selection_deterministic() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner5",
+                    5,
                     "det_win",
                     TimeSeriesType::Deterministic,
                     initial,
@@ -472,7 +473,7 @@ fn window_selection_probabilistic() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner5p",
+                    51,
                     "prob_win",
                     TimeSeriesType::Probabilistic,
                     initial,
@@ -531,7 +532,7 @@ fn window_selection_scenarios() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner5s",
+                    52,
                     "scen_win",
                     TimeSeriesType::Scenarios,
                     initial,
@@ -589,7 +590,7 @@ fn window_selection_error_cases() {
             move |store| {
                 add_forecast(
                     store,
-                    "owner6",
+                    6,
                     "errfcast",
                     TimeSeriesType::Deterministic,
                     initial,
@@ -659,7 +660,7 @@ fn dst_synthesis_overlapping_windows() {
             move |store| {
                 add_forecast(
                     store,
-                    "dst_owner",
+                    100,
                     "dst_series",
                     TimeSeriesType::DeterministicSingleTimeSeries,
                     initial,
@@ -731,7 +732,7 @@ fn deterministic_i64_dtype_preserved() {
             move |store| {
                 add_forecast(
                     store,
-                    "i64_owner",
+                    101,
                     "i64_fcast",
                     TimeSeriesType::Deterministic,
                     initial,
@@ -858,7 +859,7 @@ fn get_forecast_parameters_real() {
             move |store| {
                 add_forecast(
                     store,
-                    "fp_owner",
+                    102,
                     "fp_series",
                     TimeSeriesType::Deterministic,
                     initial,
@@ -917,7 +918,7 @@ fn dst_synthesis_multidim_element_shape() {
             move |store| {
                 add_forecast(
                     store,
-                    "dst_md",
+                    103,
                     "dst_md_series",
                     TimeSeriesType::DeterministicSingleTimeSeries,
                     initial,

@@ -46,16 +46,19 @@ tss template <single|non_sequential|deterministic|probabilistic|scenarios>
 `get`, `info`, and `remove` identify one series with these repeatable/optional flags; `list` accepts
 the same flags as filters:
 
-| Flag                  | Meaning                                                                    |
-| --------------------- | -------------------------------------------------------------------------- |
-| `--owner-uuid <U>`    | Owner UUID.                                                                |
-| `--name <N>`          | Series name.                                                               |
-| `--type <T>`          | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
-| `--resolution <DUR>`  | Resolution, e.g. `1h`, `15min`.                                            |
-| `--feature key=value` | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+| Flag                   | Meaning                                                                    |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `--owner-id <I>`       | Owner identifier (`i64` integer).                                          |
+| `--owner-category <C>` | Restrict to `component` or `supplemental_attribute`; omit to match either. |
+| `--name <N>`           | Series name.                                                               |
+| `--type <T>`           | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
+| `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`.                                            |
+| `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 
 If a selector matches more than one series, `tss` errors and lists the candidates so the query can
-be narrowed.
+be narrowed. The owner identity is the pair `(owner_id, owner_category)`, so a component and a
+supplemental attribute may share a numeric `owner_id`; add `--owner-category` to disambiguate when
+both exist.
 
 ## Durations and Timestamps
 
@@ -71,7 +74,7 @@ The CSV holds only numbers (plus a leading timestamp column for `non_sequential`
 
 | Key                            | Required for                | Notes                                               |
 | ------------------------------ | --------------------------- | --------------------------------------------------- |
-| `owner_uuid`                   | all                         |                                                     |
+| `owner_id`                     | all                         | Integer component identifier (`i64`).               |
 | `owner_type`                   | all                         |                                                     |
 | `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.  |
 | `name`                         | all                         |                                                     |

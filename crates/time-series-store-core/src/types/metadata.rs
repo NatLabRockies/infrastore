@@ -93,7 +93,7 @@ pub type Features = BTreeMap<String, FeatureValue>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimeSeriesMetadata {
-    pub owner_uuid: String,
+    pub owner_id: i64,
     pub owner_type: String,
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,

@@ -19,7 +19,7 @@ pub fn remove(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result
             "Remove {} '{}' (owner {})? [y/N] ",
             meta.time_series_type.as_str(),
             meta.name,
-            meta.owner_uuid
+            meta.owner_id
         );
         std::io::stdout().flush().ok();
         let mut answer = String::new();
@@ -40,7 +40,7 @@ pub fn remove(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result
         "{}",
         color::header(&format!(
             "Removed '{}' (owner {}).",
-            meta.name, meta.owner_uuid
+            meta.name, meta.owner_id
         ))
     );
     Ok(())
@@ -52,7 +52,7 @@ pub fn transform(store_path: &Path, horizon: &str, interval: &str) -> Result<(),
     let interval = parse::parse_duration(interval)?;
     let mut store = store_access::open_writable(store_path)?;
     let n = store
-        .transform_single_time_series(horizon, interval)
+        .transform_single_time_series(horizon, interval, None, None)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     println!(
@@ -86,7 +86,7 @@ pub fn template(ts_type: &str) -> Result<(), String> {
 }
 
 const SINGLE: &str = r#"{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "load",
@@ -104,7 +104,7 @@ const SINGLE: &str = r#"{
 "#;
 
 const NON_SEQUENTIAL: &str = r#"{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "events",
@@ -117,7 +117,7 @@ const NON_SEQUENTIAL: &str = r#"{
 "#;
 
 const DETERMINISTIC: &str = r#"{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "load_forecast",
@@ -135,7 +135,7 @@ const DETERMINISTIC: &str = r#"{
 "#;
 
 const PROBABILISTIC: &str = r#"{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "load_prob",
@@ -154,7 +154,7 @@ const PROBABILISTIC: &str = r#"{
 "#;
 
 const SCENARIOS: &str = r#"{
-  "owner_uuid": "42",
+  "owner_id": 42,
   "owner_type": "Generator",
   "owner_category": "component",
   "name": "load_scenarios",

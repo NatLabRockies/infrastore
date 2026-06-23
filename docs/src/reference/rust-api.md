@@ -56,7 +56,7 @@ impl Store {
 
     pub fn add_time_series(
         &mut self,
-        owner_uuid: &str,
+        owner_id: i64,
         owner_type: &str,
         owner_category: OwnerCategory,
         name: &str,
@@ -80,10 +80,23 @@ impl Store {
     ) -> Result<usize>;
 
     pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()>;
-    pub fn clear_time_series(&mut self, owner_uuid: Option<&str>) -> Result<usize>;
+    pub fn clear_time_series(
+        &mut self,
+        owner: Option<(i64, OwnerCategory)>,
+    ) -> Result<usize>;
+    pub fn replace_owner(
+        &mut self,
+        old_owner_id: i64,
+        new_owner_id: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<usize>;
 
     pub fn list_time_series(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>>;
-    pub fn get_time_series_keys(&self, owner_uuid: &str) -> Result<Vec<TimeSeriesKey>>;
+    pub fn get_time_series_keys(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<Vec<TimeSeriesKey>>;
     pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool>;
 
     pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata>;
@@ -117,8 +130,14 @@ impl Store {
   variant (static series and all forecast types). With `time_range = Some((start, end))`, slices on
   the time axis; the returned series's `initial_timestamp` and `length` reflect the slice. For
   forecasts the window is resolved over the `count` axis (`resolve_windows`). `end` is exclusive.
-- **`clear_time_series`** — `Some(uuid)` removes one owner's series; `None` removes all. Returns the
-  count removed. Underlying arrays are freed only when their last reference is gone.
+- **`clear_time_series`** — `Some((id, category))` removes one owner's series (the owner is the
+  `(owner_id, owner_category)` pair); `None` removes all. Returns the count removed. Underlying
+  arrays are freed only when their last reference is gone.
+- **`replace_owner`** — Reassigns every series owned by `(old_owner_id, owner_category)` to
+  `(new_owner_id, owner_category)`, returning the number of associations updated. The category is
+  unchanged by the move and scopes which owner's series are reassigned.
+- **`get_time_series_keys`** — Lists every key for the owner identified by the
+  `(owner_id, owner_category)` pair.
 - **`get_metadata` / `get_array_by_hash`** — The low-level pair used by external bindings: resolve a
   key to metadata (including `data_hash`), then read the array directly.
 - **`verify_integrity`** — Recomputes each stored array's hash and reports mismatches.
@@ -140,7 +159,7 @@ let forecast = Deterministic::new(
     initial_timestamp, resolution, horizon, interval, count, data,
 )?;
 let key = store.add_time_series(
-    owner_uuid, owner_type, OwnerCategory::Component, name,
+    owner_id, owner_type, OwnerCategory::Component, name,
     TimeSeriesData::Deterministic(forecast),
     features, units,
 )?;
@@ -174,7 +193,8 @@ the underlying packed array. The low-level pair still works for direct array acc
 
 ```rust
 pub struct TimeSeriesKey {
-    pub owner_uuid: String,
+    pub owner_id: i64,
+    pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,
     pub name: String,
     pub resolution: Option<Duration>,
@@ -376,7 +396,8 @@ A builder; every field is an optional filter, combined with AND.
 
 ```rust
 ListFilter::new()
-    .owner_uuid("42")
+    .owner_id(42)
+    .owner_category(OwnerCategory::Component)
     .time_series_type(TimeSeriesType::SingleTimeSeries)
     .name("load")
     .resolution(Duration::hours(1))
@@ -464,5 +485,5 @@ These define the cross-language content-addressing contract; see
 ## Constants
 
 ```rust
-pub const DATA_FORMAT_VERSION: &str = "0.2.0";
+pub const DATA_FORMAT_VERSION: &str = "0.6.0";
 ```

@@ -7,9 +7,12 @@ use crate::parse;
 /// Flags that narrow a query down to (ideally) a single stored series.
 #[derive(Debug, Clone, clap::Args)]
 pub struct SelectorArgs {
-    /// Owner UUID of the time series.
+    /// Owner ID of the time series.
     #[arg(long)]
-    pub owner_uuid: Option<String>,
+    pub owner_id: Option<i64>,
+    /// Owner category (component|supplemental_attribute).
+    #[arg(long)]
+    pub owner_category: Option<String>,
     /// Time series name.
     #[arg(long)]
     pub name: Option<String>,
@@ -28,8 +31,11 @@ impl SelectorArgs {
     /// Build a [`ListFilter`] from the provided flags.
     pub fn to_filter(&self) -> Result<ListFilter, String> {
         let mut filter = ListFilter::new();
-        if let Some(u) = &self.owner_uuid {
-            filter = filter.owner_uuid(u.clone());
+        if let Some(u) = self.owner_id {
+            filter = filter.owner_id(u);
+        }
+        if let Some(c) = &self.owner_category {
+            filter = filter.owner_category(parse::parse_owner_category(c)?);
         }
         if let Some(n) = &self.name {
             filter = filter.name(n.clone());
@@ -70,8 +76,9 @@ impl SelectorArgs {
                 );
                 for m in &matches {
                     msg.push_str(&format!(
-                        "  - owner={} type={} name={} resolution={}\n",
-                        m.owner_uuid,
+                        "  - owner={} owner_category={} type={} name={} resolution={}\n",
+                        m.owner_id,
+                        m.owner_category.as_str(),
                         m.time_series_type.as_str(),
                         m.name,
                         m.resolution
@@ -88,7 +95,8 @@ impl SelectorArgs {
 /// Reconstruct the lookup key from a metadata record.
 pub fn key_of(meta: &TimeSeriesMetadata) -> TimeSeriesKey {
     TimeSeriesKey {
-        owner_uuid: meta.owner_uuid.clone(),
+        owner_id: meta.owner_id,
+        owner_category: meta.owner_category,
         time_series_type: meta.time_series_type,
         name: meta.name.clone(),
         resolution: meta.resolution,

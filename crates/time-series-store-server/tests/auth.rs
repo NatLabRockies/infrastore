@@ -22,7 +22,7 @@ fn make_store() -> Store {
     let s = SingleTimeSeries::new(initial, resolution, data, "load");
     store
         .add_time_series(
-            "1",
+            1,
             "Generator",
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),

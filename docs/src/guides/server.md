@@ -48,6 +48,7 @@ codes are mapped back onto `TimeSeriesError`, so remote and local calls surface 
 taxonomy.
 
 ```rust
+use time_series_store_core::OwnerCategory;
 use time_series_store_server::client::RemoteClient;
 
 #[tokio::main]
@@ -57,7 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let counts = client.get_counts().await?;
     println!("{} static series", counts.static_time_series);
 
-    let keys = client.get_time_series_keys("42".into()).await?;
+    // The owner is the (owner_id, owner_category) pair.
+    let keys = client.get_time_series_keys(42, OwnerCategory::Component).await?;
     if let Some(key) = keys.first() {
         let data = client.get_time_series(key, None).await?;
         println!("read {} values", data.as_single().unwrap().length);

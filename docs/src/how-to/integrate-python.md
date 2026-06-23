@@ -56,7 +56,7 @@ ts = SingleTimeSeries(
     "load",
 )
 key = store.add_time_series(
-    owner_uuid="42", owner_type="Generator",
+    owner_id=42, owner_type="Generator",
     owner_category=OwnerCategory.Component,
     time_series=ts,
     features={"model_year": 2030}, units="MW",

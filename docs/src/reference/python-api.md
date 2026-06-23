@@ -57,7 +57,7 @@ store.read_only -> bool
 ```python
 def add_time_series(
     self,
-    owner_uuid: str,
+    owner_id: int,
     owner_type: str,
     owner_category: OwnerCategory,
     time_series: SingleTimeSeries | NonSequentialTimeSeries
@@ -69,7 +69,7 @@ def add_time_series(
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
 
 def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
-# Each item dict mirrors add_time_series's parameters: required `owner_uuid`,
+# Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
@@ -83,19 +83,30 @@ def get_time_series(
 ) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
 
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
-def clear_time_series(self, owner_uuid: str | None = None) -> int: ...
+def clear_time_series(
+    self,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+) -> int: ...
+# Pass both owner_id and owner_category to clear one owner's series (the owner is
+# the (owner_id, owner_category) pair); pass neither to clear the whole store.
 
 def list_time_series(
     self,
-    owner_uuid: str | None = None,
+    owner_id: int | None = None,
     owner_type: str | None = None,
+    owner_category: OwnerCategory | None = None,
     time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
     resolution: timedelta | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> list[dict]: ...
 
-def get_time_series_keys(self, owner_uuid: str) -> list[TimeSeriesKey]: ...
+def get_time_series_keys(
+    self,
+    owner_id: int,
+    owner_category: OwnerCategory,
+) -> list[TimeSeriesKey]: ...
 def has_time_series(self, key: TimeSeriesKey) -> bool: ...
 def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[timedelta]: ...
 def get_time_series_counts(self) -> dict: ...
@@ -113,7 +124,7 @@ def flush(self) -> None: ...
   **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
   `SingleTimeSeries` and returns the count transformed. **`get_time_series`** returns whichever
   matches the stored type.
-- **`list_time_series`** returns a list of dicts, each with the keys: `owner_uuid`, `owner_type`,
+- **`list_time_series`** returns a list of dicts, each with the keys: `owner_id`, `owner_type`,
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`,
   `resolution_seconds`, `timestamps`, `features`, `units`. `timestamps` is a list of RFC 3339
   strings for non-sequential series and `None` otherwise. The `features` filter is a subset match —
@@ -167,7 +178,8 @@ Returned by `add_time_series` and `get_time_series_keys`; not constructed direct
 properties:
 
 ```python
-key.owner_uuid        -> str
+key.owner_id          -> int
+key.owner_category    -> OwnerCategory
 key.time_series_type  -> TimeSeriesType
 key.name              -> str
 key.resolution        -> timedelta | None

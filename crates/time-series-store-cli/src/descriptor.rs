@@ -20,7 +20,7 @@ use crate::parse;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Descriptor {
-    pub owner_uuid: String,
+    pub owner_id: i64,
     pub owner_type: String,
     #[serde(default = "default_owner_category")]
     pub owner_category: String,
@@ -139,7 +139,7 @@ impl Descriptor {
         let data = self.build_data(ts_type, dtype, per_step, &csv)?;
 
         Ok(AddRequest {
-            owner_uuid: self.owner_uuid.clone(),
+            owner_id: self.owner_id,
             owner_type: self.owner_type.clone(),
             owner_category,
             data,

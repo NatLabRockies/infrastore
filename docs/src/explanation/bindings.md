@@ -78,12 +78,13 @@ and the [Julia API reference](../reference/julia-api.md).
 
 ### InfrastructureSystems.jl Integration
 
-The model was shaped to drop into InfrastructureSystems.jl: owners are identified by string UUIDs,
-owner categories map to `Component` / `SupplementalAttribute`, and features accept string values so
-InfrastructureSystems.jl's feature dictionaries round-trip unchanged. The FFI exposes
-attribute-based metadata accessors (`ts_store_get_metadata`, `ts_store_has_by_attrs`,
-`ts_store_remove_by_attrs`) and a hash-based array fetch (`ts_store_get_array_by_hash`) so an
-InfrastructureSystems.jl-side store can keep its own key objects and reach the array layer directly.
+The model was shaped to drop into InfrastructureSystems.jl: owners are identified by integer
+component identifiers (`i64`), owner categories map to `Component` / `SupplementalAttribute`, and
+features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
+unchanged. The FFI exposes attribute-based metadata accessors (`ts_store_get_metadata`,
+`ts_store_has_by_attrs`, `ts_store_remove_by_attrs`) and a hash-based array fetch
+(`ts_store_get_array_by_hash`) so an InfrastructureSystems.jl-side store can keep its own key
+objects and reach the array layer directly.
 
 ## gRPC Server and Client
 

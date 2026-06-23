@@ -82,18 +82,22 @@ same physical shape — the type, timestamps, and windowing parameters all live 
 
 The catalog holds two tables:
 
-- **`time_series_associations`** — one row per `(owner, name, resolution, features)` association,
-  including the `data_hash` that links it to a packed column or standalone variable, the array
-  typing (`dtype`, `element_shape`, `logical_type`), plus temporal fields, forecast parameters
-  (`horizon`, `interval`, `count`, `percentiles`), and units.
+- **`time_series_associations`** — one row per
+  `(owner_id, owner_category, name, resolution, features)` association, including the `data_hash`
+  that links it to a packed column or standalone variable, the array typing (`dtype`,
+  `element_shape`, `logical_type`), plus temporal fields, forecast parameters (`horizon`,
+  `interval`, `count`, `percentiles`), and units.
 - **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
   a `value_kind` discriminator.
 
-A unique index over `(owner_uuid, time_series_type, name, resolution_ms, features_hash)` enforces
-the [key uniqueness](./data-model.md#keys) invariant at the database level. Because SQLite treats
-`NULL` as distinct in a `UNIQUE` index, a second index folds a `NULL` `resolution_ms` to a sentinel
-so series without a resolution (e.g. `NonSequentialTimeSeries`) are still constrained. Indexes on
-`data_hash`, `owner_uuid`, and `resolution_ms` keep lookups fast.
+A unique index over
+`(owner_id, owner_category, time_series_type, name, resolution_ms, features_hash)` enforces the
+[key uniqueness](./data-model.md#keys) invariant at the database level. `owner_category` is part of
+the key, so a component and a supplemental attribute that share an `owner_id` are independent.
+Because SQLite treats `NULL` as distinct in a `UNIQUE` index, a second index folds a `NULL`
+`resolution_ms` to a sentinel so series without a resolution (e.g. `NonSequentialTimeSeries`) are
+still constrained. Indexes on `data_hash`, `(owner_id, owner_category)`, and `resolution_ms` keep
+lookups fast.
 
 ## Keeping the Two Files Consistent
 
