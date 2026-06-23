@@ -24,6 +24,7 @@ pub struct MetadataStore {
 #[derive(Debug, Default, Clone)]
 pub struct MetadataFilter {
     pub owner_id: Option<i64>,
+    pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
@@ -193,14 +194,15 @@ impl MetadataStore {
         let resolution_ms = key.resolution.map(duration_to_ms);
         let mut stmt = tx.prepare(
             "SELECT id, data_hash FROM time_series_associations
-             WHERE owner_id = ?1 AND time_series_type = ?2 AND name = ?3
-               AND ((?4 IS NULL AND resolution_ms IS NULL) OR resolution_ms = ?4)
-               AND features_hash = ?5",
+             WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
+               AND ((?5 IS NULL AND resolution_ms IS NULL) OR resolution_ms = ?5)
+               AND features_hash = ?6",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
             .query_map(
                 params![
                     key.owner_id,
+                    key.owner_category.as_str(),
                     key.time_series_type.as_str(),
                     key.name,
                     resolution_ms,
@@ -225,31 +227,44 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// Delete all associations for `owner_id`. Returns the data_hashes of removed rows.
-    pub fn delete_by_owner(tx: &Transaction<'_>, owner_id: i64) -> Result<Vec<[u8; 32]>> {
+    /// Delete all associations for the owner `(owner_id, owner_category)`.
+    /// Returns the data_hashes of removed rows.
+    pub fn delete_by_owner(
+        tx: &Transaction<'_>,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
             tx,
-            "SELECT data_hash FROM time_series_associations WHERE owner_id = ?1",
-            params![owner_id],
+            "SELECT data_hash FROM time_series_associations
+             WHERE owner_id = ?1 AND owner_category = ?2",
+            params![owner_id, owner_category.as_str()],
         )?;
         let hashes = bytes_list
             .into_iter()
             .filter_map(|bytes| bytes_to_hash32(&bytes))
             .collect::<Vec<_>>();
         tx.execute(
-            "DELETE FROM time_series_associations WHERE owner_id = ?1",
-            params![owner_id],
+            "DELETE FROM time_series_associations WHERE owner_id = ?1 AND owner_category = ?2",
+            params![owner_id, owner_category.as_str()],
         )?;
         Ok(hashes)
     }
 
-    /// Reassign every association from `old_owner` to `new_owner`. Only the
-    /// owning id changes; type/category and the underlying arrays are
-    /// untouched (arrays are content-addressed). Returns the rows updated.
-    pub fn replace_owner(tx: &Transaction<'_>, old_owner: i64, new_owner: i64) -> Result<usize> {
+    /// Reassign every association from `old_owner` to `new_owner` within the
+    /// given `owner_category`. Only the owning id changes; type/category and the
+    /// underlying arrays are untouched (arrays are content-addressed). Returns
+    /// the rows updated.
+    pub fn replace_owner(
+        tx: &Transaction<'_>,
+        old_owner: i64,
+        new_owner: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<usize> {
         let updated = tx.execute(
-            "UPDATE time_series_associations SET owner_id = ?1 WHERE owner_id = ?2",
-            params![new_owner, old_owner],
+            "UPDATE time_series_associations SET owner_id = ?1
+             WHERE owner_id = ?2 AND owner_category = ?3",
+            params![new_owner, old_owner, owner_category.as_str()],
         )?;
         Ok(updated)
     }
@@ -295,6 +310,10 @@ impl MetadataStore {
         if let Some(owner_id) = filter.owner_id {
             sql.push_str(" AND owner_id = ?");
             params_vec.push(Box::new(owner_id));
+        }
+        if let Some(owner_category) = filter.owner_category {
+            sql.push_str(" AND owner_category = ?");
+            params_vec.push(Box::new(owner_category.as_str().to_string()));
         }
         if let Some(ref owner_type) = filter.owner_type {
             sql.push_str(" AND owner_type = ?");
@@ -342,15 +361,21 @@ impl MetadataStore {
         Ok(out)
     }
 
-    pub fn list_keys_for_owner(&self, owner_id: i64) -> Result<Vec<TimeSeriesKey>> {
+    pub fn list_keys_for_owner(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<Vec<TimeSeriesKey>> {
         let metas = self.list(&MetadataFilter {
             owner_id: Some(owner_id),
+            owner_category: Some(owner_category),
             ..Default::default()
         })?;
         Ok(metas
             .into_iter()
             .map(|m| TimeSeriesKey {
                 owner_id: m.owner_id,
+                owner_category: m.owner_category,
                 time_series_type: m.time_series_type,
                 name: m.name,
                 resolution: m.resolution,
@@ -362,6 +387,7 @@ impl MetadataStore {
     pub fn get_by_key(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
+            owner_category: Some(key.owner_category),
             time_series_type: Some(key.time_series_type),
             name: Some(key.name.clone()),
             resolution: key.resolution,
@@ -425,7 +451,8 @@ impl MetadataStore {
 
     pub fn count_distinct_owners(&self) -> Result<i64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT owner_id) FROM time_series_associations",
+            "SELECT COUNT(*) FROM
+             (SELECT DISTINCT owner_id, owner_category FROM time_series_associations)",
             [],
             |r| r.get(0),
         )?;

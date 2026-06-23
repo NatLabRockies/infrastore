@@ -251,6 +251,7 @@ fn sts_keys(count: usize) -> Vec<TimeSeriesKey> {
     (0..count)
         .map(|i| TimeSeriesKey {
             owner_id: i as i64,
+            owner_category: OwnerCategory::Component,
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: "active_power".to_string(),
             resolution: Some(chrono::Duration::hours(1)),
@@ -264,6 +265,7 @@ fn det_keys(count: usize) -> Vec<TimeSeriesKey> {
     (0..count)
         .map(|i| TimeSeriesKey {
             owner_id: i as i64,
+            owner_category: OwnerCategory::Component,
             time_series_type: TimeSeriesType::Deterministic,
             name: "active_power_forecast".to_string(),
             resolution: Some(chrono::Duration::hours(1)),

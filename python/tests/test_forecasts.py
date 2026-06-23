@@ -278,7 +278,7 @@ def test_transform_single_time_series_to_dst():
     transformed = store.transform_single_time_series(horizon, interval)
     assert transformed == 1
 
-    keys = store.get_time_series_keys(OWNER_ID)
+    keys = store.get_time_series_keys(OWNER_ID, OWNER_CAT)
     dst_key = next(
         k for k in keys
         if k.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries

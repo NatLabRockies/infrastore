@@ -81,7 +81,17 @@ fn single_round_trip_all_dtypes() {
 
         let out = run(
             &store,
-            &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
+            &[
+                "-f",
+                "csv",
+                "get",
+                "--owner-id",
+                "42",
+                "--owner-category",
+                "component",
+                "--name",
+                "load",
+            ],
         );
         assert_eq!(data_lines(&out), *expected, "dtype {dtype} round-trip");
     }
@@ -283,17 +293,53 @@ fn list_info_and_json_succeed() {
     );
 
     // list in all three formats
-    run(&store, &["list"]);
-    run(&store, &["-f", "csv", "list"]);
+    let table = run(&store, &["list"]);
+    assert!(
+        table.contains("Owner Category"),
+        "list table includes owner category column"
+    );
+    let csv = run(&store, &["-f", "csv", "list"]);
+    assert!(
+        csv.contains("owner_category") || csv.contains("Owner Category"),
+        "list csv includes owner category header"
+    );
     let json = run(&store, &["-f", "json", "list"]);
     assert!(json.contains("\"items\""), "list json wraps items");
+    assert!(
+        json.contains("\"owner_category\""),
+        "list json includes owner_category"
+    );
 
-    // info json carries stats
+    // filtering by owner category resolves the same series
+    let filtered = run(
+        &store,
+        &["-f", "json", "list", "--owner-category", "component"],
+    );
+    assert!(
+        filtered.contains("\"name\": \"load\"") || filtered.contains("\"name\":\"load\""),
+        "owner-category filter matches component-owned series"
+    );
+
+    // info json carries stats and owner_category
     let info = run(
         &store,
-        &["-f", "json", "info", "--owner-id", "42", "--name", "load"],
+        &[
+            "-f",
+            "json",
+            "info",
+            "--owner-id",
+            "42",
+            "--owner-category",
+            "component",
+            "--name",
+            "load",
+        ],
     );
     assert!(info.contains("\"mean\""), "info json includes stats");
+    assert!(
+        info.contains("\"owner_category\""),
+        "info json includes owner_category"
+    );
 }
 
 #[test]

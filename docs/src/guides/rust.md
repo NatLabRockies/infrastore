@@ -104,11 +104,12 @@ let window = store.get_time_series(&key, Some((start, end)))?;
 is ANDed, and the `features` clause is a subset match:
 
 ```rust
-use time_series_store_core::{ListFilter, TimeSeriesType};
+use time_series_store_core::{ListFilter, OwnerCategory, TimeSeriesType};
 
 let metas = store.list_time_series(
     ListFilter::new()
         .owner_id(42)
+        .owner_category(OwnerCategory::Component)
         .time_series_type(TimeSeriesType::SingleTimeSeries)
         .name("load"),
 )?;
@@ -117,7 +118,8 @@ for m in &metas {
 }
 
 // All keys for one owner, an existence check, distinct resolutions, counts.
-let keys = store.get_time_series_keys("42")?;
+// The owner is the (owner_id, owner_category) pair.
+let keys = store.get_time_series_keys(42, OwnerCategory::Component)?;
 let present = store.has_time_series(&key)?;
 let resolutions = store.get_resolutions(Some(TimeSeriesType::SingleTimeSeries))?;
 let counts = store.get_time_series_counts()?;
@@ -202,7 +204,8 @@ let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 
 ```rust
 store.remove_time_series(&key)?;       // one series
-store.clear_time_series(Some("42"))?;  // all series for an owner
+// The owner is the (owner_id, owner_category) pair.
+store.clear_time_series(Some((42, OwnerCategory::Component)))?;  // all series for an owner
 store.clear_time_series(None)?;        // everything
 
 let report = store.compact()?;         // reports reusable slots

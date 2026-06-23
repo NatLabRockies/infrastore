@@ -57,8 +57,9 @@ cargo run --manifest-path crates/time-series-store-core/Cargo.toml --example bas
 1. **`create_store(None, true)`** built a store backed by an in-memory array backend and an
    in-memory SQLite metadata database.
 2. **`add_time_series`** hashed the array, wrote it to the backend (deduplicating on the hash), and
-   recorded a metadata association keyed by `(owner_id, type, name, resolution, features)`. It
-   returned a [`TimeSeriesKey`](../reference/rust-api.md#timeserieskey) that can re-find the series.
+   recorded a metadata association keyed by
+   `(owner_id, owner_category, type, name, resolution, features)`. It returned a
+   [`TimeSeriesKey`](../reference/rust-api.md#timeserieskey) that can re-find the series.
 3. **`get_time_series(&key, None)`** looked up the association, read the array back by its content
    hash, and reconstructed a `SingleTimeSeries`. Passing `Some((start, end))` instead of `None`
    slices the series on the time axis.

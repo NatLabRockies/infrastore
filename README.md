@@ -172,7 +172,7 @@ cargo run -p time-series-store-server -- --config my_server.toml
 
 ## Storage format
 
-NetCDF file with attribute `data_format_version = "0.2.0"`. Each packed dataset is named
+NetCDF file with attribute `data_format_version = "0.6.0"`. Each packed dataset is named
 `sts_{dtype}_{shape}_{length}_{resolution}` (per-timestep reads across all components are
 contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash for each column; an
 empty string marks a free slot. Standalone arrays are stored as `arr_{hex_hash}`.

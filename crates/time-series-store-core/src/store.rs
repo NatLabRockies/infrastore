@@ -21,6 +21,7 @@ use crate::types::time_series::{
 #[derive(Debug, Clone, Default)]
 pub struct ListFilter {
     pub owner_id: Option<i64>,
+    pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
@@ -34,6 +35,10 @@ impl ListFilter {
     }
     pub fn owner_id(mut self, id: i64) -> Self {
         self.owner_id = Some(id);
+        self
+    }
+    pub fn owner_category(mut self, c: OwnerCategory) -> Self {
+        self.owner_category = Some(c);
         self
     }
     pub fn owner_type(mut self, t: impl Into<String>) -> Self {
@@ -62,6 +67,7 @@ impl From<ListFilter> for MetadataFilter {
     fn from(value: ListFilter) -> Self {
         MetadataFilter {
             owner_id: value.owner_id,
+            owner_category: value.owner_category,
             owner_type: value.owner_type,
             time_series_type: value.time_series_type,
             name: value.name,
@@ -245,6 +251,7 @@ impl Store {
                         },
                         TimeSeriesKey {
                             owner_id: item.owner_id,
+                            owner_category: item.owner_category,
                             time_series_type: TimeSeriesType::SingleTimeSeries,
                             name: single.name.clone(),
                             resolution: Some(single.resolution),
@@ -282,6 +289,7 @@ impl Store {
                         },
                         TimeSeriesKey {
                             owner_id: item.owner_id,
+                            owner_category: item.owner_category,
                             time_series_type: TimeSeriesType::NonSequentialTimeSeries,
                             name: non_sequential.name.clone(),
                             resolution: None,
@@ -425,14 +433,16 @@ impl Store {
         Ok(())
     }
 
-    /// Remove every time series for `owner_id`. Returns the count removed.
-    pub fn clear_time_series(&mut self, owner_id: Option<i64>) -> Result<usize> {
+    /// Remove every time series for the owner `(owner_id, owner_category)`, or
+    /// every time series in the store when `owner` is `None`. Returns the count
+    /// removed.
+    pub fn clear_time_series(&mut self, owner: Option<(i64, OwnerCategory)>) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.transaction()?;
-        let removed = match owner_id {
-            Some(id) => MetadataStore::delete_by_owner(&tx, id)?,
+        let removed = match owner {
+            Some((id, category)) => MetadataStore::delete_by_owner(&tx, id, category)?,
             None => MetadataStore::delete_all(&tx)?,
         };
         let count = removed.len();
@@ -452,12 +462,17 @@ impl Store {
     /// Reassign every time series owned by `old_owner` to `new_owner`. The
     /// underlying arrays are content-addressed and shared, so only the
     /// association rows change. Returns the number of associations updated.
-    pub fn replace_owner(&mut self, old_owner: i64, new_owner: i64) -> Result<usize> {
+    pub fn replace_owner(
+        &mut self,
+        old_owner: i64,
+        new_owner: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let tx = self.metadata.transaction()?;
-        let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner)?;
+        let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner, owner_category)?;
         tx.commit()?;
         Ok(updated)
     }
@@ -765,8 +780,12 @@ impl Store {
         self.backend.get_array(hash)
     }
 
-    pub fn get_time_series_keys(&self, owner_id: i64) -> Result<Vec<TimeSeriesKey>> {
-        self.metadata.list_keys_for_owner(owner_id)
+    pub fn get_time_series_keys(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+    ) -> Result<Vec<TimeSeriesKey>> {
+        self.metadata.list_keys_for_owner(owner_id, owner_category)
     }
 
     /// Derive `DeterministicSingleTimeSeries` forecasts from the stored
@@ -787,20 +806,73 @@ impl Store {
         &mut self,
         horizon: Duration,
         interval: Duration,
+        owner_category: Option<OwnerCategory>,
+        resolution: Option<Duration>,
     ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         use crate::metadata::MetadataFilter;
-        let sources = self.metadata.list(&MetadataFilter {
+        let mut sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
             ..Default::default()
         })?;
+        // Restrict the transform to one owner category (e.g. only components,
+        // leaving supplemental-attribute series untouched) when requested.
+        if let Some(cat) = owner_category {
+            sources.retain(|m| m.owner_category == cat);
+        }
+        // Restrict the transform to a single resolution when requested, so series
+        // of other resolutions (which may be incompatible with the interval) are
+        // left untouched.
+        if let Some(res) = resolution {
+            sources.retain(|m| m.resolution == Some(res));
+        }
+
+        // Series that already have a DeterministicSingleTimeSeries view are
+        // skipped so the transform is idempotent (e.g. re-deriving one series
+        // when others were transformed earlier, as during a component copy).
+        // The dedup key is the full owner identity (owner_id, owner_category)
+        // plus name/resolution/features.
+        #[allow(clippy::type_complexity)]
+        let existing_dst: std::collections::HashSet<(
+            i64,
+            OwnerCategory,
+            String,
+            Option<i64>,
+            [u8; 32],
+        )> = self
+            .metadata
+            .list(&MetadataFilter {
+                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
+                ..Default::default()
+            })?
+            .iter()
+            .map(|m| {
+                (
+                    m.owner_id,
+                    m.owner_category,
+                    m.name.clone(),
+                    m.resolution.map(|r| r.num_milliseconds()),
+                    crate::hash::features_hash(&m.features),
+                )
+            })
+            .collect();
 
         // Build every DST metadata row up front so a single ineligible series
         // aborts the whole transform before any write.
         let mut new_metas = Vec::with_capacity(sources.len());
         for src in &sources {
+            let src_key = (
+                src.owner_id,
+                src.owner_category,
+                src.name.clone(),
+                src.resolution.map(|r| r.num_milliseconds()),
+                crate::hash::features_hash(&src.features),
+            );
+            if existing_dst.contains(&src_key) {
+                continue;
+            }
             let resolution = required_resolution(src, "transform_single_time_series")?;
             let total_len = src.length.ok_or_else(|| {
                 TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
@@ -995,6 +1067,7 @@ fn forecast_key(
 ) -> TimeSeriesKey {
     TimeSeriesKey {
         owner_id: item.owner_id,
+        owner_category: item.owner_category,
         time_series_type,
         name: name.to_owned(),
         resolution: Some(resolution),
