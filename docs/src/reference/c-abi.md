@@ -229,8 +229,8 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
 
 int32_t ts_store_transform_single_time_series(struct TsStore *handle,
                                               int64_t horizon_ms, int64_t interval_ms,
-                                              int32_t owner_category,  /* reserved; currently ignored */
-                                              int64_t resolution_ms,   /* reserved; currently ignored */
+                                              int32_t owner_category,  /* <0 = all categories; else 0=Component, 1=SupplementalAttribute */
+                                              int64_t resolution_ms,   /* <=0 = all resolutions */
                                               uint64_t *out_count);
 ```
 

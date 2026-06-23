@@ -49,7 +49,7 @@ the same flags as filters:
 | Flag                   | Meaning                                                                    |
 | ---------------------- | -------------------------------------------------------------------------- |
 | `--owner-id <I>`       | Owner identifier (`i64` integer).                                          |
-| `--owner-category <C>` | `component` (default) or `supplemental_attribute`.                         |
+| `--owner-category <C>` | Restrict to `component` or `supplemental_attribute`; omit to match either. |
 | `--name <N>`           | Series name.                                                               |
 | `--type <T>`           | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
 | `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`.                                            |
