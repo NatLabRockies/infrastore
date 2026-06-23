@@ -42,7 +42,9 @@ fn persistent_round_trip() {
 
     // Reopen and read back.
     let store = open_store(path.as_path(), true).unwrap();
-    let keys = store.get_time_series_keys(42).unwrap();
+    let keys = store
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .unwrap();
     assert_eq!(keys.len(), 1);
     let got = store.get_time_series(&keys[0], None).unwrap();
     let single = got.as_single().unwrap();
@@ -112,7 +114,9 @@ fn compression_policies_round_trip() {
 
         let store = open_store(path.as_path(), true).unwrap();
         for (owner, base) in [(7i64, 100.0), (8, 200.0)] {
-            let keys = store.get_time_series_keys(owner).unwrap();
+            let keys = store
+                .get_time_series_keys(owner, OwnerCategory::Component)
+                .unwrap();
             assert_eq!(keys.len(), 1, "{compression:?}");
             let got = store.get_time_series(&keys[0], None).unwrap();
             assert_eq!(
@@ -299,7 +303,9 @@ fn spill_into_new_dataset_past_capacity() {
     assert_eq!(counts.static_time_series as usize, total);
 
     // Quick spot-check: the very last one — which must have spilled — reads back.
-    let keys = store.get_time_series_keys(total as i64).unwrap();
+    let keys = store
+        .get_time_series_keys(total as i64, OwnerCategory::Component)
+        .unwrap();
     assert_eq!(keys.len(), 1);
     let last = store.get_time_series(&keys[0], None).unwrap();
     let single = last.as_single().unwrap();

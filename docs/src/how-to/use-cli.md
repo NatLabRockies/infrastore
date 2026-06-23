@@ -74,9 +74,12 @@ tss --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable
 tss --store demo.nc -f json info --owner-id 42 --name load     # metadata + min/max/mean
 ```
 
-`get`/`info`/`remove` select a single series with `--owner-id`, `--name`, `--type`, `--resolution`,
-and repeated `--feature key=value`; if more than one series matches, `tss` lists the candidates so
-you can narrow the query. Large series truncate in `table` output — pass `--limit N` or `--full`.
+`get`/`info`/`remove` select a single series with `--owner-id`, `--owner-category`, `--name`,
+`--type`, `--resolution`, and repeated `--feature key=value`; if more than one series matches, `tss`
+lists the candidates so you can narrow the query. The owner is the `(owner_id, owner_category)`
+pair, so a component and a supplemental attribute may share a numeric id — add `--owner-category`
+(`component` / `supplemental_attribute`) to disambiguate. Large series truncate in `table` output —
+pass `--limit N` or `--full`.
 
 ## 5. Forecasts
 

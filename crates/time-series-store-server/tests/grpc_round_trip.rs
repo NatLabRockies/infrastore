@@ -75,13 +75,16 @@ async fn list_and_get_round_trip() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(None, None, None, None, None, None)
+        .list_time_series(None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 2);
 
     // Fetch by key.
-    let keys = client.get_time_series_keys(42).await.unwrap();
+    let keys = client
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .await
+        .unwrap();
     assert_eq!(keys.len(), 1);
     let data = client.get_time_series(&keys[0], None).await.unwrap();
     let single = data.as_single().unwrap();
@@ -95,7 +98,10 @@ async fn time_range_slicing_over_grpc() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(42).await.unwrap();
+    let keys = client
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .await
+        .unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
@@ -117,7 +123,7 @@ async fn list_filter_by_features_subset() {
     let mut filter: Features = BTreeMap::new();
     filter.insert("model_year".into(), FeatureValue::Int(2030));
     let metas = client
-        .list_time_series(None, None, None, None, None, Some(&filter))
+        .list_time_series(None, None, None, None, None, None, Some(&filter))
         .await
         .unwrap();
     assert_eq!(metas.len(), 1);
@@ -142,7 +148,10 @@ async fn counts_resolutions_has_verify() {
         .unwrap();
     assert_eq!(resolutions_typed, vec![Duration::hours(1)]);
 
-    let keys = client.get_time_series_keys(42).await.unwrap();
+    let keys = client
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .await
+        .unwrap();
     let present = client.has_time_series(&keys[0]).await.unwrap();
     assert!(present);
 
@@ -157,6 +166,7 @@ async fn missing_key_returns_not_found() {
 
     let bogus_key = time_series_store_core::TimeSeriesKey {
         owner_id: 999,
+        owner_category: OwnerCategory::Component,
         time_series_type: TimeSeriesType::SingleTimeSeries,
         name: "load".into(),
         resolution: Some(Duration::hours(1)),
@@ -197,7 +207,10 @@ async fn non_sequential_round_trip_over_grpc() {
 
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
-    let keys = client.get_time_series_keys(44).await.unwrap();
+    let keys = client
+        .get_time_series_keys(44, OwnerCategory::Component)
+        .await
+        .unwrap();
     assert_eq!(keys[0].resolution, None);
     let got = client
         .get_time_series(
@@ -236,7 +249,10 @@ async fn dtype_preserved_over_grpc() {
 
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
-    let keys = client.get_time_series_keys(1).await.unwrap();
+    let keys = client
+        .get_time_series_keys(1, OwnerCategory::Component)
+        .await
+        .unwrap();
     let got = client.get_time_series(&keys[0], None).await.unwrap();
     let single = got.as_single().unwrap();
     // dtype + raw bytes survive the round trip.

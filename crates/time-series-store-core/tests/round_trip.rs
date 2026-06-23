@@ -295,7 +295,9 @@ fn clear_by_owner() {
         store.get_time_series_counts().unwrap().static_time_series,
         3
     );
-    let removed = store.clear_time_series(Some(2)).unwrap();
+    let removed = store
+        .clear_time_series(Some((2, OwnerCategory::Component)))
+        .unwrap();
     assert_eq!(removed, 1);
     let remaining = store
         .list_time_series(ListFilter::new().time_series_type(TimeSeriesType::SingleTimeSeries))

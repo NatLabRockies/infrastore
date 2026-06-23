@@ -46,16 +46,19 @@ tss template <single|non_sequential|deterministic|probabilistic|scenarios>
 `get`, `info`, and `remove` identify one series with these repeatable/optional flags; `list` accepts
 the same flags as filters:
 
-| Flag                  | Meaning                                                                    |
-| --------------------- | -------------------------------------------------------------------------- |
-| `--owner-id <I>`      | Owner identifier (`i64` integer).                                          |
-| `--name <N>`          | Series name.                                                               |
-| `--type <T>`          | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
-| `--resolution <DUR>`  | Resolution, e.g. `1h`, `15min`.                                            |
-| `--feature key=value` | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+| Flag                   | Meaning                                                                    |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `--owner-id <I>`       | Owner identifier (`i64` integer).                                          |
+| `--owner-category <C>` | `component` (default) or `supplemental_attribute`.                         |
+| `--name <N>`           | Series name.                                                               |
+| `--type <T>`           | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
+| `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`.                                            |
+| `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 
 If a selector matches more than one series, `tss` errors and lists the candidates so the query can
-be narrowed.
+be narrowed. The owner identity is the pair `(owner_id, owner_category)`, so a component and a
+supplemental attribute may share a numeric `owner_id`; add `--owner-category` to disambiguate when
+both exist.
 
 ## Durations and Timestamps
 

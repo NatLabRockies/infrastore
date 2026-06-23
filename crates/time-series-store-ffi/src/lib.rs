@@ -1035,6 +1035,7 @@ pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
 
 unsafe fn build_key_from_attrs(
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1042,6 +1043,14 @@ unsafe fn build_key_from_attrs(
     let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
         set_error("name is invalid");
     })?;
+    let owner_category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return Err(TS_ERR_INVALID_PARAMETER);
+        }
+    };
     let features = unsafe { parse_features_json(features_json) }?;
     let resolution = if resolution_ms <= 0 {
         None
@@ -1050,6 +1059,7 @@ unsafe fn build_key_from_attrs(
     };
     Ok(core_lib::TimeSeriesKey {
         owner_id,
+        owner_category,
         time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
         name: name.to_string(),
         resolution,
@@ -1064,7 +1074,8 @@ unsafe fn build_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
 /// value and `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
@@ -1072,6 +1083,7 @@ unsafe fn build_key_from_attrs(
 pub unsafe extern "C" fn ts_store_get_metadata(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1099,7 +1111,9 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) } {
+    let key = match unsafe {
+        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+    } {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1143,13 +1157,15 @@ pub unsafe extern "C" fn ts_store_get_metadata(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
 /// `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_by_attrs(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1163,7 +1179,9 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     if out_present.is_null() {
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) } {
+    let key = match unsafe {
+        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+    } {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1182,12 +1200,14 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle; `owner_id` is a plain integer;
-/// `out_present` valid for writing one bool.
+/// `handle` must be a live store handle; `owner_id` is a plain integer and
+/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) identifies the
+/// owner category; `out_present` valid for writing one bool.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_has_for_owner(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     ts_type: i32,
     use_type: bool,
     out_present: *mut bool,
@@ -1200,7 +1220,17 @@ pub unsafe extern "C" fn ts_store_has_for_owner(
     if out_present.is_null() {
         return TS_ERR_NULL_POINTER;
     }
-    let mut filter = core_lib::ListFilter::new().owner_id(owner_id);
+    let category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let mut filter = core_lib::ListFilter::new()
+        .owner_id(owner_id)
+        .owner_category(category);
     if use_type {
         let t = match ts_type_from_int(ts_type) {
             Some(t) => t,
@@ -1225,12 +1255,14 @@ pub unsafe extern "C" fn ts_store_has_for_owner(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+/// `handle` must be a live mutable store handle. `owner_id` and `owner_category`
+/// (`0` = Component, `1` = SupplementalAttribute) identify the owner. Required strings
 /// must be null-terminated UTF-8, and `features_json` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_remove_by_attrs(
     handle: *mut TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -1240,7 +1272,9 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let key = match unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) } {
+    let key = match unsafe {
+        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+    } {
         Ok(k) => k,
         Err(code) => return code,
     };
@@ -1347,6 +1381,7 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
 
 unsafe fn build_typed_key_from_attrs(
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -1359,7 +1394,9 @@ unsafe fn build_typed_key_from_attrs(
             return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let mut key = unsafe { build_key_from_attrs(owner_id, name, resolution_ms, features_json) }?;
+    let mut key = unsafe {
+        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+    }?;
     key.time_series_type = time_series_type;
     Ok(key)
 }
@@ -2106,8 +2143,8 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
     handle: *mut TsStoreHandle,
     horizon_ms: i64,
     interval_ms: i64,
-    _owner_category: i32,
-    _resolution_ms: i64,
+    owner_category: i32,
+    resolution_ms: i64,
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
@@ -2119,9 +2156,27 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
         set_error("a required pointer is null");
         return TS_ERR_NULL_POINTER;
     }
+    // `owner_category < 0` means "all categories"; `resolution_ms <= 0` means
+    // "all resolutions".
+    let category = match owner_category {
+        c if c < 0 => None,
+        0 => Some(core_lib::OwnerCategory::Component),
+        1 => Some(core_lib::OwnerCategory::SupplementalAttribute),
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let resolution = if resolution_ms > 0 {
+        Some(Duration::milliseconds(resolution_ms))
+    } else {
+        None
+    };
     match store.inner.transform_single_time_series(
         Duration::milliseconds(horizon_ms),
         Duration::milliseconds(interval_ms),
+        category,
+        resolution,
     ) {
         Ok(n) => {
             unsafe { *out_count = n as u64 };
@@ -2137,7 +2192,8 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
 /// one value, `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for
 /// writing one pointer. The returned percentile buffer must be released exactly once with
@@ -2147,6 +2203,7 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
 pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
@@ -2172,6 +2229,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     let key = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
+            owner_category,
             name,
             4, // Probabilistic
             resolution_ms,
@@ -2217,7 +2275,8 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
 /// one value and `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
@@ -2225,6 +2284,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
 pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -2258,7 +2318,14 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(
+            owner_id,
+            owner_category,
+            name,
+            ts_type,
+            resolution_ms,
+            features_json,
+        )
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2316,7 +2383,8 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 ///
 /// - `handle` must be a live, non-null store handle created by this library.
 ///   No concurrent mutation is permitted for the duration of the call.
-/// - `owner_id` is a plain integer. `name` must point to a valid, null-terminated
+/// - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+///   identify the owner. `name` must point to a valid, null-terminated
 ///   UTF-8 string for the duration of the call; `features_json` may be null.
 /// - All `out_*` scalar pointers must be valid for writing one value each.
 /// - `out_dims` must be valid for writing one pointer; the returned pointer
@@ -2335,6 +2403,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 pub unsafe extern "C" fn ts_store_get_forecast(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -2387,7 +2456,14 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(
+            owner_id,
+            owner_category,
+            name,
+            ts_type,
+            resolution_ms,
+            features_json,
+        )
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2722,13 +2798,16 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
 ///
 /// # Safety
 ///
-/// `owner_id` is a plain integer. `name` must point to a valid, null-terminated
+/// `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+/// identify the owner. `name` must point to a valid, null-terminated
 /// UTF-8 string. `features_json`, when non-null, must be a null-terminated UTF-8
 /// JSON object. `out_key` must be valid for writing one pointer. The returned key
 /// must be released exactly once with `ts_key_free`.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_make_key_from_attrs(
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -2741,7 +2820,14 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(
+            owner_id,
+            owner_category,
+            name,
+            ts_type,
+            resolution_ms,
+            features_json,
+        )
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -2763,13 +2849,15 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle and `owner_id` is a plain integer.
+/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+/// Component, `1` = SupplementalAttribute) identify the owner.
 /// `out_keys` must be valid for writing one pointer and `out_len` for writing one
 /// `u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_get_time_series_keys(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     out_keys: *mut *mut *mut TsKeyHandle,
     out_len: *mut u64,
 ) -> i32 {
@@ -2785,7 +2873,15 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let keys = match store.inner.get_time_series_keys(owner_id) {
+    let category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let keys = match store.inner.get_time_series_keys(owner_id, category) {
         Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
@@ -2885,7 +2981,10 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
 
 /// List time series metadata as a JSON array string (see `metadata_rows_to_json`
 /// for the per-row shape). When `has_owner` is true only `owner_id`'s rows
-/// are returned; otherwise the whole store is listed.
+/// are returned; when `has_owner_category` is true only rows whose owner category
+/// matches `owner_category` (`0` = Component, `1` = SupplementalAttribute) are
+/// returned. The two filters are independent; with neither set the whole store is
+/// listed.
 ///
 /// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
 /// learn the byte length via `out_len`, then call again with a buffer of at
@@ -2894,14 +2993,17 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `has_owner` and `owner_id` are plain
-/// scalars. `out_len` must be writable; `buf` must be null or valid for `cap`
-/// bytes.
+/// `handle` must be a live store handle. `has_owner`, `owner_id`,
+/// `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
+/// writable; `buf` must be null or valid for `cap` bytes.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_list_metadata(
     handle: *const TsStoreHandle,
     has_owner: bool,
     owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
     buf: *mut c_char,
     cap: u64,
     out_len: *mut u64,
@@ -2918,6 +3020,17 @@ pub unsafe extern "C" fn ts_store_list_metadata(
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
         filter = filter.owner_id(owner_id);
+    }
+    if has_owner_category {
+        let category = match owner_category {
+            0 => core_lib::OwnerCategory::Component,
+            1 => core_lib::OwnerCategory::SupplementalAttribute,
+            other => {
+                set_error(format!("invalid owner_category {other}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        filter = filter.owner_category(category);
     }
     let rows = match store.inner.list_time_series(filter) {
         Ok(r) => r,
@@ -2981,10 +3094,11 @@ fn features_to_json(features: &core_lib::Features) -> String {
 /// # Safety
 ///
 /// `key` must be a live key handle created by this library. `out_type`,
-/// `out_resolution_ms`, `out_owner_id`, `out_name_len`, and `out_features_len`
-/// must each be valid for writing one value. `name_buf` / `features_buf` may be
-/// null; when non-null they must be valid for writing `name_cap` / `features_cap`
-/// bytes respectively.
+/// `out_resolution_ms`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
+/// `out_features_len` must each be valid for writing one value. `out_owner_category`
+/// receives `0` (Component) or `1` (SupplementalAttribute). `name_buf` /
+/// `features_buf` may be null; when non-null they must be valid for writing
+/// `name_cap` / `features_cap` bytes respectively.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_key_attributes(
@@ -2992,6 +3106,7 @@ pub unsafe extern "C" fn ts_key_attributes(
     out_type: *mut i32,
     out_resolution_ms: *mut i64,
     out_owner_id: *mut i64,
+    out_owner_category: *mut i32,
     name_buf: *mut c_char,
     name_cap: u64,
     out_name_len: *mut u64,
@@ -3010,6 +3125,7 @@ pub unsafe extern "C" fn ts_key_attributes(
     if out_type.is_null()
         || out_resolution_ms.is_null()
         || out_owner_id.is_null()
+        || out_owner_category.is_null()
         || out_name_len.is_null()
         || out_features_len.is_null()
     {
@@ -3017,10 +3133,15 @@ pub unsafe extern "C" fn ts_key_attributes(
         return TS_ERR_NULL_POINTER;
     }
     let k = &key.inner;
+    let category_code = match k.owner_category {
+        core_lib::OwnerCategory::Component => 0,
+        core_lib::OwnerCategory::SupplementalAttribute => 1,
+    };
     unsafe {
         *out_type = ts_type_to_int(k.time_series_type);
         *out_resolution_ms = k.resolution.map(|r| r.num_milliseconds()).unwrap_or(0);
         *out_owner_id = k.owner_id;
+        *out_owner_category = category_code;
         write_str_out(&k.name, name_buf, name_cap, out_name_len);
         write_str_out(
             &features_to_json(&k.features),
@@ -3099,13 +3220,16 @@ pub unsafe extern "C" fn ts_buffer_free_u64(ptr: *mut u64, len: u64) {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+/// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+/// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
 /// `bool`.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_has_typed(
     handle: *const TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -3121,7 +3245,14 @@ pub unsafe extern "C" fn ts_store_has_typed(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(
+            owner_id,
+            owner_category,
+            name,
+            ts_type,
+            resolution_ms,
+            features_json,
+        )
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -3139,12 +3270,15 @@ pub unsafe extern "C" fn ts_store_has_typed(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+/// `handle` must be a live mutable store handle. `owner_id` and `owner_category`
+/// (`0` = Component, `1` = SupplementalAttribute) identify the owner. Required strings
 /// must be null-terminated UTF-8, and `features_json` may be null.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_remove_typed(
     handle: *mut TsStoreHandle,
     owner_id: i64,
+    owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution_ms: i64,
@@ -3156,7 +3290,14 @@ pub unsafe extern "C" fn ts_store_remove_typed(
         None => return TS_ERR_NULL_POINTER,
     };
     let key = match unsafe {
-        build_typed_key_from_attrs(owner_id, name, ts_type, resolution_ms, features_json)
+        build_typed_key_from_attrs(
+            owner_id,
+            owner_category,
+            name,
+            ts_type,
+            resolution_ms,
+            features_json,
+        )
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -3172,20 +3313,34 @@ pub unsafe extern "C" fn ts_store_remove_typed(
 ///
 /// # Safety
 ///
-/// `handle` must be a live mutable store handle. `has_owner` and `owner_id` are
-/// plain scalars.
+/// `handle` must be a live mutable store handle. `has_owner`, `owner_id`, and
+/// `owner_category` are plain scalars; when `has_owner` is true `owner_category`
+/// (`0` = Component, `1` = SupplementalAttribute) scopes the clear to one owner.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_clear(
     handle: *mut TsStoreHandle,
     has_owner: bool,
     owner_id: i64,
+    owner_category: i32,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    let owner = if has_owner { Some(owner_id) } else { None };
+    let owner = if has_owner {
+        let category = match owner_category {
+            0 => core_lib::OwnerCategory::Component,
+            1 => core_lib::OwnerCategory::SupplementalAttribute,
+            other => {
+                set_error(format!("invalid owner_category {other}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        };
+        Some((owner_id, category))
+    } else {
+        None
+    };
     match store.inner.clear_time_series(owner) {
         Ok(_) => TS_OK,
         Err(e) => map_core_error(e),
@@ -3199,13 +3354,15 @@ pub unsafe extern "C" fn ts_store_clear(
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle. `old_owner_id` and
-/// `new_owner_id` are plain integers. When non-null, `out_updated` must point to
-/// writable `u64` storage.
+/// `new_owner_id` are plain integers; `owner_category` (`0` = Component, `1` =
+/// SupplementalAttribute) identifies the owner category. When non-null,
+/// `out_updated` must point to writable `u64` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_replace_owner(
     handle: *mut TsStoreHandle,
     old_owner_id: i64,
     new_owner_id: i64,
+    owner_category: i32,
     out_updated: *mut u64,
 ) -> i32 {
     clear_error();
@@ -3213,7 +3370,18 @@ pub unsafe extern "C" fn ts_store_replace_owner(
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    match store.inner.replace_owner(old_owner_id, new_owner_id) {
+    let category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    match store
+        .inner
+        .replace_owner(old_owner_id, new_owner_id, category)
+    {
         Ok(updated) => {
             if !out_updated.is_null() {
                 unsafe { *out_updated = updated as u64 };

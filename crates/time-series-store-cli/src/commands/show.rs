@@ -28,6 +28,7 @@ pub fn list(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
     let headers: Vec<String> = [
         "Owner",
         "Owner Type",
+        "Owner Category",
         "Type",
         "Name",
         "Dtype",
@@ -57,6 +58,7 @@ fn list_row(m: &TimeSeriesMetadata) -> Vec<String> {
     vec![
         m.owner_id.to_string(),
         m.owner_type.clone(),
+        m.owner_category.as_str().to_string(),
         m.time_series_type.as_str().to_string(),
         m.name.clone(),
         m.dtype.as_str().to_string(),
@@ -74,6 +76,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     let mut obj = Map::new();
     obj.insert("owner_id".into(), json!(m.owner_id));
     obj.insert("owner_type".into(), json!(m.owner_type));
+    obj.insert("owner_category".into(), json!(m.owner_category.as_str()));
     obj.insert("type".into(), json!(m.time_series_type.as_str()));
     obj.insert("name".into(), json!(m.name));
     obj.insert("dtype".into(), json!(m.dtype.as_str()));

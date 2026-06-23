@@ -53,6 +53,7 @@ message TimeSeriesKey {
   // Resolution in milliseconds. 0 = unset (e.g. NonSequentialTimeSeries).
   int64           resolution_ms     = 4;
   Features        features          = 5;
+  OwnerCategory   owner_category    = 6;
 }
 
 message TimeSeriesMetadata {
@@ -88,6 +89,7 @@ message ListReq {
   optional string          name              = 4;
   optional int64           resolution_ms     = 5;
   Features                 features          = 6;
+  optional OwnerCategory   owner_category    = 7;
 }
 message ListResp {
   repeated TimeSeriesMetadata metadata = 1;
@@ -123,7 +125,8 @@ message GetResp {
 // ---- GetTimeSeriesKeys ----
 
 message KeysReq {
-  int64 owner_id = 1;
+  int64         owner_id       = 1;
+  OwnerCategory owner_category = 2;
 }
 message KeysResp {
   repeated TimeSeriesKey keys = 1;

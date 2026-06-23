@@ -113,7 +113,10 @@ async fn deterministic_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(1).await.unwrap();
+    let keys = client
+        .get_time_series_keys(1, OwnerCategory::Component)
+        .await
+        .unwrap();
     assert_eq!(keys.len(), 1);
 
     let data = client.get_time_series(&keys[0], None).await.unwrap();
@@ -139,7 +142,10 @@ async fn deterministic_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(1).await.unwrap();
+    let keys = client
+        .get_time_series_keys(1, OwnerCategory::Component)
+        .await
+        .unwrap();
 
     // Windows start at t0 + k*2h. Select windows 2,3,4 (start=t0+4h, end=t0+10h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -170,7 +176,10 @@ async fn probabilistic_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(2).await.unwrap();
+    let keys = client
+        .get_time_series_keys(2, OwnerCategory::Component)
+        .await
+        .unwrap();
     assert_eq!(keys.len(), 1);
 
     let data = client.get_time_series(&keys[0], None).await.unwrap();
@@ -192,7 +201,10 @@ async fn probabilistic_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(2).await.unwrap();
+    let keys = client
+        .get_time_series_keys(2, OwnerCategory::Component)
+        .await
+        .unwrap();
 
     // Windows start at t0 + k*2h. Select windows 1,2 (start=t0+2h, end=t0+6h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
@@ -223,7 +235,10 @@ async fn scenarios_full_round_trip_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(3).await.unwrap();
+    let keys = client
+        .get_time_series_keys(3, OwnerCategory::Component)
+        .await
+        .unwrap();
     assert_eq!(keys.len(), 1);
 
     let data = client.get_time_series(&keys[0], None).await.unwrap();
@@ -245,7 +260,10 @@ async fn scenarios_time_range_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let keys = client.get_time_series_keys(3).await.unwrap();
+    let keys = client
+        .get_time_series_keys(3, OwnerCategory::Component)
+        .await
+        .unwrap();
 
     // Windows start at t0 + k*2h. Select windows 0,1 (start=t0, end=t0+4h).
     let t0 = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

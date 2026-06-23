@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use time_series_store_core::{ListFilter, Store, TimeSeriesError, TimeSeriesType};
+use time_series_store_core::{ListFilter, OwnerCategory, Store, TimeSeriesError, TimeSeriesType};
 use time_series_store_proto::convert::{
     features_from_pb, key_from_pb, metadata_to_pb, time_series_data_to_get_resp,
 };
@@ -72,6 +72,11 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         if let Some(id) = req.owner_id {
             filter = filter.owner_id(id);
         }
+        if let Some(c) = req.owner_category {
+            let pb_c = pb::OwnerCategory::try_from(c)
+                .map_err(|_| Status::invalid_argument(format!("unknown owner_category {c}")))?;
+            filter = filter.owner_category(OwnerCategory::from(pb_c));
+        }
         if let Some(t) = req.owner_type {
             filter = filter.owner_type(t);
         }
@@ -132,8 +137,15 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         request: Request<KeysReq>,
     ) -> Result<Response<KeysResp>, Status> {
         let req = request.into_inner();
+        let owner_category = pb::OwnerCategory::try_from(req.owner_category)
+            .map_err(|_| {
+                Status::invalid_argument(format!("unknown owner_category {}", req.owner_category))
+            })
+            .map(OwnerCategory::from)?;
         let store = self.store.lock().await;
-        let keys = store.get_time_series_keys(req.owner_id).map_err(map_err)?;
+        let keys = store
+            .get_time_series_keys(req.owner_id, owner_category)
+            .map_err(map_err)?;
         Ok(Response::new(KeysResp {
             keys: keys
                 .iter()

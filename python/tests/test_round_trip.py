@@ -43,6 +43,7 @@ def test_in_memory_round_trip():
         units="MW",
     )
     assert key.owner_id == 42
+    assert key.owner_category == OwnerCategory.Component
     assert key.time_series_type == TimeSeriesType.SingleTimeSeries
 
     got = store.get_time_series(key)
@@ -67,8 +68,9 @@ def test_persistent_round_trip(tmp_path):
     del store  # drop file handle
 
     reopened = TimeSeriesStore.open(path=str(path), read_only=True)
-    keys = reopened.get_time_series_keys(1)
+    keys = reopened.get_time_series_keys(1, OwnerCategory.Component)
     assert len(keys) == 1
+    assert keys[0].owner_category == OwnerCategory.Component
     got = reopened.get_time_series(keys[0])
     assert got.name == "load"
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
@@ -103,7 +105,7 @@ def test_compression_round_trip(tmp_path, kwargs):
     if expected == "deflate":
         assert comp["level"] == kwargs.get("compression_level", 3)
         assert comp["shuffle"] == kwargs.get("shuffle", True)
-    keys = reopened.get_time_series_keys(1)
+    keys = reopened.get_time_series_keys(1, OwnerCategory.Component)
     got = reopened.get_time_series(keys[0])
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
     assert reopened.verify_integrity() == []
@@ -321,10 +323,111 @@ def test_add_time_series_bulk_rolls_back_on_error():
     }
     with pytest.raises(DuplicateTimeSeriesError):
         store.add_time_series_bulk([dup, dict(dup)])
-    assert store.get_time_series_keys(1) == []
+    assert store.get_time_series_keys(1, OwnerCategory.Component) == []
 
 
 def test_add_time_series_bulk_rejects_missing_keys():
     store = TimeSeriesStore.create(in_memory=True)
     with pytest.raises(InvalidParameterError, match="owner_id"):
         store.add_time_series_bulk([{"owner_type": "Generator"}])
+
+
+# ---------------------------------------------------------------------------
+# Category-aware ownership
+# ---------------------------------------------------------------------------
+
+
+def _add_for_category(store, owner_id, category, name):
+    return store.add_time_series(
+        owner_id=owner_id,
+        owner_type="Generator" if category == OwnerCategory.Component else "Outage",
+        owner_category=category,
+        time_series=make_series(name=name),
+    )
+
+
+def test_owner_pair_distinguishes_same_id_across_categories():
+    """The same owner_id under different categories are distinct owners."""
+    store = TimeSeriesStore.create(in_memory=True)
+    comp_key = _add_for_category(store, 7, OwnerCategory.Component, "comp")
+    supp_key = _add_for_category(store, 7, OwnerCategory.SupplementalAttribute, "supp")
+
+    assert comp_key.owner_category == OwnerCategory.Component
+    assert supp_key.owner_category == OwnerCategory.SupplementalAttribute
+
+    comp_keys = store.get_time_series_keys(7, OwnerCategory.Component)
+    supp_keys = store.get_time_series_keys(7, OwnerCategory.SupplementalAttribute)
+    assert len(comp_keys) == 1
+    assert len(supp_keys) == 1
+    assert store.get_time_series(comp_keys[0]).name == "comp"
+    assert store.get_time_series(supp_keys[0]).name == "supp"
+
+
+def test_list_time_series_emits_and_filters_owner_category():
+    store = TimeSeriesStore.create(in_memory=True)
+    _add_for_category(store, 1, OwnerCategory.Component, "comp")
+    _add_for_category(store, 1, OwnerCategory.SupplementalAttribute, "supp")
+
+    all_rows = store.list_time_series(owner_id=1)
+    assert len(all_rows) == 2
+    assert {r["owner_category"] for r in all_rows} == {
+        "Component",
+        "SupplementalAttribute",
+    }
+
+    comp_rows = store.list_time_series(
+        owner_id=1, owner_category=OwnerCategory.Component
+    )
+    assert len(comp_rows) == 1
+    assert comp_rows[0]["owner_category"] == "Component"
+    assert comp_rows[0]["name"] == "comp"
+
+
+def test_clear_time_series_for_owner_pair():
+    store = TimeSeriesStore.create(in_memory=True)
+    _add_for_category(store, 1, OwnerCategory.Component, "comp")
+    _add_for_category(store, 1, OwnerCategory.SupplementalAttribute, "supp")
+
+    removed = store.clear_time_series(
+        owner_id=1, owner_category=OwnerCategory.Component
+    )
+    assert removed == 1
+    assert store.get_time_series_keys(1, OwnerCategory.Component) == []
+    assert len(store.get_time_series_keys(1, OwnerCategory.SupplementalAttribute)) == 1
+
+
+def test_clear_time_series_all():
+    store = TimeSeriesStore.create(in_memory=True)
+    _add_for_category(store, 1, OwnerCategory.Component, "comp")
+    _add_for_category(store, 2, OwnerCategory.SupplementalAttribute, "supp")
+
+    removed = store.clear_time_series()
+    assert removed == 2
+    assert store.list_time_series() == []
+
+
+def test_clear_time_series_requires_both_or_neither():
+    store = TimeSeriesStore.create(in_memory=True)
+    with pytest.raises(InvalidParameterError):
+        store.clear_time_series(owner_id=1)
+    with pytest.raises(InvalidParameterError):
+        store.clear_time_series(owner_category=OwnerCategory.Component)
+
+
+def test_replace_owner():
+    store = TimeSeriesStore.create(in_memory=True)
+    _add_for_category(store, 1, OwnerCategory.Component, "comp")
+
+    updated = store.replace_owner(1, 2, OwnerCategory.Component)
+    assert updated == 1
+    assert store.get_time_series_keys(1, OwnerCategory.Component) == []
+    moved = store.get_time_series_keys(2, OwnerCategory.Component)
+    assert len(moved) == 1
+    assert moved[0].owner_id == 2
+    assert store.get_time_series(moved[0]).name == "comp"
+
+
+def test_key_repr_includes_owner_category():
+    store = TimeSeriesStore.create(in_memory=True)
+    key = _add_for_category(store, 1, OwnerCategory.Component, "comp")
+    assert "owner_category" in repr(key)

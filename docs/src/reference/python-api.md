@@ -83,19 +83,30 @@ def get_time_series(
 ) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
 
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
-def clear_time_series(self, owner_id: int | None = None) -> int: ...
+def clear_time_series(
+    self,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+) -> int: ...
+# Pass both owner_id and owner_category to clear one owner's series (the owner is
+# the (owner_id, owner_category) pair); pass neither to clear the whole store.
 
 def list_time_series(
     self,
     owner_id: int | None = None,
     owner_type: str | None = None,
+    owner_category: OwnerCategory | None = None,
     time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
     resolution: timedelta | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> list[dict]: ...
 
-def get_time_series_keys(self, owner_id: int) -> list[TimeSeriesKey]: ...
+def get_time_series_keys(
+    self,
+    owner_id: int,
+    owner_category: OwnerCategory,
+) -> list[TimeSeriesKey]: ...
 def has_time_series(self, key: TimeSeriesKey) -> bool: ...
 def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[timedelta]: ...
 def get_time_series_counts(self) -> dict: ...
@@ -168,6 +179,7 @@ properties:
 
 ```python
 key.owner_id          -> int
+key.owner_category    -> OwnerCategory
 key.time_series_type  -> TimeSeriesType
 key.name              -> str
 key.resolution        -> timedelta | None

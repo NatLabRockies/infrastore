@@ -138,6 +138,17 @@ impl From<PyOwnerCategory> for core_lib::OwnerCategory {
     }
 }
 
+impl From<core_lib::OwnerCategory> for PyOwnerCategory {
+    fn from(v: core_lib::OwnerCategory) -> Self {
+        match v {
+            core_lib::OwnerCategory::Component => PyOwnerCategory::Component,
+            core_lib::OwnerCategory::SupplementalAttribute => {
+                PyOwnerCategory::SupplementalAttribute
+            }
+        }
+    }
+}
+
 // ---- Features -------------------------------------------------------------
 
 /// Convert a Python dict { str: int|float|bool } into the core Features map.
@@ -678,6 +689,11 @@ impl PyTimeSeriesKey {
     }
 
     #[getter]
+    fn owner_category(&self) -> PyOwnerCategory {
+        self.inner.owner_category.into()
+    }
+
+    #[getter]
     fn time_series_type(&self) -> PyTimeSeriesType {
         self.inner.time_series_type.into()
     }
@@ -702,8 +718,9 @@ impl PyTimeSeriesKey {
 
     fn __repr__(&self) -> String {
         format!(
-            "TimeSeriesKey(owner_id={:?}, time_series_type={:?}, name={:?}, features={:?})",
+            "TimeSeriesKey(owner_id={:?}, owner_category={:?}, time_series_type={:?}, name={:?}, features={:?})",
             self.inner.owner_id,
+            self.inner.owner_category.as_str(),
             self.inner.time_series_type.as_str(),
             self.inner.name,
             self.inner.features,
@@ -901,7 +918,7 @@ impl PyStore {
         let horizon = pydelta_to_chrono(&horizon)?;
         let interval = pydelta_to_chrono(&interval)?;
         self.inner
-            .transform_single_time_series(horizon, interval)
+            .transform_single_time_series(horizon, interval, None, None)
             .map_err(map_err)
     }
 
@@ -909,9 +926,38 @@ impl PyStore {
         self.inner.remove_time_series(&key.inner).map_err(map_err)
     }
 
-    #[pyo3(signature = (owner_id=None))]
-    fn clear_time_series(&mut self, owner_id: Option<i64>) -> PyResult<usize> {
-        self.inner.clear_time_series(owner_id).map_err(map_err)
+    /// Remove every time series for the owner `(owner_id, owner_category)`, or
+    /// every time series in the store when neither is given. Both must be
+    /// supplied together or neither.
+    #[pyo3(signature = (owner_id=None, owner_category=None))]
+    fn clear_time_series(
+        &mut self,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+    ) -> PyResult<usize> {
+        let owner = match (owner_id, owner_category) {
+            (Some(id), Some(cat)) => Some((id, cat.into())),
+            (None, None) => None,
+            _ => {
+                return Err(InvalidParameterError::new_err(
+                    "clear_time_series requires both owner_id and owner_category, or neither",
+                ));
+            }
+        };
+        self.inner.clear_time_series(owner).map_err(map_err)
+    }
+
+    /// Reassign every time series owned by `(old_owner, owner_category)` to
+    /// `(new_owner, owner_category)`. Returns the number of associations moved.
+    fn replace_owner(
+        &mut self,
+        old_owner: i64,
+        new_owner: i64,
+        owner_category: PyOwnerCategory,
+    ) -> PyResult<usize> {
+        self.inner
+            .replace_owner(old_owner, new_owner, owner_category.into())
+            .map_err(map_err)
     }
 
     /// Fetch a static time series by key. `time_range`, if given, is a tuple of
@@ -950,7 +996,7 @@ impl PyStore {
     /// `owner_id`, `owner_type`, `time_series_type`, `name`, `length`,
     /// `resolution_seconds`, `features`, `units`.
     #[pyo3(signature = (
-        owner_id=None, owner_type=None, time_series_type=None,
+        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -958,6 +1004,7 @@ impl PyStore {
         &self,
         py: Python<'py>,
         owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
@@ -967,6 +1014,9 @@ impl PyStore {
         let mut filter = core_lib::ListFilter::new();
         if let Some(id) = owner_id {
             filter = filter.owner_id(id);
+        }
+        if let Some(c) = owner_category {
+            filter = filter.owner_category(c.into());
         }
         if let Some(t) = owner_type {
             filter = filter.owner_type(t);
@@ -1011,10 +1061,14 @@ impl PyStore {
         Ok(out)
     }
 
-    fn get_time_series_keys(&self, owner_id: i64) -> PyResult<Vec<PyTimeSeriesKey>> {
+    fn get_time_series_keys(
+        &self,
+        owner_id: i64,
+        owner_category: PyOwnerCategory,
+    ) -> PyResult<Vec<PyTimeSeriesKey>> {
         Ok(self
             .inner
-            .get_time_series_keys(owner_id)
+            .get_time_series_keys(owner_id, owner_category.into())
             .map_err(map_err)?
             .into_iter()
             .map(|k| PyTimeSeriesKey { inner: k })

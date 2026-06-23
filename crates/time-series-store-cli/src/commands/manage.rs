@@ -52,7 +52,7 @@ pub fn transform(store_path: &Path, horizon: &str, interval: &str) -> Result<(),
     let interval = parse::parse_duration(interval)?;
     let mut store = store_access::open_writable(store_path)?;
     let n = store
-        .transform_single_time_series(horizon, interval)
+        .transform_single_time_series(horizon, interval, None, None)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     println!(

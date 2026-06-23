@@ -124,6 +124,7 @@ pub fn features_from_pb(f: pb::Features) -> Result<Features, ConvertError> {
 pub fn key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
     pb::TimeSeriesKey {
         owner_id: k.owner_id,
+        owner_category: pb::OwnerCategory::from(k.owner_category) as i32,
         time_series_type: pb::TimeSeriesType::from(k.time_series_type) as i32,
         name: k.name.clone(),
         resolution_ms: k.resolution.map(duration_to_ms).unwrap_or(0),
@@ -132,6 +133,11 @@ pub fn key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
 }
 
 pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> {
+    let owner_category =
+        pb::OwnerCategory::try_from(k.owner_category).map_err(|_| ConvertError::InvalidValue {
+            field: "owner_category",
+            message: format!("unknown enum value {}", k.owner_category),
+        })?;
     let ts_type = pb::TimeSeriesType::try_from(k.time_series_type).map_err(|_| {
         ConvertError::InvalidValue {
             field: "time_series_type",
@@ -149,6 +155,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> 
     };
     Ok(TimeSeriesKey {
         owner_id: k.owner_id,
+        owner_category: OwnerCategory::from(owner_category),
         time_series_type: TimeSeriesType::from(ts_type),
         name: k.name,
         resolution,

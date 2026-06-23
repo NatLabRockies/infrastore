@@ -468,15 +468,17 @@ function add_time_series!(
 end
 
 """
-    get_metadata(store, owner_id, name; resolution, features=Dict())
+    get_metadata(store, owner_id, owner_category, name; resolution, features=Dict())
 
 Look up a SingleTimeSeries by attributes and return a named tuple of
-`(initial_timestamp, resolution, length, data_hash)`. `data_hash` is the 32-byte
-content hash as a `Vector{UInt8}`. Throws `NotFoundError` if absent.
+`(initial_timestamp, resolution, length, data_hash)`. `owner_category` is the
+owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). `data_hash` is
+the 32-byte content hash as a `Vector{UInt8}`. Throws `NotFoundError` if absent.
 """
 function get_metadata(
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -492,10 +494,10 @@ function get_metadata(
     out_lt_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int64, Cstring,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int64, Cstring,
          Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, Int64(owner_id), name, resolution_ms, features_json,
+        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_ms, features_json,
         out_initial, out_resolution, out_length, out_hash, out_dtype,
         lt_buf, UInt64(length(lt_buf)), out_lt_len,
     )
@@ -514,14 +516,17 @@ function get_metadata(
 end
 
 """
-    get_forecast_metadata(store, owner_id, name, ts_type; resolution, features=Dict())
+    get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, features=Dict())
 
 Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash)`
 for a stored forecast of integer `ts_type` (see the `TS_TYPE_*` constants).
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
 """
 function get_forecast_metadata(
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString,
     ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing,
@@ -536,10 +541,10 @@ function get_forecast_metadata(
     lt_buf = Vector{UInt8}(undef, 256); out_lt_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_forecast_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Int64, Cstring,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Int64, Cstring,
          Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, Int64(owner_id), name, Int32(ts_type), resolution_ms, features_json,
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_ms, features_json,
         out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
         lt_buf, UInt64(length(lt_buf)), out_lt_len,
     )
@@ -598,11 +603,15 @@ function get_array_nd(store::Store, data_hash::Vector{UInt8}, ::Type{T}, dims) w
 end
 
 """
-    has_time_series(store, owner_id, name; resolution, features=Dict()) -> Bool
+    has_time_series(store, owner_id, owner_category, name; resolution, features=Dict()) -> Bool
+
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
 """
 function has_time_series(
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -612,30 +621,33 @@ function has_time_series(
     out = Ref{Bool}(false)
     code = ccall(
         (:ts_store_has_by_attrs, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int64, Cstring, Ref{Bool}),
-        store.handle, Int64(owner_id), name, resolution_ms, features_json, out,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int64, Cstring, Ref{Bool}),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_ms, features_json, out,
     )
     _check(code)
     return out[]
 end
 
 """
-    has_for_owner(store, owner_id; time_series_type=nothing) -> Bool
+    has_for_owner(store, owner_id, owner_category; time_series_type=nothing) -> Bool
 
-True if `owner_id` has any time series, optionally restricted to a single
-`time_series_type` code (the name-less existence query).
+True if `(owner_id, owner_category)` has any time series, optionally restricted to
+a single `time_series_type` code (the name-less existence query).
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
 """
 function has_for_owner(
     store::Store,
-    owner_id::Integer;
+    owner_id::Integer,
+    owner_category::OwnerCategory;
     time_series_type::Union{Nothing,Integer}=nothing,
 )
     out = Ref{Bool}(false)
     use_type = time_series_type !== nothing
     code = ccall(
         (:ts_store_has_for_owner, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Bool, Ref{Bool}),
-        store.handle, Int64(owner_id),
+        (Ptr{Cvoid}, Int64, Int32, Int32, Bool, Ref{Bool}),
+        store.handle, Int64(owner_id), _category_int(owner_category),
         Int32(use_type ? time_series_type : 0), use_type, out,
     )
     _check(code)
@@ -643,11 +655,15 @@ function has_for_owner(
 end
 
 """
-    remove_time_series!(store, owner_id, name; resolution, features=Dict())
+    remove_time_series!(store, owner_id, owner_category, name; resolution, features=Dict())
+
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
 """
 function remove_time_series!(
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -656,8 +672,8 @@ function remove_time_series!(
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     code = ccall(
         (:ts_store_remove_by_attrs, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int64, Cstring),
-        store.handle, Int64(owner_id), name, resolution_ms, features_json,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int64, Cstring),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_ms, features_json,
     )
     _check(code)
     return nothing
@@ -737,6 +753,7 @@ end
 # Build a `TimeSeriesKey` from attributes via the FFI key constructor.
 function _make_key(
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString,
     ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing,
@@ -747,8 +764,8 @@ function _make_key(
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_make_key_from_attrs, lib_path()), Int32,
-        (Int64, Cstring, Int32, Int64, Cstring, Ref{Ptr{Cvoid}}),
-        Int64(owner_id), name, Int32(ts_type), resolution_ms, features_json, out_key,
+        (Int64, Int32, Cstring, Int32, Int64, Cstring, Ref{Ptr{Cvoid}}),
+        Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_ms, features_json, out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -778,25 +795,27 @@ end
 
 # Association attributes for an attribute-addressed read: build the matching key,
 # then look up `name`.
-_assoc_attrs(store::Store, owner_id::Integer, name::AbstractString, ts_type::Integer;
+_assoc_attrs(store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
              resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}()) =
-    _get_association(store, _make_key(owner_id, name, ts_type; resolution=resolution, features=features))
+    _get_association(store, _make_key(owner_id, owner_category, name, ts_type; resolution=resolution, features=features))
 
 """
-    get_time_series_keys(store, owner_id) -> Vector{TimeSeriesKey}
+    get_time_series_keys(store, owner_id, owner_category) -> Vector{TimeSeriesKey}
 
-Every key associated with `owner_id`, one per stored association (including
-`DeterministicSingleTimeSeries` rows derived by `transform_single_time_series!`).
-Each key can be passed to the key-based `get_time_series(Type, store, key)`
-readers — the way to read a transform-derived forecast by key.
+Every key associated with `(owner_id, owner_category)`, one per stored association
+(including `DeterministicSingleTimeSeries` rows derived by
+`transform_single_time_series!`). `owner_category` is the owner's `OwnerCategory`
+(`Component` or `SupplementalAttribute`). Each key can be passed to the key-based
+`get_time_series(Type, store, key)` readers — the way to read a transform-derived
+forecast by key.
 """
-function get_time_series_keys(store::Store, owner_id::Integer)
+function get_time_series_keys(store::Store, owner_id::Integer, owner_category::OwnerCategory)
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_time_series_keys, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
-        store.handle, Int64(owner_id), out_keys, out_len,
+        (Ptr{Cvoid}, Int64, Int32, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
+        store.handle, Int64(owner_id), _category_int(owner_category), out_keys, out_len,
     )
     _check(code)
     n = Int(out_len[])
@@ -862,28 +881,32 @@ function _decode_metadata_row(r::AbstractDict)
 end
 
 """
-    list_metadata(store; owner_id=nothing) -> Vector{NamedTuple}
+    list_metadata(store; owner_id=nothing, owner_category=nothing) -> Vector{NamedTuple}
 
-List time series metadata rows. When `owner_id` is given only that owner's
-rows are returned; otherwise the whole store is listed. Each row is a
-`NamedTuple` with `owner_id`, `owner_type`, `owner_category`,
-`time_series_type` (the Julia type), `name`, `data_hash` (`Vector{UInt8}`),
-`initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
-`features`, `percentiles`, and `logical_type`;
+List time series metadata rows. When `owner_id` is given only that owner's rows
+are returned, and when `owner_category` (an `OwnerCategory`) is given only rows of
+that category are returned; the two filters are independent. With neither given the
+whole store is listed. Each row is a `NamedTuple` with `owner_id`, `owner_type`,
+`owner_category`, `time_series_type` (the Julia type), `name`, `data_hash`
+(`Vector{UInt8}`), `initial_timestamp`, `resolution`, `length`, `horizon`,
+`interval`, `count`, `features`, `percentiles`, and `logical_type`;
 fields that do not apply to a row are `nothing`.
 """
-function list_metadata(store::Store; owner_id::Union{Nothing, Integer} = nothing)
+function list_metadata(store::Store; owner_id::Union{Nothing, Integer} = nothing,
+                       owner_category::Union{Nothing, OwnerCategory} = nothing)
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+    has_category = owner_category !== nothing
+    category_arg = has_category ? _category_int(owner_category) : Int32(0)
     out_len = Ref{UInt64}(0)
     code = ccall((:ts_store_list_metadata, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, C_NULL, UInt64(0), out_len)
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg, C_NULL, UInt64(0), out_len)
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
     code = ccall((:ts_store_list_metadata, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, buf, UInt64(length(buf)), out_len)
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg, buf, UInt64(length(buf)), out_len)
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [_decode_metadata_row(r) for r in rows]
@@ -893,7 +916,8 @@ end
     key_info(key) -> NamedTuple
 
 Inspect an opaque `TimeSeriesKey` (e.g. one returned by `get_time_series_keys`):
-returns `(owner_id, name, time_series_type, resolution, features)`.
+returns `(owner_id, owner_category, name, time_series_type, resolution, features)`.
+`owner_category` is an `OwnerCategory` (`Component` or `SupplementalAttribute`).
 `time_series_type` is the Julia type (one of `SingleTimeSeries`,
 `NonSequentialTimeSeries`, `Deterministic`, `DeterministicSingleTimeSeries`,
 `Probabilistic`, `Scenarios`) — pass it straight to
@@ -904,15 +928,17 @@ function key_info(key::TimeSeriesKey)
     out_type = Ref{Int32}(0)
     out_res = Ref{Int64}(0)
     out_owner = Ref{Int64}(0)
+    out_category = Ref{Int32}(0)
     name_len = Ref{UInt64}(0)
     feat_len = Ref{UInt64}(0)
-    # Probe the string lengths (type, resolution, and owner id are filled on this call too).
+    # Probe the string lengths (type, resolution, owner id, and owner category are
+    # filled on this call too).
     code = ccall(
         (:ts_key_attributes, lib_path()), Int32,
-        (Ptr{Cvoid}, Ref{Int32}, Ref{Int64}, Ref{Int64},
+        (Ptr{Cvoid}, Ref{Int32}, Ref{Int64}, Ref{Int64}, Ref{Int32},
          Ptr{UInt8}, UInt64, Ref{UInt64},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
-        key.handle, out_type, out_res, out_owner,
+        key.handle, out_type, out_res, out_owner, out_category,
         C_NULL, UInt64(0), name_len,
         C_NULL, UInt64(0), feat_len,
     )
@@ -921,10 +947,10 @@ function key_info(key::TimeSeriesKey)
     feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
     code = ccall(
         (:ts_key_attributes, lib_path()), Int32,
-        (Ptr{Cvoid}, Ref{Int32}, Ref{Int64}, Ref{Int64},
+        (Ptr{Cvoid}, Ref{Int32}, Ref{Int64}, Ref{Int64}, Ref{Int32},
          Ptr{UInt8}, UInt64, Ref{UInt64},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
-        key.handle, out_type, out_res, out_owner,
+        key.handle, out_type, out_res, out_owner, out_category,
         name_buf, UInt64(length(name_buf)), name_len,
         feat_buf, UInt64(length(feat_buf)), feat_len,
     )
@@ -934,6 +960,7 @@ function key_info(key::TimeSeriesKey)
     resolution = out_res[] == 0 ? nothing : Millisecond(out_res[])
     return (
         owner_id         = out_owner[],
+        owner_category   = OwnerCategory(Int(out_category[])),
         name             = name,
         time_series_type = _type_for_code(out_type[]),
         resolution       = resolution,
@@ -947,36 +974,41 @@ get_time_series(::Type{SingleTimeSeries}, store::Store, key::TimeSeriesKey) =
     get_time_series(store, key)
 
 """
-    get_time_series(SingleTimeSeries, store, owner_id, name; resolution, features)
+    get_time_series(SingleTimeSeries, store, owner_id, owner_category, name; resolution, features)
 
-Attribute-addressed counterpart to `get_time_series(store, key)`.
+Attribute-addressed counterpart to `get_time_series(store, key)`. `owner_category`
+is the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`).
 """
 function get_time_series(
     ::Type{SingleTimeSeries},
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    key = _make_key(owner_id, name, TS_TYPE_SINGLE; resolution=resolution, features=features)
+    key = _make_key(owner_id, owner_category, name, TS_TYPE_SINGLE; resolution=resolution, features=features)
     return get_time_series(store, key)
 end
 
 """
-    get_time_series(NonSequentialTimeSeries, store, owner_id, name; resolution, features)
+    get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name; resolution, features)
 
 Attribute-addressed counterpart to `get_time_series(NonSequentialTimeSeries, store, key)`.
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
 """
 function get_time_series(
     ::Type{NonSequentialTimeSeries},
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    key = _make_key(owner_id, name, TS_TYPE_NON_SEQUENTIAL; resolution=resolution, features=features)
+    key = _make_key(owner_id, owner_category, name, TS_TYPE_NON_SEQUENTIAL; resolution=resolution, features=features)
     return get_time_series(NonSequentialTimeSeries, store, key)
 end
 
@@ -1077,33 +1109,44 @@ function flush!(store::Store)
 end
 
 """
-    clear!(store; owner_id=nothing)
+    clear!(store; owner_id=nothing, owner_category=nothing)
 
 Remove all time series (data + metadata) from the store, or only those belonging
-to `owner_id` when given.
+to a single owner. An owner is the pair `(owner_id, owner_category)`, so to scope
+the clear to one owner pass both `owner_id` and `owner_category` (an
+`OwnerCategory`). With neither given the whole store is cleared.
 """
-function clear!(store::Store; owner_id::Union{Nothing, Integer} = nothing)
+function clear!(store::Store; owner_id::Union{Nothing, Integer} = nothing,
+                owner_category::Union{Nothing, OwnerCategory} = nothing)
     has_owner = owner_id !== nothing
+    if has_owner && owner_category === nothing
+        throw(ArgumentError("clear! with owner_id also requires owner_category"))
+    end
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+    category_arg = has_owner ? _category_int(owner_category) : Int32(0)
     code = ccall((:ts_store_clear, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64), store.handle, has_owner, owner_arg)
+                 (Ptr{Cvoid}, Bool, Int64, Int32),
+                 store.handle, has_owner, owner_arg, category_arg)
     _check(code)
     return nothing
 end
 
 """
-    replace_owner!(store, old_owner_id, new_owner_id) -> Int
+    replace_owner!(store, old_owner_id, new_owner_id, owner_category) -> Int
 
-Reassign every time series owned by `old_owner_id` to `new_owner_id`. The
-underlying arrays are content-addressed and shared, so only the association
-records change. Returns the number of associations updated.
+Reassign every time series owned by `(old_owner_id, owner_category)` to
+`(new_owner_id, owner_category)`. `owner_category` is the owner's `OwnerCategory`
+(`Component` or `SupplementalAttribute`). The underlying arrays are
+content-addressed and shared, so only the association records change. Returns the
+number of associations updated.
 """
 function replace_owner!(store::Store, old_owner_id::Integer,
-                        new_owner_id::Integer)
+                        new_owner_id::Integer, owner_category::OwnerCategory)
     out = Ref{UInt64}(0)
     code = ccall((:ts_store_replace_owner, lib_path()), Int32,
-                 (Ptr{Cvoid}, Int64, Int64, Ref{UInt64}),
-                 store.handle, Int64(old_owner_id), Int64(new_owner_id), out)
+                 (Ptr{Cvoid}, Int64, Int64, Int32, Ref{UInt64}),
+                 store.handle, Int64(old_owner_id), Int64(new_owner_id),
+                 _category_int(owner_category), out)
     _check(code)
     return Int(out[])
 end
@@ -1231,9 +1274,11 @@ function transform_single_time_series!(
     return Int(out_count[])
 end
 
-"""True iff a time series of `ts_type` with the given attributes exists."""
+"""True iff a time series of `ts_type` with the given attributes exists.
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`)."""
 function has_typed(
-    store::Store, owner_id::Integer, name::AbstractString, ts_type::Integer;
+    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
 )
     resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
@@ -1241,24 +1286,25 @@ function has_typed(
     out = Ref{Bool}(false)
     code = ccall(
         (:ts_store_has_typed, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Int64, Cstring, Ref{Bool}),
-        store.handle, Int64(owner_id), name, Int32(ts_type), resolution_ms, features_json, out,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Int64, Cstring, Ref{Bool}),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_ms, features_json, out,
     )
     _check(code)
     return out[]
 end
 
-"""Remove a time series of `ts_type` by attributes."""
+"""Remove a time series of `ts_type` by attributes. `owner_category` is the
+owner's `OwnerCategory` (`Component` or `SupplementalAttribute`)."""
 function remove_typed!(
-    store::Store, owner_id::Integer, name::AbstractString, ts_type::Integer;
+    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
 )
     resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
     features_json = _features_arg(features)
     code = ccall(
         (:ts_store_remove_typed, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Int64, Cstring),
-        store.handle, Int64(owner_id), name, Int32(ts_type), resolution_ms, features_json,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Int64, Cstring),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_ms, features_json,
     )
     _check(code)
     return nothing
@@ -1556,6 +1602,7 @@ end
 function _get_forecast_raw(
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString,
     ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing,
@@ -1587,6 +1634,7 @@ function _get_forecast_raw(
         (:ts_store_get_forecast, lib_path()), Int32,
         (Ptr{Cvoid},   # handle
          Int64,        # owner_id
+         Int32,        # owner_category
          Cstring,      # name
          Int32,        # ts_type
          Int64,        # resolution_ms
@@ -1609,6 +1657,7 @@ function _get_forecast_raw(
          Ref{UInt64}), # out_percentiles_len
         store.handle,
         Int64(owner_id),
+        _category_int(owner_category),
         name,
         Int32(ts_type),
         resolution_ms,
@@ -1766,17 +1815,19 @@ function _decode_forecast_array(bytes::Vector{UInt8}, dtype_code::Int32, dims::V
 end
 
 """
-    get_time_series(Deterministic, store, owner_id, name; resolution, features, time_range)
+    get_time_series(Deterministic, store, owner_id, owner_category, name; resolution, features, time_range)
 
 Fetch a `Deterministic` forecast (or a `DeterministicSingleTimeSeries` synthesized
-into one). `data` has canonical shape `(H, count, element_dims...)` where
-`H = horizon / resolution`. Pass `time_range = (start, end)` (exclusive end) to
-select a window sub-range per the InfrastructureSystems.jl convention.
+into one). `owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`). `data` has canonical shape `(H, count, element_dims...)`
+where `H = horizon / resolution`. Pass `time_range = (start, end)` (exclusive end)
+to select a window sub-range per the InfrastructureSystems.jl convention.
 """
 function get_time_series(
     ::Type{Deterministic},
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -1788,71 +1839,75 @@ function get_time_series(
     matched_type = TS_TYPE_DETERMINISTIC
     r = try
         _get_forecast_raw(
-            store, owner_id, name, TS_TYPE_DETERMINISTIC;
+            store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
             resolution=resolution, features=features, time_range=time_range,
         )
     catch e
         e isa NotFoundError || rethrow()
         matched_type = TS_TYPE_DETERMINISTIC_SINGLE
         _get_forecast_raw(
-            store, owner_id, name, TS_TYPE_DETERMINISTIC_SINGLE;
+            store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
             resolution=resolution, features=features, time_range=time_range,
         )
     end
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, name, matched_type; resolution=resolution, features=features)
+    a = _assoc_attrs(store, owner_id, owner_category, name, matched_type; resolution=resolution, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                          a.name)
 end
 
 """
-    get_time_series(DeterministicSingleTimeSeries, store, owner_id, name; resolution, features, time_range)
+    get_time_series(DeterministicSingleTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
 
 Fetch a `DeterministicSingleTimeSeries` (derived via `transform_single_time_series!`)
-explicitly by its stored type. It has no materialized form, so the result is a
-[`Deterministic`].
+explicitly by its stored type. `owner_category` is the owner's `OwnerCategory`
+(`Component` or `SupplementalAttribute`). It has no materialized form, so the
+result is a [`Deterministic`].
 """
 function get_time_series(
     ::Type{DeterministicSingleTimeSeries},
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, name, TS_TYPE_DETERMINISTIC_SINGLE;
+        store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
         resolution=resolution, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, name, TS_TYPE_DETERMINISTIC_SINGLE;
+    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
                      resolution=resolution, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                          a.name)
 end
 
 """
-    get_time_series(Probabilistic, store, owner_id, name; resolution, features, time_range)
+    get_time_series(Probabilistic, store, owner_id, owner_category, name; resolution, features, time_range)
 
-Fetch a `Probabilistic` forecast. `data` has canonical shape
+Fetch a `Probabilistic` forecast. `owner_category` is the owner's `OwnerCategory`
+(`Component` or `SupplementalAttribute`). `data` has canonical shape
 `(num_percentiles, H, count, element_dims...)`.
 """
 function get_time_series(
     ::Type{Probabilistic},
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, name, TS_TYPE_PROBABILISTIC;
+        store, owner_id, owner_category, name, TS_TYPE_PROBABILISTIC;
         resolution=resolution, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, name, TS_TYPE_PROBABILISTIC;
+    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_PROBABILISTIC;
                      resolution=resolution, features=features)
     return Probabilistic(
         r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
@@ -1861,26 +1916,28 @@ function get_time_series(
 end
 
 """
-    get_time_series(Scenarios, store, owner_id, name; resolution, features, time_range)
+    get_time_series(Scenarios, store, owner_id, owner_category, name; resolution, features, time_range)
 
-Fetch a `Scenarios` forecast. `data` has canonical shape
+Fetch a `Scenarios` forecast. `owner_category` is the owner's `OwnerCategory`
+(`Component` or `SupplementalAttribute`). `data` has canonical shape
 `(scenario_count, H, count, element_dims...)`.
 """
 function get_time_series(
     ::Type{Scenarios},
     store::Store,
     owner_id::Integer,
+    owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, name, TS_TYPE_SCENARIOS;
+        store, owner_id, owner_category, name, TS_TYPE_SCENARIOS;
         resolution=resolution, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, name, TS_TYPE_SCENARIOS;
+    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_SCENARIOS;
                      resolution=resolution, features=features)
     # `scenario_count` is the leading axis of the decoded data.
     return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,

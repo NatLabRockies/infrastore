@@ -25,7 +25,7 @@ using TimeSeriesStore
     @test length(got.data) == 24
 
     # The same series is reachable attribute-addressed (both conventions unified).
-    got_attr = get_time_series(SingleTimeSeries, store, 42, "load";
+    got_attr = get_time_series(SingleTimeSeries, store, 42, Component, "load";
                                features=Dict("model_year" => 2030))
     @test got_attr.data == values
     @test got_attr.name == "load"
@@ -63,7 +63,7 @@ end
     @test get_counts(store).static_time_series == 1
 
     # Attribute-addressed read returns the same series.
-    got_attr = get_time_series(NonSequentialTimeSeries, store, 7, "events")
+    got_attr = get_time_series(NonSequentialTimeSeries, store, 7, Component, "events")
     @test got_attr.timestamps == timestamps
     @test got_attr.data == Int64[10, 20, 30]
     @test got_attr.name == "events"
@@ -81,11 +81,11 @@ end
     add_time_series!(store, owner, "Generator", Component, ts;
                      features=feats, units="MW")
 
-    @test has_time_series(store, owner, "load"; resolution=resolution, features=feats)
-    @test !has_time_series(store, owner, "load"; resolution=resolution,
+    @test has_time_series(store, owner, Component, "load"; resolution=resolution, features=feats)
+    @test !has_time_series(store, owner, Component, "load"; resolution=resolution,
                            features=Dict("model_year" => 2031))
 
-    meta = get_metadata(store, owner, "load"; resolution=resolution, features=feats)
+    meta = get_metadata(store, owner, Component, "load"; resolution=resolution, features=feats)
     @test meta.initial_timestamp == initial
     @test meta.resolution == Millisecond(resolution)
     @test meta.length == 24
@@ -94,9 +94,9 @@ end
     fetched = get_array_by_hash(store, meta.data_hash)
     @test fetched == values
 
-    remove_time_series!(store, owner, "load"; resolution=resolution, features=feats)
-    @test !has_time_series(store, owner, "load"; resolution=resolution, features=feats)
-    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, owner, "load";
+    remove_time_series!(store, owner, Component, "load"; resolution=resolution, features=feats)
+    @test !has_time_series(store, owner, Component, "load"; resolution=resolution, features=feats)
+    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, owner, Component, "load";
                                                        resolution=resolution, features=feats)
 end
 
@@ -114,7 +114,7 @@ end
         try
             counts = get_counts(store)
             @test counts.static_time_series == 1
-            meta = get_metadata(store, 1, "load"; resolution=Hour(1))
+            meta = get_metadata(store, 1, Component, "load"; resolution=Hour(1))
             @test meta.length == 12
             @test get_array_by_hash(store, meta.data_hash) == collect(1.0:12.0)
         finally
@@ -131,7 +131,7 @@ end
     # Int64 scalar series round-trips with its dtype.
     add_time_series!(store, 1001, "Generator", Component,
         SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; logical_type="Int64"))
-    m = get_metadata(store, 1001, "load"; resolution=res)
+    m = get_metadata(store, 1001, Component, "load"; resolution=res)
     @test m.dtype == Int64
     @test get_array_by_hash(store, m.data_hash, Int64) == Int64[10, 20, 30]
 
@@ -139,7 +139,7 @@ end
     A = Float64[i + j / 10 for i in 1:4, j in 1:3]
     add_time_series!(store, 1002, "Generator", Component,
         SingleTimeSeries(t0, res, A, "cost"; logical_type="QuadraticFunctionData"))
-    mq = get_metadata(store, 1002, "cost"; resolution=res)
+    mq = get_metadata(store, 1002, Component, "cost"; resolution=res)
     @test mq.dtype == Float64
     flat = get_array_by_hash(store, mq.data_hash, Float64)
     @test permutedims(reshape(flat, (3, 4)), (2, 1)) == A
@@ -165,7 +165,7 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "pf"),
     )
 
-    fc = get_time_series(Deterministic, store, 100, "pf")
+    fc = get_time_series(Deterministic, store, 100, Component, "pf")
     @test fc.initial_timestamp == t0
     @test fc.resolution == Millisecond(res)
     @test fc.horizon == Millisecond(hor)
@@ -204,7 +204,7 @@ end
     win_start = t0 + Hour(6)
     win_end   = t0 + Hour(18)   # exclusive; covers windows at +6h and +12h
 
-    fc = get_time_series(Deterministic, store, 110, "pf2"; time_range=(win_start, win_end))
+    fc = get_time_series(Deterministic, store, 110, Component, "pf2"; time_range=(win_start, win_end))
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
     @test size(fc.data) == (H, 2)
@@ -231,7 +231,7 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "pf_md"),
     )
 
-    fc = get_time_series(Deterministic, store, 120, "pf_md")
+    fc = get_time_series(Deterministic, store, 120, Component, "pf_md")
     @test size(fc.data) == (H, count, E)
     @test fc.data == data
 end
@@ -254,7 +254,7 @@ end
         Probabilistic(t0, res, hor, ivl, count, percentiles, data, "pf_prob"),
     )
 
-    fc = get_time_series(Probabilistic, store, 200, "pf_prob")
+    fc = get_time_series(Probabilistic, store, 200, Component, "pf_prob")
     @test fc.initial_timestamp == t0
     @test fc.resolution == Millisecond(res)
     @test fc.horizon == Millisecond(hor)
@@ -294,7 +294,7 @@ end
     win_start = t0 + Hour(4)
     win_end   = t0 + Hour(12)
 
-    fc = get_time_series(Probabilistic, store, 210, "pf_prob_win"; time_range=(win_start, win_end))
+    fc = get_time_series(Probabilistic, store, 210, Component, "pf_prob_win"; time_range=(win_start, win_end))
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
     @test fc.percentiles ≈ percentiles
@@ -319,7 +319,7 @@ end
         Scenarios(t0, res, hor, ivl, count, data, "pf_scen"),
     )
 
-    fc = get_time_series(Scenarios, store, 300, "pf_scen")
+    fc = get_time_series(Scenarios, store, 300, Component, "pf_scen")
     @test fc.initial_timestamp == t0
     @test fc.resolution == Millisecond(res)
     @test fc.horizon == Millisecond(hor)
@@ -358,7 +358,7 @@ end
     win_start = t0 + Hour(8)
     win_end   = t0 + Hour(24)
 
-    fc = get_time_series(Scenarios, store, 310, "pf_scen_win"; time_range=(win_start, win_end))
+    fc = get_time_series(Scenarios, store, 310, Component, "pf_scen_win"; time_range=(win_start, win_end))
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
     @test fc.scenario_count == scenario_count
@@ -382,7 +382,7 @@ end
         Deterministic(t0, res, hor, ivl, count, data, "pf_i64"),
     )
 
-    fc = get_time_series(Deterministic, store, 130, "pf_i64")
+    fc = get_time_series(Deterministic, store, 130, Component, "pf_i64")
     @test eltype(fc.data) == Int64
     @test fc.data == data
 end
@@ -405,7 +405,7 @@ end
     n = transform_single_time_series!(store, hor, ivl)
     @test n == 1
 
-    fc = get_time_series(Deterministic, store, 400, "dst")
+    fc = get_time_series(Deterministic, store, 400, Component, "dst")
     @test fc.count == 3
     @test size(fc.data) == (4, 3)
     @test fc.name == "dst"
@@ -415,13 +415,13 @@ end
 
     # get_time_series_keys enumerates both the source STS and the derived DST;
     # key_info lets us pick the DST and read it back by key (no key from transform).
-    keys = get_time_series_keys(store, 400)
+    keys = get_time_series_keys(store, 400, Component)
     @test length(keys) == 2
     infos = [key_info(k) for k in keys]
     # time_series_type is the actual Julia type, as in InfrastructureSystems.jl.
     @test Set(i.time_series_type for i in infos) ==
           Set([SingleTimeSeries, DeterministicSingleTimeSeries])
-    @test all(i -> i.owner_id == 400 && i.name == "dst", infos)
+    @test all(i -> i.owner_id == 400 && i.owner_category == Component && i.name == "dst", infos)
 
     dst_idx = findfirst(i -> i.time_series_type == DeterministicSingleTimeSeries, infos)
     # The actual type drives the read directly; a DST has no struct so it returns
@@ -439,7 +439,7 @@ end
 
 @testset "get_time_series_keys empty owner" begin
     store = Store(in_memory=true)
-    @test get_time_series_keys(store, 999) == TimeSeriesStore.TimeSeriesKey[]
+    @test get_time_series_keys(store, 999, Component) == TimeSeriesStore.TimeSeriesKey[]
 end
 
 @testset "key_info exposes attributes and features" begin
@@ -450,10 +450,11 @@ end
         SingleTimeSeries(DateTime(2024, 1, 1), res, collect(1.0:6.0), "load");
         features=feats)
 
-    keys = get_time_series_keys(store, 500)
+    keys = get_time_series_keys(store, 500, Component)
     @test length(keys) == 1
     info = key_info(keys[1])
     @test info.owner_id == 500
+    @test info.owner_category == Component
     @test info.name == "load"
     @test info.time_series_type == SingleTimeSeries
     @test info.resolution == Millisecond(res)
@@ -465,7 +466,7 @@ end
     # The key's type resolves the series, and an attribute read using the
     # recovered features matches — confirming features round-trip faithfully.
     @test get_time_series(info.time_series_type, store, keys[1]).data == collect(1.0:6.0)
-    @test get_time_series(info.time_series_type, store, info.owner_id, info.name;
+    @test get_time_series(info.time_series_type, store, info.owner_id, info.owner_category, info.name;
                           resolution=info.resolution, features=info.features).data ==
           collect(1.0:6.0)
 end
@@ -520,9 +521,9 @@ end
                     @test c.level == level
                     @test c.shuffle == shuffle
                 end
-                m1 = get_metadata(store, 1, "load"; resolution=Hour(1))
+                m1 = get_metadata(store, 1, Component, "load"; resolution=Hour(1))
                 @test get_array_by_hash(store, m1.data_hash) == collect(1.0:12.0)
-                m2 = get_metadata(store, 2, "load"; resolution=Hour(1))
+                m2 = get_metadata(store, 2, Component, "load"; resolution=Hour(1))
                 @test get_array_by_hash(store, m2.data_hash) == collect(13.0:24.0)
             finally
                 TimeSeriesStore.close!(store)
@@ -583,10 +584,64 @@ end
     add_time_series!(batch, 800, "Generator", Component, ts)
     @test_throws TimeSeriesStore.DuplicateTimeSeriesError add_time_series_bulk!(store, batch)
     @test length(batch) == 0
-    @test isempty(get_time_series_keys(store, 800))
+    @test isempty(get_time_series_keys(store, 800, Component))
 
     # The batch is reusable after a failed submit.
     add_time_series!(batch, 800, "Generator", Component, ts)
     keys = add_time_series_bulk!(store, batch)
     @test length(keys) == 1
+end
+
+@testset "owner category disambiguates a shared owner_id" begin
+    # A Component and a SupplementalAttribute may reuse the SAME numeric owner_id
+    # while keeping independent time series. Add identical-attribute
+    # SingleTimeSeries to each and assert they coexist and are independently
+    # readable / removable.
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+    owner_id = 1234
+
+    comp_vals = collect(1.0:24.0)
+    supp_vals = collect(100.0:123.0)
+
+    comp_key = add_time_series!(
+        store, owner_id, "Generator", Component,
+        SingleTimeSeries(initial, resolution, comp_vals, "load"),
+    )
+    supp_key = add_time_series!(
+        store, owner_id, "Outage", SupplementalAttribute,
+        SingleTimeSeries(initial, resolution, supp_vals, "load"),
+    )
+
+    # Two distinct owners despite the shared numeric id.
+    @test get_counts(store).components_with_time_series == 2
+
+    # Each category reads back its own data, key-based...
+    @test get_time_series(store, comp_key).data == comp_vals
+    @test get_time_series(store, supp_key).data == supp_vals
+
+    # ...and attribute-addressed, keyed on the category.
+    @test get_time_series(SingleTimeSeries, store, owner_id, Component, "load"; resolution=resolution).data == comp_vals
+    @test get_time_series(SingleTimeSeries, store, owner_id, SupplementalAttribute, "load"; resolution=resolution).data == supp_vals
+
+    # has_time_series / get_metadata are independent per category.
+    @test has_time_series(store, owner_id, Component, "load"; resolution=resolution)
+    @test has_time_series(store, owner_id, SupplementalAttribute, "load"; resolution=resolution)
+
+    # get_time_series_keys is scoped to (owner_id, owner_category).
+    comp_keys = get_time_series_keys(store, owner_id, Component)
+    supp_keys = get_time_series_keys(store, owner_id, SupplementalAttribute)
+    @test length(comp_keys) == 1
+    @test length(supp_keys) == 1
+    @test key_info(comp_keys[1]).owner_category == Component
+    @test key_info(supp_keys[1]).owner_category == SupplementalAttribute
+
+    # Removing the component series leaves the supplemental one intact.
+    remove_time_series!(store, owner_id, Component, "load"; resolution=resolution)
+    @test !has_time_series(store, owner_id, Component, "load"; resolution=resolution)
+    @test has_time_series(store, owner_id, SupplementalAttribute, "load"; resolution=resolution)
+    @test get_time_series(store, supp_key).data == supp_vals
+    @test isempty(get_time_series_keys(store, owner_id, Component))
+    @test length(get_time_series_keys(store, owner_id, SupplementalAttribute)) == 1
 end

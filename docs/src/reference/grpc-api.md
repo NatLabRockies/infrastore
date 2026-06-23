@@ -51,6 +51,7 @@ message TimeSeriesKey {
   string         name             = 3;
   int64          resolution_ms    = 4;   // 0 = unset
   Features       features         = 5;
+  OwnerCategory  owner_category   = 6;   // part of the owner identity / key
 }
 
 message TimeSeriesMetadata {
@@ -82,6 +83,7 @@ message ListReq {
   optional string         name             = 4;
   optional int64          resolution_ms    = 5;
   Features                features         = 6;   // subset match
+  optional OwnerCategory  owner_category   = 7;
 }
 message ListResp { repeated TimeSeriesMetadata metadata = 1; }
 
@@ -100,7 +102,7 @@ message GetResp {
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
 }
 
-message KeysReq  { int64 owner_id = 1; }
+message KeysReq  { int64 owner_id = 1; OwnerCategory owner_category = 2; }
 message KeysResp { repeated TimeSeriesKey keys = 1; }
 
 message ResolutionsReq  { optional TimeSeriesType time_series_type = 1; }
@@ -159,11 +161,12 @@ metadata is required. See [Server Configuration](./server-config.md).
 core types, mapping gRPC `Status` codes to `TimeSeriesError::ConnectionError`:
 
 ```rust
+use time_series_store_core::OwnerCategory;
 use time_series_store_server::client::RemoteClient;
 
 let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
 let counts = client.get_counts().await?;
-let keys = client.get_time_series_keys("42".into()).await?;
+let keys = client.get_time_series_keys(42, OwnerCategory::Component).await?;
 let data = client.get_time_series(&keys[0], None).await?;
 ```
 

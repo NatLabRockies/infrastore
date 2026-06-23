@@ -318,12 +318,14 @@ int32_t ts_store_flush(struct TsStore *handle);
  *
  * # Safety
  *
- * `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+ * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+ * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
  * value and `out_data_hash` must be valid for 32 bytes.
  */
 int32_t ts_store_get_metadata(const struct TsStore *handle,
                               int64_t owner_id,
+                              int32_t owner_category,
                               const char *name,
                               int64_t resolution_ms,
                               const char *features_json,
@@ -341,12 +343,14 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+ * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+ * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
  * `bool`.
  */
 int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               int64_t owner_id,
+                              int32_t owner_category,
                               const char *name,
                               int64_t resolution_ms,
                               const char *features_json,
@@ -359,11 +363,13 @@ int32_t ts_store_has_by_attrs(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle; `owner_id` is a plain integer;
- * `out_present` valid for writing one bool.
+ * `handle` must be a live store handle; `owner_id` is a plain integer and
+ * `owner_category` (`0` = Component, `1` = SupplementalAttribute) identifies the
+ * owner category; `out_present` valid for writing one bool.
  */
 int32_t ts_store_has_for_owner(const struct TsStore *handle,
                                int64_t owner_id,
+                               int32_t owner_category,
                                int32_t ts_type,
                                bool use_type,
                                bool *out_present);
@@ -374,11 +380,13 @@ int32_t ts_store_has_for_owner(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+ * `handle` must be a live mutable store handle. `owner_id` and `owner_category`
+ * (`0` = Component, `1` = SupplementalAttribute) identify the owner. Required strings
  * must be null-terminated UTF-8, and `features_json` may be null.
  */
 int32_t ts_store_remove_by_attrs(struct TsStore *handle,
                                  int64_t owner_id,
+                                 int32_t owner_category,
                                  const char *name,
                                  int64_t resolution_ms,
                                  const char *features_json);
@@ -644,8 +652,8 @@ int32_t ts_store_add_batch(struct TsStore *handle,
 int32_t ts_store_transform_single_time_series(struct TsStore *handle,
                                               int64_t horizon_ms,
                                               int64_t interval_ms,
-                                              int32_t _owner_category,
-                                              int64_t _resolution_ms,
+                                              int32_t owner_category,
+                                              int64_t resolution_ms,
                                               uint64_t *out_count);
 
 /**
@@ -655,7 +663,8 @@ int32_t ts_store_transform_single_time_series(struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+ * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+ * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
  * one value, `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for
  * writing one pointer. The returned percentile buffer must be released exactly once with
@@ -663,6 +672,7 @@ int32_t ts_store_transform_single_time_series(struct TsStore *handle,
  */
 int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             int64_t owner_id,
+                                            int32_t owner_category,
                                             const char *name,
                                             int64_t resolution_ms,
                                             const char *features_json,
@@ -683,12 +693,14 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+ * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+ * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
  * one value and `out_data_hash` must be valid for 32 bytes.
  */
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        int64_t owner_id,
+                                       int32_t owner_category,
                                        const char *name,
                                        int32_t ts_type,
                                        int64_t resolution_ms,
@@ -728,7 +740,8 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
  *
  * - `handle` must be a live, non-null store handle created by this library.
  *   No concurrent mutation is permitted for the duration of the call.
- * - `owner_id` is a plain integer. `name` must point to a valid, null-terminated
+ * - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+ *   identify the owner. `name` must point to a valid, null-terminated
  *   UTF-8 string for the duration of the call; `features_json` may be null.
  * - All `out_*` scalar pointers must be valid for writing one value each.
  * - `out_dims` must be valid for writing one pointer; the returned pointer
@@ -745,6 +758,7 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
  */
 int32_t ts_store_get_forecast(const struct TsStore *handle,
                               int64_t owner_id,
+                              int32_t owner_category,
                               const char *name,
                               int32_t ts_type,
                               int64_t resolution_ms,
@@ -819,12 +833,14 @@ int32_t ts_store_get_forecast_by_key(const struct TsStore *handle,
  *
  * # Safety
  *
- * `owner_id` is a plain integer. `name` must point to a valid, null-terminated
+ * `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+ * identify the owner. `name` must point to a valid, null-terminated
  * UTF-8 string. `features_json`, when non-null, must be a null-terminated UTF-8
  * JSON object. `out_key` must be valid for writing one pointer. The returned key
  * must be released exactly once with `ts_key_free`.
  */
 int32_t ts_make_key_from_attrs(int64_t owner_id,
+                               int32_t owner_category,
                                const char *name,
                                int32_t ts_type,
                                int64_t resolution_ms,
@@ -844,19 +860,24 @@ int32_t ts_make_key_from_attrs(int64_t owner_id,
  *
  * # Safety
  *
- * `handle` must be a live store handle and `owner_id` is a plain integer.
+ * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+ * Component, `1` = SupplementalAttribute) identify the owner.
  * `out_keys` must be valid for writing one pointer and `out_len` for writing one
  * `u64`.
  */
 int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
                                       int64_t owner_id,
+                                      int32_t owner_category,
                                       struct TsKey ***out_keys,
                                       uint64_t *out_len);
 
 /**
  * List time series metadata as a JSON array string (see `metadata_rows_to_json`
  * for the per-row shape). When `has_owner` is true only `owner_id`'s rows
- * are returned; otherwise the whole store is listed.
+ * are returned; when `has_owner_category` is true only rows whose owner category
+ * matches `owner_category` (`0` = Component, `1` = SupplementalAttribute) are
+ * returned. The two filters are independent; with neither set the whole store is
+ * listed.
  *
  * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
  * learn the byte length via `out_len`, then call again with a buffer of at
@@ -865,13 +886,15 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle. `has_owner` and `owner_id` are plain
- * scalars. `out_len` must be writable; `buf` must be null or valid for `cap`
- * bytes.
+ * `handle` must be a live store handle. `has_owner`, `owner_id`,
+ * `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
+ * writable; `buf` must be null or valid for `cap` bytes.
  */
 int32_t ts_store_list_metadata(const struct TsStore *handle,
                                bool has_owner,
                                int64_t owner_id,
+                               bool has_owner_category,
+                               int32_t owner_category,
                                char *buf,
                                uint64_t cap,
                                uint64_t *out_len);
@@ -908,15 +931,17 @@ void ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
  * # Safety
  *
  * `key` must be a live key handle created by this library. `out_type`,
- * `out_resolution_ms`, `out_owner_id`, `out_name_len`, and `out_features_len`
- * must each be valid for writing one value. `name_buf` / `features_buf` may be
- * null; when non-null they must be valid for writing `name_cap` / `features_cap`
- * bytes respectively.
+ * `out_resolution_ms`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
+ * `out_features_len` must each be valid for writing one value. `out_owner_category`
+ * receives `0` (Component) or `1` (SupplementalAttribute). `name_buf` /
+ * `features_buf` may be null; when non-null they must be valid for writing
+ * `name_cap` / `features_cap` bytes respectively.
  */
 int32_t ts_key_attributes(const struct TsKey *key,
                           int32_t *out_type,
                           int64_t *out_resolution_ms,
                           int64_t *out_owner_id,
+                          int32_t *out_owner_category,
                           char *name_buf,
                           uint64_t name_cap,
                           uint64_t *out_name_len,
@@ -959,12 +984,14 @@ void ts_buffer_free_u64(uint64_t *ptr, uint64_t len);
  *
  * # Safety
  *
- * `handle` must be a live store handle. `owner_id` is a plain integer. Required strings must be
+ * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
+ * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. `out_present` must be valid for writing one
  * `bool`.
  */
 int32_t ts_store_has_typed(const struct TsStore *handle,
                            int64_t owner_id,
+                           int32_t owner_category,
                            const char *name,
                            int32_t ts_type,
                            int64_t resolution_ms,
@@ -976,11 +1003,13 @@ int32_t ts_store_has_typed(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live mutable store handle. `owner_id` is a plain integer. Required strings
+ * `handle` must be a live mutable store handle. `owner_id` and `owner_category`
+ * (`0` = Component, `1` = SupplementalAttribute) identify the owner. Required strings
  * must be null-terminated UTF-8, and `features_json` may be null.
  */
 int32_t ts_store_remove_typed(struct TsStore *handle,
                               int64_t owner_id,
+                              int32_t owner_category,
                               const char *name,
                               int32_t ts_type,
                               int64_t resolution_ms,
@@ -992,10 +1021,14 @@ int32_t ts_store_remove_typed(struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live mutable store handle. `has_owner` and `owner_id` are
- * plain scalars.
+ * `handle` must be a live mutable store handle. `has_owner`, `owner_id`, and
+ * `owner_category` are plain scalars; when `has_owner` is true `owner_category`
+ * (`0` = Component, `1` = SupplementalAttribute) scopes the clear to one owner.
  */
-int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id);
+int32_t ts_store_clear(struct TsStore *handle,
+                       bool has_owner,
+                       int64_t owner_id,
+                       int32_t owner_category);
 
 /**
  * Reassign every time series owned by `old_owner_id` to `new_owner_id`.
@@ -1005,12 +1038,14 @@ int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id)
  * # Safety
  *
  * `handle` must be a live mutable store handle. `old_owner_id` and
- * `new_owner_id` are plain integers. When non-null, `out_updated` must point to
- * writable `u64` storage.
+ * `new_owner_id` are plain integers; `owner_category` (`0` = Component, `1` =
+ * SupplementalAttribute) identifies the owner category. When non-null,
+ * `out_updated` must point to writable `u64` storage.
  */
 int32_t ts_store_replace_owner(struct TsStore *handle,
                                int64_t old_owner_id,
                                int64_t new_owner_id,
+                               int32_t owner_category,
                                uint64_t *out_updated);
 
 /**

@@ -151,10 +151,11 @@ fn add_forecast(
                 )
                 .unwrap();
             store
-                .transform_single_time_series(horizon, interval)
+                .transform_single_time_series(horizon, interval, None, None)
                 .unwrap();
             return TimeSeriesKey {
                 owner_id: owner,
+                owner_category: OwnerCategory::Component,
                 time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
                 name: name.to_string(),
                 resolution: Some(resolution),
