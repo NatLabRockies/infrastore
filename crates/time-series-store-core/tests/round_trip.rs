@@ -151,6 +151,13 @@ fn deduplication_via_content_addressing() {
     assert_eq!(counts.static_time_series, 2);
     assert_eq!(counts.components_with_time_series, 2);
 
+    // Two SingleTimeSeries associations, but they share one content-addressed array.
+    assert_eq!(
+        store.counts_by_type().unwrap(),
+        vec![(TimeSeriesType::SingleTimeSeries, 2)]
+    );
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }

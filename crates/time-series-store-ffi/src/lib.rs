@@ -979,6 +979,78 @@ pub unsafe extern "C" fn ts_store_get_resolutions(
     TS_OK
 }
 
+/// Association count grouped by time series type, as a JSON array of
+/// `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
+/// `ts_store_list_keys`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+/// null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_counts_by_type(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let counts = match store.inner.counts_by_type() {
+        Ok(c) => c,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = counts
+        .iter()
+        .map(|(ts_type, n)| {
+            let mut o = serde_json::Map::new();
+            o.insert("time_series_type".into(), Value::from(ts_type.as_str()));
+            o.insert("count".into(), Value::from(*n));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Write the number of distinct stored arrays (content hashes); shared series
+/// count once.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_count` must be valid for writing one
+/// `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_num_distinct_arrays(
+    handle: *const TsStoreHandle,
+    out_count: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_count.is_null() {
+        set_error("out_count is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.num_distinct_arrays() {
+        Ok(n) => {
+            unsafe { *out_count = n };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Write the store's compression policy.
 ///
 /// `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

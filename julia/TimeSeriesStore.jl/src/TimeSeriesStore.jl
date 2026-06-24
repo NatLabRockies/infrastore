@@ -10,7 +10,8 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        add_time_series!, AddBatch, add_time_series_bulk!,
        get_time_series, get_time_series_keys, key_info, list_keys,
        remove_time_series!,
-       has_time_series, get_counts, get_forecast_parameters, get_resolutions, get_compression,
+       has_time_series, get_counts, counts_by_type, num_distinct_arrays,
+       get_forecast_parameters, get_resolutions, get_compression,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
        open_store, flush!, clear!, replace_owner!,
@@ -1090,6 +1091,42 @@ function get_counts(store::Store)
                  store.handle, a, b, c)
     _check(code)
     return (components_with_time_series=a[], static_time_series=b[], forecasts=c[])
+end
+
+"""
+    counts_by_type(store) -> Vector{NamedTuple}
+
+Association count grouped by time series type, as `(time_series_type, count)`
+NamedTuples (`time_series_type` is the Julia type). One catalog query in the core.
+"""
+function counts_by_type(store::Store)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_counts_by_type, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_counts_by_type, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [(time_series_type=_type_for_name(r["time_series_type"]), count=Int(r["count"]))
+            for r in rows]
+end
+
+"""
+    num_distinct_arrays(store) -> Int
+
+Number of distinct stored arrays (content hashes); series that share an array
+(de-duplicated by content) count once.
+"""
+function num_distinct_arrays(store::Store)
+    out = Ref{Int64}(0)
+    code = ccall((:ts_store_num_distinct_arrays, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Int64}), store.handle, out)
+    _check(code)
+    return Int(out[])
 end
 
 """

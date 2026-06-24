@@ -292,6 +292,32 @@ int32_t ts_store_get_resolutions(const struct TsStore *handle,
                                  uint64_t *out_len);
 
 /**
+ * Association count grouped by time series type, as a JSON array of
+ * `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
+ * `ts_store_list_keys`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+ * null or valid for `cap` bytes.
+ */
+int32_t ts_store_counts_by_type(const struct TsStore *handle,
+                                char *buf,
+                                uint64_t cap,
+                                uint64_t *out_len);
+
+/**
+ * Write the number of distinct stored arrays (content hashes); shared series
+ * count once.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_count` must be valid for writing one
+ * `i64`.
+ */
+int32_t ts_store_num_distinct_arrays(const struct TsStore *handle, int64_t *out_count);
+
+/**
  * Write the store's compression policy.
  *
  * `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

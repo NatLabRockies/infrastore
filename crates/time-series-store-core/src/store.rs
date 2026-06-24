@@ -1119,6 +1119,17 @@ impl Store {
         })
     }
 
+    /// Association count grouped by time series type. Replaces a binding-side
+    /// scan-and-group with one catalog query.
+    pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
+        self.metadata.counts_by_type()
+    }
+
+    /// Number of distinct stored arrays (content hashes); shared series count once.
+    pub fn num_distinct_arrays(&self) -> Result<i64> {
+        self.metadata.count_distinct_arrays()
+    }
+
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);

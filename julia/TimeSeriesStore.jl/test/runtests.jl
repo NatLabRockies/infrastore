@@ -482,6 +482,17 @@ end
     @test get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE) ==
           [Millisecond(Minute(5)), Millisecond(Hour(1))]
     @test isempty(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC))
+
+    # counts_by_type: all four are SingleTimeSeries here.
+    cbt = counts_by_type(store)
+    @test length(cbt) == 1
+    @test cbt[1].time_series_type == SingleTimeSeries
+    @test cbt[1].count == 4
+    # num_distinct_arrays: the two "load" Hour(1) series share content (same vals,
+    # initial, resolution) and dedup to one array; "wind" and the supp-attr "load"
+    # add two more distinct owner/name combos but identical values still dedup by
+    # content hash, so distinct arrays == 1.
+    @test num_distinct_arrays(store) == 1
 end
 
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin

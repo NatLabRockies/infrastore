@@ -343,6 +343,12 @@ int32_t ts_store_add_batch(struct TsStore *handle, struct TsBatch *batch,
 ```c
 int32_t ts_store_counts(const struct TsStore *handle, int64_t *out_components_with_time_series,
                         int64_t *out_static_time_series, int64_t *out_forecasts);
+/* Association count per type as a JSON array of {time_series_type, count};
+   probe-then-fetch. */
+int32_t ts_store_counts_by_type(const struct TsStore *handle,
+                                char *buf, uint64_t cap, uint64_t *out_len);
+/* Distinct stored arrays (content hashes); shared arrays count once. */
+int32_t ts_store_num_distinct_arrays(const struct TsStore *handle, int64_t *out_count);
 /* out_present = false when no forecasts; absent fields are set to -1. */
 int32_t ts_store_get_forecast_parameters(const struct TsStore *handle, bool *out_present,
                                          int64_t *out_horizon_ms, int64_t *out_interval_ms,

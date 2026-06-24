@@ -473,6 +473,36 @@ impl MetadataStore {
         Ok(n)
     }
 
+    /// Association count grouped by time series type, as `(type, count)` pairs.
+    /// One grouped query; types the core does not recognize are skipped.
+    pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT time_series_type, COUNT(*) FROM time_series_associations
+             GROUP BY time_series_type",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts_type, n) = row?;
+            if let Some(ty) = TimeSeriesType::parse(&ts_type) {
+                out.push((ty, n));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Number of distinct stored arrays (content hashes) referenced by any
+    /// association. Series that share an array (de-duplicated by content) count
+    /// once. One `COUNT(DISTINCT)` query.
+    pub fn count_distinct_arrays(&self) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT data_hash) FROM time_series_associations",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
     pub fn has_match(&self, filter: &MetadataFilter) -> Result<bool> {
         Ok(!self.list(filter)?.is_empty())
     }
