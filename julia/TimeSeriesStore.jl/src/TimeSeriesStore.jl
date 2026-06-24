@@ -4,14 +4,16 @@ using Dates
 import JSON
 
 export Store, SingleTimeSeries, NonSequentialTimeSeries,
-       Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios, TimeSeriesKey,
+       Deterministic, DeterministicSingleTimeSeries, AbstractDeterministic,
+       Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, AddBatch, add_time_series_bulk!,
        get_time_series, get_time_series_keys, key_info, list_metadata,
        remove_time_series!,
        has_time_series, get_counts, get_forecast_parameters, get_compression,
        verify_integrity, compact!,
-       get_metadata, get_forecast_metadata, get_array_by_hash, open_store, flush!, clear!, replace_owner!,
+       get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
+       open_store, flush!, clear!, replace_owner!,
        transform_single_time_series!, has_typed, remove_typed!,
        close!,
        init_logging
@@ -205,7 +207,20 @@ end
 # `SingleTimeSeries` via `transform_single_time_series!` and read back as a
 # `Deterministic` (see the type below).
 
-struct Deterministic
+"""
+    AbstractDeterministic
+
+Supertype of [`Deterministic`] and [`DeterministicSingleTimeSeries`], mirroring
+InfrastructureSystems.jl. Use it as the requested type to read whichever of the
+two concrete forecasts is stored under an identity:
+`get_time_series(AbstractDeterministic, store, owner_id, owner_category, name)`.
+The concrete types match only themselves; the family is resolved authoritatively
+by the Rust core (no guess-and-retry), which errors if both concrete types share
+the identity.
+"""
+abstract type AbstractDeterministic end
+
+struct Deterministic <: AbstractDeterministic
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
@@ -279,7 +294,7 @@ one — e.g. `get_time_series(DeterministicSingleTimeSeries, store, key)` — re
 a [`Deterministic`]. It surfaces as the `time_series_type` of keys returned by
 `get_time_series_keys` / `key_info`.
 """
-abstract type DeterministicSingleTimeSeries end
+abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
 
 # ---- Keys -----------------------------------------------------------------
 
@@ -586,6 +601,29 @@ function get_array_by_hash(store::Store, data_hash::Vector{UInt8}, ::Type{T}=Flo
     bytes = copy(raw)
     ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_len[])
     return collect(reinterpret(T, bytes))
+end
+
+"""
+    count_array_references(store, data_hash) -> (; sts, dst)
+
+Count the `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
+referencing the 32-byte content hash `data_hash`, across all owners. A
+`DeterministicSingleTimeSeries` shares the underlying array of the
+`SingleTimeSeries` it was derived from, so a caller uses these counts to decide
+whether removing a `SingleTimeSeries` would orphan a DST. Resolved by a single
+catalog query in the Rust core.
+"""
+function count_array_references(store::Store, data_hash::Vector{UInt8})
+    length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
+    out_sts = Ref{UInt64}(0)
+    out_dst = Ref{UInt64}(0)
+    code = ccall(
+        (:ts_store_count_array_references, lib_path()), Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, Ref{UInt64}, Ref{UInt64}),
+        store.handle, data_hash, out_sts, out_dst,
+    )
+    _check(code)
+    return (sts = Int(out_sts[]), dst = Int(out_dst[]))
 end
 
 """
@@ -1160,6 +1198,11 @@ const TS_TYPE_DETERMINISTIC                = 2
 const TS_TYPE_DETERMINISTIC_SINGLE         = 3
 const TS_TYPE_PROBABILISTIC                = 4
 const TS_TYPE_SCENARIOS                    = 5
+# Request-only family sentinel (never a stored type): matches a stored
+# `Deterministic` or `DeterministicSingleTimeSeries`. The Rust core resolves it
+# and reports the concrete type that matched. Must match `TS_TYPE_ABSTRACT_DETERMINISTIC`
+# in the C ABI.
+const TS_TYPE_ABSTRACT_DETERMINISTIC       = 100
 
 _features_arg(features) = isempty(features) ? C_NULL : JSON.json(features)
 _category_int(c::OwnerCategory) = Int32(Int(c))
@@ -1629,6 +1672,7 @@ function _get_forecast_raw(
     out_byte_len  = Ref{UInt64}(0)
     out_pct       = Ref{Ptr{Float64}}(C_NULL)
     out_pct_len   = Ref{UInt64}(0)
+    out_matched   = Ref{Int32}(0)
 
     code = ccall(
         (:ts_store_get_forecast, lib_path()), Int32,
@@ -1654,7 +1698,8 @@ function _get_forecast_raw(
          Ref{Ptr{UInt8}},   # out_data
          Ref{UInt64},  # out_data_byte_len
          Ref{Ptr{Float64}}, # out_percentiles
-         Ref{UInt64}), # out_percentiles_len
+         Ref{UInt64},  # out_percentiles_len
+         Ref{Int32}),  # out_matched_type
         store.handle,
         Int64(owner_id),
         _category_int(owner_category),
@@ -1678,12 +1723,14 @@ function _get_forecast_raw(
         out_byte_len,
         out_pct,
         out_pct_len,
+        out_matched,
     )
     _check(code)
 
     return _decode_forecast_outputs(
         out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
         out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+        out_matched,
     )
 end
 
@@ -1693,6 +1740,7 @@ end
 function _decode_forecast_outputs(
     out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
     out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+    out_matched,
 )
     # Copy dims and free FFI buffer.
     nd = Int(out_ndims[])
@@ -1727,6 +1775,7 @@ function _decode_forecast_outputs(
         bytes             = bytes,
         dtype_code        = out_dtype[],
         percentiles       = percentiles,
+        matched_type      = Int(out_matched[]),
     )
 end
 
@@ -1754,6 +1803,7 @@ function _get_forecast_raw(
     out_byte_len  = Ref{UInt64}(0)
     out_pct       = Ref{Ptr{Float64}}(C_NULL)
     out_pct_len   = Ref{UInt64}(0)
+    out_matched   = Ref{Int32}(0)
 
     code = ccall(
         (:ts_store_get_forecast_by_key, lib_path()), Int32,
@@ -1774,7 +1824,8 @@ function _get_forecast_raw(
          Ref{Ptr{UInt8}},   # out_data
          Ref{UInt64},  # out_data_byte_len
          Ref{Ptr{Float64}}, # out_percentiles
-         Ref{UInt64}), # out_percentiles_len
+         Ref{UInt64},  # out_percentiles_len
+         Ref{Int32}),  # out_matched_type
         store.handle,
         key.handle,
         time_range_present,
@@ -1793,12 +1844,14 @@ function _get_forecast_raw(
         out_byte_len,
         out_pct,
         out_pct_len,
+        out_matched,
     )
     _check(code)
 
     return _decode_forecast_outputs(
         out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
         out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+        out_matched,
     )
 end
 
@@ -1815,10 +1868,46 @@ function _decode_forecast_array(bytes::Vector{UInt8}, dtype_code::Int32, dims::V
 end
 
 """
+    get_time_series(AbstractDeterministic, store, owner_id, owner_category, name; resolution, features, time_range)
+
+Fetch whichever of `Deterministic` / `DeterministicSingleTimeSeries` is stored
+under the identity, returned as a [`Deterministic`]. `owner_category` is the
+owner's `OwnerCategory` (`Component` or `SupplementalAttribute`).
+
+The Rust core resolves the family in a single call — no guess-and-retry. A
+genuine miss raises `NotFoundError`; an identity that matches *both* a
+`Deterministic` and a `DeterministicSingleTimeSeries` is ambiguous and raises an
+error (request a concrete type instead). `data` has canonical shape
+`(H, count, element_dims...)`; pass `time_range = (start, end)` (exclusive end)
+to select a window sub-range.
+"""
+function get_time_series(
+    ::Type{AbstractDeterministic},
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    r = _get_forecast_raw(
+        store, owner_id, owner_category, name, TS_TYPE_ABSTRACT_DETERMINISTIC;
+        resolution=resolution, features=features, time_range=time_range,
+    )
+    data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
+    a = _assoc_attrs(store, owner_id, owner_category, name, r.matched_type; resolution=resolution, features=features)
+    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
+                         a.name)
+end
+
+"""
     get_time_series(Deterministic, store, owner_id, owner_category, name; resolution, features, time_range)
 
-Fetch a `Deterministic` forecast (or a `DeterministicSingleTimeSeries` synthesized
-into one). `owner_category` is the owner's `OwnerCategory` (`Component` or
+Fetch a stored `Deterministic` forecast by its concrete type (a
+`DeterministicSingleTimeSeries` is *not* matched — use `AbstractDeterministic`
+for the family, or [`get_time_series(DeterministicSingleTimeSeries, ...)`] for a
+DST). `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`). `data` has canonical shape `(H, count, element_dims...)`
 where `H = horizon / resolution`. Pass `time_range = (start, end)` (exclusive end)
 to select a window sub-range per the InfrastructureSystems.jl convention.
@@ -1833,25 +1922,13 @@ function get_time_series(
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
-    # A request for `Deterministic` matches either a stored `Deterministic` or a
-    # `DeterministicSingleTimeSeries` derived via `transform_single_time_series!`
-    # (synthesized into a Deterministic on read), mirroring InfrastructureSystems.jl.
-    matched_type = TS_TYPE_DETERMINISTIC
-    r = try
-        _get_forecast_raw(
-            store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
-            resolution=resolution, features=features, time_range=time_range,
-        )
-    catch e
-        e isa NotFoundError || rethrow()
-        matched_type = TS_TYPE_DETERMINISTIC_SINGLE
-        _get_forecast_raw(
-            store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
-            resolution=resolution, features=features, time_range=time_range,
-        )
-    end
+    r = _get_forecast_raw(
+        store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
+        resolution=resolution, features=features, time_range=time_range,
+    )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, matched_type; resolution=resolution, features=features)
+    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
+                     resolution=resolution, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                          a.name)
 end

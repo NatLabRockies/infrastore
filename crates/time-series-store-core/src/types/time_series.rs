@@ -51,6 +51,39 @@ impl FromStr for TimeSeriesType {
     }
 }
 
+/// The time series type named by a *read* request.
+///
+/// A request may name a concrete [`TimeSeriesType`], or an abstract family that
+/// resolves to exactly one concrete type at read time. The abstract variant is
+/// never stored and never returned — it exists only to address a forecast whose
+/// concrete type the caller does not (or should not need to) know.
+///
+/// [`RequestedType::AbstractDeterministic`] mirrors InfrastructureSystems.jl's
+/// `AbstractDeterministic` supertype: it matches a stored `Deterministic` *or* a
+/// `DeterministicSingleTimeSeries`. Resolving it replaces the old
+/// guess-and-retry fallback in the bindings with an authoritative catalog
+/// lookup that returns the concrete type that matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestedType {
+    /// Match exactly one concrete stored type.
+    Concrete(TimeSeriesType),
+    /// Match a stored `Deterministic` or `DeterministicSingleTimeSeries`.
+    AbstractDeterministic,
+}
+
+impl RequestedType {
+    /// Does the concrete stored type `concrete` satisfy this request?
+    pub fn matches(self, concrete: TimeSeriesType) -> bool {
+        match self {
+            RequestedType::Concrete(t) => t == concrete,
+            RequestedType::AbstractDeterministic => matches!(
+                concrete,
+                TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries
+            ),
+        }
+    }
+}
+
 /// A time series array at regular intervals.
 ///
 /// `data` is a [`TypedArray`]: its first dimension is time (`length`) and any

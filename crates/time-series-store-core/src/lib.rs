@@ -18,8 +18,8 @@ pub use types::{
     key::TimeSeriesKey,
     metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
     time_series::{
-        Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
-        TimeSeriesData, TimeSeriesType,
+        Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
+        SingleTimeSeries, TimeSeriesData, TimeSeriesType,
     },
 };
 pub use version::DATA_FORMAT_VERSION;

@@ -953,3 +953,246 @@ fn dst_synthesis_multidim_element_shape() {
         },
     );
 }
+
+// ---------------------------------------------------------------------------
+// AbstractDeterministic resolution + matched_type
+//
+// These replace the bindings' former guess-and-retry fallback: the catalog
+// resolves the family to one concrete key (whose `time_series_type` is the
+// matched type), errors explicitly on ambiguity, and reports a genuine miss as
+// `NotFound` rather than masking it.
+// ---------------------------------------------------------------------------
+
+use time_series_store_core::{RequestedType, TimeSeriesError};
+
+// Underlying STS values long enough to derive a DST under (H=2, interval=1).
+fn dst_source_vals() -> Vec<f64> {
+    (0..8).map(|i| i as f64).collect()
+}
+
+#[test]
+fn resolve_abstract_deterministic_matches_real_deterministic() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(4);
+    let interval = Duration::hours(6);
+    let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    let data = f64_arr(vec![4, 3], &vals);
+
+    for_each_backend(
+        {
+            let data = data.clone();
+            move |store| {
+                add_forecast(
+                    store,
+                    1,
+                    "load",
+                    TimeSeriesType::Deterministic,
+                    initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    3,
+                    data.clone(),
+                    None,
+                )
+            }
+        },
+        |store, _key, backend| {
+            let resolved = store
+                .resolve_forecast_key(
+                    1,
+                    OwnerCategory::Component,
+                    "load",
+                    Some(resolution),
+                    Features::new(),
+                    RequestedType::AbstractDeterministic,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved.time_series_type,
+                TimeSeriesType::Deterministic,
+                "{backend}: matched type is the concrete Deterministic"
+            );
+            assert!(
+                store
+                    .get_time_series(&resolved, None)
+                    .unwrap()
+                    .as_deterministic()
+                    .is_some(),
+                "{backend}: reads back as Deterministic"
+            );
+        },
+    );
+}
+
+#[test]
+fn resolve_abstract_deterministic_matches_dst() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+    let data = f64_arr(vec![8], &dst_source_vals());
+
+    for_each_backend(
+        {
+            let data = data.clone();
+            move |store| {
+                add_forecast(
+                    store,
+                    7,
+                    "gen",
+                    TimeSeriesType::DeterministicSingleTimeSeries,
+                    initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    0,
+                    data.clone(),
+                    None,
+                )
+            }
+        },
+        |store, _key, backend| {
+            let resolved = store
+                .resolve_forecast_key(
+                    7,
+                    OwnerCategory::Component,
+                    "gen",
+                    Some(resolution),
+                    Features::new(),
+                    RequestedType::AbstractDeterministic,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved.time_series_type,
+                TimeSeriesType::DeterministicSingleTimeSeries,
+                "{backend}: matched type is the concrete DST"
+            );
+            assert!(
+                store
+                    .get_time_series(&resolved, None)
+                    .unwrap()
+                    .as_deterministic()
+                    .is_some(),
+                "{backend}: DST reads back as Deterministic"
+            );
+        },
+    );
+}
+
+#[test]
+fn resolve_abstract_deterministic_not_found_is_not_masked() {
+    let store = create_store(None, true).unwrap();
+    let err = store
+        .resolve_forecast_key(
+            1,
+            OwnerCategory::Component,
+            "missing",
+            Some(Duration::hours(1)),
+            Features::new(),
+            RequestedType::AbstractDeterministic,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::NotFound),
+        "expected NotFound, got {err:?}"
+    );
+}
+
+#[test]
+fn resolve_abstract_deterministic_ambiguous_errors() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+    let mut store = create_store(None, true).unwrap();
+
+    // A DST (derived from a transformed STS) and a real Deterministic sharing the
+    // same (owner, name, resolution, features) identity — distinct only by type.
+    add_forecast(
+        &mut store,
+        3,
+        "dup",
+        TimeSeriesType::DeterministicSingleTimeSeries,
+        initial,
+        resolution,
+        horizon,
+        interval,
+        0,
+        f64_arr(vec![8], &dst_source_vals()),
+        None,
+    );
+    add_forecast(
+        &mut store,
+        3,
+        "dup",
+        TimeSeriesType::Deterministic,
+        initial,
+        resolution,
+        horizon,
+        interval,
+        2,
+        f64_arr(vec![2, 2], &[0.0, 1.0, 2.0, 3.0]),
+        None,
+    );
+
+    let err = store
+        .resolve_forecast_key(
+            3,
+            OwnerCategory::Component,
+            "dup",
+            Some(resolution),
+            Features::new(),
+            RequestedType::AbstractDeterministic,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "ambiguous family should error, got {err:?}"
+    );
+
+    // A concrete request still disambiguates each one.
+    let d = store
+        .resolve_forecast_key(
+            3,
+            OwnerCategory::Component,
+            "dup",
+            Some(resolution),
+            Features::new(),
+            RequestedType::Concrete(TimeSeriesType::Deterministic),
+        )
+        .unwrap();
+    assert_eq!(d.time_series_type, TimeSeriesType::Deterministic);
+}
+
+#[test]
+fn count_array_references_counts_sts_and_dst() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+    let mut store = create_store(None, true).unwrap();
+
+    // Transforming an STS leaves an STS and a DST sharing one underlying array.
+    let dst_key = add_forecast(
+        &mut store,
+        5,
+        "ref",
+        TimeSeriesType::DeterministicSingleTimeSeries,
+        initial,
+        resolution,
+        horizon,
+        interval,
+        0,
+        f64_arr(vec![8], &dst_source_vals()),
+        None,
+    );
+    let meta = store.get_metadata(&dst_key).unwrap();
+    let (sts, dst) = store.count_array_references(&meta.data_hash).unwrap();
+    assert_eq!(
+        (sts, dst),
+        (1, 1),
+        "one STS and one DST reference the array"
+    );
+}

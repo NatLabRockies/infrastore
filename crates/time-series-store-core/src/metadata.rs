@@ -449,6 +449,30 @@ impl MetadataStore {
         Ok(n)
     }
 
+    /// Count `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
+    /// referencing `data_hash`, returned as `(sts, dst)`. Other types referencing
+    /// the same array (if any) are ignored. One grouped query, no feature fetch.
+    pub fn count_array_references(&self, data_hash: &[u8; 32]) -> Result<(i64, i64)> {
+        let mut stmt = self.conn.prepare(
+            "SELECT time_series_type, COUNT(*) FROM time_series_associations
+             WHERE data_hash = ?1 GROUP BY time_series_type",
+        )?;
+        let rows = stmt.query_map(params![data_hash.as_slice()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut sts = 0i64;
+        let mut dst = 0i64;
+        for row in rows {
+            let (ts_type, n) = row?;
+            match TimeSeriesType::parse(&ts_type) {
+                Some(TimeSeriesType::SingleTimeSeries) => sts = n,
+                Some(TimeSeriesType::DeterministicSingleTimeSeries) => dst = n,
+                _ => {}
+            }
+        }
+        Ok((sts, dst))
+    }
+
     pub fn count_distinct_owners(&self) -> Result<i64> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM

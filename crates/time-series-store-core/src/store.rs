@@ -773,6 +773,92 @@ impl Store {
         self.metadata.get_by_key(key)
     }
 
+    /// Resolve a forecast addressed by attributes plus a [`RequestedType`] to the
+    /// concrete [`TimeSeriesKey`] of the single matching association. The returned
+    /// key's `time_series_type` is the concrete type that matched.
+    ///
+    /// For a [`RequestedType::Concrete`] request this is the unique-index lookup
+    /// in [`Store::get_metadata`]. For [`RequestedType::AbstractDeterministic`] it
+    /// matches a stored `Deterministic` or `DeterministicSingleTimeSeries`,
+    /// returning whichever exists. This is the authoritative replacement for the
+    /// bindings' former guess-and-retry fallback: the catalog — not the caller —
+    /// decides which concrete type satisfies the request.
+    ///
+    /// Errors:
+    /// - [`TimeSeriesError::NotFound`] if nothing matches.
+    /// - [`TimeSeriesError::InvalidParameter`] if an abstract request is
+    ///   ambiguous (both a `Deterministic` and a `DeterministicSingleTimeSeries`
+    ///   share the identity); the caller must then request a concrete type.
+    pub fn resolve_forecast_key(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+        name: &str,
+        resolution: Option<Duration>,
+        features: Features,
+        requested: crate::types::time_series::RequestedType,
+    ) -> Result<TimeSeriesKey> {
+        use crate::types::time_series::RequestedType;
+        // A concrete request maps to exactly one key; reuse the unique-index
+        // lookup so resolution stays cheap and NotFound is reported uniformly.
+        if let RequestedType::Concrete(time_series_type) = requested {
+            let key = TimeSeriesKey {
+                owner_id,
+                owner_category,
+                time_series_type,
+                name: name.to_string(),
+                resolution,
+                features,
+            };
+            self.metadata.get_by_key(&key)?;
+            return Ok(key);
+        }
+
+        // Abstract family: list candidates sharing (owner, name, resolution,
+        // features), then keep those whose concrete type satisfies the family.
+        let f_hash = crate::hash::features_hash(&features);
+        let mut matches = self.metadata.list(&MetadataFilter {
+            owner_id: Some(owner_id),
+            owner_category: Some(owner_category),
+            name: Some(name.to_string()),
+            resolution,
+            features_hash: Some(f_hash),
+            ..Default::default()
+        })?;
+        matches.retain(|m| m.features == features && requested.matches(m.time_series_type));
+        match matches.len() {
+            0 => Err(TimeSeriesError::NotFound),
+            1 => {
+                let m = matches.pop().unwrap();
+                Ok(TimeSeriesKey {
+                    owner_id: m.owner_id,
+                    owner_category: m.owner_category,
+                    time_series_type: m.time_series_type,
+                    name: m.name,
+                    resolution: m.resolution,
+                    features: m.features,
+                })
+            }
+            _ => Err(TimeSeriesError::InvalidParameter(format!(
+                "ambiguous AbstractDeterministic request for '{name}': matches both a \
+                 Deterministic and a DeterministicSingleTimeSeries; request a concrete type"
+            ))),
+        }
+    }
+
+    /// Count `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
+    /// that reference `data_hash`, across all owners, as `(sts, dst)`.
+    ///
+    /// A `DeterministicSingleTimeSeries` shares the underlying array of the
+    /// `SingleTimeSeries` it was derived from, so a binding deciding whether a
+    /// `SingleTimeSeries` can be removed without orphaning a DST needs these
+    /// counts. Resolved by a single grouped catalog query rather than scanning
+    /// every association in the caller.
+    pub fn count_array_references(&self, data_hash: &[u8; 32]) -> Result<(usize, usize)> {
+        let (sts, dst) = self.metadata.count_array_references(data_hash)?;
+        Ok((sts as usize, dst as usize))
+    }
+
     /// Fetch the full stored array for a content hash. The metadata-owning
     /// binding resolves a key to its `data_hash`, then calls this to read the
     /// underlying values.
