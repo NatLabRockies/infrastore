@@ -13,9 +13,10 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
 `get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
 `get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
-`get_forecast_parameters`, `check_static_consistency`, `get_resolutions`, `get_compression`,
-`verify_integrity`, `compact!`, `get_metadata`, `get_array_by_hash`, `open_store`, `flush!`,
-`clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
+`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
+`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
+`get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
+`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
 
 ## Constructors
 
@@ -321,6 +322,8 @@ counts_by_type(store) -> Vector{NamedTuple}   # (time_series_type, count) per st
 num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays count once
 time_series_counts(store) -> NamedTuple   # distinct owners per category + distinct arrays per kind
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
+static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
+forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution); fields `nothing` when none match
 check_static_consistency(store) -> Union{Nothing,NamedTuple}  # shared (initial_timestamp, length) of SingleTimeSeries; throws if they disagree
 get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}  # distinct resolutions, ascending

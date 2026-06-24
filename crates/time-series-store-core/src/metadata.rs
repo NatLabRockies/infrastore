@@ -21,6 +21,60 @@ pub struct MetadataStore {
     read_only: bool,
 }
 
+/// One grouped row of the static-series summary: a distinct
+/// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+/// length)` combination and how many associations share it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub name: String,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub resolution: Option<Duration>,
+    pub time_step_count: Option<i64>,
+    pub count: i64,
+}
+
+/// One grouped row of the forecast summary: a distinct
+/// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+/// horizon, interval, window_count)` combination and how many associations
+/// share it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForecastSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub name: String,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub resolution: Option<Duration>,
+    pub horizon: Option<Duration>,
+    pub interval: Option<Duration>,
+    pub window_count: Option<i64>,
+    pub count: i64,
+}
+
+fn parse_opt_rfc3339(s: Option<String>) -> Result<Option<DateTime<Utc>>> {
+    match s {
+        None => Ok(None),
+        Some(s) => Ok(Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| TimeSeriesError::IntegrityError(format!("bad timestamp: {e}")))?
+                .with_timezone(&Utc),
+        )),
+    }
+}
+
+fn parse_category(s: &str) -> Result<OwnerCategory> {
+    OwnerCategory::parse(s)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad owner_category {s}")))
+}
+
+fn parse_type(s: &str) -> Result<TimeSeriesType> {
+    TimeSeriesType::parse(s)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad time_series_type {s}")))
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct MetadataFilter {
     pub owner_id: Option<i64>,
@@ -530,6 +584,95 @@ impl MetadataStore {
             .conn
             .query_row(&sql, rusqlite::params_from_iter(names), |r| r.get(0))?;
         Ok(n)
+    }
+
+    /// Grouped summary of the static series (SingleTimeSeries +
+    /// NonSequentialTimeSeries): one row per distinct
+    /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+    /// length)` with the association count. One `GROUP BY` query.
+    pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT owner_type, owner_category, time_series_type, name,
+                    initial_timestamp, resolution_ms, length, COUNT(*)
+             FROM time_series_associations
+             WHERE time_series_type IN ('SingleTimeSeries', 'NonSequentialTimeSeries')
+             GROUP BY owner_type, owner_category, time_series_type, name,
+                      initial_timestamp, resolution_ms, length",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (owner_type, oc, tt, name, its, res, len, count) = row?;
+            out.push(StaticSummaryRow {
+                owner_type,
+                owner_category: parse_category(&oc)?,
+                time_series_type: parse_type(&tt)?,
+                name,
+                initial_timestamp: parse_opt_rfc3339(its)?,
+                resolution: res.map(Duration::milliseconds),
+                time_step_count: len,
+                count,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Grouped summary of forecasts: one row per distinct
+    /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+    /// horizon, interval, window_count)` with the association count. One
+    /// `GROUP BY` query.
+    pub fn forecast_summary(&self) -> Result<Vec<ForecastSummaryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT owner_type, owner_category, time_series_type, name,
+                    initial_timestamp, resolution_ms, horizon_ms, interval_ms, count, COUNT(*)
+             FROM time_series_associations
+             WHERE time_series_type IN
+                   ('Deterministic', 'DeterministicSingleTimeSeries', 'Probabilistic', 'Scenarios')
+             GROUP BY owner_type, owner_category, time_series_type, name,
+                      initial_timestamp, resolution_ms, horizon_ms, interval_ms, count",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<i64>>(8)?,
+                r.get::<_, i64>(9)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (owner_type, oc, tt, name, its, res, hor, iv, wcount, count) = row?;
+            out.push(ForecastSummaryRow {
+                owner_type,
+                owner_category: parse_category(&oc)?,
+                time_series_type: parse_type(&tt)?,
+                name,
+                initial_timestamp: parse_opt_rfc3339(its)?,
+                resolution: res.map(Duration::milliseconds),
+                horizon: hor.map(Duration::milliseconds),
+                interval: iv.map(Duration::milliseconds),
+                window_count: wcount,
+                count,
+            });
+        }
+        Ok(out)
     }
 
     /// Distinct `(initial_timestamp, length)` pairs across all `SingleTimeSeries`

@@ -1217,6 +1217,141 @@ pub unsafe extern "C" fn ts_store_list_owner_ids(
     TS_OK
 }
 
+/// Static-series summary as a JSON array. Each object has `owner_type`,
+/// `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+/// `resolution_ms`, `time_step_count`, and `count` (the number of associations in
+/// the group); fields that do not apply are `null`. Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+/// null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_static_summary(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let rows = match store.inner.static_summary() {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let dur = |d: Option<chrono::Duration>| {
+        d.map(|x| Value::from(x.num_milliseconds()))
+            .unwrap_or(Value::Null)
+    };
+    let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
+    let arr: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut o = serde_json::Map::new();
+            o.insert("owner_type".into(), Value::from(r.owner_type.clone()));
+            o.insert(
+                "owner_category".into(),
+                Value::from(r.owner_category.as_str()),
+            );
+            o.insert(
+                "time_series_type".into(),
+                Value::from(r.time_series_type.as_str()),
+            );
+            o.insert("name".into(), Value::from(r.name.clone()));
+            o.insert(
+                "initial_timestamp_ms".into(),
+                r.initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert("resolution_ms".into(), dur(r.resolution));
+            o.insert("time_step_count".into(), opt_i64(r.time_step_count));
+            o.insert("count".into(), Value::from(r.count));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Forecast summary as a JSON array. Each object has `owner_type`,
+/// `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+/// `resolution_ms`, `horizon_ms`, `interval_ms`, `window_count`, and `count` (the
+/// number of associations in the group); fields that do not apply are `null`.
+/// Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+/// null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_forecast_summary(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let rows = match store.inner.forecast_summary() {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let dur = |d: Option<chrono::Duration>| {
+        d.map(|x| Value::from(x.num_milliseconds()))
+            .unwrap_or(Value::Null)
+    };
+    let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
+    let arr: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut o = serde_json::Map::new();
+            o.insert("owner_type".into(), Value::from(r.owner_type.clone()));
+            o.insert(
+                "owner_category".into(),
+                Value::from(r.owner_category.as_str()),
+            );
+            o.insert(
+                "time_series_type".into(),
+                Value::from(r.time_series_type.as_str()),
+            );
+            o.insert("name".into(), Value::from(r.name.clone()));
+            o.insert(
+                "initial_timestamp_ms".into(),
+                r.initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert("resolution_ms".into(), dur(r.resolution));
+            o.insert("horizon_ms".into(), dur(r.horizon));
+            o.insert("interval_ms".into(), dur(r.interval));
+            o.insert("window_count".into(), opt_i64(r.window_count));
+            o.insert("count".into(), Value::from(r.count));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
 /// Write the store's compression policy.
 ///
 /// `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

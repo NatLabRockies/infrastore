@@ -375,6 +375,39 @@ int32_t ts_store_list_owner_ids(const struct TsStore *handle,
                                 uint64_t *out_len);
 
 /**
+ * Static-series summary as a JSON array. Each object has `owner_type`,
+ * `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+ * `resolution_ms`, `time_step_count`, and `count` (the number of associations in
+ * the group); fields that do not apply are `null`. Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+ * null or valid for `cap` bytes.
+ */
+int32_t ts_store_static_summary(const struct TsStore *handle,
+                                char *buf,
+                                uint64_t cap,
+                                uint64_t *out_len);
+
+/**
+ * Forecast summary as a JSON array. Each object has `owner_type`,
+ * `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+ * `resolution_ms`, `horizon_ms`, `interval_ms`, `window_count`, and `count` (the
+ * number of associations in the group); fields that do not apply are `null`.
+ * Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+ * null or valid for `cap` bytes.
+ */
+int32_t ts_store_forecast_summary(const struct TsStore *handle,
+                                  char *buf,
+                                  uint64_t cap,
+                                  uint64_t *out_len);
+
+/**
  * Write the store's compression policy.
  *
  * `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

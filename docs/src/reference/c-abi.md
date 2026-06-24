@@ -349,6 +349,12 @@ int32_t ts_store_counts_by_type(const struct TsStore *handle,
                                 char *buf, uint64_t cap, uint64_t *out_len);
 /* Distinct stored arrays (content hashes); shared arrays count once. */
 int32_t ts_store_num_distinct_arrays(const struct TsStore *handle, int64_t *out_count);
+/* Grouped static / forecast summaries as JSON arrays (one object per group with a
+   `count` field); probe-then-fetch. */
+int32_t ts_store_static_summary(const struct TsStore *handle,
+                                char *buf, uint64_t cap, uint64_t *out_len);
+int32_t ts_store_forecast_summary(const struct TsStore *handle,
+                                  char *buf, uint64_t cap, uint64_t *out_len);
 /* Distinct owners per category + distinct arrays per kind (static/forecast). */
 int32_t ts_store_counts_detailed(const struct TsStore *handle, int64_t *out_components,
                                  int64_t *out_supplemental_attributes,

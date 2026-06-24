@@ -1210,6 +1210,19 @@ impl Store {
             .list_owner_ids(category, time_series_type, resolution)
     }
 
+    /// Grouped static-series summary (one row per distinct owner/name/shape
+    /// combination, with the association count). The binding builds the
+    /// presentation table; the core does the grouping.
+    pub fn static_summary(&self) -> Result<Vec<crate::metadata::StaticSummaryRow>> {
+        self.metadata.static_summary()
+    }
+
+    /// Grouped forecast summary (one row per distinct owner/name/window
+    /// configuration, with the association count).
+    pub fn forecast_summary(&self) -> Result<Vec<crate::metadata::ForecastSummaryRow>> {
+        self.metadata.forecast_summary()
+    }
+
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);

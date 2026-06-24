@@ -171,6 +171,14 @@ fn deduplication_via_content_addressing() {
     owners.sort_unstable();
     assert_eq!(owners, vec![1, 2]);
 
+    // The two associations collapse to one static-summary group with count 2.
+    let summary = store.static_summary().unwrap();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].count, 2);
+    assert_eq!(summary[0].name, "load");
+    assert_eq!(summary[0].time_step_count, Some(24));
+    assert!(store.forecast_summary().unwrap().is_empty());
+
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }

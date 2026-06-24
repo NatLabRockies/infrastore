@@ -11,7 +11,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        get_time_series, get_time_series_keys, key_info, list_keys,
        remove_time_series!,
        has_time_series, get_counts, counts_by_type, num_distinct_arrays,
-       time_series_counts, list_owner_ids,
+       time_series_counts, list_owner_ids, static_summary, forecast_summary,
        get_forecast_parameters, check_static_consistency, get_resolutions, get_compression,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
@@ -1174,6 +1174,82 @@ function list_owner_ids(store::Store, owner_category::OwnerCategory;
     _check(code)
     ids = JSON.parse(String(buf[1:Int(out_len[])]))
     return Int[Int(i) for i in ids]
+end
+
+function _decode_static_summary_row(r::AbstractDict)
+    its = r["initial_timestamp_ms"]
+    return (
+        owner_type = String(r["owner_type"]),
+        owner_category = String(r["owner_category"]),
+        time_series_type = _type_for_name(r["time_series_type"]),
+        name = String(r["name"]),
+        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution = _row_ms(r["resolution_ms"]),
+        time_step_count = _row_int(r["time_step_count"]),
+        count = Int(r["count"]),
+    )
+end
+
+function _decode_forecast_summary_row(r::AbstractDict)
+    its = r["initial_timestamp_ms"]
+    return (
+        owner_type = String(r["owner_type"]),
+        owner_category = String(r["owner_category"]),
+        time_series_type = _type_for_name(r["time_series_type"]),
+        name = String(r["name"]),
+        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution = _row_ms(r["resolution_ms"]),
+        horizon = _row_ms(r["horizon_ms"]),
+        interval = _row_ms(r["interval_ms"]),
+        window_count = _row_int(r["window_count"]),
+        count = Int(r["count"]),
+    )
+end
+
+"""
+    static_summary(store) -> Vector{NamedTuple}
+
+Grouped static-series (SingleTimeSeries + NonSequentialTimeSeries) summary: one
+row per distinct `(owner_type, owner_category, time_series_type, name,
+initial_timestamp, resolution, time_step_count)` with `count` = the number of
+associations in the group. The core does the GROUP BY; callers build any
+presentation table (e.g. a DataFrame).
+"""
+function static_summary(store::Store)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_static_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_static_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [_decode_static_summary_row(r) for r in rows]
+end
+
+"""
+    forecast_summary(store) -> Vector{NamedTuple}
+
+Grouped forecast summary: one row per distinct `(owner_type, owner_category,
+time_series_type, name, initial_timestamp, resolution, horizon, interval,
+window_count)` with `count` = the number of associations in the group.
+"""
+function forecast_summary(store::Store)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_forecast_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_forecast_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [_decode_forecast_summary_row(r) for r in rows]
 end
 
 """

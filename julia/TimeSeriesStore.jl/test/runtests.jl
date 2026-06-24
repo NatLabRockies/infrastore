@@ -552,6 +552,39 @@ end
     @test q.count === nothing
 end
 
+@testset "static_summary and forecast_summary" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    v = Float64[1, 2, 3, 4]
+    # owners 1 & 2 share the static group (Generator/load/Hour(1)/length 4).
+    add_time_series!(store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[9, 9, 9, 9], "load"))
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), v, "wind"))  # separate group (name)
+    add_time_series!(store, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+
+    ss = static_summary(store)
+    @test length(ss) == 2
+    load_row = only(filter(r -> r.name == "load", ss))
+    @test load_row.count == 2                     # grouped across owners 1 and 2
+    @test load_row.time_step_count == 4
+    @test load_row.time_series_type == SingleTimeSeries
+    @test load_row.owner_type == "Generator"
+    @test load_row.resolution == Millisecond(Hour(1))
+    @test only(filter(r -> r.name == "wind", ss)).count == 1
+
+    fs = forecast_summary(store)
+    @test length(fs) == 1
+    @test fs[1].name == "fc"
+    @test fs[1].count == 1
+    @test fs[1].window_count == 2
+    @test fs[1].horizon == Millisecond(Hour(2))
+    @test fs[1].interval == Millisecond(Hour(1))
+    @test fs[1].time_series_type == Deterministic
+end
+
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin
     # The family is resolved in the core; a real miss is no longer masked by the
     # old guess-and-retry fallback.
