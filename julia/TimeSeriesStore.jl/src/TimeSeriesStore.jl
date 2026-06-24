@@ -1253,12 +1253,14 @@ function forecast_summary(store::Store)
 end
 
 """
-    get_forecast_parameters(store)
+    get_forecast_parameters(store; resolution=nothing, interval=nothing)
 
 Return the store's forecast parameters as a NamedTuple
-`(horizon, interval, count, resolution)`. `horizon`, `interval`, and
-`resolution` are `Millisecond` periods (or `nothing`); `count` is an `Int` (or
-`nothing`). Every field is `nothing` when the store holds no forecasts.
+`(horizon, interval, count, resolution, initial_timestamp)`, optionally restricted
+to forecasts with the given `resolution` and/or `interval` (`Period`s).
+`horizon`, `interval`, and `resolution` are `Millisecond` periods (or `nothing`);
+`count` is an `Int` (or `nothing`); `initial_timestamp` is a `DateTime` (or
+`nothing`). Every field is `nothing` when no forecast matches.
 """
 function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period} = nothing,
                                  interval::Union{Nothing, Period} = nothing)
@@ -1266,10 +1268,12 @@ function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period
     fivl = interval === nothing ? Int64(0) : _resolution_to_ms(interval)
     present = Ref{Bool}(false)
     horizon_out = Ref{Int64}(-1); interval_out = Ref{Int64}(-1)
-    count = Ref{Int64}(-1); resolution_out = Ref{Int64}(-1)
+    count = Ref{Int64}(-1); resolution_out = Ref{Int64}(-1); initial_out = Ref{Int64}(-1)
     code = ccall((:ts_store_get_forecast_parameters, lib_path()), Int32,
-                 (Ptr{Cvoid}, Int64, Int64, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-                 store.handle, fres, fivl, present, horizon_out, interval_out, count, resolution_out)
+                 (Ptr{Cvoid}, Int64, Int64, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64},
+                  Ref{Int64}, Ref{Int64}),
+                 store.handle, fres, fivl, present, horizon_out, interval_out, count,
+                 resolution_out, initial_out)
     _check(code)
     _ms(x) = x < 0 ? nothing : Millisecond(x)
     return (
@@ -1277,6 +1281,7 @@ function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period
         interval=_ms(interval_out[]),
         count=(count[] < 0 ? nothing : Int(count[])),
         resolution=_ms(resolution_out[]),
+        initial_timestamp=(initial_out[] < 0 ? nothing : _from_unix_ms(initial_out[])),
     )
 end
 

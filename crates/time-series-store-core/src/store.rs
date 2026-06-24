@@ -118,6 +118,7 @@ pub struct ForecastParameters {
     pub interval: Option<Duration>,
     pub count: Option<usize>,
     pub resolution: Option<Duration>,
+    pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct Store {
@@ -1116,6 +1117,7 @@ impl Store {
                     interval: row.interval,
                     count: row.count,
                     resolution: row.resolution,
+                    initial_timestamp: row.initial_timestamp,
                 });
             }
         }

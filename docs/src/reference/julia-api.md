@@ -324,7 +324,7 @@ time_series_counts(store) -> NamedTuple   # distinct owners per category + disti
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
 static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
 forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
-get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution); fields `nothing` when none match
+get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
 check_static_consistency(store) -> Union{Nothing,NamedTuple}  # shared (initial_timestamp, length) of SingleTimeSeries; throws if they disagree
 get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}  # distinct resolutions, ascending
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open

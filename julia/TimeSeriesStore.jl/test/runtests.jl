@@ -546,6 +546,7 @@ end
     @test p.horizon == Millisecond(Hour(2))
     @test p.interval == Millisecond(Hour(1))
     @test p.count == 2
+    @test p.initial_timestamp == t0
     # A non-matching interval yields no parameters.
     q = get_forecast_parameters(fstore; interval=Hour(3))
     @test q.horizon === nothing

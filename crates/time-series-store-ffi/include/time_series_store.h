@@ -254,10 +254,11 @@ int32_t ts_store_counts(const struct TsStore *handle,
  * with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
  *
  * `out_present` is set to `true` when a matching forecast exists, `false`
- * otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`, and
- * `out_resolution_ms` receives the corresponding value, or `-1` when that field
- * is absent (durations, resolution, and counts are always non-negative when
- * present, so `-1` is an unambiguous "unset" sentinel).
+ * otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`,
+ * `out_resolution_ms`, and `out_initial_ms` (the initial timestamp as unix ms)
+ * receives the corresponding value, or `-1` when that field is absent
+ * (durations, resolution, and counts are always non-negative when present, so
+ * `-1` is an unambiguous "unset" sentinel).
  *
  * # Safety
  *
@@ -272,7 +273,8 @@ int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
                                          int64_t *out_horizon_ms,
                                          int64_t *out_interval_ms,
                                          int64_t *out_count,
-                                         int64_t *out_resolution_ms);
+                                         int64_t *out_resolution_ms,
+                                         int64_t *out_initial_ms);
 
 /**
  * Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.

@@ -876,10 +876,11 @@ pub unsafe extern "C" fn ts_store_counts(
 /// with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
 ///
 /// `out_present` is set to `true` when a matching forecast exists, `false`
-/// otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`, and
-/// `out_resolution_ms` receives the corresponding value, or `-1` when that field
-/// is absent (durations, resolution, and counts are always non-negative when
-/// present, so `-1` is an unambiguous "unset" sentinel).
+/// otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`,
+/// `out_resolution_ms`, and `out_initial_ms` (the initial timestamp as unix ms)
+/// receives the corresponding value, or `-1` when that field is absent
+/// (durations, resolution, and counts are always non-negative when present, so
+/// `-1` is an unambiguous "unset" sentinel).
 ///
 /// # Safety
 ///
@@ -897,6 +898,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
     out_interval_ms: *mut i64,
     out_count: *mut i64,
     out_resolution_ms: *mut i64,
+    out_initial_ms: *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -908,6 +910,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
         || out_interval_ms.is_null()
         || out_count.is_null()
         || out_resolution_ms.is_null()
+        || out_initial_ms.is_null()
     {
         return TS_ERR_NULL_POINTER;
     }
@@ -933,6 +936,10 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
                 *out_interval_ms = p.interval.map(|d| d.num_milliseconds()).unwrap_or(-1);
                 *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
                 *out_resolution_ms = p.resolution.map(|d| d.num_milliseconds()).unwrap_or(-1);
+                *out_initial_ms = p
+                    .initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .unwrap_or(-1);
             }
             TS_OK
         }

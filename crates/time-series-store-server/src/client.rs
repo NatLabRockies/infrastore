@@ -190,6 +190,9 @@ impl RemoteClient {
             interval: resp.interval_ms.map(chrono::Duration::milliseconds),
             count: resp.count.map(|c| c as usize),
             resolution: resp.resolution_ms.map(chrono::Duration::milliseconds),
+            // The forecast-parameters gRPC message does not carry the initial
+            // timestamp; it is not part of the read-only wire contract.
+            initial_timestamp: None,
         })
     }
 

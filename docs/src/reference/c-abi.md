@@ -370,7 +370,7 @@ int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
                                          int64_t filter_resolution_ms, int64_t filter_interval_ms,
                                          bool *out_present, int64_t *out_horizon_ms,
                                          int64_t *out_interval_ms, int64_t *out_count,
-                                         int64_t *out_resolution_ms);
+                                         int64_t *out_resolution_ms, int64_t *out_initial_ms);
 /* All SingleTimeSeries share one (initial_timestamp, length): out_present=false
    when none; error when they disagree. */
 int32_t ts_store_check_static_consistency(const struct TsStore *handle, bool *out_present,
