@@ -521,6 +521,37 @@ end
     @test isempty(list_owner_ids(store, Component; resolution=Minute(5)))
 end
 
+@testset "check_static_consistency and filtered get_forecast_parameters" begin
+    store = Store(in_memory=true)
+    @test check_static_consistency(store) === nothing
+
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "a"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "a"))
+    cs = check_static_consistency(store)
+    @test cs.initial_timestamp == t0
+    @test cs.length == 4
+    # A differing length makes the store inconsistent.
+    add_time_series!(store, 3, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "a"))
+    @test_throws TimeSeriesStore.IntegrityError check_static_consistency(store)
+
+    # Filtered forecast parameters.
+    fstore = Store(in_memory=true)
+    add_time_series!(fstore, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+    p = get_forecast_parameters(fstore; resolution=Hour(1), interval=Hour(1))
+    @test p.horizon == Millisecond(Hour(2))
+    @test p.interval == Millisecond(Hour(1))
+    @test p.count == 2
+    # A non-matching interval yields no parameters.
+    q = get_forecast_parameters(fstore; interval=Hour(3))
+    @test q.horizon === nothing
+    @test q.count === nothing
+end
+
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin
     # The family is resolved in the core; a real miss is no longer masked by the
     # old guess-and-retry fallback.

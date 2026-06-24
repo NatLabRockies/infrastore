@@ -890,7 +890,7 @@ fn get_forecast_parameters_real() {
             }
         },
         |store, _key, backend| {
-            let params = store.get_forecast_parameters().unwrap();
+            let params = store.get_forecast_parameters(None, None).unwrap();
             assert_eq!(params.horizon, Some(horizon), "{backend}: horizon");
             assert_eq!(params.interval, Some(interval), "{backend}: interval");
             assert_eq!(params.count, Some(count), "{backend}: count");
@@ -902,7 +902,7 @@ fn get_forecast_parameters_real() {
 #[test]
 fn get_forecast_parameters_empty_when_no_forecasts() {
     let store = create_store(None, true).unwrap();
-    let params = store.get_forecast_parameters().unwrap();
+    let params = store.get_forecast_parameters(None, None).unwrap();
     assert!(params.horizon.is_none());
     assert!(params.interval.is_none());
     assert!(params.count.is_none());

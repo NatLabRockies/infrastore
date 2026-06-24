@@ -532,6 +532,30 @@ impl MetadataStore {
         Ok(n)
     }
 
+    /// Distinct `(initial_timestamp, length)` pairs across all `SingleTimeSeries`
+    /// associations. Used to verify the store holds a single consistent static
+    /// horizon. One `DISTINCT` query.
+    pub fn distinct_single_initial_and_length(&self) -> Result<Vec<(DateTime<Utc>, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT initial_timestamp, length FROM time_series_associations
+             WHERE time_series_type = ?1",
+        )?;
+        let rows = stmt.query_map(params![TimeSeriesType::SingleTimeSeries.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts_str, len) = row?;
+            let ts = DateTime::parse_from_rfc3339(&ts_str)
+                .map_err(|e| {
+                    TimeSeriesError::IntegrityError(format!("bad initial_timestamp: {e}"))
+                })?
+                .with_timezone(&Utc);
+            out.push((ts, len));
+        }
+        Ok(out)
+    }
+
     /// Distinct owner ids in `category` that have an association, optionally
     /// restricted to one time series type and/or resolution.
     pub fn list_owner_ids(

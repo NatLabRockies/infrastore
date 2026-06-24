@@ -1108,7 +1108,10 @@ impl PyStore {
     /// `interval` (timedeltas), `count` (int), and `resolution` (timedelta).
     /// Each value is `None` when the store holds no forecasts.
     fn get_forecast_parameters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let p = self.inner.get_forecast_parameters().map_err(map_err)?;
+        let p = self
+            .inner
+            .get_forecast_parameters(None, None)
+            .map_err(map_err)?;
         let d = PyDict::new(py);
         let dur = |py: Python<'py>, v: Option<chrono::Duration>| -> PyResult<Option<Py<PyDelta>>> {
             match v {

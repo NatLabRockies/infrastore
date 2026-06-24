@@ -872,21 +872,26 @@ pub unsafe extern "C" fn ts_store_counts(
     }
 }
 
-/// Write the store's forecast parameters.
+/// Write the store's forecast parameters, optionally restricted to forecasts
+/// with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
 ///
-/// `out_present` is set to `true` when the store holds at least one forecast,
-/// `false` otherwise. Each of `out_horizon_ms`, `out_interval_ms`,
-/// `out_count`, and `out_resolution_ms` receives the corresponding value, or
-/// `-1` when that field is absent (durations, resolution, and counts are always
-/// non-negative when present, so `-1` is an unambiguous "unset" sentinel).
+/// `out_present` is set to `true` when a matching forecast exists, `false`
+/// otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`, and
+/// `out_resolution_ms` receives the corresponding value, or `-1` when that field
+/// is absent (durations, resolution, and counts are always non-negative when
+/// present, so `-1` is an unambiguous "unset" sentinel).
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_present` must be valid for writing
-/// one `bool`; every other output pointer must be valid for writing one `i64`.
+/// `handle` must be a live store handle; the filter args are plain scalars.
+/// `out_present` must be valid for writing one `bool`; every other output pointer
+/// must be valid for writing one `i64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_parameters(
     handle: *const TsStoreHandle,
+    filter_resolution_ms: i64,
+    filter_interval_ms: i64,
     out_present: *mut bool,
     out_horizon_ms: *mut i64,
     out_interval_ms: *mut i64,
@@ -906,7 +911,17 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
     {
         return TS_ERR_NULL_POINTER;
     }
-    match store.inner.get_forecast_parameters() {
+    let resolution = if filter_resolution_ms > 0 {
+        Some(Duration::milliseconds(filter_resolution_ms))
+    } else {
+        None
+    };
+    let interval = if filter_interval_ms > 0 {
+        Some(Duration::milliseconds(filter_interval_ms))
+    } else {
+        None
+    };
+    match store.inner.get_forecast_parameters(resolution, interval) {
         Ok(p) => {
             let present = p.horizon.is_some()
                 || p.interval.is_some()
@@ -918,6 +933,52 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
                 *out_interval_ms = p.interval.map(|d| d.num_milliseconds()).unwrap_or(-1);
                 *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
                 *out_resolution_ms = p.resolution.map(|d| d.num_milliseconds()).unwrap_or(-1);
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.
+///
+/// `out_present` is `false` when the store has no `SingleTimeSeries`; otherwise
+/// `true` and `out_initial_ms` / `out_length` receive the shared pair. Returns an
+/// error when more than one distinct pair exists (the catalog is inconsistent).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Each out pointer must be valid for one
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_check_static_consistency(
+    handle: *const TsStoreHandle,
+    out_present: *mut bool,
+    out_initial_ms: *mut i64,
+    out_length: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_present.is_null() || out_initial_ms.is_null() || out_length.is_null() {
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.check_static_consistency() {
+        Ok(None) => {
+            unsafe {
+                *out_present = false;
+                *out_initial_ms = 0;
+                *out_length = 0;
+            }
+            TS_OK
+        }
+        Ok(Some((ts, len))) => {
+            unsafe {
+                *out_present = true;
+                *out_initial_ms = datetime_to_unix_ms(ts).unwrap_or(0);
+                *out_length = len as i64;
             }
             TS_OK
         }

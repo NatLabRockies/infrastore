@@ -358,10 +358,17 @@ int32_t ts_store_counts_detailed(const struct TsStore *handle, int64_t *out_comp
 int32_t ts_store_list_owner_ids(const struct TsStore *handle, int32_t owner_category,
                                 bool has_time_series_type, int32_t time_series_type,
                                 int64_t resolution_ms, char *buf, uint64_t cap, uint64_t *out_len);
-/* out_present = false when no forecasts; absent fields are set to -1. */
-int32_t ts_store_get_forecast_parameters(const struct TsStore *handle, bool *out_present,
-                                         int64_t *out_horizon_ms, int64_t *out_interval_ms,
-                                         int64_t *out_count, int64_t *out_resolution_ms);
+/* out_present = false when no matching forecast; absent fields are set to -1.
+   filter_*_ms <= 0 = no filter on that field. */
+int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
+                                         int64_t filter_resolution_ms, int64_t filter_interval_ms,
+                                         bool *out_present, int64_t *out_horizon_ms,
+                                         int64_t *out_interval_ms, int64_t *out_count,
+                                         int64_t *out_resolution_ms);
+/* All SingleTimeSeries share one (initial_timestamp, length): out_present=false
+   when none; error when they disagree. */
+int32_t ts_store_check_static_consistency(const struct TsStore *handle, bool *out_present,
+                                          int64_t *out_initial_ms, int64_t *out_length);
 /* Distinct resolutions (ms) as a JSON array, ascending; optional type filter.
    Probe-then-fetch (buf=NULL, cap=0 to size). */
 int32_t ts_store_get_resolutions(const struct TsStore *handle,

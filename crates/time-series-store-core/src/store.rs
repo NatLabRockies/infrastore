@@ -1078,15 +1078,22 @@ impl Store {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
-    /// Return the forecast parameters recorded in the store.
+    /// Return the forecast parameters recorded in the store, optionally
+    /// restricted to forecasts with a given `resolution` and/or `interval`.
     ///
-    /// Looks for any metadata row whose type is a forecast type and returns its
-    /// `horizon`, `interval`, `count`, and `resolution`. If no forecasts exist,
-    /// returns [`ForecastParameters::default()`]. When multiple forecasts are
-    /// present, returns the parameters from the first one found (v0 stores a
-    /// single coherent forecast configuration; callers that need per-type
-    /// parameters should use [`Self::list_time_series`] directly).
-    pub fn get_forecast_parameters(&self) -> Result<ForecastParameters> {
+    /// Looks for any metadata row whose type is a forecast type (and matches the
+    /// filters) and returns its `horizon`, `interval`, `count`, and `resolution`.
+    /// If none match, returns [`ForecastParameters::default()`]. When multiple
+    /// match, returns the first one found (v0 stores a single coherent forecast
+    /// configuration; callers that need per-type parameters should use
+    /// [`Self::list_time_series`] directly). `resolution` is pushed into the
+    /// catalog query; `interval` (not a catalog filter column) is matched on the
+    /// returned rows.
+    pub fn get_forecast_parameters(
+        &self,
+        resolution: Option<Duration>,
+        interval: Option<Duration>,
+    ) -> Result<ForecastParameters> {
         use crate::metadata::MetadataFilter;
         // Check each forecast type in priority order.
         for ts_type in [
@@ -1097,18 +1104,42 @@ impl Store {
         ] {
             let rows = self.metadata.list(&MetadataFilter {
                 time_series_type: Some(ts_type),
+                resolution,
                 ..Default::default()
             })?;
-            if let Some(first) = rows.into_iter().next() {
+            for row in rows {
+                if interval.is_some() && row.interval != interval {
+                    continue;
+                }
                 return Ok(ForecastParameters {
-                    horizon: first.horizon,
-                    interval: first.interval,
-                    count: first.count,
-                    resolution: first.resolution,
+                    horizon: row.horizon,
+                    interval: row.interval,
+                    count: row.count,
+                    resolution: row.resolution,
                 });
             }
         }
         Ok(ForecastParameters::default())
+    }
+
+    /// Verify that all `SingleTimeSeries` share one `(initial_timestamp, length)`
+    /// pair. Returns `None` when there are no `SingleTimeSeries`, `Some(pair)`
+    /// when they agree, or [`TimeSeriesError::IntegrityError`] when more than one
+    /// distinct pair is present. One `DISTINCT` query.
+    pub fn check_static_consistency(
+        &self,
+    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, usize)>> {
+        let pairs = self.metadata.distinct_single_initial_and_length()?;
+        match pairs.len() {
+            0 => Ok(None),
+            1 => {
+                let (ts, len) = pairs[0];
+                Ok(Some((ts, len as usize)))
+            }
+            _ => Err(TimeSeriesError::IntegrityError(format!(
+                "SingleTimeSeries have more than one (initial_timestamp, length) set: {pairs:?}"
+            ))),
+        }
     }
 
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts> {

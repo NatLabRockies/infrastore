@@ -12,7 +12,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        remove_time_series!,
        has_time_series, get_counts, counts_by_type, num_distinct_arrays,
        time_series_counts, list_owner_ids,
-       get_forecast_parameters, get_resolutions, get_compression,
+       get_forecast_parameters, check_static_consistency, get_resolutions, get_compression,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
        open_store, flush!, clear!, replace_owner!,
@@ -1184,21 +1184,40 @@ Return the store's forecast parameters as a NamedTuple
 `resolution` are `Millisecond` periods (or `nothing`); `count` is an `Int` (or
 `nothing`). Every field is `nothing` when the store holds no forecasts.
 """
-function get_forecast_parameters(store::Store)
+function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period} = nothing,
+                                 interval::Union{Nothing, Period} = nothing)
+    fres = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    fivl = interval === nothing ? Int64(0) : _resolution_to_ms(interval)
     present = Ref{Bool}(false)
-    horizon = Ref{Int64}(-1); interval = Ref{Int64}(-1)
-    count = Ref{Int64}(-1); resolution = Ref{Int64}(-1)
+    horizon_out = Ref{Int64}(-1); interval_out = Ref{Int64}(-1)
+    count = Ref{Int64}(-1); resolution_out = Ref{Int64}(-1)
     code = ccall((:ts_store_get_forecast_parameters, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-                 store.handle, present, horizon, interval, count, resolution)
+                 (Ptr{Cvoid}, Int64, Int64, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+                 store.handle, fres, fivl, present, horizon_out, interval_out, count, resolution_out)
     _check(code)
     _ms(x) = x < 0 ? nothing : Millisecond(x)
     return (
-        horizon=_ms(horizon[]),
-        interval=_ms(interval[]),
+        horizon=_ms(horizon_out[]),
+        interval=_ms(interval_out[]),
         count=(count[] < 0 ? nothing : Int(count[])),
-        resolution=_ms(resolution[]),
+        resolution=_ms(resolution_out[]),
     )
+end
+
+"""
+    check_static_consistency(store) -> Union{Nothing, NamedTuple}
+
+Return `(initial_timestamp, length)` shared by every `SingleTimeSeries`, or
+`nothing` when there are none. Throws if the stored `SingleTimeSeries` disagree on
+their `(initial_timestamp, length)`. One catalog query.
+"""
+function check_static_consistency(store::Store)
+    present = Ref{Bool}(false); initial_ms = Ref{Int64}(0); len = Ref{Int64}(0)
+    code = ccall((:ts_store_check_static_consistency, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Bool}, Ref{Int64}, Ref{Int64}),
+                 store.handle, present, initial_ms, len)
+    _check(code)
+    return present[] ? (initial_timestamp=_from_unix_ms(initial_ms[]), length=Int(len[])) : nothing
 end
 
 """

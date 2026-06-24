@@ -250,25 +250,46 @@ int32_t ts_store_counts(const struct TsStore *handle,
                         int64_t *out_forecasts);
 
 /**
- * Write the store's forecast parameters.
+ * Write the store's forecast parameters, optionally restricted to forecasts
+ * with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
  *
- * `out_present` is set to `true` when the store holds at least one forecast,
- * `false` otherwise. Each of `out_horizon_ms`, `out_interval_ms`,
- * `out_count`, and `out_resolution_ms` receives the corresponding value, or
- * `-1` when that field is absent (durations, resolution, and counts are always
- * non-negative when present, so `-1` is an unambiguous "unset" sentinel).
+ * `out_present` is set to `true` when a matching forecast exists, `false`
+ * otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`, and
+ * `out_resolution_ms` receives the corresponding value, or `-1` when that field
+ * is absent (durations, resolution, and counts are always non-negative when
+ * present, so `-1` is an unambiguous "unset" sentinel).
  *
  * # Safety
  *
- * `handle` must be a live store handle. `out_present` must be valid for writing
- * one `bool`; every other output pointer must be valid for writing one `i64`.
+ * `handle` must be a live store handle; the filter args are plain scalars.
+ * `out_present` must be valid for writing one `bool`; every other output pointer
+ * must be valid for writing one `i64`.
  */
 int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
+                                         int64_t filter_resolution_ms,
+                                         int64_t filter_interval_ms,
                                          bool *out_present,
                                          int64_t *out_horizon_ms,
                                          int64_t *out_interval_ms,
                                          int64_t *out_count,
                                          int64_t *out_resolution_ms);
+
+/**
+ * Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.
+ *
+ * `out_present` is `false` when the store has no `SingleTimeSeries`; otherwise
+ * `true` and `out_initial_ms` / `out_length` receive the shared pair. Returns an
+ * error when more than one distinct pair exists (the catalog is inconsistent).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. Each out pointer must be valid for one
+ * write.
+ */
+int32_t ts_store_check_static_consistency(const struct TsStore *handle,
+                                          bool *out_present,
+                                          int64_t *out_initial_ms,
+                                          int64_t *out_length);
 
 /**
  * List the distinct resolutions present in the store as a JSON array of integer
