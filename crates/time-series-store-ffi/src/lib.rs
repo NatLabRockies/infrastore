@@ -3033,67 +3033,69 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
 /// binding needs to reconstruct a `TimeSeriesMetadata`. Durations are emitted
 /// as integer milliseconds, `initial_timestamp_ms` as Unix epoch milliseconds,
 /// and `data_hash` as a byte array; absent optionals are `null`.
-fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
-    let dur_ms = |d: &Option<chrono::Duration>| -> Value {
+// Serialize keys to a JSON array. Each object carries the identity tuple
+// (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution_ms`,
+// `features`) plus the per-variant descriptive snapshot. Physical storage detail
+// (`data_hash`, `dtype`, `logical_type`, `percentiles`) is deliberately absent —
+// it is read on demand via the metadata read descriptors.
+fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
+    let dur_ms = |d: Option<chrono::Duration>| -> Value {
         d.map(|x| Value::from(x.num_milliseconds()))
             .unwrap_or(Value::Null)
     };
-    let arr: Vec<Value> = rows
+    let arr: Vec<Value> = keys
         .iter()
-        .map(|m| {
+        .map(|k| {
+            let id = k.identity();
             let mut o = serde_json::Map::new();
-            o.insert("owner_id".into(), Value::from(m.owner_id));
-            o.insert("owner_type".into(), Value::from(m.owner_type.clone()));
+            o.insert("owner_id".into(), Value::from(id.owner_id));
             o.insert(
                 "owner_category".into(),
-                Value::from(m.owner_category.as_str()),
+                Value::from(id.owner_category.as_str()),
             );
             o.insert(
                 "time_series_type".into(),
-                Value::from(m.time_series_type.as_str()),
+                Value::from(id.time_series_type.as_str()),
             );
-            o.insert("name".into(), Value::from(m.name.clone()));
-            o.insert("data_hash".into(), Value::from(m.data_hash.to_vec()));
+            o.insert("name".into(), Value::from(id.name.clone()));
+            o.insert("resolution_ms".into(), dur_ms(id.resolution));
+            o.insert(
+                "features".into(),
+                serde_json::from_str(&features_to_json(&id.features))
+                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            );
+            // Per-variant descriptive snapshot.
+            let (initial_timestamp, length, horizon, interval, count) = match k {
+                core_lib::TimeSeriesKey::Single(s) => {
+                    (Some(s.initial_timestamp), Some(s.length), None, None, None)
+                }
+                core_lib::TimeSeriesKey::NonSequential(s) => {
+                    (None, Some(s.length), None, None, None)
+                }
+                core_lib::TimeSeriesKey::Forecast(f) => (
+                    Some(f.initial_timestamp),
+                    None,
+                    Some(f.horizon),
+                    Some(f.interval),
+                    Some(f.count),
+                ),
+            };
             o.insert(
                 "initial_timestamp_ms".into(),
-                m.initial_timestamp
+                initial_timestamp
                     .and_then(datetime_to_unix_ms)
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
-            o.insert("resolution_ms".into(), dur_ms(&m.resolution));
             o.insert(
                 "length".into(),
-                m.length
-                    .map(|l| Value::from(l as u64))
-                    .unwrap_or(Value::Null),
+                length.map(|l| Value::from(l as u64)).unwrap_or(Value::Null),
             );
-            o.insert("horizon_ms".into(), dur_ms(&m.horizon));
-            o.insert("interval_ms".into(), dur_ms(&m.interval));
+            o.insert("horizon_ms".into(), dur_ms(horizon));
+            o.insert("interval_ms".into(), dur_ms(interval));
             o.insert(
                 "count".into(),
-                m.count
-                    .map(|c| Value::from(c as u64))
-                    .unwrap_or(Value::Null),
-            );
-            o.insert(
-                "features".into(),
-                serde_json::from_str(&features_to_json(&m.features))
-                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-            );
-            o.insert(
-                "percentiles".into(),
-                m.percentiles
-                    .clone()
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-            );
-            o.insert(
-                "logical_type".into(),
-                m.logical_type
-                    .clone()
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
+                count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
             );
             Value::Object(o)
         })
@@ -3101,12 +3103,11 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
     Value::Array(arr).to_string()
 }
 
-/// List time series metadata as a JSON array string (see `metadata_rows_to_json`
-/// for the per-row shape). When `has_owner` is true only `owner_id`'s rows
-/// are returned; when `has_owner_category` is true only rows whose owner category
-/// matches `owner_category` (`0` = Component, `1` = SupplementalAttribute) are
-/// returned. The two filters are independent; with neither set the whole store is
-/// listed.
+/// List time series keys as a JSON array string (see `keys_to_json` for the
+/// per-key shape). When `has_owner` is true only `owner_id`'s keys are returned;
+/// when `has_owner_category` is true only keys whose owner category matches
+/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) are returned.
+/// The two filters are independent; with neither set the whole store is listed.
 ///
 /// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
 /// learn the byte length via `out_len`, then call again with a buffer of at
@@ -3120,7 +3121,7 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
 /// writable; `buf` must be null or valid for `cap` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn ts_store_list_metadata(
+pub unsafe extern "C" fn ts_store_list_keys(
     handle: *const TsStoreHandle,
     has_owner: bool,
     owner_id: i64,
@@ -3154,11 +3155,11 @@ pub unsafe extern "C" fn ts_store_list_metadata(
         };
         filter = filter.owner_category(category);
     }
-    let rows = match store.inner.list_time_series(filter) {
-        Ok(r) => r,
+    let keys = match store.inner.list_keys(filter) {
+        Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
-    let json = metadata_rows_to_json(&rows);
+    let json = keys_to_json(&keys);
     unsafe { write_str_out(&json, buf, cap, out_len) };
     TS_OK
 }

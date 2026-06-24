@@ -442,10 +442,10 @@ end
     @test get_time_series(infos[sts_idx].time_series_type, store, keys[sts_idx]).data == underlying
 
     # Reference counting lives in the core: the STS and its derived DST share one
-    # underlying array, so count_array_references reports one of each.
-    md = list_metadata(store)
-    hash = md[1].data_hash
-    @test all(r.data_hash == hash for r in md)
+    # underlying array, so count_array_references reports one of each. The content
+    # hash is physical storage detail, read via the metadata descriptor — it is not
+    # carried on a key, so list_keys does not expose it.
+    hash = get_metadata(store, 400, Component, "dst").data_hash
     @test count_array_references(store, hash) == (sts = 1, dst = 1)
 end
 

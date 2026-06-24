@@ -356,13 +356,14 @@ int32_t ts_store_flush(struct TsStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */
-/* List metadata as a JSON array. has_owner / has_owner_category are independent
-   filters; with neither set the whole store is listed. Probe-then-fetch: call
-   with buf=NULL, cap=0 to learn the length via out_len, then again with len+1 bytes. */
-int32_t ts_store_list_metadata(const struct TsStore *handle,
-                               bool has_owner, int64_t owner_id,
-                               bool has_owner_category, int32_t owner_category,
-                               char *buf, uint64_t cap, uint64_t *out_len);
+/* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
+   storage detail). has_owner / has_owner_category are independent filters; with
+   neither set the whole store is listed. Probe-then-fetch: call with buf=NULL,
+   cap=0 to learn the length via out_len, then again with len+1 bytes. */
+int32_t ts_store_list_keys(const struct TsStore *handle,
+                           bool has_owner, int64_t owner_id,
+                           bool has_owner_category, int32_t owner_category,
+                           char *buf, uint64_t cap, uint64_t *out_len);
 ```
 
 ## Error Messages

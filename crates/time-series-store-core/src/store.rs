@@ -786,6 +786,19 @@ impl Store {
         self.metadata.list(&filter.into())
     }
 
+    /// List the [`TimeSeriesKey`] of every association matching `filter`. This is
+    /// the key-centric counterpart of [`Self::list_time_series`]: each row is
+    /// reduced to its identifying + descriptive key, dropping physical storage
+    /// detail (`data_hash`, `dtype`, `logical_type`, `percentiles`) which is read
+    /// on demand via [`Self::get_metadata`]. The binding-facing listing path.
+    pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>> {
+        self.metadata
+            .list(&filter.into())?
+            .iter()
+            .map(TimeSeriesKey::from_metadata)
+            .collect()
+    }
+
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.

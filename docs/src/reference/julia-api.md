@@ -329,9 +329,11 @@ replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory)
 close!(store) -> Nothing
 ```
 
-`list_metadata(store; owner_id=nothing, owner_category=nothing, ...)` likewise accepts
-`owner_category` to scope the listing to a single owner; pass both `owner_id` and `owner_category`
-together to filter by owner.
+`list_keys(store; owner_id=nothing, owner_category=nothing)` lists the key of every stored series as
+`NamedTuple`s (identity plus the per-type descriptive snapshot: `initial_timestamp`, `resolution`,
+`length`, `horizon`, `interval`, `count`, `features`). It accepts `owner_id` and `owner_category` as
+independent filters to scope the listing. Physical storage detail (`data_hash`, `logical_type`,
+`percentiles`) is not on a key — read it via `get_metadata` / `get_forecast_metadata`.
 
 ## Errors
 

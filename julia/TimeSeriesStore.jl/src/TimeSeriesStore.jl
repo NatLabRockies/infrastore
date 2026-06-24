@@ -8,7 +8,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, AddBatch, add_time_series_bulk!,
-       get_time_series, get_time_series_keys, key_info, list_metadata,
+       get_time_series, get_time_series_keys, key_info, list_keys,
        remove_time_series!,
        has_time_series, get_counts, get_forecast_parameters, get_compression,
        verify_integrity, compact!,
@@ -896,16 +896,13 @@ _type_for_name(name::AbstractString) =
 _row_ms(x) = x === nothing ? nothing : Millisecond(Int64(x))
 _row_int(x) = x === nothing ? nothing : Int(x)
 
-function _decode_metadata_row(r::AbstractDict)
+function _decode_key_row(r::AbstractDict)
     its = r["initial_timestamp_ms"]
-    pcts = r["percentiles"]
     return (
         owner_id = Int64(r["owner_id"]),
-        owner_type = String(r["owner_type"]),
         owner_category = String(r["owner_category"]),
         time_series_type = _type_for_name(r["time_series_type"]),
         name = String(r["name"]),
-        data_hash = UInt8[UInt8(b) for b in r["data_hash"]],
         initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
         resolution = _row_ms(r["resolution_ms"]),
         length = _row_int(r["length"]),
@@ -913,41 +910,40 @@ function _decode_metadata_row(r::AbstractDict)
         interval = _row_ms(r["interval_ms"]),
         count = _row_int(r["count"]),
         features = Dict{String, Any}(r["features"]),
-        percentiles = pcts === nothing ? nothing : Float64[Float64(p) for p in pcts],
-        logical_type = r["logical_type"] === nothing ? nothing : String(r["logical_type"]),
     )
 end
 
 """
-    list_metadata(store; owner_id=nothing, owner_category=nothing) -> Vector{NamedTuple}
+    list_keys(store; owner_id=nothing, owner_category=nothing) -> Vector{NamedTuple}
 
-List time series metadata rows. When `owner_id` is given only that owner's rows
-are returned, and when `owner_category` (an `OwnerCategory`) is given only rows of
-that category are returned; the two filters are independent. With neither given the
-whole store is listed. Each row is a `NamedTuple` with `owner_id`, `owner_type`,
-`owner_category`, `time_series_type` (the Julia type), `name`, `data_hash`
-(`Vector{UInt8}`), `initial_timestamp`, `resolution`, `length`, `horizon`,
-`interval`, `count`, `features`, `percentiles`, and `logical_type`;
-fields that do not apply to a row are `nothing`.
+List the key of every stored time series. When `owner_id` is given only that
+owner's keys are returned, and when `owner_category` (an `OwnerCategory`) is given
+only keys of that category are returned; the two filters are independent. With
+neither given the whole store is listed. Each key is a `NamedTuple` with
+`owner_id`, `owner_category`, `time_series_type` (the Julia type), `name`,
+`initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, and
+`features`; fields that do not apply to a key's type are `nothing`. Physical
+storage detail (`data_hash`, `logical_type`, `percentiles`) is not on the key —
+read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
 """
-function list_metadata(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                       owner_category::Union{Nothing, OwnerCategory} = nothing)
+function list_keys(store::Store; owner_id::Union{Nothing, Integer} = nothing,
+                   owner_category::Union{Nothing, OwnerCategory} = nothing)
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_list_metadata, lib_path()), Int32,
+    code = ccall((:ts_store_list_keys, lib_path()), Int32,
                  (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
                  store.handle, has_owner, owner_arg, has_category, category_arg, C_NULL, UInt64(0), out_len)
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_list_metadata, lib_path()), Int32,
+    code = ccall((:ts_store_list_keys, lib_path()), Int32,
                  (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
                  store.handle, has_owner, owner_arg, has_category, category_arg, buf, UInt64(length(buf)), out_len)
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [_decode_metadata_row(r) for r in rows]
+    return [_decode_key_row(r) for r in rows]
 end
 
 """

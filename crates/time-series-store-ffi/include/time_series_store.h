@@ -915,12 +915,11 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
                                       uint64_t *out_len);
 
 /**
- * List time series metadata as a JSON array string (see `metadata_rows_to_json`
- * for the per-row shape). When `has_owner` is true only `owner_id`'s rows
- * are returned; when `has_owner_category` is true only rows whose owner category
- * matches `owner_category` (`0` = Component, `1` = SupplementalAttribute) are
- * returned. The two filters are independent; with neither set the whole store is
- * listed.
+ * List time series keys as a JSON array string (see `keys_to_json` for the
+ * per-key shape). When `has_owner` is true only `owner_id`'s keys are returned;
+ * when `has_owner_category` is true only keys whose owner category matches
+ * `owner_category` (`0` = Component, `1` = SupplementalAttribute) are returned.
+ * The two filters are independent; with neither set the whole store is listed.
  *
  * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
  * learn the byte length via `out_len`, then call again with a buffer of at
@@ -933,14 +932,14 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
  * `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
  * writable; `buf` must be null or valid for `cap` bytes.
  */
-int32_t ts_store_list_metadata(const struct TsStore *handle,
-                               bool has_owner,
-                               int64_t owner_id,
-                               bool has_owner_category,
-                               int32_t owner_category,
-                               char *buf,
-                               uint64_t cap,
-                               uint64_t *out_len);
+int32_t ts_store_list_keys(const struct TsStore *handle,
+                           bool has_owner,
+                           int64_t owner_id,
+                           bool has_owner_category,
+                           int32_t owner_category,
+                           char *buf,
+                           uint64_t cap,
+                           uint64_t *out_len);
 
 /**
  * Free the key-handle array returned by `ts_store_get_time_series_keys`.
