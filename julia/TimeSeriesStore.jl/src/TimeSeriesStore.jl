@@ -10,7 +10,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        add_time_series!, AddBatch, add_time_series_bulk!,
        get_time_series, get_time_series_keys, key_info, list_keys,
        remove_time_series!,
-       has_time_series, get_counts, get_forecast_parameters, get_compression,
+       has_time_series, get_counts, get_forecast_parameters, get_resolutions, get_compression,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
        open_store, flush!, clear!, replace_owner!,
@@ -1115,6 +1115,30 @@ function get_forecast_parameters(store::Store)
         count=(count[] < 0 ? nothing : Int(count[])),
         resolution=_ms(resolution[]),
     )
+end
+
+"""
+    get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}
+
+Return the distinct resolutions stored, ascending. When `time_series_type` (a
+`TS_TYPE_*` integer code) is given the result is restricted to that type. This is
+a single catalog query in the core rather than a scan of every association.
+"""
+function get_resolutions(store::Store; time_series_type::Union{Nothing, Integer} = nothing)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_get_resolutions, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_type, type_arg, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_get_resolutions, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_type, type_arg, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    ms = JSON.parse(String(buf[1:Int(out_len[])]))
+    return Millisecond[Millisecond(Int64(m)) for m in ms]
 end
 
 """

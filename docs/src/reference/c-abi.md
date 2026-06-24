@@ -347,6 +347,11 @@ int32_t ts_store_counts(const struct TsStore *handle, int64_t *out_components_wi
 int32_t ts_store_get_forecast_parameters(const struct TsStore *handle, bool *out_present,
                                          int64_t *out_horizon_ms, int64_t *out_interval_ms,
                                          int64_t *out_count, int64_t *out_resolution_ms);
+/* Distinct resolutions (ms) as a JSON array, ascending; optional type filter.
+   Probe-then-fetch (buf=NULL, cap=0 to size). */
+int32_t ts_store_get_resolutions(const struct TsStore *handle,
+                                 bool has_time_series_type, int32_t time_series_type,
+                                 char *buf, uint64_t cap, uint64_t *out_len);
 /* out_kind: 0 = none, 1 = DEFLATE (out_level 0-9 + out_shuffle). */
 int32_t ts_store_get_compression(const struct TsStore *handle, uint8_t *out_kind,
                                  uint8_t *out_level, bool *out_shuffle);

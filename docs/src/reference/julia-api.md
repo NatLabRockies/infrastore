@@ -12,8 +12,8 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
 `Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
 `get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
-`get_counts`, `get_forecast_parameters`, `get_compression`, `verify_integrity`, `compact!`,
-`get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
+`get_counts`, `get_forecast_parameters`, `get_resolutions`, `get_compression`, `verify_integrity`,
+`compact!`, `get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
 `transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
 
 ## Constructors
@@ -317,6 +317,7 @@ flattened array.
 ```julia
 get_counts(store) -> NamedTuple   # (components_with_time_series, static_time_series, forecasts)
 get_forecast_parameters(store) -> NamedTuple  # (horizon, interval, count, resolution); fields `nothing` when no forecasts
+get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}  # distinct resolutions, ascending
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing

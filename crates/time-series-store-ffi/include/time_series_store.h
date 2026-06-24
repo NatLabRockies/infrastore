@@ -271,6 +271,27 @@ int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
                                          int64_t *out_resolution_ms);
 
 /**
+ * List the distinct resolutions present in the store as a JSON array of integer
+ * milliseconds (ascending). When `has_time_series_type` is true the listing is
+ * restricted to that `TS_TYPE_*` code; otherwise all types are considered.
+ *
+ * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
+ * learn the byte length via `out_len`, then again with a buffer of at least
+ * `len + 1` bytes.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; the type filter args are plain scalars.
+ * `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+ */
+int32_t ts_store_get_resolutions(const struct TsStore *handle,
+                                 bool has_time_series_type,
+                                 int32_t time_series_type,
+                                 char *buf,
+                                 uint64_t cap,
+                                 uint64_t *out_len);
+
+/**
  * Write the store's compression policy.
  *
  * `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

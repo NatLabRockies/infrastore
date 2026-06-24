@@ -476,6 +476,12 @@ end
     # Combined filters narrowing to a single key.
     @test length(list_keys(store; owner_id=1, name="wind", resolution=Minute(5))) == 1
     @test isempty(list_keys(store; owner_id=1, name="wind", resolution=Hour(1)))
+
+    # get_resolutions: distinct resolutions, ascending, optionally per type.
+    @test get_resolutions(store) == [Millisecond(Minute(5)), Millisecond(Hour(1))]
+    @test get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE) ==
+          [Millisecond(Minute(5)), Millisecond(Hour(1))]
+    @test isempty(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC))
 end
 
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin
