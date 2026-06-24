@@ -839,10 +839,33 @@ impl Store {
                     features: m.features,
                 })
             }
-            _ => Err(TimeSeriesError::InvalidParameter(format!(
-                "ambiguous AbstractDeterministic request for '{name}': matches both a \
-                 Deterministic and a DeterministicSingleTimeSeries; request a concrete type"
-            ))),
+            _ => {
+                // More than one candidate satisfies the family. This is usually a
+                // Deterministic + DeterministicSingleTimeSeries sharing an identity,
+                // but with `resolution` unset it can also be several forecasts at
+                // different resolutions, so report the actual candidates rather than
+                // asserting a single shape.
+                let mut candidates: Vec<String> = matches
+                    .iter()
+                    .map(|m| match m.resolution {
+                        Some(r) => {
+                            format!(
+                                "{} at {}ms",
+                                m.time_series_type.as_str(),
+                                r.num_milliseconds()
+                            )
+                        }
+                        None => m.time_series_type.as_str().to_string(),
+                    })
+                    .collect();
+                candidates.sort();
+                Err(TimeSeriesError::InvalidParameter(format!(
+                    "ambiguous AbstractDeterministic request for '{name}': {} candidates match \
+                     ({}); request a concrete type and/or resolution",
+                    candidates.len(),
+                    candidates.join(", "),
+                )))
+            }
         }
     }
 

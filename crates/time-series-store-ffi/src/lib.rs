@@ -1396,13 +1396,25 @@ fn ts_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
 /// `DeterministicSingleTimeSeries`) the caller does not need to know in advance.
 pub const TS_TYPE_ABSTRACT_DETERMINISTIC: i32 = 100;
 
-/// Map a read request's `ts_type` code to a [`core_lib::RequestedType`]: a
-/// concrete type (0..=5) or the [`TS_TYPE_ABSTRACT_DETERMINISTIC`] family.
+/// Map a forecast read request's `ts_type` code to a [`core_lib::RequestedType`]:
+/// a concrete forecast type (2..=5) or the [`TS_TYPE_ABSTRACT_DETERMINISTIC`]
+/// family. The non-forecast types `SingleTimeSeries` (0) and
+/// `NonSequentialTimeSeries` (1) are rejected here so the forecast API reports a
+/// clear "invalid time_series_type" error up front rather than failing later in
+/// `emit_forecast_data` after a key is resolved and data is read.
 fn requested_type_from_int(i: i32) -> Option<core_lib::RequestedType> {
+    use core_lib::TimeSeriesType as T;
     if i == TS_TYPE_ABSTRACT_DETERMINISTIC {
-        Some(core_lib::RequestedType::AbstractDeterministic)
-    } else {
-        ts_type_from_int(i).map(core_lib::RequestedType::Concrete)
+        return Some(core_lib::RequestedType::AbstractDeterministic);
+    }
+    match ts_type_from_int(i) {
+        Some(
+            t @ (T::Deterministic
+            | T::DeterministicSingleTimeSeries
+            | T::Probabilistic
+            | T::Scenarios),
+        ) => Some(core_lib::RequestedType::Concrete(t)),
+        _ => None,
     }
 }
 
