@@ -914,33 +914,54 @@ function _decode_key_row(r::AbstractDict)
 end
 
 """
-    list_keys(store; owner_id=nothing, owner_category=nothing) -> Vector{NamedTuple}
+    list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+              name=nothing, resolution=nothing, features=Dict()) -> Vector{NamedTuple}
 
-List the key of every stored time series. When `owner_id` is given only that
-owner's keys are returned, and when `owner_category` (an `OwnerCategory`) is given
-only keys of that category are returned; the two filters are independent. With
-neither given the whole store is listed. Each key is a `NamedTuple` with
-`owner_id`, `owner_category`, `time_series_type` (the Julia type), `name`,
-`initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`, and
-`features`; fields that do not apply to a key's type are `nothing`. Physical
-storage detail (`data_hash`, `logical_type`, `percentiles`) is not on the key —
-read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
+List the key of every stored time series matching the (all-optional, independent)
+filters. With no filter set the whole store is listed.
+
+- `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
+- `time_series_type` — a `TS_TYPE_*` integer code.
+- `name` — exact association name.
+- `resolution` — a `Period`.
+- `features` — match keys whose features include all the given entries (subset).
+
+Each key is a `NamedTuple` with `owner_id`, `owner_category`, `time_series_type`
+(the Julia type), `name`, `initial_timestamp`, `resolution`, `length`, `horizon`,
+`interval`, `count`, and `features`; fields that do not apply to a key's type are
+`nothing`. Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is
+not on the key — read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
 """
 function list_keys(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                   owner_category::Union{Nothing, OwnerCategory} = nothing)
+                   owner_category::Union{Nothing, OwnerCategory} = nothing,
+                   time_series_type::Union{Nothing, Integer} = nothing,
+                   name::Union{Nothing, AbstractString} = nothing,
+                   resolution::Union{Nothing, Period} = nothing,
+                   features::AbstractDict = Dict{String, Any}())
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    name_arg = name === nothing ? C_NULL : String(name)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_len = Ref{UInt64}(0)
     code = ccall((:ts_store_list_keys, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg, C_NULL, UInt64(0), out_len)
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Int64,
+                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 has_type, type_arg, name_arg, resolution_ms, features_json,
+                 C_NULL, UInt64(0), out_len)
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
     code = ccall((:ts_store_list_keys, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg, buf, UInt64(length(buf)), out_len)
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Int64,
+                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 has_type, type_arg, name_arg, resolution_ms, features_json,
+                 buf, UInt64(length(buf)), out_len)
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [_decode_key_row(r) for r in rows]

@@ -449,6 +449,35 @@ end
     @test count_array_references(store, hash) == (sts = 1, dst = 1)
 end
 
+@testset "list_keys filters (owner, type, name, resolution, features)" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    vals = Float64[1, 2, 3, 4]
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load"); features=Dict("scenario" => "high"))
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load"); features=Dict("scenario" => "low"))
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Minute(5), vals, "wind"))
+    add_time_series!(store, 2, "Bus", SupplementalAttribute,
+        SingleTimeSeries(t0, Hour(1), vals, "load"))
+
+    @test length(list_keys(store)) == 4
+    @test length(list_keys(store; owner_id=1)) == 3
+    @test length(list_keys(store; owner_category=SupplementalAttribute)) == 1
+    @test length(list_keys(store; name="load")) == 3
+    @test length(list_keys(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE)) == 4
+    @test length(list_keys(store; resolution=Minute(5))) == 1
+    # Feature filter is a subset match.
+    fkeys = list_keys(store; owner_id=1, name="load", features=Dict("scenario" => "high"))
+    @test length(fkeys) == 1
+    @test fkeys[1].name == "load"
+    @test fkeys[1].resolution == Hour(1)
+    # Combined filters narrowing to a single key.
+    @test length(list_keys(store; owner_id=1, name="wind", resolution=Minute(5))) == 1
+    @test isempty(list_keys(store; owner_id=1, name="wind", resolution=Hour(1)))
+end
+
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin
     # The family is resolved in the core; a real miss is no longer masked by the
     # old guess-and-retry fallback.

@@ -3104,10 +3104,15 @@ fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
 }
 
 /// List time series keys as a JSON array string (see `keys_to_json` for the
-/// per-key shape). When `has_owner` is true only `owner_id`'s keys are returned;
-/// when `has_owner_category` is true only keys whose owner category matches
-/// `owner_category` (`0` = Component, `1` = SupplementalAttribute) are returned.
-/// The two filters are independent; with neither set the whole store is listed.
+/// per-key shape). Every filter is optional and independent; with none set the
+/// whole store is listed. A `has_*` flag of `false` (or a null string pointer)
+/// disables that filter:
+/// - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+/// - `time_series_type` (the `TS_TYPE_*` code)
+/// - `name` (null = no name filter)
+/// - `resolution_ms` (`<= 0` = no resolution filter)
+/// - `features_json` (a JSON object; null or empty = no feature filter; matches as
+///   a subset, i.e. a key whose features include all the given ones)
 ///
 /// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
 /// learn the byte length via `out_len`, then call again with a buffer of at
@@ -3116,9 +3121,10 @@ fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `has_owner`, `owner_id`,
-/// `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
-/// writable; `buf` must be null or valid for `cap` bytes.
+/// `handle` must be a live store handle. The scalar filter flags/values are plain
+/// scalars. `name` and `features_json` must each be null or a null-terminated
+/// UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
+/// `cap` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_list_keys(
@@ -3127,6 +3133,11 @@ pub unsafe extern "C" fn ts_store_list_keys(
     owner_id: i64,
     has_owner_category: bool,
     owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution_ms: i64,
+    features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
     out_len: *mut u64,
@@ -3154,6 +3165,33 @@ pub unsafe extern "C" fn ts_store_list_keys(
             }
         };
         filter = filter.owner_category(category);
+    }
+    if has_time_series_type {
+        match ts_type_from_int(time_series_type) {
+            Some(t) => filter = filter.time_series_type(t),
+            None => {
+                set_error(format!("invalid time_series_type {time_series_type}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    match unsafe { cstr_to_optional_string(name) } {
+        Ok(Some(n)) => filter = filter.name(n),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("name is not valid UTF-8");
+            return c;
+        }
+    }
+    if resolution_ms > 0 {
+        filter = filter.resolution(Duration::milliseconds(resolution_ms));
+    }
+    let features = match unsafe { parse_features_json(features_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    if !features.is_empty() {
+        filter = filter.features(features);
     }
     let keys = match store.inner.list_keys(filter) {
         Ok(k) => k,

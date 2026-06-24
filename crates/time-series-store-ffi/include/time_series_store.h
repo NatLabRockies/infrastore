@@ -916,10 +916,15 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
 
 /**
  * List time series keys as a JSON array string (see `keys_to_json` for the
- * per-key shape). When `has_owner` is true only `owner_id`'s keys are returned;
- * when `has_owner_category` is true only keys whose owner category matches
- * `owner_category` (`0` = Component, `1` = SupplementalAttribute) are returned.
- * The two filters are independent; with neither set the whole store is listed.
+ * per-key shape). Every filter is optional and independent; with none set the
+ * whole store is listed. A `has_*` flag of `false` (or a null string pointer)
+ * disables that filter:
+ * - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+ * - `time_series_type` (the `TS_TYPE_*` code)
+ * - `name` (null = no name filter)
+ * - `resolution_ms` (`<= 0` = no resolution filter)
+ * - `features_json` (a JSON object; null or empty = no feature filter; matches as
+ *   a subset, i.e. a key whose features include all the given ones)
  *
  * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
  * learn the byte length via `out_len`, then call again with a buffer of at
@@ -928,15 +933,21 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle. `has_owner`, `owner_id`,
- * `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
- * writable; `buf` must be null or valid for `cap` bytes.
+ * `handle` must be a live store handle. The scalar filter flags/values are plain
+ * scalars. `name` and `features_json` must each be null or a null-terminated
+ * UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
+ * `cap` bytes.
  */
 int32_t ts_store_list_keys(const struct TsStore *handle,
                            bool has_owner,
                            int64_t owner_id,
                            bool has_owner_category,
                            int32_t owner_category,
+                           bool has_time_series_type,
+                           int32_t time_series_type,
+                           const char *name,
+                           int64_t resolution_ms,
+                           const char *features_json,
                            char *buf,
                            uint64_t cap,
                            uint64_t *out_len);
