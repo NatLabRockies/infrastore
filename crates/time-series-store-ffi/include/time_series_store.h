@@ -318,6 +318,42 @@ int32_t ts_store_counts_by_type(const struct TsStore *handle,
 int32_t ts_store_num_distinct_arrays(const struct TsStore *handle, int64_t *out_count);
 
 /**
+ * Write the detailed counts: distinct owners per category and distinct stored
+ * arrays per kind (static vs forecast).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. Each out pointer must be valid for
+ * writing one `i64`.
+ */
+int32_t ts_store_counts_detailed(const struct TsStore *handle,
+                                 int64_t *out_components,
+                                 int64_t *out_supplemental_attributes,
+                                 int64_t *out_static_time_series,
+                                 int64_t *out_forecasts);
+
+/**
+ * List the distinct owner ids of `owner_category` (`0` = Component, `1` =
+ * SupplementalAttribute) that have a time series, as a JSON array of integers.
+ * Optionally restricted to one `time_series_type` (`TS_TYPE_*` code, gated by
+ * `has_time_series_type`) and/or `resolution_ms` (`<= 0` = no filter).
+ * Probe-then-fetch (see `ts_store_list_keys`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; the filter args are plain scalars.
+ * `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+ */
+int32_t ts_store_list_owner_ids(const struct TsStore *handle,
+                                int32_t owner_category,
+                                bool has_time_series_type,
+                                int32_t time_series_type,
+                                int64_t resolution_ms,
+                                char *buf,
+                                uint64_t cap,
+                                uint64_t *out_len);
+
+/**
  * Write the store's compression policy.
  *
  * `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

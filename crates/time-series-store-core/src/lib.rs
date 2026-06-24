@@ -12,7 +12,9 @@ pub mod version;
 
 pub use error::{Result, TimeSeriesError};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
-pub use store::{AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts};
+pub use store::{
+    AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,
+};
 pub use types::{
     array::{Dtype, TypedArray},
     key::{

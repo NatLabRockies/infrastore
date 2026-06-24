@@ -503,6 +503,58 @@ impl MetadataStore {
         Ok(n)
     }
 
+    /// Number of distinct owner ids in `category` that have any association.
+    pub fn count_distinct_owners_in_category(&self, category: OwnerCategory) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT owner_id) FROM time_series_associations
+             WHERE owner_category = ?1",
+            params![category.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Number of distinct stored arrays referenced by associations of any of
+    /// `types`. Empty `types` yields 0.
+    pub fn count_distinct_arrays_for_types(&self, types: &[TimeSeriesType]) -> Result<i64> {
+        if types.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; types.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(DISTINCT data_hash) FROM time_series_associations
+             WHERE time_series_type IN ({placeholders})"
+        );
+        let names: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
+        let n: i64 = self
+            .conn
+            .query_row(&sql, rusqlite::params_from_iter(names), |r| r.get(0))?;
+        Ok(n)
+    }
+
+    /// Distinct owner ids in `category` that have an association, optionally
+    /// restricted to one time series type and/or resolution.
+    pub fn list_owner_ids(
+        &self,
+        category: OwnerCategory,
+        ts_type: Option<TimeSeriesType>,
+        resolution: Option<Duration>,
+    ) -> Result<Vec<i64>> {
+        let ts_type_str = ts_type.map(|t| t.as_str());
+        let res_ms = resolution.map(duration_to_ms);
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT owner_id FROM time_series_associations
+             WHERE owner_category = ?1
+               AND (?2 IS NULL OR time_series_type = ?2)
+               AND (?3 IS NULL OR resolution_ms = ?3)",
+        )?;
+        let rows = stmt.query_map(params![category.as_str(), ts_type_str, res_ms], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn has_match(&self, filter: &MetadataFilter) -> Result<bool> {
         Ok(!self.list(filter)?.is_empty())
     }

@@ -158,6 +158,19 @@ fn deduplication_via_content_addressing() {
     );
     assert_eq!(store.num_distinct_arrays().unwrap(), 1);
 
+    // Detailed counts: two distinct Component owners, no supplemental attributes,
+    // one shared static array, no forecasts.
+    let detailed = store.time_series_counts_detailed().unwrap();
+    assert_eq!(detailed.components_with_time_series, 2);
+    assert_eq!(detailed.supplemental_attributes_with_time_series, 0);
+    assert_eq!(detailed.static_time_series_count, 1);
+    assert_eq!(detailed.forecast_count, 0);
+    let mut owners = store
+        .list_owner_ids(OwnerCategory::Component, None, None)
+        .unwrap();
+    owners.sort_unstable();
+    assert_eq!(owners, vec![1, 2]);
+
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }

@@ -12,10 +12,10 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
 `Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
 `get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
-`get_counts`, `counts_by_type`, `num_distinct_arrays`, `get_forecast_parameters`, `get_resolutions`,
-`get_compression`, `verify_integrity`, `compact!`, `get_metadata`, `get_array_by_hash`,
-`open_store`, `flush!`, `clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`,
-`remove_typed!`, `close!`.
+`get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
+`get_forecast_parameters`, `get_resolutions`, `get_compression`, `verify_integrity`, `compact!`,
+`get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
+`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
 
 ## Constructors
 
@@ -319,6 +319,8 @@ flattened array.
 get_counts(store) -> NamedTuple   # (components_with_time_series, static_time_series, forecasts)
 counts_by_type(store) -> Vector{NamedTuple}   # (time_series_type, count) per stored type
 num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays count once
+time_series_counts(store) -> NamedTuple   # distinct owners per category + distinct arrays per kind
+list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
 get_forecast_parameters(store) -> NamedTuple  # (horizon, interval, count, resolution); fields `nothing` when no forecasts
 get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}  # distinct resolutions, ascending
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open

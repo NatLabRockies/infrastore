@@ -1051,6 +1051,111 @@ pub unsafe extern "C" fn ts_store_num_distinct_arrays(
     }
 }
 
+/// Write the detailed counts: distinct owners per category and distinct stored
+/// arrays per kind (static vs forecast).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Each out pointer must be valid for
+/// writing one `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_counts_detailed(
+    handle: *const TsStoreHandle,
+    out_components: *mut i64,
+    out_supplemental_attributes: *mut i64,
+    out_static_time_series: *mut i64,
+    out_forecasts: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_components.is_null()
+        || out_supplemental_attributes.is_null()
+        || out_static_time_series.is_null()
+        || out_forecasts.is_null()
+    {
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.time_series_counts_detailed() {
+        Ok(c) => {
+            unsafe {
+                *out_components = c.components_with_time_series;
+                *out_supplemental_attributes = c.supplemental_attributes_with_time_series;
+                *out_static_time_series = c.static_time_series_count;
+                *out_forecasts = c.forecast_count;
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// List the distinct owner ids of `owner_category` (`0` = Component, `1` =
+/// SupplementalAttribute) that have a time series, as a JSON array of integers.
+/// Optionally restricted to one `time_series_type` (`TS_TYPE_*` code, gated by
+/// `has_time_series_type`) and/or `resolution_ms` (`<= 0` = no filter).
+/// Probe-then-fetch (see `ts_store_list_keys`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle; the filter args are plain scalars.
+/// `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_owner_ids(
+    handle: *const TsStoreHandle,
+    owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    resolution_ms: i64,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let ts_type = if has_time_series_type {
+        match ts_type_from_int(time_series_type) {
+            Some(t) => Some(t),
+            None => {
+                set_error(format!("invalid time_series_type {time_series_type}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
+    } else {
+        None
+    };
+    let resolution = if resolution_ms > 0 {
+        Some(Duration::milliseconds(resolution_ms))
+    } else {
+        None
+    };
+    let ids = match store.inner.list_owner_ids(category, ts_type, resolution) {
+        Ok(v) => v,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = ids.iter().map(|id| Value::from(*id)).collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
 /// Write the store's compression policy.
 ///
 /// `out_kind` receives `0` (no compression) or `1` (DEFLATE). For DEFLATE,

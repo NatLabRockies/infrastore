@@ -11,6 +11,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        get_time_series, get_time_series_keys, key_info, list_keys,
        remove_time_series!,
        has_time_series, get_counts, counts_by_type, num_distinct_arrays,
+       time_series_counts, list_owner_ids,
        get_forecast_parameters, get_resolutions, get_compression,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
@@ -1127,6 +1128,52 @@ function num_distinct_arrays(store::Store)
                  (Ptr{Cvoid}, Ref{Int64}), store.handle, out)
     _check(code)
     return Int(out[])
+end
+
+"""
+    time_series_counts(store) -> NamedTuple
+
+Distinct owners per category and distinct stored arrays per kind:
+`(components_with_time_series, supplemental_attributes_with_time_series,
+static_time_series_count, forecast_count)`. Arrays shared by content count once.
+"""
+function time_series_counts(store::Store)
+    a = Ref{Int64}(0); b = Ref{Int64}(0); c = Ref{Int64}(0); d = Ref{Int64}(0)
+    code = ccall((:ts_store_counts_detailed, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+                 store.handle, a, b, c, d)
+    _check(code)
+    return (components_with_time_series=a[],
+            supplemental_attributes_with_time_series=b[],
+            static_time_series_count=c[], forecast_count=d[])
+end
+
+"""
+    list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
+
+Distinct owner ids of `owner_category` (an `OwnerCategory`) that have a time
+series, optionally restricted by `time_series_type` (a `TS_TYPE_*` integer code)
+and/or `resolution` (a `Period`).
+"""
+function list_owner_ids(store::Store, owner_category::OwnerCategory;
+                        time_series_type::Union{Nothing, Integer} = nothing,
+                        resolution::Union{Nothing, Period} = nothing)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    cat = _category_int(owner_category)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_list_owner_ids, lib_path()), Int32,
+                 (Ptr{Cvoid}, Int32, Bool, Int32, Int64, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, cat, has_type, type_arg, resolution_ms, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_list_owner_ids, lib_path()), Int32,
+                 (Ptr{Cvoid}, Int32, Bool, Int32, Int64, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, cat, has_type, type_arg, resolution_ms, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    ids = JSON.parse(String(buf[1:Int(out_len[])]))
+    return Int[Int(i) for i in ids]
 end
 
 """

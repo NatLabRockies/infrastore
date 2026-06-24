@@ -495,6 +495,32 @@ end
     @test num_distinct_arrays(store) == 1
 end
 
+@testset "time_series_counts and list_owner_ids" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    v = Float64[1, 2, 3, 4]
+    add_time_series!(store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "load"))
+    add_time_series!(store, 9, "Bus", SupplementalAttribute,
+        SingleTimeSeries(t0, Hour(1), v, "voltage"))  # shares content with owner 1
+    add_time_series!(store, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+
+    c = time_series_counts(store)
+    @test c.components_with_time_series == 2            # owners 1, 2
+    @test c.supplemental_attributes_with_time_series == 1  # owner 9
+    @test c.static_time_series_count == 2               # [1,2,3,4] (x2 shared) + [5,6,7,8]
+    @test c.forecast_count == 1                         # one Deterministic array
+
+    @test sort!(list_owner_ids(store, Component)) == [1, 2]
+    @test list_owner_ids(store, SupplementalAttribute) == [9]
+    @test list_owner_ids(store, Component;
+        time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC) == [1]
+    @test sort!(list_owner_ids(store, Component; resolution=Hour(1))) == [1, 2]
+    @test isempty(list_owner_ids(store, Component; resolution=Minute(5)))
+end
+
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin
     # The family is resolved in the core; a real miss is no longer masked by the
     # old guess-and-retry fallback.

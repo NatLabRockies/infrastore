@@ -101,6 +101,17 @@ pub struct TimeSeriesCounts {
     pub forecasts: i64,
 }
 
+/// Owner- and array-oriented counts (distinct owners per category, distinct
+/// stored arrays per kind). Unlike [`TimeSeriesCounts`] the time-series counts
+/// here are de-duplicated by array content, and owners are split by category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeSeriesCountsDetailed {
+    pub components_with_time_series: i64,
+    pub supplemental_attributes_with_time_series: i64,
+    pub static_time_series_count: i64,
+    pub forecast_count: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ForecastParameters {
     pub horizon: Option<Duration>,
@@ -1128,6 +1139,44 @@ impl Store {
     /// Number of distinct stored arrays (content hashes); shared series count once.
     pub fn num_distinct_arrays(&self) -> Result<i64> {
         self.metadata.count_distinct_arrays()
+    }
+
+    /// Distinct owners per category and distinct stored arrays per kind (static
+    /// vs forecast). Replaces a binding-side full scan that grouped owners and
+    /// hashes in memory.
+    pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed> {
+        const STATIC: [TimeSeriesType; 2] = [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+        ];
+        const FORECAST: [TimeSeriesType; 4] = [
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ];
+        Ok(TimeSeriesCountsDetailed {
+            components_with_time_series: self
+                .metadata
+                .count_distinct_owners_in_category(OwnerCategory::Component)?,
+            supplemental_attributes_with_time_series: self
+                .metadata
+                .count_distinct_owners_in_category(OwnerCategory::SupplementalAttribute)?,
+            static_time_series_count: self.metadata.count_distinct_arrays_for_types(&STATIC)?,
+            forecast_count: self.metadata.count_distinct_arrays_for_types(&FORECAST)?,
+        })
+    }
+
+    /// Distinct owner ids of `category` that have a time series, optionally
+    /// restricted by type and/or resolution.
+    pub fn list_owner_ids(
+        &self,
+        category: OwnerCategory,
+        time_series_type: Option<TimeSeriesType>,
+        resolution: Option<Duration>,
+    ) -> Result<Vec<i64>> {
+        self.metadata
+            .list_owner_ids(category, time_series_type, resolution)
     }
 
     pub fn compact(&mut self) -> Result<CompactionReport> {
