@@ -164,7 +164,7 @@ async fn missing_key_returns_not_found() {
     let addr = spawn_server(fixture_store()).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let bogus_key = time_series_store_core::TimeSeriesKey {
+    let bogus_key = time_series_store_core::KeyIdentity {
         owner_id: 999,
         owner_category: OwnerCategory::Component,
         time_series_type: TimeSeriesType::SingleTimeSeries,

@@ -103,7 +103,10 @@ pub struct TsStoreHandle {
 }
 
 pub struct TsKeyHandle {
-    inner: core_lib::TimeSeriesKey,
+    // A key handle is a lookup handle: it carries the identity tuple the catalog
+    // resolves. Descriptive window fields (only known for a fully-described key
+    // from add/list) are not carried here.
+    inner: core_lib::KeyIdentity,
 }
 
 /// Accumulates pending add requests for a single all-or-nothing
@@ -450,7 +453,7 @@ pub unsafe extern "C" fn ts_store_add_single(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
+                inner: keys.remove(0).identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
@@ -595,7 +598,7 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
         Ok(mut keys) => {
             unsafe {
                 *out_key = Box::into_raw(Box::new(TsKeyHandle {
-                    inner: keys.remove(0),
+                    inner: keys.remove(0).identity().clone(),
                 }))
             };
             TS_OK
@@ -1039,7 +1042,7 @@ unsafe fn build_key_from_attrs(
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
-) -> Result<core_lib::TimeSeriesKey, i32> {
+) -> Result<core_lib::KeyIdentity, i32> {
     let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
         set_error("name is invalid");
     })?;
@@ -1057,7 +1060,7 @@ unsafe fn build_key_from_attrs(
     } else {
         Some(Duration::milliseconds(resolution_ms))
     };
-    Ok(core_lib::TimeSeriesKey {
+    Ok(core_lib::KeyIdentity {
         owner_id,
         owner_category,
         time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
@@ -1459,7 +1462,7 @@ unsafe fn build_typed_key_from_attrs(
     ts_type: i32,
     resolution_ms: i64,
     features_json: *const c_char,
-) -> Result<core_lib::TimeSeriesKey, i32> {
+) -> Result<core_lib::KeyIdentity, i32> {
     let time_series_type = match ts_type_from_int(ts_type) {
         Some(t) => t,
         None => {
@@ -1547,7 +1550,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
+                inner: keys.remove(0).identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
@@ -1745,7 +1748,7 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
+                inner: keys.remove(0).identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
@@ -2181,7 +2184,11 @@ pub unsafe extern "C" fn ts_store_add_batch(
         Ok(keys) => {
             let mut handles: Vec<*mut TsKeyHandle> = keys
                 .into_iter()
-                .map(|k| Box::into_raw(Box::new(TsKeyHandle { inner: k })))
+                .map(|k| {
+                    Box::into_raw(Box::new(TsKeyHandle {
+                        inner: k.identity().clone(),
+                    }))
+                })
                 .collect();
             // Keep capacity == length so `ts_keys_buffer_free` can reconstruct the Vec.
             handles.shrink_to_fit();
@@ -2568,7 +2575,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
-    let matched_type = ts_type_to_int(key.time_series_type);
+    let matched_type = ts_type_to_int(key.time_series_type());
     let time_range = if time_range_present {
         let start = match unix_ms_to_datetime(time_range_start_ms) {
             Some(d) => d,
@@ -2590,7 +2597,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     } else {
         None
     };
-    let data = match store.inner.get_time_series(&key, time_range) {
+    let data = match store.inner.get_time_series(key.identity(), time_range) {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
@@ -2998,7 +3005,11 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
     };
     let mut handles: Vec<*mut TsKeyHandle> = keys
         .into_iter()
-        .map(|k| Box::into_raw(Box::new(TsKeyHandle { inner: k })))
+        .map(|k| {
+            Box::into_raw(Box::new(TsKeyHandle {
+                inner: k.identity().clone(),
+            }))
+        })
         .collect();
     // Keep capacity == length so `ts_keys_buffer_free` can reconstruct the Vec.
     handles.shrink_to_fit();

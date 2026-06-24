@@ -39,7 +39,7 @@ fn add_and_get_round_trip() {
         )
         .unwrap();
 
-    let got = store.get_time_series(&key, None).unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.data, s.data);
     assert_eq!(single.length, 24);
@@ -182,13 +182,13 @@ fn remove_keeps_array_when_other_refs_exist() {
         .unwrap();
 
     // Remove first association — array still referenced by k2, so k2 must work.
-    store.remove_time_series(&k1).unwrap();
-    let still_there = store.get_time_series(&k2, None).unwrap();
+    store.remove_time_series(k1.identity()).unwrap();
+    let still_there = store.get_time_series(k2.identity(), None).unwrap();
     assert_eq!(still_there.as_single().unwrap().data, s.data);
 
     // Remove second — array is now unreferenced. The store doesn't expose
     // the dropped-array fact directly, but verify_integrity should still pass.
-    store.remove_time_series(&k2).unwrap();
+    store.remove_time_series(k2.identity()).unwrap();
     let report = store.verify_integrity().unwrap();
     assert!(report.ok());
 }
@@ -267,7 +267,9 @@ fn time_range_slicing() {
     // Hours 2..5 (i.e. samples 30, 40, 50).
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
-    let got = store.get_time_series(&key, Some((start, end))).unwrap();
+    let got = store
+        .get_time_series(key.identity(), Some((start, end)))
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 3);
     assert_eq!(single.initial_timestamp, start);
@@ -405,17 +407,17 @@ fn non_sequential_round_trip_and_time_slice() {
         .unwrap();
 
     assert_eq!(
-        key.time_series_type,
+        key.time_series_type(),
         TimeSeriesType::NonSequentialTimeSeries
     );
-    assert_eq!(key.resolution, None);
-    let metadata = store.get_metadata(&key).unwrap();
+    assert_eq!(key.resolution(), None);
+    let metadata = store.get_metadata(key.identity()).unwrap();
     assert_eq!(metadata.timestamps, Some(timestamps.clone()));
     assert_eq!(metadata.resolution, None);
 
     let got = store
         .get_time_series(
-            &key,
+            key.identity(),
             Some((initial + Duration::hours(2), initial + Duration::days(1))),
         )
         .unwrap();

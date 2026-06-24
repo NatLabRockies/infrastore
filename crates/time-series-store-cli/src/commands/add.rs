@@ -29,9 +29,9 @@ pub fn run(
     for k in &keys {
         println!(
             "added {} '{}' (owner {})",
-            k.time_series_type.as_str(),
-            k.name,
-            k.owner_id
+            k.time_series_type().as_str(),
+            k.name(),
+            k.owner_id()
         );
     }
     println!(

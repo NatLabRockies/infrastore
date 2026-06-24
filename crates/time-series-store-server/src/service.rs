@@ -149,7 +149,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         Ok(Response::new(KeysResp {
             keys: keys
                 .iter()
-                .map(time_series_store_proto::convert::key_to_pb)
+                .map(|k| time_series_store_proto::convert::key_to_pb(k.identity()))
                 .collect(),
         }))
     }

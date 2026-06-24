@@ -12,7 +12,7 @@ use rusqlite::{Connection, Transaction, params};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
-use crate::types::key::TimeSeriesKey;
+use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
 use crate::types::time_series::TimeSeriesType;
 
@@ -189,7 +189,7 @@ impl MetadataStore {
     /// Delete an association by primary-key tuple. Returns the number of rows
     /// deleted (0 if no match) and the data_hashes of the removed rows so the
     /// caller can decide whether to drop the underlying array.
-    pub fn delete_by_key(tx: &Transaction<'_>, key: &TimeSeriesKey) -> Result<Vec<[u8; 32]>> {
+    pub fn delete_by_key(tx: &Transaction<'_>, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
         let resolution_ms = key.resolution.map(duration_to_ms);
         let mut stmt = tx.prepare(
@@ -371,20 +371,10 @@ impl MetadataStore {
             owner_category: Some(owner_category),
             ..Default::default()
         })?;
-        Ok(metas
-            .into_iter()
-            .map(|m| TimeSeriesKey {
-                owner_id: m.owner_id,
-                owner_category: m.owner_category,
-                time_series_type: m.time_series_type,
-                name: m.name,
-                resolution: m.resolution,
-                features: m.features,
-            })
-            .collect())
+        metas.iter().map(TimeSeriesKey::from_metadata).collect()
     }
 
-    pub fn get_by_key(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
+    pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),

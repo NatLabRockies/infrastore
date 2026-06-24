@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use time_series_store_core::{
-    Deterministic, Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory,
-    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata,
+    Deterministic, Dtype, FeatureValue, Features, KeyIdentity, NonSequentialTimeSeries,
+    OwnerCategory, Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesMetadata,
     TimeSeriesType, TypedArray,
 };
 
@@ -121,7 +121,10 @@ pub fn features_from_pb(f: pb::Features) -> Result<Features, ConvertError> {
 
 // ---- Key + metadata ----
 
-pub fn key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
+// The protobuf key message carries only the identity tuple (the wire format is
+// identity-addressed), so it maps to a [`KeyIdentity`]. Descriptive window
+// fields are not transported.
+pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
     pb::TimeSeriesKey {
         owner_id: k.owner_id,
         owner_category: pb::OwnerCategory::from(k.owner_category) as i32,
@@ -132,7 +135,7 @@ pub fn key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
     }
 }
 
-pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> {
+pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<KeyIdentity, ConvertError> {
     let owner_category =
         pb::OwnerCategory::try_from(k.owner_category).map_err(|_| ConvertError::InvalidValue {
             field: "owner_category",
@@ -153,7 +156,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> 
         Some(f) => features_from_pb(f)?,
         None => Features::new(),
     };
-    Ok(TimeSeriesKey {
+    Ok(KeyIdentity {
         owner_id: k.owner_id,
         owner_category: OwnerCategory::from(owner_category),
         time_series_type: TimeSeriesType::from(ts_type),

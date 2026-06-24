@@ -11,7 +11,10 @@ use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
 use crate::types::array::TypedArray;
-use crate::types::key::TimeSeriesKey;
+use crate::types::key::{
+    ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
+    TimeSeriesKey,
+};
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
 use crate::types::time_series::{
     Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
@@ -249,14 +252,15 @@ impl Store {
                             element_shape: single.data.element_shape().to_vec(),
                             logical_type: item.logical_type.clone(),
                         },
-                        TimeSeriesKey {
-                            owner_id: item.owner_id,
-                            owner_category: item.owner_category,
-                            time_series_type: TimeSeriesType::SingleTimeSeries,
-                            name: single.name.clone(),
-                            resolution: Some(single.resolution),
-                            features: item.features.clone(),
-                        },
+                        TimeSeriesKey::Single(SingleTimeSeriesKey::new(
+                            item.owner_id,
+                            item.owner_category,
+                            single.name.clone(),
+                            single.resolution,
+                            item.features.clone(),
+                            single.initial_timestamp,
+                            single.length,
+                        )),
                     )
                 }
                 TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
@@ -287,14 +291,13 @@ impl Store {
                             element_shape: non_sequential.data.element_shape().to_vec(),
                             logical_type: item.logical_type.clone(),
                         },
-                        TimeSeriesKey {
-                            owner_id: item.owner_id,
-                            owner_category: item.owner_category,
-                            time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                            name: non_sequential.name.clone(),
-                            resolution: None,
-                            features: item.features.clone(),
-                        },
+                        TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
+                            item.owner_id,
+                            item.owner_category,
+                            non_sequential.name.clone(),
+                            item.features.clone(),
+                            non_sequential.length,
+                        )),
                     )
                 }
                 // Dense forecast types are stored as standalone arrays in their
@@ -322,6 +325,10 @@ impl Store {
                         TimeSeriesType::Deterministic,
                         &det.name,
                         det.resolution,
+                        det.initial_timestamp,
+                        det.horizon,
+                        det.interval,
+                        det.count,
                     ),
                 ),
                 TimeSeriesData::Probabilistic(prob) => (
@@ -345,6 +352,10 @@ impl Store {
                         TimeSeriesType::Probabilistic,
                         &prob.name,
                         prob.resolution,
+                        prob.initial_timestamp,
+                        prob.horizon,
+                        prob.interval,
+                        prob.count,
                     ),
                 ),
                 TimeSeriesData::Scenarios(scen) => (
@@ -363,7 +374,16 @@ impl Store {
                         &scen.data,
                         None,
                     ),
-                    forecast_key(item, TimeSeriesType::Scenarios, &scen.name, scen.resolution),
+                    forecast_key(
+                        item,
+                        TimeSeriesType::Scenarios,
+                        &scen.name,
+                        scen.resolution,
+                        scen.initial_timestamp,
+                        scen.horizon,
+                        scen.interval,
+                        scen.count,
+                    ),
                 ),
             };
             let data = match &item.data {
@@ -409,7 +429,7 @@ impl Store {
     }
 
     #[tracing::instrument(skip(self, key), fields(owner = key.owner_id, name = %key.name))]
-    pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()> {
+    pub fn remove_time_series(&mut self, key: &KeyIdentity) -> Result<()> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -480,7 +500,7 @@ impl Store {
     #[tracing::instrument(skip(self, key, time_range), fields(owner = key.owner_id, name = %key.name, has_time_range = time_range.is_some()))]
     pub fn get_time_series(
         &self,
-        key: &TimeSeriesKey,
+        key: &KeyIdentity,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
         let meta = self.metadata.get_by_key(key)?;
@@ -769,7 +789,7 @@ impl Store {
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
-    pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
+    pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         self.metadata.get_by_key(key)
     }
 
@@ -802,7 +822,7 @@ impl Store {
         // A concrete request maps to exactly one key; reuse the unique-index
         // lookup so resolution stays cheap and NotFound is reported uniformly.
         if let RequestedType::Concrete(time_series_type) = requested {
-            let key = TimeSeriesKey {
+            let identity = KeyIdentity {
                 owner_id,
                 owner_category,
                 time_series_type,
@@ -810,8 +830,8 @@ impl Store {
                 resolution,
                 features,
             };
-            self.metadata.get_by_key(&key)?;
-            return Ok(key);
+            let meta = self.metadata.get_by_key(&identity)?;
+            return TimeSeriesKey::from_metadata(&meta);
         }
 
         // Abstract family: list candidates sharing (owner, name, resolution,
@@ -828,17 +848,7 @@ impl Store {
         matches.retain(|m| m.features == features && requested.matches(m.time_series_type));
         match matches.len() {
             0 => Err(TimeSeriesError::NotFound),
-            1 => {
-                let m = matches.pop().unwrap();
-                Ok(TimeSeriesKey {
-                    owner_id: m.owner_id,
-                    owner_category: m.owner_category,
-                    time_series_type: m.time_series_type,
-                    name: m.name,
-                    resolution: m.resolution,
-                    features: m.features,
-                })
-            }
+            1 => TimeSeriesKey::from_metadata(&matches.pop().unwrap()),
             _ => {
                 // More than one candidate satisfies the family. This is usually a
                 // Deterministic + DeterministicSingleTimeSeries sharing an identity,
@@ -1029,7 +1039,7 @@ impl Store {
         Ok(new_metas.len())
     }
 
-    pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool> {
+    pub fn has_time_series(&self, key: &KeyIdentity) -> Result<bool> {
         match self.metadata.get_by_key(key) {
             Ok(_) => Ok(true),
             Err(TimeSeriesError::NotFound) => Ok(false),
@@ -1168,20 +1178,29 @@ fn forecast_metadata(
 
 /// Build the key returned for a dense forecast added via
 /// [`Store::add_time_series_bulk`].
+#[allow(clippy::too_many_arguments)]
 fn forecast_key(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
     name: &str,
     resolution: Duration,
+    initial_timestamp: chrono::DateTime<chrono::Utc>,
+    horizon: Duration,
+    interval: Duration,
+    count: usize,
 ) -> TimeSeriesKey {
-    TimeSeriesKey {
-        owner_id: item.owner_id,
-        owner_category: item.owner_category,
+    TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
+        item.owner_id,
+        item.owner_category,
         time_series_type,
-        name: name.to_owned(),
-        resolution: Some(resolution),
-        features: item.features.clone(),
-    }
+        name.to_owned(),
+        resolution,
+        item.features.clone(),
+        initial_timestamp,
+        horizon,
+        interval,
+        count,
+    ))
 }
 
 fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {
