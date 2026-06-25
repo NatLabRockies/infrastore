@@ -639,10 +639,14 @@ fn identity_sort_key(m: &TimeSeriesMetadata) -> (i64, &'static str, &str) {
 mod tests {
     use chrono::TimeZone;
 
-    use crate::store::{ListFilter, Store};
+    use std::collections::HashMap;
+
+    use crate::store::{AddRequest, ListFilter, Store};
     use crate::types::array::{Dtype, TypedArray};
     use crate::types::metadata::OwnerCategory;
-    use crate::types::time_series::{Deterministic, SingleTimeSeries, TimeSeriesData};
+    use crate::types::time_series::{
+        Deterministic, Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData,
+    };
 
     use super::*;
 
@@ -1101,5 +1105,393 @@ mod tests {
             assert_eq!(dst.window(), rm.entries()[0].window());
             assert_eq!(det_entry.window(), rm.entries()[1].window());
         }
+    }
+
+    // ---- Oracle cross-checks against get_time_series ----------------------
+    //
+    // The strongest correctness check: a reader's bytes must equal what the
+    // independent, separately-tested `get_time_series` path returns for the
+    // same series at the same timestamp / window. These run on-disk so they
+    // exercise the NetCDF hyperslab overrides.
+
+    /// Encode `vals` into `dtype`'s little-endian bytes for a typed array.
+    fn typed_from(dtype: Dtype, shape: Vec<usize>, vals: &[f64]) -> TypedArray {
+        let mut bytes = Vec::new();
+        for &v in vals {
+            match dtype {
+                Dtype::F64 => bytes.extend_from_slice(&v.to_le_bytes()),
+                Dtype::F32 => bytes.extend_from_slice(&(v as f32).to_le_bytes()),
+                Dtype::I64 => bytes.extend_from_slice(&(v as i64).to_le_bytes()),
+                Dtype::I32 => bytes.extend_from_slice(&(v as i32).to_le_bytes()),
+                Dtype::U64 => bytes.extend_from_slice(&(v as u64).to_le_bytes()),
+                Dtype::Bool => bytes.push(if v != 0.0 { 1 } else { 0 }),
+            }
+        }
+        TypedArray::new(dtype, shape, bytes).unwrap()
+    }
+
+    fn distinct(base: f64, n: usize) -> Vec<f64> {
+        (0..n).map(|k| base + k as f64).collect()
+    }
+
+    /// Every dtype × element-shape × timestamp: static reader bytes must equal
+    /// `get_time_series` (full series, indexed at the same step).
+    #[test]
+    fn static_reader_matches_get_time_series_all_dtypes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.nc");
+        let mut store = Store::create(Some(&path), false).unwrap();
+        let length = 5usize;
+        let res = Duration::hours(1);
+        let dtypes = [
+            Dtype::F64,
+            Dtype::F32,
+            Dtype::I64,
+            Dtype::I32,
+            Dtype::U64,
+            Dtype::Bool,
+        ];
+        let shapes: [Vec<usize>; 3] = [vec![], vec![2], vec![2, 3]];
+        let mut owner = 1i64;
+        for &dt in &dtypes {
+            for esh in &shapes {
+                let ecount: usize = esh.iter().product::<usize>().max(1);
+                // Distinct values per (timestep, element) to catch any stride bug.
+                let vals = distinct(owner as f64 * 1000.0, length * ecount);
+                let mut shape = vec![length];
+                shape.extend_from_slice(esh);
+                let ts = SingleTimeSeries::new(t0(), res, typed_from(dt, shape, &vals), "v");
+                store
+                    .add_time_series(
+                        owner,
+                        "Gen",
+                        OwnerCategory::Component,
+                        TimeSeriesData::SingleTimeSeries(ts),
+                        Default::default(),
+                        None,
+                    )
+                    .unwrap();
+                owner += 1;
+            }
+        }
+
+        let mut reader = store
+            .build_static_reader(ListFilter::new().resolution(res))
+            .unwrap();
+        // Oracle: full series bytes per owner, via get_time_series.
+        let mut full: HashMap<i64, Vec<u8>> = HashMap::new();
+        for g in reader.groups() {
+            for k in g.keys() {
+                match store.get_time_series(k.identity(), None).unwrap() {
+                    TimeSeriesData::SingleTimeSeries(s) => {
+                        full.insert(k.owner_id(), s.data.bytes);
+                    }
+                    other => panic!("expected SingleTimeSeries, got {other:?}"),
+                }
+            }
+        }
+        // 6 dtypes × 3 shapes = 18 columns spread over groups.
+        assert_eq!(
+            reader
+                .groups()
+                .iter()
+                .map(|g| g.num_columns())
+                .sum::<usize>(),
+            18
+        );
+
+        for i in 0..length {
+            store
+                .static_read(&mut reader, t0() + res * (i as i32))
+                .unwrap();
+            for g in reader.groups() {
+                let eb = g.element_shape().iter().product::<usize>().max(1) * g.dtype().size();
+                let vals = g.values();
+                for (j, k) in g.keys().iter().enumerate() {
+                    let col = &vals[j * eb..(j + 1) * eb];
+                    let oracle = &full[&k.owner_id()];
+                    assert_eq!(
+                        col,
+                        &oracle[i * eb..(i + 1) * eb],
+                        "owner {} dtype {:?} shape {:?} index {i}",
+                        k.owner_id(),
+                        g.dtype(),
+                        g.element_shape()
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_prob(
+        store: &mut Store,
+        owner: i64,
+        name: &str,
+        h: usize,
+        count: usize,
+        p: usize,
+        eshape: Vec<usize>,
+        vals: &[f64],
+    ) {
+        let mut shape = vec![p, h, count];
+        shape.extend_from_slice(&eshape);
+        let percentiles: Vec<f64> = (1..=p).map(|i| i as f64 / (p as f64 + 1.0)).collect();
+        let prob = Probabilistic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(h as i64),
+            Duration::hours(1),
+            count,
+            percentiles,
+            TypedArray::from_f64(shape, vals),
+            name,
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                owner,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::Probabilistic(prob),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_scen(
+        store: &mut Store,
+        owner: i64,
+        name: &str,
+        h: usize,
+        count: usize,
+        sc: usize,
+        eshape: Vec<usize>,
+        vals: &[f64],
+    ) {
+        let mut shape = vec![sc, h, count];
+        shape.extend_from_slice(&eshape);
+        let scen = Scenarios::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(h as i64),
+            Duration::hours(1),
+            count,
+            sc,
+            TypedArray::from_f64(shape, vals),
+            name,
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                owner,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::Scenarios(scen),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+    }
+
+    fn forecast_bytes(d: &TimeSeriesData) -> Vec<u8> {
+        match d {
+            TimeSeriesData::Deterministic(x) => x.data.bytes.clone(),
+            TimeSeriesData::Probabilistic(x) => x.data.bytes.clone(),
+            TimeSeriesData::Scenarios(x) => x.data.bytes.clone(),
+            other => panic!("not a forecast: {other:?}"),
+        }
+    }
+
+    /// Every forecast type (Deterministic, Probabilistic, Scenarios, DST) and
+    /// every window: reader window bytes must equal a single-window
+    /// `get_time_series` (whose count axis is length 1, so its bytes are exactly
+    /// the window). Covers the count-axis-2 layouts (Prob/Scen) and multidim E.
+    #[test]
+    fn forecast_reader_matches_get_time_series_all_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.nc");
+        let mut store = Store::create(Some(&path), false).unwrap();
+        let res = Duration::hours(1);
+        let ivl = Duration::hours(1);
+        let (h, count) = (2usize, 4usize);
+
+        add_det(
+            &mut store,
+            1,
+            "d0",
+            h,
+            count,
+            vec![],
+            &distinct(1000.0, h * count),
+        );
+        add_det(
+            &mut store,
+            2,
+            "d1",
+            h,
+            count,
+            vec![2],
+            &distinct(2000.0, h * count * 2),
+        );
+        add_prob(
+            &mut store,
+            3,
+            "p0",
+            h,
+            count,
+            3,
+            vec![],
+            &distinct(3000.0, 3 * h * count),
+        );
+        add_prob(
+            &mut store,
+            4,
+            "p1",
+            h,
+            count,
+            3,
+            vec![2],
+            &distinct(4000.0, 3 * h * count * 2),
+        );
+        add_scen(
+            &mut store,
+            5,
+            "sc0",
+            h,
+            count,
+            2,
+            vec![],
+            &distinct(5000.0, 2 * h * count),
+        );
+        add_scen(
+            &mut store,
+            6,
+            "sc1",
+            h,
+            count,
+            2,
+            vec![2],
+            &distinct(6000.0, 2 * h * count * 2),
+        );
+        // DST owner 7: underlying length (count-1)*interval_steps + H = 3*1 + 2 = 5.
+        add_f64(&mut store, 7, "load", &distinct(7000.0, 5));
+        store
+            .transform_single_time_series(Duration::hours(h as i64), ivl, None, None)
+            .unwrap();
+
+        for ts_type in [
+            TimeSeriesType::Deterministic, // abstract -> Deterministic + DST
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            let mut reader = store
+                .build_forecast_reader(ListFilter::new().time_series_type(ts_type).resolution(res))
+                .unwrap();
+            assert!(!reader.entries().is_empty());
+            for w in 0..count {
+                let t_w = t0() + ivl * (w as i32);
+                store.forecast_read(&mut reader, t_w).unwrap();
+                for e in reader.entries() {
+                    let window = store
+                        .get_time_series(e.key().identity(), Some((t_w, t_w + ivl)))
+                        .unwrap();
+                    assert_eq!(
+                        e.window(),
+                        forecast_bytes(&window).as_slice(),
+                        "type {ts_type:?} owner {} window {w}",
+                        e.key().owner_id()
+                    );
+                }
+            }
+        }
+    }
+
+    /// More than MAX_COLS_PER_DATASET series in one group spill into a second
+    /// packed dataset; the row read must gather across the dataset boundary.
+    #[test]
+    fn static_reader_spans_spilled_datasets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("spill.nc");
+        let mut store = Store::create(Some(&path), false).unwrap();
+        let res = Duration::hours(1);
+        let length = 3usize;
+        let n = 1001i64; // > MAX_COLS_PER_DATASET (1000) -> two datasets
+        let items: Vec<AddRequest> = (1..=n)
+            .map(|owner| {
+                let vals = distinct(owner as f64 * 10.0, length);
+                let ts = SingleTimeSeries::new(
+                    t0(),
+                    res,
+                    TypedArray::from_f64(vec![length], &vals),
+                    "v",
+                );
+                AddRequest {
+                    owner_id: owner,
+                    owner_type: "Gen".into(),
+                    owner_category: OwnerCategory::Component,
+                    data: TimeSeriesData::SingleTimeSeries(ts),
+                    features: Default::default(),
+                    units: None,
+                    logical_type: None,
+                }
+            })
+            .collect();
+        store.add_time_series_bulk(items).unwrap();
+
+        let mut reader = store
+            .build_static_reader(ListFilter::new().resolution(res))
+            .unwrap();
+        assert_eq!(reader.groups().len(), 1);
+        assert_eq!(reader.groups()[0].num_columns(), n as usize);
+
+        for i in 0..length {
+            store
+                .static_read(&mut reader, t0() + res * (i as i32))
+                .unwrap();
+            let g = &reader.groups()[0];
+            let vals = g.values();
+            for (j, k) in g.keys().iter().enumerate() {
+                let got = f64::from_le_bytes(vals[j * 8..j * 8 + 8].try_into().unwrap());
+                assert_eq!(got, k.owner_id() as f64 * 10.0 + i as f64);
+            }
+        }
+    }
+
+    /// A reader pins one resolution: series at other resolutions are excluded
+    /// (pulling them in would violate the uniform-grid invariant).
+    #[test]
+    fn static_reader_scopes_to_one_resolution() {
+        let mut store = Store::create(None, true).unwrap();
+        add_f64(&mut store, 1, "load", &[1.0, 2.0, 3.0, 4.0]); // 1h
+        add_f64(&mut store, 2, "load", &[5.0, 6.0, 7.0, 8.0]); // 1h
+        let two_hour = SingleTimeSeries::new(
+            t0(),
+            Duration::hours(2),
+            TypedArray::from_f64(vec![4], &[9.0, 10.0, 11.0, 12.0]),
+            "load",
+        );
+        store
+            .add_time_series(
+                3,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(two_hour),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+
+        let reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        let owners: Vec<i64> = reader
+            .groups()
+            .iter()
+            .flat_map(|g| g.keys().iter().map(|k| k.owner_id()))
+            .collect();
+        assert_eq!(owners, vec![1, 2], "the 2h series must be excluded");
     }
 }

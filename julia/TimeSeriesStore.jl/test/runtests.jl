@@ -914,3 +914,41 @@ end
         @test w_dst == [sts[k + 1], sts[k + 2]]
     end
 end
+
+@testset "Reader reshape matches get_time_series (Julia oracle)" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2032, 1, 1)
+    res = Hour(1)
+
+    # Static with a 2-D element shape (2, 3): data shape (time=4, 2, 3). The
+    # reader reshapes each timestep's element block back to (2, 3); compare to
+    # the array as stored. (The 2-arg get_time_series returns multi-dim static
+    # data flat, so the stored array is the oracle here.)
+    sdata = Float64[t * 100 + a * 10 + b for t in 1:4, a in 1:2, b in 1:3]
+    add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, sdata, "v"))
+    r = build_static_reader(store; resolution=res)
+    @test static_groups(r)[1].element_shape == [2, 3]
+    for i in 0:3
+        static_read!(r, t0 + Hour(i))
+        vals = static_values(r, 1)                    # (ncols=1, 2, 3)
+        @test size(vals) == (1, 2, 3)
+        @test vals[1, :, :] == sdata[i + 1, :, :]     # reader reshape == stored
+    end
+
+    # Probabilistic window reshape (P, H) — count axis (2) removed.
+    pstore = Store(in_memory=true)
+    P, H, count = 3, 2, 4
+    pdata = Float64[p * 1000 + h * 10 + c for p in 1:P, h in 1:H, c in 1:count]
+    add_time_series!(pstore, 2, "Gen", Component,
+                     Probabilistic(t0, res, Hour(H), Hour(1), count, [0.1, 0.5, 0.9], pdata, "pf"))
+    full_p = get_time_series(Probabilistic, pstore, 2, Component, "pf")
+    @test full_p.data == pdata
+    fr = build_forecast_reader(pstore, Probabilistic; resolution=res)
+    @test forecast_entries(fr)[1].window_shape == [P, H]
+    for k in 0:(count - 1)
+        forecast_read!(fr, t0 + Hour(k))
+        w = forecast_values(fr, 1)                    # (P, H)
+        @test size(w) == (P, H)
+        @test w == full_p.data[:, :, k + 1]
+    end
+end
