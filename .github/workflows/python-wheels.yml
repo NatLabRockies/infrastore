@@ -19,7 +19,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
+        # macOS bundles Homebrew's HDF5/NetCDF, which are built for the runner's
+        # OS version; the wheel's deployment target must match or delocate rejects
+        # the libraries. Keep each macos-NN entry in sync with its runner image.
+        include:
+          - os: ubuntu-latest
+          - os: macos-13
+            macosx_deployment_target: "13.0"
+          - os: macos-14
+            macosx_deployment_target: "14.0"
+          - os: windows-latest
     defaults:
       run:
         working-directory: crates/time-series-store-py
@@ -28,8 +37,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # cibuildwheel's before-all handles HDF5/NetCDF on Linux/macOS, but Windows
+      # has no system package manager, so provision via vcpkg here (mirrors test.yml)
+      # and export the locations for the netcdf-sys/hdf5-metno-sys build scripts.
+      - name: Install native dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg install netcdf-c:x64-windows
+          $prefix = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
+          "NETCDF_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HDF5_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PKG_CONFIG_PATH=$prefix\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$prefix\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         with:
           package-dir: crates/time-series-store-py
           output-dir: wheelhouse
