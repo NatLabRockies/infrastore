@@ -4157,3 +4157,959 @@ fn datetime_to_unix_ms(dt: DateTime<Utc>) -> Option<i64> {
 }
 
 use chrono::TimeZone;
+
+// ---- Timestamp readers (StaticReader / ForecastReader) --------------------
+//
+// Stateful readers for the simulation access pattern: a loop over every
+// timestamp wants the value of every series at that instant. Build a reader
+// once (it resolves the catalog layout and owns reusable buffers), then call
+// the read function per timestamp and read each group/entry's values pointer,
+// which is valid until the next read on that reader or until it is freed.
+
+/// Opaque handle wrapping a core `StaticReader` (SingleTimeSeries, columnar).
+pub struct TsStaticReaderHandle {
+    inner: core_lib::StaticReader,
+}
+
+/// Opaque handle wrapping a core `ForecastReader` (one forecast type, per-key
+/// windows).
+pub struct TsForecastReaderHandle {
+    inner: core_lib::ForecastReader,
+}
+
+/// Build a [`core_lib::ListFilter`] from the reader build arguments shared by
+/// both readers (owner / category / name / resolution / features). The
+/// time-series type is set by the caller, not here.
+unsafe fn reader_filter(
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    name: *const c_char,
+    resolution_ms: i64,
+    features_json: *const c_char,
+) -> Result<core_lib::ListFilter, i32> {
+    let mut filter = core_lib::ListFilter::new();
+    if has_owner {
+        filter = filter.owner_id(owner_id);
+    }
+    if has_owner_category {
+        let category = match owner_category {
+            0 => core_lib::OwnerCategory::Component,
+            1 => core_lib::OwnerCategory::SupplementalAttribute,
+            other => {
+                set_error(format!("invalid owner_category {other}"));
+                return Err(TS_ERR_INVALID_PARAMETER);
+            }
+        };
+        filter = filter.owner_category(category);
+    }
+    match unsafe { cstr_to_optional_string(name) } {
+        Ok(Some(n)) => filter = filter.name(n),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("name is not valid UTF-8");
+            return Err(c);
+        }
+    }
+    if resolution_ms > 0 {
+        filter = filter.resolution(Duration::milliseconds(resolution_ms));
+    }
+    let features = unsafe { parse_features_json(features_json) }?;
+    if !features.is_empty() {
+        filter = filter.features(features);
+    }
+    Ok(filter)
+}
+
+/// Write `values` into `buf` (truncated to `cap` elements), always reporting the
+/// full length through `out_len`. Probe-then-fetch: call with `buf` null and
+/// `cap` 0 to learn the length first. Used for the small shape arrays.
+///
+/// # Safety
+///
+/// `out_len` must be valid for writing one `u64`. When `buf` is non-null it must
+/// be valid for writing `cap` `i64` values.
+unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: *mut u64) {
+    unsafe {
+        *out_len = values.len() as u64;
+        if !buf.is_null() && cap > 0 {
+            let n = values.len().min(cap as usize);
+            ptr::copy_nonoverlapping(values.as_ptr(), buf, n);
+        }
+    }
+}
+
+// ---- StaticReader ---------------------------------------------------------
+
+/// Build a [`TsStaticReaderHandle`] over the SingleTimeSeries matching the
+/// filter. `resolution_ms` must be positive (one resolution per reader); the
+/// matched series must share one grid (`initial_timestamp` + `length`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `name` / `features_json` must be null
+/// or valid null-terminated UTF-8. `out_reader` must be valid for writing one
+/// pointer; the returned handle must be freed exactly once with
+/// `ts_static_reader_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_build_static_reader(
+    handle: *const TsStoreHandle,
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    name: *const c_char,
+    resolution_ms: i64,
+    features_json: *const c_char,
+    out_reader: *mut *mut TsStaticReaderHandle,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_reader.is_null() {
+        set_error("out_reader is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter = match unsafe {
+        reader_filter(
+            has_owner,
+            owner_id,
+            has_owner_category,
+            owner_category,
+            name,
+            resolution_ms,
+            features_json,
+        )
+    } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let reader = match store.inner.build_static_reader(filter) {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { *out_reader = Box::into_raw(Box::new(TsStaticReaderHandle { inner: reader })) };
+    TS_OK
+}
+
+/// Read the reader's master grid: `initial_timestamp` (unix ms), resolution
+/// (ms), and the number of timestamps on the grid.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. Each out pointer must be valid
+/// for writing one value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_grid(
+    reader: *const TsStaticReaderHandle,
+    out_initial_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_length: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_initial_ms.is_null() || out_resolution_ms.is_null() || out_length.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let initial = match datetime_to_unix_ms(reader.inner.initial_timestamp()) {
+        Some(n) => n,
+        None => {
+            set_error("initial_timestamp out of i64 millisecond range");
+            return TS_ERR_INTEGRITY;
+        }
+    };
+    unsafe {
+        *out_initial_ms = initial;
+        *out_resolution_ms = reader.inner.resolution().num_milliseconds();
+        *out_length = reader.inner.length() as u64;
+    }
+    TS_OK
+}
+
+/// Number of columnar groups in the reader.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_n` must be valid for
+/// writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_num_groups(
+    reader: *const TsStaticReaderHandle,
+    out_n: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_n.is_null() {
+        set_error("out_n is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    unsafe { *out_n = reader.inner.groups().len() as u64 };
+    TS_OK
+}
+
+/// Read group `group_idx`'s layout: its dtype code, column count, and per-step
+/// element shape. The shape follows the probe-then-fetch convention: call with
+/// `shape_buf` null / `shape_cap` 0 to learn `out_shape_len`, then call again
+/// with a buffer of at least that many `i64` values. An empty shape (scalar per
+/// step) reports length 0.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_dtype`, `out_num_columns`,
+/// and `out_shape_len` must be valid for writing one value each. When non-null,
+/// `shape_buf` must be valid for writing `shape_cap` `i64` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_group_info(
+    reader: *const TsStaticReaderHandle,
+    group_idx: u64,
+    out_dtype: *mut i32,
+    out_num_columns: *mut u64,
+    shape_buf: *mut i64,
+    shape_cap: u64,
+    out_shape_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_dtype.is_null() || out_num_columns.is_null() || out_shape_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let group = match reader.inner.groups().get(group_idx as usize) {
+        Some(g) => g,
+        None => {
+            set_error(format!("group index {group_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let shape: Vec<i64> = group.element_shape().iter().map(|&d| d as i64).collect();
+    unsafe {
+        *out_dtype = group.dtype().code();
+        *out_num_columns = group.num_columns() as u64;
+        write_i64_slice_out(&shape, shape_buf, shape_cap, out_shape_len);
+    }
+    TS_OK
+}
+
+/// Return an owned key handle for column `col_idx` of group `group_idx`. The
+/// handle carries the column's identity and must be freed with `ts_key_free`.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_key` must be valid for
+/// writing one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_group_key(
+    reader: *const TsStaticReaderHandle,
+    group_idx: u64,
+    col_idx: u64,
+    out_key: *mut *mut TsKeyHandle,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_key.is_null() {
+        set_error("out_key is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let group = match reader.inner.groups().get(group_idx as usize) {
+        Some(g) => g,
+        None => {
+            set_error(format!("group index {group_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let key = match group.keys().get(col_idx as usize) {
+        Some(k) => k,
+        None => {
+            set_error(format!("column index {col_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let handle = Box::new(TsKeyHandle {
+        inner: key.identity().clone(),
+    });
+    unsafe { *out_key = Box::into_raw(handle) };
+    TS_OK
+}
+
+/// Read the value of every series at `at_unix_ms`, filling the reader's reusable
+/// buffers. After this, `ts_static_reader_group_values` exposes each group's
+/// bytes. Errors if `at_unix_ms` is off the reader's grid.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle and `store` a live store handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_read(
+    reader: *mut TsStaticReaderHandle,
+    store: *const TsStoreHandle,
+    at_unix_ms: i64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_mut() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let store = match unsafe { store.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let at = match unix_ms_to_datetime(at_unix_ms) {
+        Some(t) => t,
+        None => {
+            set_error("timestamp out of range");
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    match store.inner.static_read(&mut reader.inner, at) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Expose group `group_idx`'s value bytes from the most recent read. The pointer
+/// is into reader-owned memory and is valid until the next read on this reader
+/// or until it is freed; do not free it. Before any read the length is 0.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_ptr` and `out_byte_len`
+/// must be valid for writing one value each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_group_values(
+    reader: *const TsStaticReaderHandle,
+    group_idx: u64,
+    out_ptr: *mut *const u8,
+    out_byte_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_ptr.is_null() || out_byte_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let group = match reader.inner.groups().get(group_idx as usize) {
+        Some(g) => g,
+        None => {
+            set_error(format!("group index {group_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let bytes = group.values();
+    unsafe {
+        *out_ptr = bytes.as_ptr();
+        *out_byte_len = bytes.len() as u64;
+    }
+    TS_OK
+}
+
+/// Free a static-reader handle.
+///
+/// # Safety
+///
+/// `reader` must be null or a handle from `ts_store_build_static_reader`, not
+/// previously freed, and unused after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_static_reader_free(reader: *mut TsStaticReaderHandle) {
+    if !reader.is_null() {
+        unsafe { drop(Box::from_raw(reader)) };
+    }
+}
+
+// ---- ForecastReader -------------------------------------------------------
+
+/// Build a [`TsForecastReaderHandle`] over the forecasts matching the filter.
+/// `time_series_type` must be a forecast type; a `Deterministic` reader is
+/// abstract and also includes `DeterministicSingleTimeSeries`. `resolution_ms`
+/// must be positive; matched forecasts must share one window timeline.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `name` / `features_json` must be null
+/// or valid null-terminated UTF-8. `out_reader` must be valid for writing one
+/// pointer; free the result with `ts_forecast_reader_free`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_build_forecast_reader(
+    handle: *const TsStoreHandle,
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution_ms: i64,
+    features_json: *const c_char,
+    out_reader: *mut *mut TsForecastReaderHandle,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_reader.is_null() {
+        set_error("out_reader is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let ts_type = match ts_type_from_int(time_series_type) {
+        Some(t) => t,
+        None => {
+            set_error(format!("invalid time_series_type {time_series_type}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let mut filter = match unsafe {
+        reader_filter(
+            has_owner,
+            owner_id,
+            has_owner_category,
+            owner_category,
+            name,
+            resolution_ms,
+            features_json,
+        )
+    } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    filter = filter.time_series_type(ts_type);
+    let reader = match store.inner.build_forecast_reader(filter) {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe { *out_reader = Box::into_raw(Box::new(TsForecastReaderHandle { inner: reader })) };
+    TS_OK
+}
+
+/// Read the reader's window timeline: `initial_timestamp` (unix ms), resolution
+/// (ms), interval (ms), and the window count.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. Each out pointer must be
+/// valid for writing one value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_timeline(
+    reader: *const TsForecastReaderHandle,
+    out_initial_ms: *mut i64,
+    out_resolution_ms: *mut i64,
+    out_interval_ms: *mut i64,
+    out_count: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_initial_ms.is_null()
+        || out_resolution_ms.is_null()
+        || out_interval_ms.is_null()
+        || out_count.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let initial = match datetime_to_unix_ms(reader.inner.initial_timestamp()) {
+        Some(n) => n,
+        None => {
+            set_error("initial_timestamp out of i64 millisecond range");
+            return TS_ERR_INTEGRITY;
+        }
+    };
+    unsafe {
+        *out_initial_ms = initial;
+        *out_resolution_ms = reader.inner.resolution().num_milliseconds();
+        *out_interval_ms = reader.inner.interval().num_milliseconds();
+        *out_count = reader.inner.count() as u64;
+    }
+    TS_OK
+}
+
+/// Number of per-key window entries in the reader.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_n` must be valid for
+/// writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_num_entries(
+    reader: *const TsForecastReaderHandle,
+    out_n: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_n.is_null() {
+        set_error("out_n is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    unsafe { *out_n = reader.inner.entries().len() as u64 };
+    TS_OK
+}
+
+/// Read entry `entry_idx`'s layout: its dtype code and window shape. The shape
+/// follows the probe-then-fetch convention (call with `shape_buf` null /
+/// `shape_cap` 0 to learn `out_shape_len`).
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_dtype` and
+/// `out_shape_len` must be valid for writing one value each. When non-null,
+/// `shape_buf` must be valid for writing `shape_cap` `i64` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_entry_info(
+    reader: *const TsForecastReaderHandle,
+    entry_idx: u64,
+    out_dtype: *mut i32,
+    shape_buf: *mut i64,
+    shape_cap: u64,
+    out_shape_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_dtype.is_null() || out_shape_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let entry = match reader.inner.entries().get(entry_idx as usize) {
+        Some(e) => e,
+        None => {
+            set_error(format!("entry index {entry_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let shape: Vec<i64> = entry.window_shape().iter().map(|&d| d as i64).collect();
+    unsafe {
+        *out_dtype = entry.dtype().code();
+        write_i64_slice_out(&shape, shape_buf, shape_cap, out_shape_len);
+    }
+    TS_OK
+}
+
+/// Return an owned key handle for entry `entry_idx`, freed with `ts_key_free`.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_key` must be valid for
+/// writing one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_entry_key(
+    reader: *const TsForecastReaderHandle,
+    entry_idx: u64,
+    out_key: *mut *mut TsKeyHandle,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_key.is_null() {
+        set_error("out_key is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let entry = match reader.inner.entries().get(entry_idx as usize) {
+        Some(e) => e,
+        None => {
+            set_error(format!("entry index {entry_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let handle = Box::new(TsKeyHandle {
+        inner: entry.key().identity().clone(),
+    });
+    unsafe { *out_key = Box::into_raw(handle) };
+    TS_OK
+}
+
+/// Read the forecast window at `at_unix_ms` for every entry, filling the
+/// reader's reusable buffers. Errors if `at_unix_ms` is off the window timeline.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle and `store` a live store
+/// handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_read(
+    reader: *mut TsForecastReaderHandle,
+    store: *const TsStoreHandle,
+    at_unix_ms: i64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_mut() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let store = match unsafe { store.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    let at = match unix_ms_to_datetime(at_unix_ms) {
+        Some(t) => t,
+        None => {
+            set_error("timestamp out of range");
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    match store.inner.forecast_read(&mut reader.inner, at) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Expose entry `entry_idx`'s window bytes from the most recent read. The
+/// pointer is into reader-owned memory, valid until the next read or free; do
+/// not free it. Before any read the length is 0.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_ptr` and `out_byte_len`
+/// must be valid for writing one value each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_entry_values(
+    reader: *const TsForecastReaderHandle,
+    entry_idx: u64,
+    out_ptr: *mut *const u8,
+    out_byte_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_ptr.is_null() || out_byte_len.is_null() {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let entry = match reader.inner.entries().get(entry_idx as usize) {
+        Some(e) => e,
+        None => {
+            set_error(format!("entry index {entry_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let bytes = entry.window();
+    unsafe {
+        *out_ptr = bytes.as_ptr();
+        *out_byte_len = bytes.len() as u64;
+    }
+    TS_OK
+}
+
+/// Free a forecast-reader handle.
+///
+/// # Safety
+///
+/// `reader` must be null or a handle from `ts_store_build_forecast_reader`, not
+/// previously freed, and unused after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_free(reader: *mut TsForecastReaderHandle) {
+    if !reader.is_null() {
+        unsafe { drop(Box::from_raw(reader)) };
+    }
+}
+
+#[cfg(test)]
+mod reader_ffi_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use core_lib::{OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray};
+
+    const T0_MS: i64 = 1_700_000_000_000;
+    const HOUR_MS: i64 = 3_600_000;
+
+    fn t0() -> DateTime<Utc> {
+        Utc.timestamp_millis_opt(T0_MS).single().unwrap()
+    }
+
+    fn add_sts_f64(store: &mut Store, owner_id: i64, name: &str, vals: &[f64]) {
+        let data = TypedArray::from_f64(vec![vals.len()], vals);
+        let ts = SingleTimeSeries::new(t0(), ChronoDuration::hours(1), data, name);
+        store
+            .add_time_series(
+                owner_id,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(ts),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn static_reader_ffi_roundtrip() {
+        let mut store = Store::create(None, true).unwrap();
+        add_sts_f64(&mut store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
+        add_sts_f64(&mut store, 2, "load", &[20.0, 21.0, 22.0, 23.0]);
+        let handle = TsStoreHandle { inner: store };
+
+        let mut reader: *mut TsStaticReaderHandle = ptr::null_mut();
+        let rc = unsafe {
+            ts_store_build_static_reader(
+                &handle,
+                false,
+                0,
+                false,
+                0,
+                ptr::null(),
+                HOUR_MS,
+                ptr::null(),
+                &mut reader,
+            )
+        };
+        assert_eq!(rc, TS_OK);
+        assert!(!reader.is_null());
+
+        // Grid.
+        let (mut initial, mut res, mut len) = (0i64, 0i64, 0u64);
+        assert_eq!(
+            unsafe { ts_static_reader_grid(reader, &mut initial, &mut res, &mut len) },
+            TS_OK
+        );
+        assert_eq!((initial, res, len), (T0_MS, HOUR_MS, 4));
+
+        // One f64 group, 2 columns, scalar shape.
+        let mut n = 0u64;
+        assert_eq!(
+            unsafe { ts_static_reader_num_groups(reader, &mut n) },
+            TS_OK
+        );
+        assert_eq!(n, 1);
+        let (mut dtype, mut ncols, mut shape_len) = (-1i32, 0u64, 99u64);
+        assert_eq!(
+            unsafe {
+                ts_static_reader_group_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    &mut ncols,
+                    ptr::null_mut(),
+                    0,
+                    &mut shape_len,
+                )
+            },
+            TS_OK
+        );
+        assert_eq!((dtype, ncols, shape_len), (0, 2, 0)); // F64 code 0
+
+        // Column keys (owners 1 then 2).
+        for (col, owner) in [(0u64, 1i64), (1, 2)] {
+            let mut key: *mut TsKeyHandle = ptr::null_mut();
+            assert_eq!(
+                unsafe { ts_static_reader_group_key(reader, 0, col, &mut key) },
+                TS_OK
+            );
+            assert_eq!(unsafe { (*key).inner.owner_id }, owner);
+            unsafe { ts_key_free(key) };
+        }
+
+        // Read at t0 + 2h -> [12, 22].
+        let at = T0_MS + 2 * HOUR_MS;
+        assert_eq!(unsafe { ts_static_reader_read(reader, &handle, at) }, TS_OK);
+        let (mut p, mut blen) = (ptr::null::<u8>(), 0u64);
+        assert_eq!(
+            unsafe { ts_static_reader_group_values(reader, 0, &mut p, &mut blen) },
+            TS_OK
+        );
+        assert_eq!(blen, 16);
+        let vals = unsafe { slice::from_raw_parts(p as *const f64, 2) };
+        assert_eq!(vals, &[12.0, 22.0]);
+
+        // Off-grid read errors.
+        assert_ne!(
+            unsafe { ts_static_reader_read(reader, &handle, T0_MS + HOUR_MS / 2) },
+            TS_OK
+        );
+
+        unsafe { ts_static_reader_free(reader) };
+    }
+
+    #[test]
+    fn forecast_reader_ffi_roundtrip() {
+        use core_lib::Deterministic;
+        let mut store = Store::create(None, true).unwrap();
+        // Deterministic H=2, count=3, scalar. Row-major [s, k]; value = k*10 + s.
+        let data = TypedArray::from_f64(vec![2, 3], &[0.0, 10.0, 20.0, 1.0, 11.0, 21.0]);
+        let det = Deterministic::new(
+            t0(),
+            ChronoDuration::hours(1),
+            ChronoDuration::hours(2),
+            ChronoDuration::hours(1),
+            3,
+            data,
+            "gen",
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                7,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(det),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+        let handle = TsStoreHandle { inner: store };
+
+        let mut reader: *mut TsForecastReaderHandle = ptr::null_mut();
+        let rc = unsafe {
+            ts_store_build_forecast_reader(
+                &handle,
+                false,
+                0,
+                false,
+                0,
+                2, // Deterministic
+                ptr::null(),
+                HOUR_MS,
+                ptr::null(),
+                &mut reader,
+            )
+        };
+        assert_eq!(rc, TS_OK);
+
+        let (mut initial, mut res, mut interval, mut count) = (0i64, 0i64, 0i64, 0u64);
+        assert_eq!(
+            unsafe {
+                ts_forecast_reader_timeline(
+                    reader,
+                    &mut initial,
+                    &mut res,
+                    &mut interval,
+                    &mut count,
+                )
+            },
+            TS_OK
+        );
+        assert_eq!((initial, interval, count), (T0_MS, HOUR_MS, 3));
+
+        let mut n = 0u64;
+        assert_eq!(
+            unsafe { ts_forecast_reader_num_entries(reader, &mut n) },
+            TS_OK
+        );
+        assert_eq!(n, 1);
+
+        // Window shape [H] = [2].
+        let (mut dtype, mut shape_len) = (-1i32, 0u64);
+        assert_eq!(
+            unsafe {
+                ts_forecast_reader_entry_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    ptr::null_mut(),
+                    0,
+                    &mut shape_len,
+                )
+            },
+            TS_OK
+        );
+        assert_eq!((dtype, shape_len), (0, 1));
+        let mut shape = [0i64; 1];
+        let mut got = 0u64;
+        assert_eq!(
+            unsafe {
+                ts_forecast_reader_entry_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    shape.as_mut_ptr(),
+                    1,
+                    &mut got,
+                )
+            },
+            TS_OK
+        );
+        assert_eq!(shape, [2]);
+
+        // Window at index 1 (t0 + 1h) -> [10, 11].
+        assert_eq!(
+            unsafe { ts_forecast_reader_read(reader, &handle, T0_MS + HOUR_MS) },
+            TS_OK
+        );
+        let (mut p, mut blen) = (ptr::null::<u8>(), 0u64);
+        assert_eq!(
+            unsafe { ts_forecast_reader_entry_values(reader, 0, &mut p, &mut blen) },
+            TS_OK
+        );
+        assert_eq!(blen, 16);
+        let vals = unsafe { slice::from_raw_parts(p as *const f64, 2) };
+        assert_eq!(vals, &[10.0, 11.0]);
+
+        unsafe { ts_forecast_reader_free(reader) };
+    }
+}

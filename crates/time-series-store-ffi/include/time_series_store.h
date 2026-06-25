@@ -44,7 +44,18 @@
  */
 typedef struct TsBatch TsBatch;
 
+/**
+ * Opaque handle wrapping a core `ForecastReader` (one forecast type, per-key
+ * windows).
+ */
+typedef struct TsForecastReaderHandle TsForecastReaderHandle;
+
 typedef struct TsKey TsKey;
+
+/**
+ * Opaque handle wrapping a core `StaticReader` (SingleTimeSeries, columnar).
+ */
+typedef struct TsStaticReaderHandle TsStaticReaderHandle;
 
 typedef struct TsStore TsStore;
 
@@ -1293,5 +1304,241 @@ void ts_buffer_free_i64(int64_t *ptr, uint64_t len);
  * `buf_len` is zero; otherwise it must reference at least `buf_len` writable bytes.
  */
 int32_t ts_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
+
+/**
+ * Build a [`TsStaticReaderHandle`] over the SingleTimeSeries matching the
+ * filter. `resolution_ms` must be positive (one resolution per reader); the
+ * matched series must share one grid (`initial_timestamp` + `length`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `name` / `features_json` must be null
+ * or valid null-terminated UTF-8. `out_reader` must be valid for writing one
+ * pointer; the returned handle must be freed exactly once with
+ * `ts_static_reader_free`.
+ */
+int32_t ts_store_build_static_reader(const struct TsStore *handle,
+                                     bool has_owner,
+                                     int64_t owner_id,
+                                     bool has_owner_category,
+                                     int32_t owner_category,
+                                     const char *name,
+                                     int64_t resolution_ms,
+                                     const char *features_json,
+                                     struct TsStaticReaderHandle **out_reader);
+
+/**
+ * Read the reader's master grid: `initial_timestamp` (unix ms), resolution
+ * (ms), and the number of timestamps on the grid.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. Each out pointer must be valid
+ * for writing one value.
+ */
+int32_t ts_static_reader_grid(const struct TsStaticReaderHandle *reader,
+                              int64_t *out_initial_ms,
+                              int64_t *out_resolution_ms,
+                              uint64_t *out_length);
+
+/**
+ * Number of columnar groups in the reader.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_n` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_static_reader_num_groups(const struct TsStaticReaderHandle *reader, uint64_t *out_n);
+
+/**
+ * Read group `group_idx`'s layout: its dtype code, column count, and per-step
+ * element shape. The shape follows the probe-then-fetch convention: call with
+ * `shape_buf` null / `shape_cap` 0 to learn `out_shape_len`, then call again
+ * with a buffer of at least that many `i64` values. An empty shape (scalar per
+ * step) reports length 0.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_dtype`, `out_num_columns`,
+ * and `out_shape_len` must be valid for writing one value each. When non-null,
+ * `shape_buf` must be valid for writing `shape_cap` `i64` values.
+ */
+int32_t ts_static_reader_group_info(const struct TsStaticReaderHandle *reader,
+                                    uint64_t group_idx,
+                                    int32_t *out_dtype,
+                                    uint64_t *out_num_columns,
+                                    int64_t *shape_buf,
+                                    uint64_t shape_cap,
+                                    uint64_t *out_shape_len);
+
+/**
+ * Return an owned key handle for column `col_idx` of group `group_idx`. The
+ * handle carries the column's identity and must be freed with `ts_key_free`.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_key` must be valid for
+ * writing one pointer.
+ */
+int32_t ts_static_reader_group_key(const struct TsStaticReaderHandle *reader,
+                                   uint64_t group_idx,
+                                   uint64_t col_idx,
+                                   struct TsKey **out_key);
+
+/**
+ * Read the value of every series at `at_unix_ms`, filling the reader's reusable
+ * buffers. After this, `ts_static_reader_group_values` exposes each group's
+ * bytes. Errors if `at_unix_ms` is off the reader's grid.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle and `store` a live store handle.
+ */
+int32_t ts_static_reader_read(struct TsStaticReaderHandle *reader,
+                              const struct TsStore *store,
+                              int64_t at_unix_ms);
+
+/**
+ * Expose group `group_idx`'s value bytes from the most recent read. The pointer
+ * is into reader-owned memory and is valid until the next read on this reader
+ * or until it is freed; do not free it. Before any read the length is 0.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_ptr` and `out_byte_len`
+ * must be valid for writing one value each.
+ */
+int32_t ts_static_reader_group_values(const struct TsStaticReaderHandle *reader,
+                                      uint64_t group_idx,
+                                      const uint8_t **out_ptr,
+                                      uint64_t *out_byte_len);
+
+/**
+ * Free a static-reader handle.
+ *
+ * # Safety
+ *
+ * `reader` must be null or a handle from `ts_store_build_static_reader`, not
+ * previously freed, and unused after this call.
+ */
+void ts_static_reader_free(struct TsStaticReaderHandle *reader);
+
+/**
+ * Build a [`TsForecastReaderHandle`] over the forecasts matching the filter.
+ * `time_series_type` must be a forecast type; a `Deterministic` reader is
+ * abstract and also includes `DeterministicSingleTimeSeries`. `resolution_ms`
+ * must be positive; matched forecasts must share one window timeline.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `name` / `features_json` must be null
+ * or valid null-terminated UTF-8. `out_reader` must be valid for writing one
+ * pointer; free the result with `ts_forecast_reader_free`.
+ */
+int32_t ts_store_build_forecast_reader(const struct TsStore *handle,
+                                       bool has_owner,
+                                       int64_t owner_id,
+                                       bool has_owner_category,
+                                       int32_t owner_category,
+                                       int32_t time_series_type,
+                                       const char *name,
+                                       int64_t resolution_ms,
+                                       const char *features_json,
+                                       struct TsForecastReaderHandle **out_reader);
+
+/**
+ * Read the reader's window timeline: `initial_timestamp` (unix ms), resolution
+ * (ms), interval (ms), and the window count.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. Each out pointer must be
+ * valid for writing one value.
+ */
+int32_t ts_forecast_reader_timeline(const struct TsForecastReaderHandle *reader,
+                                    int64_t *out_initial_ms,
+                                    int64_t *out_resolution_ms,
+                                    int64_t *out_interval_ms,
+                                    uint64_t *out_count);
+
+/**
+ * Number of per-key window entries in the reader.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_n` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_forecast_reader_num_entries(const struct TsForecastReaderHandle *reader,
+                                       uint64_t *out_n);
+
+/**
+ * Read entry `entry_idx`'s layout: its dtype code and window shape. The shape
+ * follows the probe-then-fetch convention (call with `shape_buf` null /
+ * `shape_cap` 0 to learn `out_shape_len`).
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_dtype` and
+ * `out_shape_len` must be valid for writing one value each. When non-null,
+ * `shape_buf` must be valid for writing `shape_cap` `i64` values.
+ */
+int32_t ts_forecast_reader_entry_info(const struct TsForecastReaderHandle *reader,
+                                      uint64_t entry_idx,
+                                      int32_t *out_dtype,
+                                      int64_t *shape_buf,
+                                      uint64_t shape_cap,
+                                      uint64_t *out_shape_len);
+
+/**
+ * Return an owned key handle for entry `entry_idx`, freed with `ts_key_free`.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_key` must be valid for
+ * writing one pointer.
+ */
+int32_t ts_forecast_reader_entry_key(const struct TsForecastReaderHandle *reader,
+                                     uint64_t entry_idx,
+                                     struct TsKey **out_key);
+
+/**
+ * Read the forecast window at `at_unix_ms` for every entry, filling the
+ * reader's reusable buffers. Errors if `at_unix_ms` is off the window timeline.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle and `store` a live store
+ * handle.
+ */
+int32_t ts_forecast_reader_read(struct TsForecastReaderHandle *reader,
+                                const struct TsStore *store,
+                                int64_t at_unix_ms);
+
+/**
+ * Expose entry `entry_idx`'s window bytes from the most recent read. The
+ * pointer is into reader-owned memory, valid until the next read or free; do
+ * not free it. Before any read the length is 0.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_ptr` and `out_byte_len`
+ * must be valid for writing one value each.
+ */
+int32_t ts_forecast_reader_entry_values(const struct TsForecastReaderHandle *reader,
+                                        uint64_t entry_idx,
+                                        const uint8_t **out_ptr,
+                                        uint64_t *out_byte_len);
+
+/**
+ * Free a forecast-reader handle.
+ *
+ * # Safety
+ *
+ * `reader` must be null or a handle from `ts_store_build_forecast_reader`, not
+ * previously freed, and unused after this call.
+ */
+void ts_forecast_reader_free(struct TsForecastReaderHandle *reader);
 
 #endif  /* TIME_SERIES_STORE_H */
