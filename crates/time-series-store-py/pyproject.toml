@@ -27,6 +27,9 @@ module-name = "time_series_store"
 # them and the repair step bundles them into the wheel.
 [tool.cibuildwheel]
 build = "cp310-*"
+# Alpine/musl wheels are skipped: the netcdf-sys/hdf5-metno-sys build scripts need
+# system HDF5+NetCDF, which the RPM-based `before-all` below can't install on musl.
+skip = "*-musllinux*"
 build-frontend = "build"
 # Install the Rust toolchain and the NetCDF/HDF5 development libraries before
 # building. Tune per platform; on manylinux these may need building from source
