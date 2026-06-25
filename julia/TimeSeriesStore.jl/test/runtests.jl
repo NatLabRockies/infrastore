@@ -405,13 +405,18 @@ end
     n = transform_single_time_series!(store, hor, ivl)
     @test n == 1
 
-    fc = get_time_series(Deterministic, store, 400, Component, "dst")
+    # The family read resolves to the stored DST (no concrete Deterministic here).
+    fc = get_time_series(AbstractDeterministic, store, 400, Component, "dst")
     @test fc.count == 3
     @test size(fc.data) == (4, 3)
     @test fc.name == "dst"
     # Row-major [H, C]: out[s, w] = underlying[w*2 + s] (0-indexed).
     expected = Float64[underlying[(w - 1) * 2 + s] for s in 1:4, w in 1:3]
     @test fc.data == expected
+
+    # A concrete Deterministic request must NOT match a DST.
+    @test_throws TimeSeriesStore.NotFoundError get_time_series(
+        Deterministic, store, 400, Component, "dst")
 
     # get_time_series_keys enumerates both the source STS and the derived DST;
     # key_info lets us pick the DST and read it back by key (no key from transform).
@@ -435,6 +440,43 @@ end
     # The source SingleTimeSeries key still reads back as the underlying series.
     sts_idx = findfirst(i -> i.time_series_type == SingleTimeSeries, infos)
     @test get_time_series(infos[sts_idx].time_series_type, store, keys[sts_idx]).data == underlying
+
+    # Reference counting lives in the core: the STS and its derived DST share one
+    # underlying array, so count_array_references reports one of each.
+    md = list_metadata(store)
+    hash = md[1].data_hash
+    @test all(r.data_hash == hash for r in md)
+    @test count_array_references(store, hash) == (sts = 1, dst = 1)
+end
+
+@testset "AbstractDeterministic family resolution: miss and ambiguity" begin
+    # The family is resolved in the core; a real miss is no longer masked by the
+    # old guess-and-retry fallback.
+    store = Store(in_memory=true)
+    @test_throws TimeSeriesStore.NotFoundError get_time_series(
+        AbstractDeterministic, store, 999, Component, "nope")
+
+    # An identity that matches BOTH a concrete Deterministic and a DST is
+    # ambiguous for the family — the core rejects it; a concrete read still works.
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    hor = Hour(2)
+    ivl = Hour(1)
+    add_time_series!(
+        store, 401, "Generator", Component,
+        SingleTimeSeries(t0, res, Float64[i for i in 0:7], "dup"),
+    )
+    transform_single_time_series!(store, hor, ivl)
+    # Canonical [H, C] Deterministic sharing (owner, name, resolution).
+    add_time_series!(
+        store, 401, "Generator", Component,
+        Deterministic(t0, res, hor, ivl, 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
+    )
+    @test_throws TimeSeriesStore.InvalidParameterError get_time_series(
+        AbstractDeterministic, store, 401, Component, "dup")
+    # The concrete request disambiguates.
+    cd = get_time_series(Deterministic, store, 401, Component, "dup")
+    @test cd isa Deterministic
 end
 
 @testset "get_time_series_keys empty owner" begin

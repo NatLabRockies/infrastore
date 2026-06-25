@@ -31,6 +31,14 @@
 #define TS_ERR_INTERNAL 99
 
 /**
+ * Request-only `ts_type` sentinel for the `AbstractDeterministic` family. It is
+ * never a stored type and never returned through `out_matched_type`; it only
+ * addresses a forecast whose concrete type (`Deterministic` or
+ * `DeterministicSingleTimeSeries`) the caller does not need to know in advance.
+ */
+#define TS_TYPE_ABSTRACT_DETERMINISTIC 100
+
+/**
  * Accumulates pending add requests for a single all-or-nothing
  * `ts_store_add_batch` call. Building the batch performs no store I/O.
  */
@@ -408,6 +416,26 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle,
                                    uint64_t *out_byte_len);
 
 /**
+ * Count `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
+ * that reference the 32-byte content hash `data_hash`, across all owners,
+ * writing the counts to `*out_sts` and `*out_dst`. A binding uses these to
+ * decide whether removing a `SingleTimeSeries` would orphan a DST that shares
+ * its underlying array — a single catalog query rather than a full scan in the
+ * caller.
+ *
+ * # Safety
+ *
+ * - `handle` must be a live, non-null store handle created by this library; no
+ *   concurrent mutation is permitted for the duration of the call.
+ * - `data_hash` must be non-null and point to at least 32 readable bytes.
+ * - `out_sts` and `out_dst` must each be valid for writing one `u64`.
+ */
+int32_t ts_store_count_array_references(const struct TsStore *handle,
+                                        const uint8_t *data_hash,
+                                        uint64_t *out_sts,
+                                        uint64_t *out_dst);
+
+/**
  * Add a dense forecast. `data_ptr`/`data_byte_len` is the flattened storage
  * array (Deterministic: `[H, count, *E]`; Scenarios: `[scenario_count, H,
  * count, *E]`). `ts_type` must be 2=Deterministic or 5=Scenarios;
@@ -719,6 +747,15 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
 /**
  * Fetch a forecast by attributes and return the full data array plus metadata.
  *
+ * `ts_type` is a read request: a concrete type (`2`=Deterministic,
+ * `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios) or the
+ * `TS_TYPE_ABSTRACT_DETERMINISTIC` (`100`) family, which matches a stored
+ * `Deterministic` *or* `DeterministicSingleTimeSeries`. The catalog resolves the
+ * family authoritatively — no client-side guess-and-retry — and writes the
+ * concrete type that matched to `*out_matched_type`. An ambiguous family request
+ * (both concrete types share the identity) returns `TS_ERR_INVALID_PARAMETER`;
+ * a genuine miss returns the unmasked not-found error.
+ *
  * Reads a `Deterministic`, `Probabilistic`, or `Scenarios` forecast (DST is
  * synthesized into `Deterministic`). On success, the caller owns two heap
  * buffers and must free them with the matching deallocators:
@@ -743,7 +780,8 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
  * - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
  *   identify the owner. `name` must point to a valid, null-terminated
  *   UTF-8 string for the duration of the call; `features_json` may be null.
- * - All `out_*` scalar pointers must be valid for writing one value each.
+ * - All `out_*` scalar pointers, including `out_matched_type`, must be valid
+ *   for writing one value each.
  * - `out_dims` must be valid for writing one pointer; the returned pointer
  *   must be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
  * - `out_data` must be valid for writing one pointer; the returned pointer
@@ -778,7 +816,8 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
                               uint8_t **out_data,
                               uint64_t *out_data_byte_len,
                               double **out_percentiles,
-                              uint64_t *out_percentiles_len);
+                              uint64_t *out_percentiles_len,
+                              int32_t *out_matched_type);
 
 /**
  * Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
@@ -786,13 +825,16 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
  *
  * This is the key-based counterpart to [`ts_store_get_forecast`]: the time
  * series type comes from `key` rather than an explicit `ts_type` argument. The
- * outputs and buffer-ownership rules are identical to [`ts_store_get_forecast`].
+ * outputs and buffer-ownership rules are identical to [`ts_store_get_forecast`];
+ * `*out_matched_type` is set from the key's type (no family resolution needed
+ * because the key already names the concrete type).
  *
  * # Safety
  *
  * - `handle` and `key` must be live handles created by this library; no
  *   concurrent mutation is permitted for the duration of the call.
- * - All `out_*` scalar pointers must be valid for writing one value each.
+ * - All `out_*` scalar pointers, including `out_matched_type`, must be valid
+ *   for writing one value each.
  * - `out_dims` must be valid for writing one pointer; the returned pointer must
  *   be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
  * - `out_data` must be valid for writing one pointer; the returned pointer must
@@ -819,7 +861,8 @@ int32_t ts_store_get_forecast_by_key(const struct TsStore *handle,
                                      uint8_t **out_data,
                                      uint64_t *out_data_byte_len,
                                      double **out_percentiles,
-                                     uint64_t *out_percentiles_len);
+                                     uint64_t *out_percentiles_len,
+                                     int32_t *out_matched_type);
 
 /**
  * Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,

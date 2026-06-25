@@ -1330,6 +1330,51 @@ pub unsafe extern "C" fn ts_store_get_array_by_hash(
     TS_OK
 }
 
+/// Count `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
+/// that reference the 32-byte content hash `data_hash`, across all owners,
+/// writing the counts to `*out_sts` and `*out_dst`. A binding uses these to
+/// decide whether removing a `SingleTimeSeries` would orphan a DST that shares
+/// its underlying array — a single catalog query rather than a full scan in the
+/// caller.
+///
+/// # Safety
+///
+/// - `handle` must be a live, non-null store handle created by this library; no
+///   concurrent mutation is permitted for the duration of the call.
+/// - `data_hash` must be non-null and point to at least 32 readable bytes.
+/// - `out_sts` and `out_dst` must each be valid for writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_count_array_references(
+    handle: *const TsStoreHandle,
+    data_hash: *const u8,
+    out_sts: *mut u64,
+    out_dst: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if data_hash.is_null() || out_sts.is_null() || out_dst.is_null() {
+        set_error("a pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let mut hash = [0u8; 32];
+    unsafe { ptr::copy_nonoverlapping(data_hash, hash.as_mut_ptr(), 32) };
+    let (sts, dst) = match store.inner.count_array_references(&hash) {
+        Ok(c) => c,
+        Err(e) => return map_core_error(e),
+    };
+    unsafe {
+        *out_sts = sts as u64;
+        *out_dst = dst as u64;
+    }
+    TS_OK
+}
+
 // ---- Forecasts (Deterministic / DeterministicSingleTimeSeries / ...) -------
 
 fn ts_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
@@ -1343,6 +1388,34 @@ fn ts_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
         5 => T::Scenarios,
         _ => return None,
     })
+}
+
+/// Request-only `ts_type` sentinel for the `AbstractDeterministic` family. It is
+/// never a stored type and never returned through `out_matched_type`; it only
+/// addresses a forecast whose concrete type (`Deterministic` or
+/// `DeterministicSingleTimeSeries`) the caller does not need to know in advance.
+pub const TS_TYPE_ABSTRACT_DETERMINISTIC: i32 = 100;
+
+/// Map a forecast read request's `ts_type` code to a [`core_lib::RequestedType`]:
+/// a concrete forecast type (2..=5) or the [`TS_TYPE_ABSTRACT_DETERMINISTIC`]
+/// family. The non-forecast types `SingleTimeSeries` (0) and
+/// `NonSequentialTimeSeries` (1) are rejected here so the forecast API reports a
+/// clear "invalid time_series_type" error up front rather than failing later in
+/// `emit_forecast_data` after a key is resolved and data is read.
+fn requested_type_from_int(i: i32) -> Option<core_lib::RequestedType> {
+    use core_lib::TimeSeriesType as T;
+    if i == TS_TYPE_ABSTRACT_DETERMINISTIC {
+        return Some(core_lib::RequestedType::AbstractDeterministic);
+    }
+    match ts_type_from_int(i) {
+        Some(
+            t @ (T::Deterministic
+            | T::DeterministicSingleTimeSeries
+            | T::Probabilistic
+            | T::Scenarios),
+        ) => Some(core_lib::RequestedType::Concrete(t)),
+        _ => None,
+    }
 }
 
 /// Inverse of [`ts_type_from_int`]: the integer discriminant for a
@@ -2362,6 +2435,15 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 
 /// Fetch a forecast by attributes and return the full data array plus metadata.
 ///
+/// `ts_type` is a read request: a concrete type (`2`=Deterministic,
+/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios) or the
+/// `TS_TYPE_ABSTRACT_DETERMINISTIC` (`100`) family, which matches a stored
+/// `Deterministic` *or* `DeterministicSingleTimeSeries`. The catalog resolves the
+/// family authoritatively — no client-side guess-and-retry — and writes the
+/// concrete type that matched to `*out_matched_type`. An ambiguous family request
+/// (both concrete types share the identity) returns `TS_ERR_INVALID_PARAMETER`;
+/// a genuine miss returns the unmasked not-found error.
+///
 /// Reads a `Deterministic`, `Probabilistic`, or `Scenarios` forecast (DST is
 /// synthesized into `Deterministic`). On success, the caller owns two heap
 /// buffers and must free them with the matching deallocators:
@@ -2386,7 +2468,8 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 /// - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
 ///   identify the owner. `name` must point to a valid, null-terminated
 ///   UTF-8 string for the duration of the call; `features_json` may be null.
-/// - All `out_*` scalar pointers must be valid for writing one value each.
+/// - All `out_*` scalar pointers, including `out_matched_type`, must be valid
+///   for writing one value each.
 /// - `out_dims` must be valid for writing one pointer; the returned pointer
 ///   must be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
 /// - `out_data` must be valid for writing one pointer; the returned pointer
@@ -2428,6 +2511,9 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     // percentiles (Probabilistic only; null + 0 for other types)
     out_percentiles: *mut *mut f64,
     out_percentiles_len: *mut u64,
+    // the concrete type that was matched (e.g. an AbstractDeterministic request
+    // resolves to 2=Deterministic or 3=DeterministicSingleTimeSeries)
+    out_matched_type: *mut i32,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -2451,23 +2537,38 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         || out_data_byte_len.is_null()
         || out_percentiles.is_null()
         || out_percentiles_len.is_null()
+        || out_matched_type.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe {
-        build_typed_key_from_attrs(
-            owner_id,
-            owner_category,
-            name,
-            ts_type,
-            resolution_ms,
-            features_json,
-        )
+    let requested = match requested_type_from_int(ts_type) {
+        Some(r) => r,
+        None => {
+            set_error(format!("invalid time_series_type {ts_type}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    // Parse the addressing attributes (the key's type field is unused here; the
+    // catalog decides the concrete type via `resolve_forecast_key`).
+    let attrs = match unsafe {
+        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
     };
+    let key = match store.inner.resolve_forecast_key(
+        attrs.owner_id,
+        attrs.owner_category,
+        &attrs.name,
+        attrs.resolution,
+        attrs.features,
+        requested,
+    ) {
+        Ok(k) => k,
+        Err(e) => return map_core_error(e),
+    };
+    let matched_type = ts_type_to_int(key.time_series_type);
     let time_range = if time_range_present {
         let start = match unix_ms_to_datetime(time_range_start_ms) {
             Some(d) => d,
@@ -2494,6 +2595,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         Err(e) => return map_core_error(e),
     };
     unsafe {
+        *out_matched_type = matched_type;
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
@@ -2673,13 +2775,16 @@ unsafe fn emit_forecast_data(
 ///
 /// This is the key-based counterpart to [`ts_store_get_forecast`]: the time
 /// series type comes from `key` rather than an explicit `ts_type` argument. The
-/// outputs and buffer-ownership rules are identical to [`ts_store_get_forecast`].
+/// outputs and buffer-ownership rules are identical to [`ts_store_get_forecast`];
+/// `*out_matched_type` is set from the key's type (no family resolution needed
+/// because the key already names the concrete type).
 ///
 /// # Safety
 ///
 /// - `handle` and `key` must be live handles created by this library; no
 ///   concurrent mutation is permitted for the duration of the call.
-/// - All `out_*` scalar pointers must be valid for writing one value each.
+/// - All `out_*` scalar pointers, including `out_matched_type`, must be valid
+///   for writing one value each.
 /// - `out_dims` must be valid for writing one pointer; the returned pointer must
 ///   be freed exactly once with `ts_buffer_free_u64` using `*out_ndims`.
 /// - `out_data` must be valid for writing one pointer; the returned pointer must
@@ -2709,6 +2814,9 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
     out_data_byte_len: *mut u64,
     out_percentiles: *mut *mut f64,
     out_percentiles_len: *mut u64,
+    // the concrete type read (taken from the key; provided for symmetry with
+    // `ts_store_get_forecast`)
+    out_matched_type: *mut i32,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -2738,10 +2846,12 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
         || out_data_byte_len.is_null()
         || out_percentiles.is_null()
         || out_percentiles_len.is_null()
+        || out_matched_type.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
+    let matched_type = ts_type_to_int(key.inner.time_series_type);
     let time_range = if time_range_present {
         let start = match unix_ms_to_datetime(time_range_start_ms) {
             Some(d) => d,
@@ -2768,6 +2878,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
         Err(e) => return map_core_error(e),
     };
     unsafe {
+        *out_matched_type = matched_type;
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
