@@ -824,3 +824,93 @@ end
     @test isempty(get_time_series_keys(store, owner_id, Component))
     @test length(get_time_series_keys(store, owner_id, SupplementalAttribute)) == 1
 end
+
+@testset "StaticReader: columnar reads across dtypes and shapes" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2031, 1, 1)
+    res = Hour(1)
+    add_time_series!(store, 2, "Gen", Component, SingleTimeSeries(t0, res, [20.0, 21.0, 22.0, 23.0], "load"))
+    add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, [10.0, 11.0, 12.0, 13.0], "load"))
+    add_time_series!(store, 3, "Gen", Component, SingleTimeSeries(t0, res, Int64[100, 101, 102, 103], "count"))
+    # f64 with element shape (2,): data shape (time=4, E=2).
+    pair = Float64[t * 10 + e for t in 1:4, e in 1:2]
+    add_time_series!(store, 5, "Gen", Component, SingleTimeSeries(t0, res, pair, "pair"))
+
+    r = build_static_reader(store; resolution=res)
+    grid = static_grid(r)
+    @test grid.length == 4
+    @test grid.initial_timestamp == t0
+
+    groups = static_groups(r)
+    # Order: f64 scalar, f64 [2], i64 scalar.
+    @test length(groups) == 3
+    @test groups[1].dtype == Float64 && groups[1].element_shape == Int[]
+    @test [key_info(k).owner_id for k in groups[1].keys] == [1, 2]
+    @test groups[2].dtype == Float64 && groups[2].element_shape == [2]
+    @test groups[3].dtype == Int64 && groups[3].element_shape == Int[]
+
+    static_read!(r, t0 + Hour(2))            # index 2 -> Julia row 3
+    @test static_values(r, 1) == [12.0, 22.0]
+    @test static_values(r, 2)[1, :] == pair[3, :]
+    @test static_values(r, 3) == Int64[102]
+
+    # Buffer reuse: a later read overwrites in place.
+    static_read!(r, t0 + Hour(3))
+    @test static_values(r, 1) == [13.0, 23.0]
+
+    # Off-grid read throws.
+    @test_throws TimeSeriesStore.InvalidParameterError static_read!(r, t0 + Minute(30))
+end
+
+@testset "ForecastReader: windows incl. multidim element shape" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2031, 2, 1)
+    H, count, E = 3, 2, 2
+    data = Float64[h * 1000 + c * 10 + e for h in 1:H, c in 1:count, e in 1:E]
+    add_time_series!(store, 9, "Gen", Component,
+                     Deterministic(t0, Hour(1), Hour(3), Hour(3), count, data, "pf"))
+
+    r = build_forecast_reader(store, Deterministic; resolution=Hour(1))
+    tl = forecast_timeline(r)
+    @test tl.count == count
+    @test tl.interval == Millisecond(Hour(3))
+    ents = forecast_entries(r)
+    @test length(ents) == 1
+    @test ents[1].window_shape == [H, E]
+
+    # Window k (interval 3h): window k == data[:, k+1, :].
+    for k in 0:(count - 1)
+        forecast_read!(r, t0 + Hour(3) * k)
+        @test forecast_values(r, 1) == data[:, k + 1, :]
+    end
+
+    @test_throws TimeSeriesStore.InvalidParameterError forecast_read!(r, t0 + Hour(1))
+end
+
+@testset "ForecastReader: Deterministic reader includes DST identically" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2031, 3, 1)
+    res = Hour(1)
+    sts = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+    add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, sts, "load"))
+    # Deterministic whose windows match the DST: value[s, k] = sts[k + s]; shape (H=2, count=5).
+    det = Float64[sts[k + s] for s in 0:1, k in 1:5]
+    add_time_series!(store, 2, "Gen", Component, Deterministic(t0, res, Hour(2), res, 5, det, "gen"))
+    transform_single_time_series!(store, Hour(2), res)
+
+    r = build_forecast_reader(store, Deterministic; resolution=res)
+    @test forecast_timeline(r).count == 5
+    ents = forecast_entries(r)
+    @test length(ents) == 2
+    types = [key_info(e.key).time_series_type for e in ents]
+    @test DeterministicSingleTimeSeries in types
+    @test Deterministic in types
+
+    for k in 0:4
+        forecast_read!(r, t0 + Hour(k))
+        w_dst = forecast_values(r, 1)
+        w_det = forecast_values(r, 2)
+        @test w_dst == w_det
+        @test w_dst == [sts[k + 1], sts[k + 2]]
+    end
+end

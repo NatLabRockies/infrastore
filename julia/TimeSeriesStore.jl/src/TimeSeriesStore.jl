@@ -18,6 +18,10 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        open_store, flush!, clear!, replace_owner!,
        transform_single_time_series!, has_typed, remove_typed!,
        close!,
+       StaticReader, build_static_reader, static_grid, static_groups,
+       static_read!, static_values,
+       ForecastReader, build_forecast_reader, forecast_timeline, forecast_entries,
+       forecast_read!, forecast_values,
        init_logging
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
@@ -2369,6 +2373,347 @@ function __init__()
             @warn "TimeSeriesStore.__init__: failed to initialize tracing" exception=e
         end
     end
+end
+
+# ---- Timestamp readers ----------------------------------------------------
+#
+# Stateful readers for the simulation access pattern: a loop over every
+# timestamp wants the value of every series at that instant. Build a reader
+# once (it resolves the catalog layout and owns reusable buffers), then call
+# the read function per timestamp and pull each group's / entry's values. The
+# returned arrays are copies in canonical column-major layout, so they stay
+# valid across subsequent reads.
+
+_int_for_type(::Type{Deterministic}) = TS_TYPE_DETERMINISTIC
+_int_for_type(::Type{DeterministicSingleTimeSeries}) = TS_TYPE_DETERMINISTIC_SINGLE
+_int_for_type(::Type{Probabilistic}) = TS_TYPE_PROBABILISTIC
+_int_for_type(::Type{Scenarios}) = TS_TYPE_SCENARIOS
+_int_for_type(::Type{T}) where {T} =
+    throw(InvalidParameterError("$T is not a forecast type"))
+
+# Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the
+# stored row-major `dims` to canonical column-major Julia layout. The pointer is
+# reader-owned (valid only until the next read), so we always copy.
+function _reader_values(ptr::Ptr{UInt8}, byte_len::UInt64, ::Type{T},
+                        dims::AbstractVector{<:Integer}) where {T}
+    n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
+    flat = Vector{T}(undef, n)
+    if n > 0
+        GC.@preserve flat unsafe_copyto!(pointer(flat), Ptr{T}(ptr), n)
+    end
+    nd = length(dims)
+    nd <= 1 && return flat
+    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+end
+
+# ---- StaticReader ---------------------------------------------------------
+
+"""
+One `(dtype, element_shape)` columnar group of a [`StaticReader`]. `keys[j]`
+identifies column `j` of the values matrix returned by [`static_values`].
+"""
+struct StaticGroup
+    dtype         :: DataType
+    element_shape :: Vector{Int}
+    keys          :: Vector{TimeSeriesKey}
+end
+
+"""
+A prepared reader over the `SingleTimeSeries` matching a build filter. Build
+with [`build_static_reader`], read a timestamp with [`static_read!`], then pull
+each group's values with [`static_values`]. Inspect the layout via
+[`static_groups`] / [`static_grid`].
+"""
+mutable struct StaticReader
+    handle :: Ptr{Cvoid}
+    store  :: Store
+    groups :: Vector{StaticGroup}
+    function StaticReader(handle::Ptr{Cvoid}, store::Store, groups::Vector{StaticGroup})
+        r = new(handle, store, groups)
+        finalizer(_finalize_static_reader, r)
+        return r
+    end
+end
+
+function _finalize_static_reader(r::StaticReader)
+    if r.handle != C_NULL
+        ccall((:ts_static_reader_free, lib_path()), Cvoid, (Ptr{Cvoid},), r.handle)
+        r.handle = C_NULL
+    end
+end
+
+function _static_group_layout(handle::Ptr{Cvoid}, gi::Integer)
+    out_dtype = Ref{Int32}(0)
+    out_ncols = Ref{UInt64}(0)
+    out_shape_len = Ref{UInt64}(0)
+    code = ccall((:ts_static_reader_group_info, lib_path()), Int32,
+                 (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
+                 handle, UInt64(gi), out_dtype, out_ncols, C_NULL, UInt64(0), out_shape_len)
+    _check(code)
+    shape = Vector{Int64}(undef, Int(out_shape_len[]))
+    if out_shape_len[] > 0
+        code = ccall((:ts_static_reader_group_info, lib_path()), Int32,
+                     (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
+                     handle, UInt64(gi), out_dtype, out_ncols,
+                     shape, UInt64(length(shape)), out_shape_len)
+        _check(code)
+    end
+    keys = Vector{TimeSeriesKey}(undef, Int(out_ncols[]))
+    for col in 0:(Int(out_ncols[]) - 1)
+        out_key = Ref{Ptr{Cvoid}}(C_NULL)
+        code = ccall((:ts_static_reader_group_key, lib_path()), Int32,
+                     (Ptr{Cvoid}, UInt64, UInt64, Ref{Ptr{Cvoid}}),
+                     handle, UInt64(gi), UInt64(col), out_key)
+        _check(code)
+        keys[col + 1] = TimeSeriesKey(out_key[])
+    end
+    return StaticGroup(_julia_dtype(out_dtype[]), Int.(shape), keys)
+end
+
+"""
+    build_static_reader(store; resolution, owner_id=nothing,
+                        owner_category=nothing, name=nothing, features=Dict())
+
+Build a [`StaticReader`] over the `SingleTimeSeries` matching the filter.
+`resolution` (a `Period`) is required — one resolution per reader. The matched
+series must share one grid (`initial_timestamp` + `length`).
+"""
+function build_static_reader(store::Store; resolution::Period,
+                             owner_id::Union{Nothing, Integer} = nothing,
+                             owner_category::Union{Nothing, OwnerCategory} = nothing,
+                             name::Union{Nothing, AbstractString} = nothing,
+                             features::AbstractDict = Dict{String, Any}())
+    has_owner = owner_id !== nothing
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+    has_category = owner_category !== nothing
+    category_arg = has_category ? _category_int(owner_category) : Int32(0)
+    name_arg = name === nothing ? C_NULL : String(name)
+    resolution_ms = _resolution_to_ms(resolution)
+    features_arg = isempty(features) ? C_NULL : JSON.json(features)
+    out = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall((:ts_store_build_static_reader, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Cstring, Int64, Cstring,
+                  Ref{Ptr{Cvoid}}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 name_arg, resolution_ms, features_arg, out)
+    _check(code)
+    handle = out[]
+    out_n = Ref{UInt64}(0)
+    _check(ccall((:ts_static_reader_num_groups, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{UInt64}), handle, out_n))
+    groups = [_static_group_layout(handle, gi) for gi in 0:(Int(out_n[]) - 1)]
+    return StaticReader(handle, store, groups)
+end
+
+"""
+    static_grid(reader) -> NamedTuple
+
+The reader's master grid: `(; initial_timestamp::DateTime, resolution::Period,
+length::Int)`. Valid timestamps are `initial_timestamp + k·resolution` for
+`k in 0:length-1`.
+"""
+function static_grid(reader::StaticReader)
+    out_initial = Ref{Int64}(0)
+    out_res = Ref{Int64}(0)
+    out_len = Ref{UInt64}(0)
+    _check(ccall((:ts_static_reader_grid, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{UInt64}),
+                 reader.handle, out_initial, out_res, out_len))
+    return (initial_timestamp = _from_unix_ms(out_initial[]),
+            resolution = Millisecond(out_res[]),
+            length = Int(out_len[]))
+end
+
+"""
+    static_groups(reader) -> Vector{StaticGroup}
+
+The reader's columnar groups (resolved once at build time). Each [`StaticGroup`]
+carries its `dtype`, `element_shape`, and the `keys` identifying each column.
+"""
+static_groups(reader::StaticReader) = reader.groups
+
+"""
+    static_read!(reader, t::DateTime) -> reader
+
+Read the value of every series at `t`, filling the reader's buffers. Throws if
+`t` is off the reader's grid. Follow with [`static_values`] per group.
+"""
+function static_read!(reader::StaticReader, t::DateTime)
+    _check(ccall((:ts_static_reader_read, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
+                 reader.handle, reader.store.handle, _to_unix_ms(t)))
+    return reader
+end
+
+"""
+    static_values(reader, group_index::Integer) -> Array
+
+The values from the most recent [`static_read!`] for group `group_index`
+(1-based), as a column-major array of size `(num_columns, element_shape...)`.
+Column `j` corresponds to `static_groups(reader)[group_index].keys[j]`.
+"""
+function static_values(reader::StaticReader, group_index::Integer)
+    group = reader.groups[group_index]
+    out_ptr = Ref{Ptr{UInt8}}(C_NULL)
+    out_len = Ref{UInt64}(0)
+    _check(ccall((:ts_static_reader_group_values, lib_path()), Int32,
+                 (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
+                 reader.handle, UInt64(group_index - 1), out_ptr, out_len))
+    dims = vcat(length(group.keys), group.element_shape)
+    return _reader_values(out_ptr[], out_len[], group.dtype, dims)
+end
+
+# ---- ForecastReader -------------------------------------------------------
+
+"""
+One forecast's window slot in a [`ForecastReader`]. `key` identifies the
+forecast; `window_shape` is the shape of a single window (`[H, *E]`,
+`[P, H, *E]`, or `[scenarios, H, *E]`).
+"""
+struct ForecastEntry
+    dtype        :: DataType
+    window_shape :: Vector{Int}
+    key          :: TimeSeriesKey
+end
+
+"""
+A prepared reader over the forecasts of one type matching a build filter. Build
+with [`build_forecast_reader`], read a timestamp with [`forecast_read!`], then
+pull each entry's window with [`forecast_values`].
+"""
+mutable struct ForecastReader
+    handle  :: Ptr{Cvoid}
+    store   :: Store
+    entries :: Vector{ForecastEntry}
+    function ForecastReader(handle::Ptr{Cvoid}, store::Store,
+                            entries::Vector{ForecastEntry})
+        r = new(handle, store, entries)
+        finalizer(_finalize_forecast_reader, r)
+        return r
+    end
+end
+
+function _finalize_forecast_reader(r::ForecastReader)
+    if r.handle != C_NULL
+        ccall((:ts_forecast_reader_free, lib_path()), Cvoid, (Ptr{Cvoid},), r.handle)
+        r.handle = C_NULL
+    end
+end
+
+function _forecast_entry_layout(handle::Ptr{Cvoid}, ei::Integer)
+    out_dtype = Ref{Int32}(0)
+    out_shape_len = Ref{UInt64}(0)
+    code = ccall((:ts_forecast_reader_entry_info, lib_path()), Int32,
+                 (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
+                 handle, UInt64(ei), out_dtype, C_NULL, UInt64(0), out_shape_len)
+    _check(code)
+    shape = Vector{Int64}(undef, Int(out_shape_len[]))
+    if out_shape_len[] > 0
+        code = ccall((:ts_forecast_reader_entry_info, lib_path()), Int32,
+                     (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
+                     handle, UInt64(ei), out_dtype, shape, UInt64(length(shape)), out_shape_len)
+        _check(code)
+    end
+    out_key = Ref{Ptr{Cvoid}}(C_NULL)
+    _check(ccall((:ts_forecast_reader_entry_key, lib_path()), Int32,
+                 (Ptr{Cvoid}, UInt64, Ref{Ptr{Cvoid}}), handle, UInt64(ei), out_key))
+    return ForecastEntry(_julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]))
+end
+
+"""
+    build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
+                          owner_category=nothing, name=nothing, features=Dict())
+
+Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
+`Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
+A `Deterministic` reader is abstract — it also includes
+`DeterministicSingleTimeSeries`, read into identical `[H, *E]` windows.
+`resolution` (a `Period`) is required; matched forecasts must share one window
+timeline.
+"""
+function build_forecast_reader(store::Store, time_series_type::Type; resolution::Period,
+                               owner_id::Union{Nothing, Integer} = nothing,
+                               owner_category::Union{Nothing, OwnerCategory} = nothing,
+                               name::Union{Nothing, AbstractString} = nothing,
+                               features::AbstractDict = Dict{String, Any}())
+    type_code = _int_for_type(time_series_type)
+    has_owner = owner_id !== nothing
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+    has_category = owner_category !== nothing
+    category_arg = has_category ? _category_int(owner_category) : Int32(0)
+    name_arg = name === nothing ? C_NULL : String(name)
+    resolution_ms = _resolution_to_ms(resolution)
+    features_arg = isempty(features) ? C_NULL : JSON.json(features)
+    out = Ref{Ptr{Cvoid}}(C_NULL)
+    code = ccall((:ts_store_build_forecast_reader, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Int32, Cstring, Int64, Cstring,
+                  Ref{Ptr{Cvoid}}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 Int32(type_code), name_arg, resolution_ms, features_arg, out)
+    _check(code)
+    handle = out[]
+    out_n = Ref{UInt64}(0)
+    _check(ccall((:ts_forecast_reader_num_entries, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{UInt64}), handle, out_n))
+    entries = [_forecast_entry_layout(handle, ei) for ei in 0:(Int(out_n[]) - 1)]
+    return ForecastReader(handle, store, entries)
+end
+
+"""
+    forecast_timeline(reader) -> NamedTuple
+
+The reader's window timeline: `(; initial_timestamp::DateTime, resolution::Period,
+interval::Period, count::Int)`. Valid timestamps are `initial_timestamp +
+k·interval` for `k in 0:count-1`.
+"""
+function forecast_timeline(reader::ForecastReader)
+    out_initial = Ref{Int64}(0)
+    out_res = Ref{Int64}(0)
+    out_interval = Ref{Int64}(0)
+    out_count = Ref{UInt64}(0)
+    _check(ccall((:ts_forecast_reader_timeline, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{UInt64}),
+                 reader.handle, out_initial, out_res, out_interval, out_count))
+    return (initial_timestamp = _from_unix_ms(out_initial[]),
+            resolution = Millisecond(out_res[]),
+            interval = Millisecond(out_interval[]),
+            count = Int(out_count[]))
+end
+
+"""
+    forecast_entries(reader) -> Vector{ForecastEntry}
+
+The reader's per-key window entries (resolved once at build time).
+"""
+forecast_entries(reader::ForecastReader) = reader.entries
+
+"""
+    forecast_read!(reader, t::DateTime) -> reader
+
+Read the forecast window at `t` for every entry, filling the reader's buffers.
+Throws if `t` is off the window timeline. Follow with [`forecast_values`].
+"""
+function forecast_read!(reader::ForecastReader, t::DateTime)
+    _check(ccall((:ts_forecast_reader_read, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
+                 reader.handle, reader.store.handle, _to_unix_ms(t)))
+    return reader
+end
+
+"""
+    forecast_values(reader, entry_index::Integer) -> Array
+
+The window from the most recent [`forecast_read!`] for entry `entry_index`
+(1-based), as a column-major array of size `window_shape`.
+"""
+function forecast_values(reader::ForecastReader, entry_index::Integer)
+    entry = reader.entries[entry_index]
+    out_ptr = Ref{Ptr{UInt8}}(C_NULL)
+    out_len = Ref{UInt64}(0)
+    _check(ccall((:ts_forecast_reader_entry_values, lib_path()), Int32,
+                 (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
+                 reader.handle, UInt64(entry_index - 1), out_ptr, out_len))
+    return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape)
 end
 
 end # module TimeSeriesStore
