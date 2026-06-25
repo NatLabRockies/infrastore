@@ -7,6 +7,7 @@ use chrono::Duration;
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
+use crate::reader::StaticReader;
 use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
@@ -809,6 +810,56 @@ impl Store {
             .iter()
             .map(TimeSeriesKey::from_metadata)
             .collect()
+    }
+
+    /// Build a [`StaticReader`] over the `SingleTimeSeries` matching `filter`.
+    ///
+    /// The filter must pin a resolution (one resolution per reader). All matched
+    /// series must share one grid (`initial_timestamp` + `length`); this is
+    /// validated here and errors on divergence, which is what lets the per-read
+    /// path skip presence checks. The reader is then driven with
+    /// [`Self::static_read`]. See [`crate::reader`].
+    pub fn build_static_reader(&self, mut filter: ListFilter) -> Result<StaticReader> {
+        if filter.resolution.is_none() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "build_static_reader requires a resolution filter (one resolution per reader)"
+                    .into(),
+            ));
+        }
+        // SingleTimeSeries-only; accept an explicit matching type, reject others.
+        match filter.time_series_type {
+            None | Some(TimeSeriesType::SingleTimeSeries) => {
+                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
+            }
+            Some(other) => {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "build_static_reader handles SingleTimeSeries only; got {}",
+                    other.as_str()
+                )));
+            }
+        }
+        let rows = self.list_time_series(filter)?;
+        let (initial, resolution, length, groups) = crate::reader::build_groups(rows)?;
+        Ok(StaticReader::from_parts(
+            initial, resolution, length, groups,
+        ))
+    }
+
+    /// Read the value of every series in `reader` at timestamp `at`, filling the
+    /// reader's reusable buffers in place. Afterwards walk
+    /// [`StaticReader::groups`] for the columnar bytes. Errors (never clamps) if
+    /// `at` is off the reader's grid.
+    pub fn static_read(
+        &self,
+        reader: &mut StaticReader,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let index = reader.index_at(at)?;
+        for group in reader.groups_mut() {
+            group.fill(|hashes, out| self.backend.read_index_into(hashes, index, out))?;
+        }
+        reader.mark_read(at);
+        Ok(())
     }
 
     /// Look up the full metadata record for a key. Errors with `NotFound` if no

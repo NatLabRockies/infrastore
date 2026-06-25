@@ -135,6 +135,26 @@ pub trait StorageBackend: Send + Sync {
     /// Fetch a slice of the array along axis 0 (the time axis). End is exclusive.
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
 
+    /// Read the value at a single time `index` for a set of co-located arrays,
+    /// appending the result to `out` in `hashes` order.
+    ///
+    /// All `hashes` must share one `(dtype, element_shape)`; the caller (the
+    /// timestamp reader) guarantees this by grouping. `out` is cleared first and
+    /// then filled with `hashes.len() * element_count * dtype.size()` bytes laid
+    /// out row-major as `[column, *element_shape]`. Reusing the caller's buffer
+    /// keeps a per-timestamp read loop allocation-free.
+    ///
+    /// The default reads each array's one-step slice individually; the NetCDF
+    /// backend overrides this to read a whole packed-dataset row per hyperslab.
+    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+        out.clear();
+        for hash in hashes {
+            let step = self.get_slice(hash, index..index + 1)?;
+            out.extend_from_slice(&step.bytes);
+        }
+        Ok(())
+    }
+
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
 
