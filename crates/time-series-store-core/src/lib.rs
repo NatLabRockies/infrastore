@@ -11,11 +11,17 @@ pub mod types;
 pub mod version;
 
 pub use error::{Result, TimeSeriesError};
+pub use metadata::{ForecastSummaryRow, StaticSummaryRow};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
-pub use store::{AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts};
+pub use store::{
+    AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,
+};
 pub use types::{
     array::{Dtype, TypedArray},
-    key::TimeSeriesKey,
+    key::{
+        ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
+        TimeSeriesKey,
+    },
     metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
     time_series::{
         Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,

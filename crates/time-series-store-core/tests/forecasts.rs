@@ -13,8 +13,9 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Deterministic, Dtype, Features, OwnerCategory, Probabilistic, Scenarios, SingleTimeSeries,
-    Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray, create_store, open_store,
+    Deterministic, Dtype, Features, ForecastTimeSeriesKey, OwnerCategory, Probabilistic, Scenarios,
+    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray,
+    create_store, open_store,
 };
 
 // Re-export slice_count_axis through a test-visible path.  The helper is
@@ -153,14 +154,18 @@ fn add_forecast(
             store
                 .transform_single_time_series(horizon, interval, None, None)
                 .unwrap();
-            return TimeSeriesKey {
-                owner_id: owner,
-                owner_category: OwnerCategory::Component,
-                time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
-                name: name.to_string(),
-                resolution: Some(resolution),
-                features: Features::new(),
-            };
+            return TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
+                owner,
+                OwnerCategory::Component,
+                TimeSeriesType::DeterministicSingleTimeSeries,
+                name.to_string(),
+                resolution,
+                Features::new(),
+                initial,
+                horizon,
+                interval,
+                count,
+            ));
         }
         other => panic!("add_forecast helper: unsupported type {other:?}"),
     };
@@ -231,7 +236,7 @@ fn deterministic_scalar_roundtrip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, count, "{backend}: count");
             assert_eq!(det.horizon, horizon, "{backend}: horizon");
@@ -279,7 +284,7 @@ fn deterministic_multidim_element_shape() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.data.shape, vec![2, 2, 3], "{backend}: shape");
             assert_eq!(det.data.to_f64_vec().unwrap(), vals, "{backend}: values");
@@ -325,7 +330,7 @@ fn probabilistic_roundtrip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let prob = got.as_probabilistic().unwrap();
             assert_eq!(prob.percentiles, percentiles, "{backend}: percentiles");
             assert_eq!(prob.count, count, "{backend}: count");
@@ -373,7 +378,7 @@ fn scenarios_roundtrip() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let scen = got.as_scenarios().unwrap();
             assert_eq!(
                 scen.scenario_count, scenario_count,
@@ -430,7 +435,9 @@ fn window_selection_deterministic() {
             // Select windows k=1 and k=2: start = t0+6h, end = t0+18h (exclusive).
             let start = initial + Duration::hours(6);
             let end = initial + Duration::hours(18);
-            let got = store.get_time_series(key, Some((start, end))).unwrap();
+            let got = store
+                .get_time_series(key.identity(), Some((start, end)))
+                .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 2, "{backend}: selected count");
             assert_eq!(det.initial_timestamp, start, "{backend}: initial_timestamp");
@@ -490,7 +497,9 @@ fn window_selection_probabilistic() {
             // Select windows k=1,2: start = t0+4h, end = t0+12h (exclusive).
             let start = initial + Duration::hours(4);
             let end = initial + Duration::hours(12);
-            let got = store.get_time_series(key, Some((start, end))).unwrap();
+            let got = store
+                .get_time_series(key.identity(), Some((start, end)))
+                .unwrap();
             let prob = got.as_probabilistic().unwrap();
             assert_eq!(prob.count, 2, "{backend}: count");
             assert_eq!(prob.initial_timestamp, start, "{backend}: initial");
@@ -549,7 +558,9 @@ fn window_selection_scenarios() {
             // Select windows k=2,3: start = t0+8h, end = t0+18h (exclusive).
             let start = initial + Duration::hours(8);
             let end = initial + Duration::hours(18);
-            let got = store.get_time_series(key, Some((start, end))).unwrap();
+            let got = store
+                .get_time_series(key.identity(), Some((start, end)))
+                .unwrap();
             let scen = got.as_scenarios().unwrap();
             assert_eq!(scen.count, 2, "{backend}: count");
             assert_eq!(scen.initial_timestamp, start, "{backend}: initial");
@@ -607,7 +618,9 @@ fn window_selection_error_cases() {
             // end < start => InvalidParameter
             let start = initial + Duration::hours(4);
             let end = initial;
-            let err = store.get_time_series(key, Some((start, end))).unwrap_err();
+            let err = store
+                .get_time_series(key.identity(), Some((start, end)))
+                .unwrap_err();
             assert!(
                 err.to_string().contains("end < start"),
                 "{backend}: end<start: {err}"
@@ -617,7 +630,7 @@ fn window_selection_error_cases() {
             let misaligned = initial + Duration::hours(3); // interval=4h, not aligned
             let far_end = initial + Duration::hours(20);
             let err = store
-                .get_time_series(key, Some((misaligned, far_end)))
+                .get_time_series(key.identity(), Some((misaligned, far_end)))
                 .unwrap_err();
             assert!(
                 err.to_string().contains("window boundary"),
@@ -627,7 +640,7 @@ fn window_selection_error_cases() {
             // Empty selection (aligned start with end == start) => count == 0.
             let aligned_start = initial + Duration::hours(4);
             let got = store
-                .get_time_series(key, Some((aligned_start, aligned_start)))
+                .get_time_series(key.identity(), Some((aligned_start, aligned_start)))
                 .unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 0, "{backend}: empty count");
@@ -675,7 +688,7 @@ fn dst_synthesis_overlapping_windows() {
         },
         |store, key, backend| {
             // Full read => synthesized Deterministic, shape [4, 3].
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.count, 3, "{backend}: count");
             assert_eq!(det.data.shape, vec![4, 3], "{backend}: shape");
@@ -694,7 +707,9 @@ fn dst_synthesis_overlapping_windows() {
             // Window selection: select window k=1 only.
             let start = initial + interval;
             let end = initial + interval + interval; // exclusive
-            let got2 = store.get_time_series(key, Some((start, end))).unwrap();
+            let got2 = store
+                .get_time_series(key.identity(), Some((start, end)))
+                .unwrap();
             let det2 = got2.as_deterministic().unwrap();
             assert_eq!(det2.count, 1, "{backend}: selected count");
             assert_eq!(det2.initial_timestamp, start, "{backend}: selected initial");
@@ -747,7 +762,7 @@ fn deterministic_i64_dtype_preserved() {
         },
         |store, key, backend| {
             // Full read preserves dtype and exact bytes.
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let det = got.as_deterministic().unwrap();
             assert_eq!(det.data.dtype, Dtype::I64, "{backend}: dtype");
             assert_eq!(det.data.shape, vec![2, 3], "{backend}: shape");
@@ -756,7 +771,9 @@ fn deterministic_i64_dtype_preserved() {
             // Select window k=1 (start = t0+4h, end = t0+8h).
             let start = initial + Duration::hours(4);
             let end = initial + Duration::hours(8);
-            let got2 = store.get_time_series(key, Some((start, end))).unwrap();
+            let got2 = store
+                .get_time_series(key.identity(), Some((start, end)))
+                .unwrap();
             let det2 = got2.as_deterministic().unwrap();
             assert_eq!(det2.data.dtype, Dtype::I64, "{backend}: sliced dtype");
             assert_eq!(det2.data.shape, vec![2, 1], "{backend}: sliced shape");
@@ -873,7 +890,7 @@ fn get_forecast_parameters_real() {
             }
         },
         |store, _key, backend| {
-            let params = store.get_forecast_parameters().unwrap();
+            let params = store.get_forecast_parameters(None, None).unwrap();
             assert_eq!(params.horizon, Some(horizon), "{backend}: horizon");
             assert_eq!(params.interval, Some(interval), "{backend}: interval");
             assert_eq!(params.count, Some(count), "{backend}: count");
@@ -885,7 +902,7 @@ fn get_forecast_parameters_real() {
 #[test]
 fn get_forecast_parameters_empty_when_no_forecasts() {
     let store = create_store(None, true).unwrap();
-    let params = store.get_forecast_parameters().unwrap();
+    let params = store.get_forecast_parameters(None, None).unwrap();
     assert!(params.horizon.is_none());
     assert!(params.interval.is_none());
     assert!(params.count.is_none());
@@ -932,7 +949,7 @@ fn dst_synthesis_multidim_element_shape() {
             }
         },
         |store, key, backend| {
-            let got = store.get_time_series(key, None).unwrap();
+            let got = store.get_time_series(key.identity(), None).unwrap();
             let det = got.as_deterministic().unwrap();
             // Expected output shape: [H=3, C=2, E=2] = [3, 2, 2], 12 elements.
             assert_eq!(det.data.shape, vec![3, 2, 2], "{backend}: shape");
@@ -1010,13 +1027,13 @@ fn resolve_abstract_deterministic_matches_real_deterministic() {
                 )
                 .unwrap();
             assert_eq!(
-                resolved.time_series_type,
+                resolved.time_series_type(),
                 TimeSeriesType::Deterministic,
                 "{backend}: matched type is the concrete Deterministic"
             );
             assert!(
                 store
-                    .get_time_series(&resolved, None)
+                    .get_time_series(resolved.identity(), None)
                     .unwrap()
                     .as_deterministic()
                     .is_some(),
@@ -1065,13 +1082,13 @@ fn resolve_abstract_deterministic_matches_dst() {
                 )
                 .unwrap();
             assert_eq!(
-                resolved.time_series_type,
+                resolved.time_series_type(),
                 TimeSeriesType::DeterministicSingleTimeSeries,
                 "{backend}: matched type is the concrete DST"
             );
             assert!(
                 store
-                    .get_time_series(&resolved, None)
+                    .get_time_series(resolved.identity(), None)
                     .unwrap()
                     .as_deterministic()
                     .is_some(),
@@ -1163,7 +1180,7 @@ fn resolve_abstract_deterministic_ambiguous_errors() {
             RequestedType::Concrete(TimeSeriesType::Deterministic),
         )
         .unwrap();
-    assert_eq!(d.time_series_type, TimeSeriesType::Deterministic);
+    assert_eq!(d.time_series_type(), TimeSeriesType::Deterministic);
 }
 
 #[test]
@@ -1188,7 +1205,7 @@ fn count_array_references_counts_sts_and_dst() {
         f64_arr(vec![8], &dst_source_vals()),
         None,
     );
-    let meta = store.get_metadata(&dst_key).unwrap();
+    let meta = store.get_metadata(dst_key.identity()).unwrap();
     let (sts, dst) = store.count_array_references(&meta.data_hash).unwrap();
     assert_eq!(
         (sts, dst),

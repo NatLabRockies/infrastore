@@ -63,7 +63,9 @@ fn sliced(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> (usize, DateTime<Utc>, Vec<f64>) {
-    let got = store.get_time_series(key, Some((start, end))).unwrap();
+    let got = store
+        .get_time_series(key.identity(), Some((start, end)))
+        .unwrap();
     let single = got.as_single().unwrap();
     (
         single.length,
@@ -111,7 +113,7 @@ fn cross_contamination_across_packed_columns() {
             for (i, key) in keys.iter().enumerate() {
                 let base = i as f64 * 1000.0;
 
-                let full = store.get_time_series(key, None).unwrap();
+                let full = store.get_time_series(key.identity(), None).unwrap();
                 let expected: Vec<f64> = (0..len).map(|j| base + j as f64).collect();
                 assert_eq!(
                     full.as_single().unwrap().data.to_f64_vec().unwrap(),
@@ -184,7 +186,7 @@ fn multidim_slice_at_nonzero_column() {
         },
         |store, (ka, kb), backend| {
             // Full read of the second column preserves shape + element order.
-            let full_b = store.get_time_series(kb, None).unwrap();
+            let full_b = store.get_time_series(kb.identity(), None).unwrap();
             let full_b = full_b.as_single().unwrap();
             assert_eq!(full_b.data.shape, vec![4, 3], "{backend}: full shape");
             assert_eq!(
@@ -196,7 +198,7 @@ fn multidim_slice_at_nonzero_column() {
             // Time sub-range rows 1..3 of column b -> timesteps 1 and 2.
             let sub = store
                 .get_time_series(
-                    kb,
+                    kb.identity(),
                     Some((initial + Duration::hours(1), initial + Duration::hours(3))),
                 )
                 .unwrap();
@@ -209,7 +211,7 @@ fn multidim_slice_at_nonzero_column() {
             );
 
             // Column a is untouched by reads of column b.
-            let full_a = store.get_time_series(ka, None).unwrap();
+            let full_a = store.get_time_series(ka.identity(), None).unwrap();
             assert_eq!(
                 full_a.as_single().unwrap().data.to_f64_vec().unwrap(),
                 a,
@@ -296,7 +298,7 @@ fn slice_preserves_all_dtypes() {
             },
             |store, key, backend| {
                 // Full read preserves dtype, shape, and exact bytes.
-                let full = store.get_time_series(key, None).unwrap();
+                let full = store.get_time_series(key.identity(), None).unwrap();
                 let full = full.as_single().unwrap();
                 assert_eq!(full.data.dtype, arr.dtype, "{backend}/{label}: full dtype");
                 assert_eq!(full.data.shape, arr.shape, "{backend}/{label}: full shape");
@@ -305,7 +307,7 @@ fn slice_preserves_all_dtypes() {
                 // Slice indices 2..5; byte offsets must respect dtype size.
                 let sub = store
                     .get_time_series(
-                        key,
+                        key.identity(),
                         Some((initial + Duration::hours(2), initial + Duration::hours(5))),
                     )
                     .unwrap();
@@ -412,7 +414,7 @@ fn length_one_series_slicing() {
             )
         },
         |store, key, backend| {
-            let full = store.get_time_series(key, None).unwrap();
+            let full = store.get_time_series(key.identity(), None).unwrap();
             assert_eq!(
                 full.as_single().unwrap().data.to_f64_vec().unwrap(),
                 vec![42.0],
@@ -444,7 +446,9 @@ fn far_future_end_does_not_overflow() {
         |store| add_single(store, 15, single_6(initial)),
         |store, key, backend| {
             let end = initial + Duration::nanoseconds(i64::MAX);
-            let got = store.get_time_series(key, Some((initial, end))).unwrap();
+            let got = store
+                .get_time_series(key.identity(), Some((initial, end)))
+                .unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
@@ -492,7 +496,7 @@ fn non_sequential_boundary_semantics() {
         },
         |store, key, backend| {
             let ns = |s: DateTime<Utc>, e: DateTime<Utc>| {
-                let got = store.get_time_series(key, Some((s, e))).unwrap();
+                let got = store.get_time_series(key.identity(), Some((s, e))).unwrap();
                 let series = got.as_non_sequential().unwrap();
                 (series.timestamps.clone(), series.data.to_f64_vec().unwrap())
             };

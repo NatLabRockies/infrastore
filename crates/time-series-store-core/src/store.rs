@@ -11,7 +11,10 @@ use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
 use crate::types::array::TypedArray;
-use crate::types::key::TimeSeriesKey;
+use crate::types::key::{
+    ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
+    TimeSeriesKey,
+};
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
 use crate::types::time_series::{
     Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
@@ -98,12 +101,24 @@ pub struct TimeSeriesCounts {
     pub forecasts: i64,
 }
 
+/// Owner- and array-oriented counts (distinct owners per category, distinct
+/// stored arrays per kind). Unlike [`TimeSeriesCounts`] the time-series counts
+/// here are de-duplicated by array content, and owners are split by category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeSeriesCountsDetailed {
+    pub components_with_time_series: i64,
+    pub supplemental_attributes_with_time_series: i64,
+    pub static_time_series_count: i64,
+    pub forecast_count: i64,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ForecastParameters {
     pub horizon: Option<Duration>,
     pub interval: Option<Duration>,
     pub count: Option<usize>,
     pub resolution: Option<Duration>,
+    pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct Store {
@@ -249,14 +264,15 @@ impl Store {
                             element_shape: single.data.element_shape().to_vec(),
                             logical_type: item.logical_type.clone(),
                         },
-                        TimeSeriesKey {
-                            owner_id: item.owner_id,
-                            owner_category: item.owner_category,
-                            time_series_type: TimeSeriesType::SingleTimeSeries,
-                            name: single.name.clone(),
-                            resolution: Some(single.resolution),
-                            features: item.features.clone(),
-                        },
+                        TimeSeriesKey::Single(SingleTimeSeriesKey::new(
+                            item.owner_id,
+                            item.owner_category,
+                            single.name.clone(),
+                            single.resolution,
+                            item.features.clone(),
+                            single.initial_timestamp,
+                            single.length,
+                        )),
                     )
                 }
                 TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
@@ -287,14 +303,13 @@ impl Store {
                             element_shape: non_sequential.data.element_shape().to_vec(),
                             logical_type: item.logical_type.clone(),
                         },
-                        TimeSeriesKey {
-                            owner_id: item.owner_id,
-                            owner_category: item.owner_category,
-                            time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                            name: non_sequential.name.clone(),
-                            resolution: None,
-                            features: item.features.clone(),
-                        },
+                        TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
+                            item.owner_id,
+                            item.owner_category,
+                            non_sequential.name.clone(),
+                            item.features.clone(),
+                            non_sequential.length,
+                        )),
                     )
                 }
                 // Dense forecast types are stored as standalone arrays in their
@@ -322,6 +337,10 @@ impl Store {
                         TimeSeriesType::Deterministic,
                         &det.name,
                         det.resolution,
+                        det.initial_timestamp,
+                        det.horizon,
+                        det.interval,
+                        det.count,
                     ),
                 ),
                 TimeSeriesData::Probabilistic(prob) => (
@@ -345,6 +364,10 @@ impl Store {
                         TimeSeriesType::Probabilistic,
                         &prob.name,
                         prob.resolution,
+                        prob.initial_timestamp,
+                        prob.horizon,
+                        prob.interval,
+                        prob.count,
                     ),
                 ),
                 TimeSeriesData::Scenarios(scen) => (
@@ -363,7 +386,16 @@ impl Store {
                         &scen.data,
                         None,
                     ),
-                    forecast_key(item, TimeSeriesType::Scenarios, &scen.name, scen.resolution),
+                    forecast_key(
+                        item,
+                        TimeSeriesType::Scenarios,
+                        &scen.name,
+                        scen.resolution,
+                        scen.initial_timestamp,
+                        scen.horizon,
+                        scen.interval,
+                        scen.count,
+                    ),
                 ),
             };
             let data = match &item.data {
@@ -409,7 +441,7 @@ impl Store {
     }
 
     #[tracing::instrument(skip(self, key), fields(owner = key.owner_id, name = %key.name))]
-    pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()> {
+    pub fn remove_time_series(&mut self, key: &KeyIdentity) -> Result<()> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -480,7 +512,7 @@ impl Store {
     #[tracing::instrument(skip(self, key, time_range), fields(owner = key.owner_id, name = %key.name, has_time_range = time_range.is_some()))]
     pub fn get_time_series(
         &self,
-        key: &TimeSeriesKey,
+        key: &KeyIdentity,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
         let meta = self.metadata.get_by_key(key)?;
@@ -766,10 +798,23 @@ impl Store {
         self.metadata.list(&filter.into())
     }
 
+    /// List the [`TimeSeriesKey`] of every association matching `filter`. This is
+    /// the key-centric counterpart of [`Self::list_time_series`]: each row is
+    /// reduced to its identifying + descriptive key, dropping physical storage
+    /// detail (`data_hash`, `dtype`, `logical_type`, `percentiles`) which is read
+    /// on demand via [`Self::get_metadata`]. The binding-facing listing path.
+    pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>> {
+        self.metadata
+            .list(&filter.into())?
+            .iter()
+            .map(TimeSeriesKey::from_metadata)
+            .collect()
+    }
+
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
-    pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
+    pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         self.metadata.get_by_key(key)
     }
 
@@ -802,7 +847,7 @@ impl Store {
         // A concrete request maps to exactly one key; reuse the unique-index
         // lookup so resolution stays cheap and NotFound is reported uniformly.
         if let RequestedType::Concrete(time_series_type) = requested {
-            let key = TimeSeriesKey {
+            let identity = KeyIdentity {
                 owner_id,
                 owner_category,
                 time_series_type,
@@ -810,8 +855,8 @@ impl Store {
                 resolution,
                 features,
             };
-            self.metadata.get_by_key(&key)?;
-            return Ok(key);
+            let meta = self.metadata.get_by_key(&identity)?;
+            return TimeSeriesKey::from_metadata(&meta);
         }
 
         // Abstract family: list candidates sharing (owner, name, resolution,
@@ -828,17 +873,7 @@ impl Store {
         matches.retain(|m| m.features == features && requested.matches(m.time_series_type));
         match matches.len() {
             0 => Err(TimeSeriesError::NotFound),
-            1 => {
-                let m = matches.pop().unwrap();
-                Ok(TimeSeriesKey {
-                    owner_id: m.owner_id,
-                    owner_category: m.owner_category,
-                    time_series_type: m.time_series_type,
-                    name: m.name,
-                    resolution: m.resolution,
-                    features: m.features,
-                })
-            }
+            1 => TimeSeriesKey::from_metadata(&matches.pop().unwrap()),
             _ => {
                 // More than one candidate satisfies the family. This is usually a
                 // Deterministic + DeterministicSingleTimeSeries sharing an identity,
@@ -1029,7 +1064,7 @@ impl Store {
         Ok(new_metas.len())
     }
 
-    pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool> {
+    pub fn has_time_series(&self, key: &KeyIdentity) -> Result<bool> {
         match self.metadata.get_by_key(key) {
             Ok(_) => Ok(true),
             Err(TimeSeriesError::NotFound) => Ok(false),
@@ -1044,15 +1079,22 @@ impl Store {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
-    /// Return the forecast parameters recorded in the store.
+    /// Return the forecast parameters recorded in the store, optionally
+    /// restricted to forecasts with a given `resolution` and/or `interval`.
     ///
-    /// Looks for any metadata row whose type is a forecast type and returns its
-    /// `horizon`, `interval`, `count`, and `resolution`. If no forecasts exist,
-    /// returns [`ForecastParameters::default()`]. When multiple forecasts are
-    /// present, returns the parameters from the first one found (v0 stores a
-    /// single coherent forecast configuration; callers that need per-type
-    /// parameters should use [`Self::list_time_series`] directly).
-    pub fn get_forecast_parameters(&self) -> Result<ForecastParameters> {
+    /// Looks for any metadata row whose type is a forecast type (and matches the
+    /// filters) and returns its `horizon`, `interval`, `count`, and `resolution`.
+    /// If none match, returns [`ForecastParameters::default()`]. When multiple
+    /// match, returns the first one found (v0 stores a single coherent forecast
+    /// configuration; callers that need per-type parameters should use
+    /// [`Self::list_time_series`] directly). `resolution` is pushed into the
+    /// catalog query; `interval` (not a catalog filter column) is matched on the
+    /// returned rows.
+    pub fn get_forecast_parameters(
+        &self,
+        resolution: Option<Duration>,
+        interval: Option<Duration>,
+    ) -> Result<ForecastParameters> {
         use crate::metadata::MetadataFilter;
         // Check each forecast type in priority order.
         for ts_type in [
@@ -1063,18 +1105,43 @@ impl Store {
         ] {
             let rows = self.metadata.list(&MetadataFilter {
                 time_series_type: Some(ts_type),
+                resolution,
                 ..Default::default()
             })?;
-            if let Some(first) = rows.into_iter().next() {
+            for row in rows {
+                if interval.is_some() && row.interval != interval {
+                    continue;
+                }
                 return Ok(ForecastParameters {
-                    horizon: first.horizon,
-                    interval: first.interval,
-                    count: first.count,
-                    resolution: first.resolution,
+                    horizon: row.horizon,
+                    interval: row.interval,
+                    count: row.count,
+                    resolution: row.resolution,
+                    initial_timestamp: row.initial_timestamp,
                 });
             }
         }
         Ok(ForecastParameters::default())
+    }
+
+    /// Verify that all `SingleTimeSeries` share one `(initial_timestamp, length)`
+    /// pair. Returns `None` when there are no `SingleTimeSeries`, `Some(pair)`
+    /// when they agree, or [`TimeSeriesError::IntegrityError`] when more than one
+    /// distinct pair is present. One `DISTINCT` query.
+    pub fn check_static_consistency(
+        &self,
+    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, usize)>> {
+        let pairs = self.metadata.distinct_single_initial_and_length()?;
+        match pairs.len() {
+            0 => Ok(None),
+            1 => {
+                let (ts, len) = pairs[0];
+                Ok(Some((ts, len as usize)))
+            }
+            _ => Err(TimeSeriesError::IntegrityError(format!(
+                "SingleTimeSeries have more than one (initial_timestamp, length) set: {pairs:?}"
+            ))),
+        }
     }
 
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts> {
@@ -1094,6 +1161,68 @@ impl Store {
                     .count_by_type(TimeSeriesType::NonSequentialTimeSeries)?,
             forecasts,
         })
+    }
+
+    /// Association count grouped by time series type. Replaces a binding-side
+    /// scan-and-group with one catalog query.
+    pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
+        self.metadata.counts_by_type()
+    }
+
+    /// Number of distinct stored arrays (content hashes); shared series count once.
+    pub fn num_distinct_arrays(&self) -> Result<i64> {
+        self.metadata.count_distinct_arrays()
+    }
+
+    /// Distinct owners per category and distinct stored arrays per kind (static
+    /// vs forecast). Replaces a binding-side full scan that grouped owners and
+    /// hashes in memory.
+    pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed> {
+        const STATIC: [TimeSeriesType; 2] = [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+        ];
+        const FORECAST: [TimeSeriesType; 4] = [
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ];
+        Ok(TimeSeriesCountsDetailed {
+            components_with_time_series: self
+                .metadata
+                .count_distinct_owners_in_category(OwnerCategory::Component)?,
+            supplemental_attributes_with_time_series: self
+                .metadata
+                .count_distinct_owners_in_category(OwnerCategory::SupplementalAttribute)?,
+            static_time_series_count: self.metadata.count_distinct_arrays_for_types(&STATIC)?,
+            forecast_count: self.metadata.count_distinct_arrays_for_types(&FORECAST)?,
+        })
+    }
+
+    /// Distinct owner ids of `category` that have a time series, optionally
+    /// restricted by type and/or resolution.
+    pub fn list_owner_ids(
+        &self,
+        category: OwnerCategory,
+        time_series_type: Option<TimeSeriesType>,
+        resolution: Option<Duration>,
+    ) -> Result<Vec<i64>> {
+        self.metadata
+            .list_owner_ids(category, time_series_type, resolution)
+    }
+
+    /// Grouped static-series summary (one row per distinct owner/name/shape
+    /// combination, with the association count). The binding builds the
+    /// presentation table; the core does the grouping.
+    pub fn static_summary(&self) -> Result<Vec<crate::metadata::StaticSummaryRow>> {
+        self.metadata.static_summary()
+    }
+
+    /// Grouped forecast summary (one row per distinct owner/name/window
+    /// configuration, with the association count).
+    pub fn forecast_summary(&self) -> Result<Vec<crate::metadata::ForecastSummaryRow>> {
+        self.metadata.forecast_summary()
     }
 
     pub fn compact(&mut self) -> Result<CompactionReport> {
@@ -1168,20 +1297,29 @@ fn forecast_metadata(
 
 /// Build the key returned for a dense forecast added via
 /// [`Store::add_time_series_bulk`].
+#[allow(clippy::too_many_arguments)]
 fn forecast_key(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
     name: &str,
     resolution: Duration,
+    initial_timestamp: chrono::DateTime<chrono::Utc>,
+    horizon: Duration,
+    interval: Duration,
+    count: usize,
 ) -> TimeSeriesKey {
-    TimeSeriesKey {
-        owner_id: item.owner_id,
-        owner_category: item.owner_category,
+    TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
+        item.owner_id,
+        item.owner_category,
         time_series_type,
-        name: name.to_owned(),
-        resolution: Some(resolution),
-        features: item.features.clone(),
-    }
+        name.to_owned(),
+        resolution,
+        item.features.clone(),
+        initial_timestamp,
+        horizon,
+        interval,
+        count,
+    ))
 }
 
 fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {

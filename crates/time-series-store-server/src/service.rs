@@ -149,7 +149,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         Ok(Response::new(KeysResp {
             keys: keys
                 .iter()
-                .map(time_series_store_proto::convert::key_to_pb)
+                .map(|k| time_series_store_proto::convert::key_to_pb(k.identity()))
                 .collect(),
         }))
     }
@@ -192,7 +192,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         _request: Request<ForecastParamsReq>,
     ) -> Result<Response<ForecastParamsResp>, Status> {
         let store = self.store.lock().await;
-        let params = store.get_forecast_parameters().map_err(map_err)?;
+        let params = store.get_forecast_parameters(None, None).map_err(map_err)?;
         Ok(Response::new(ForecastParamsResp {
             horizon_ms: params.horizon.map(|d| d.num_milliseconds()),
             interval_ms: params.interval.map(|d| d.num_milliseconds()),

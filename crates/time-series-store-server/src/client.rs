@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use time_series_store_core::{
-    OwnerCategory, Result as CoreResult, TimeSeriesData, TimeSeriesError, TimeSeriesKey,
+    KeyIdentity, OwnerCategory, Result as CoreResult, TimeSeriesData, TimeSeriesError,
     TimeSeriesMetadata, TimeSeriesType,
 };
 use time_series_store_proto::convert::{
@@ -96,7 +96,7 @@ impl RemoteClient {
 
     pub async fn get_time_series(
         &self,
-        key: &TimeSeriesKey,
+        key: &KeyIdentity,
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> CoreResult<TimeSeriesData> {
         let (start, end) = match time_range {
@@ -122,7 +122,7 @@ impl RemoteClient {
         &self,
         owner_id: i64,
         owner_category: OwnerCategory,
-    ) -> CoreResult<Vec<TimeSeriesKey>> {
+    ) -> CoreResult<Vec<KeyIdentity>> {
         let mut inner = self.inner.lock().await;
         let resp = inner
             .get_time_series_keys(KeysReq {
@@ -190,10 +190,13 @@ impl RemoteClient {
             interval: resp.interval_ms.map(chrono::Duration::milliseconds),
             count: resp.count.map(|c| c as usize),
             resolution: resp.resolution_ms.map(chrono::Duration::milliseconds),
+            // The forecast-parameters gRPC message does not carry the initial
+            // timestamp; it is not part of the read-only wire contract.
+            initial_timestamp: None,
         })
     }
 
-    pub async fn has_time_series(&self, key: &TimeSeriesKey) -> CoreResult<bool> {
+    pub async fn has_time_series(&self, key: &KeyIdentity) -> CoreResult<bool> {
         let mut inner = self.inner.lock().await;
         let resp = inner
             .has_time_series(HasReq {

@@ -46,7 +46,7 @@ fn persistent_round_trip() {
         .get_time_series_keys(42, OwnerCategory::Component)
         .unwrap();
     assert_eq!(keys.len(), 1);
-    let got = store.get_time_series(&keys[0], None).unwrap();
+    let got = store.get_time_series(keys[0].identity(), None).unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 24);
     assert_eq!(
@@ -118,7 +118,7 @@ fn compression_policies_round_trip() {
                 .get_time_series_keys(owner, OwnerCategory::Component)
                 .unwrap();
             assert_eq!(keys.len(), 1, "{compression:?}");
-            let got = store.get_time_series(&keys[0], None).unwrap();
+            let got = store.get_time_series(keys[0].identity(), None).unwrap();
             assert_eq!(
                 got.as_single().unwrap().data.to_f64_vec().unwrap(),
                 (0..24).map(|i| base + i as f64).collect::<Vec<_>>(),
@@ -250,7 +250,9 @@ fn time_range_slicing_through_netcdf() {
     let store = open_store(path.as_path(), true).unwrap();
     let start = initial + Duration::hours(3);
     let end = initial + Duration::hours(7);
-    let got = store.get_time_series(&key, Some((start, end))).unwrap();
+    let got = store
+        .get_time_series(key.identity(), Some((start, end)))
+        .unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.length, 4);
     assert_eq!(single.initial_timestamp, start);
@@ -307,7 +309,7 @@ fn spill_into_new_dataset_past_capacity() {
         .get_time_series_keys(total as i64, OwnerCategory::Component)
         .unwrap();
     assert_eq!(keys.len(), 1);
-    let last = store.get_time_series(&keys[0], None).unwrap();
+    let last = store.get_time_series(keys[0].identity(), None).unwrap();
     let single = last.as_single().unwrap();
     assert_eq!(
         single.data.to_f64_vec().unwrap(),
@@ -372,7 +374,7 @@ fn compact_reports_tombstones_and_slot_is_reused() {
 
     // Remove the middle association — its underlying array is dropped because
     // no other association references it.
-    store.remove_time_series(&k1).unwrap();
+    store.remove_time_series(k1.identity()).unwrap();
 
     // compact() should report >=1 reclaimed slot. (The full dataset was
     // pre-allocated at MAX_COLS, so it'll actually report MAX_COLS-2.)
@@ -447,7 +449,7 @@ fn netcdf_roundtrips_multidim_element_tuples() {
     };
 
     let store = open_store(path.as_path(), true).unwrap();
-    let got = store.get_time_series(&key, None).unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
     let single = got.as_single().unwrap();
     assert_eq!(single.data.shape, vec![4, 3]);
     assert_eq!(single.data, data);
@@ -499,7 +501,7 @@ fn non_sequential_persistent_round_trip() {
     };
 
     let store = open_store(&path, true).unwrap();
-    let got = store.get_time_series(&key, None).unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
     let irregular = got.as_non_sequential().unwrap();
     assert_eq!(irregular.timestamps, timestamps);
     assert_eq!(irregular.data, data);

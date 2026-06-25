@@ -343,10 +343,43 @@ int32_t ts_store_add_batch(struct TsStore *handle, struct TsBatch *batch,
 ```c
 int32_t ts_store_counts(const struct TsStore *handle, int64_t *out_components_with_time_series,
                         int64_t *out_static_time_series, int64_t *out_forecasts);
-/* out_present = false when no forecasts; absent fields are set to -1. */
-int32_t ts_store_get_forecast_parameters(const struct TsStore *handle, bool *out_present,
-                                         int64_t *out_horizon_ms, int64_t *out_interval_ms,
-                                         int64_t *out_count, int64_t *out_resolution_ms);
+/* Association count per type as a JSON array of {time_series_type, count};
+   probe-then-fetch. */
+int32_t ts_store_counts_by_type(const struct TsStore *handle,
+                                char *buf, uint64_t cap, uint64_t *out_len);
+/* Distinct stored arrays (content hashes); shared arrays count once. */
+int32_t ts_store_num_distinct_arrays(const struct TsStore *handle, int64_t *out_count);
+/* Grouped static / forecast summaries as JSON arrays (one object per group with a
+   `count` field); probe-then-fetch. */
+int32_t ts_store_static_summary(const struct TsStore *handle,
+                                char *buf, uint64_t cap, uint64_t *out_len);
+int32_t ts_store_forecast_summary(const struct TsStore *handle,
+                                  char *buf, uint64_t cap, uint64_t *out_len);
+/* Distinct owners per category + distinct arrays per kind (static/forecast). */
+int32_t ts_store_counts_detailed(const struct TsStore *handle, int64_t *out_components,
+                                 int64_t *out_supplemental_attributes,
+                                 int64_t *out_static_time_series, int64_t *out_forecasts);
+/* Distinct owner ids of owner_category as a JSON array; optional type/resolution
+   filters (resolution_ms <= 0 = none). Probe-then-fetch. */
+int32_t ts_store_list_owner_ids(const struct TsStore *handle, int32_t owner_category,
+                                bool has_time_series_type, int32_t time_series_type,
+                                int64_t resolution_ms, char *buf, uint64_t cap, uint64_t *out_len);
+/* out_present = false when no matching forecast; absent fields are set to -1.
+   filter_*_ms <= 0 = no filter on that field. */
+int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
+                                         int64_t filter_resolution_ms, int64_t filter_interval_ms,
+                                         bool *out_present, int64_t *out_horizon_ms,
+                                         int64_t *out_interval_ms, int64_t *out_count,
+                                         int64_t *out_resolution_ms, int64_t *out_initial_ms);
+/* All SingleTimeSeries share one (initial_timestamp, length): out_present=false
+   when none; error when they disagree. */
+int32_t ts_store_check_static_consistency(const struct TsStore *handle, bool *out_present,
+                                          int64_t *out_initial_ms, int64_t *out_length);
+/* Distinct resolutions (ms) as a JSON array, ascending; optional type filter.
+   Probe-then-fetch (buf=NULL, cap=0 to size). */
+int32_t ts_store_get_resolutions(const struct TsStore *handle,
+                                 bool has_time_series_type, int32_t time_series_type,
+                                 char *buf, uint64_t cap, uint64_t *out_len);
 /* out_kind: 0 = none, 1 = DEFLATE (out_level 0-9 + out_shuffle). */
 int32_t ts_store_get_compression(const struct TsStore *handle, uint8_t *out_kind,
                                  uint8_t *out_level, bool *out_shuffle);
@@ -356,13 +389,14 @@ int32_t ts_store_flush(struct TsStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */
-/* List metadata as a JSON array. has_owner / has_owner_category are independent
-   filters; with neither set the whole store is listed. Probe-then-fetch: call
-   with buf=NULL, cap=0 to learn the length via out_len, then again with len+1 bytes. */
-int32_t ts_store_list_metadata(const struct TsStore *handle,
-                               bool has_owner, int64_t owner_id,
-                               bool has_owner_category, int32_t owner_category,
-                               char *buf, uint64_t cap, uint64_t *out_len);
+/* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
+   storage detail). has_owner / has_owner_category are independent filters; with
+   neither set the whole store is listed. Probe-then-fetch: call with buf=NULL,
+   cap=0 to learn the length via out_len, then again with len+1 bytes. */
+int32_t ts_store_list_keys(const struct TsStore *handle,
+                           bool has_owner, int64_t owner_id,
+                           bool has_owner_category, int32_t owner_category,
+                           char *buf, uint64_t cap, uint64_t *out_len);
 ```
 
 ## Error Messages

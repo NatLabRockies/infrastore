@@ -27,15 +27,29 @@ module-name = "time_series_store"
 # them and the repair step bundles them into the wheel.
 [tool.cibuildwheel]
 build = "cp310-*"
+# Alpine/musl wheels are skipped: the netcdf-sys/hdf5-metno-sys build scripts need
+# system HDF5+NetCDF, which the RPM-based `before-all` below can't install on musl.
+# 32-bit Windows (win32) is skipped: vcpkg provides only x64 HDF5/NetCDF.
+skip = "*-musllinux* *-win32"
 build-frontend = "build"
+
 # Install the Rust toolchain and the NetCDF/HDF5 development libraries before
 # building. Tune per platform; on manylinux these may need building from source
-# or a prebuilt (set HDF5_DIR / NETCDF_DIR for the netcdf-sys build script).
-before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y"
-environment = { PATH = "$HOME/.cargo/bin:$PATH" }
-
+# or a prebuilt (set HDF5_DIR / NETCDF_DIR for the netcdf-sys build script). The
+# `$HOME/.cargo/bin` PATH override is only meaningful where rustup is installed by
+# before-all (Linux/macOS), so it is set per-platform rather than globally.
 [tool.cibuildwheel.linux]
 before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y && (yum install -y hdf5-devel netcdf-devel || dnf install -y hdf5-devel netcdf-devel || true)"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
 
 [tool.cibuildwheel.macos]
 before-all = "curl -sSf https://sh.rustup.rs | sh -s -- -y && brew install hdf5 netcdf"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
+
+[tool.cibuildwheel.windows]
+# Rust is preinstalled on the GitHub Windows runner; HDF5/NetCDF are provisioned
+# by the vcpkg step in python-wheels.yml (HDF5_DIR/NETCDF_DIR come in via the env).
+before-all = "rustup default stable"
+# delvewheel bundles the vcpkg HDF5/NetCDF DLLs (found on PATH) into the wheel.
+before-build = "pip install delvewheel"
+repair-wheel-command = "delvewheel repair -w {dest_dir} {wheel}"

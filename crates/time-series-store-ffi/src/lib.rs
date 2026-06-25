@@ -103,7 +103,10 @@ pub struct TsStoreHandle {
 }
 
 pub struct TsKeyHandle {
-    inner: core_lib::TimeSeriesKey,
+    // A key handle is a lookup handle: it carries the identity tuple the catalog
+    // resolves. Descriptive window fields (only known for a fully-described key
+    // from add/list) are not carried here.
+    inner: core_lib::KeyIdentity,
 }
 
 /// Accumulates pending add requests for a single all-or-nothing
@@ -450,7 +453,7 @@ pub unsafe extern "C" fn ts_store_add_single(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
+                inner: keys.remove(0).identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
@@ -595,7 +598,7 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
         Ok(mut keys) => {
             unsafe {
                 *out_key = Box::into_raw(Box::new(TsKeyHandle {
-                    inner: keys.remove(0),
+                    inner: keys.remove(0).identity().clone(),
                 }))
             };
             TS_OK
@@ -869,26 +872,33 @@ pub unsafe extern "C" fn ts_store_counts(
     }
 }
 
-/// Write the store's forecast parameters.
+/// Write the store's forecast parameters, optionally restricted to forecasts
+/// with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
 ///
-/// `out_present` is set to `true` when the store holds at least one forecast,
-/// `false` otherwise. Each of `out_horizon_ms`, `out_interval_ms`,
-/// `out_count`, and `out_resolution_ms` receives the corresponding value, or
-/// `-1` when that field is absent (durations, resolution, and counts are always
-/// non-negative when present, so `-1` is an unambiguous "unset" sentinel).
+/// `out_present` is set to `true` when a matching forecast exists, `false`
+/// otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`,
+/// `out_resolution_ms`, and `out_initial_ms` (the initial timestamp as unix ms)
+/// receives the corresponding value, or `-1` when that field is absent
+/// (durations, resolution, and counts are always non-negative when present, so
+/// `-1` is an unambiguous "unset" sentinel).
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `out_present` must be valid for writing
-/// one `bool`; every other output pointer must be valid for writing one `i64`.
+/// `handle` must be a live store handle; the filter args are plain scalars.
+/// `out_present` must be valid for writing one `bool`; every other output pointer
+/// must be valid for writing one `i64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_parameters(
     handle: *const TsStoreHandle,
+    filter_resolution_ms: i64,
+    filter_interval_ms: i64,
     out_present: *mut bool,
     out_horizon_ms: *mut i64,
     out_interval_ms: *mut i64,
     out_count: *mut i64,
     out_resolution_ms: *mut i64,
+    out_initial_ms: *mut i64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -900,10 +910,21 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
         || out_interval_ms.is_null()
         || out_count.is_null()
         || out_resolution_ms.is_null()
+        || out_initial_ms.is_null()
     {
         return TS_ERR_NULL_POINTER;
     }
-    match store.inner.get_forecast_parameters() {
+    let resolution = if filter_resolution_ms > 0 {
+        Some(Duration::milliseconds(filter_resolution_ms))
+    } else {
+        None
+    };
+    let interval = if filter_interval_ms > 0 {
+        Some(Duration::milliseconds(filter_interval_ms))
+    } else {
+        None
+    };
+    match store.inner.get_forecast_parameters(resolution, interval) {
         Ok(p) => {
             let present = p.horizon.is_some()
                 || p.interval.is_some()
@@ -915,11 +936,427 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
                 *out_interval_ms = p.interval.map(|d| d.num_milliseconds()).unwrap_or(-1);
                 *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
                 *out_resolution_ms = p.resolution.map(|d| d.num_milliseconds()).unwrap_or(-1);
+                *out_initial_ms = p
+                    .initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .unwrap_or(-1);
             }
             TS_OK
         }
         Err(e) => map_core_error(e),
     }
+}
+
+/// Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.
+///
+/// `out_present` is `false` when the store has no `SingleTimeSeries`; otherwise
+/// `true` and `out_initial_ms` / `out_length` receive the shared pair. Returns an
+/// error when more than one distinct pair exists (the catalog is inconsistent).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Each out pointer must be valid for one
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_check_static_consistency(
+    handle: *const TsStoreHandle,
+    out_present: *mut bool,
+    out_initial_ms: *mut i64,
+    out_length: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_present.is_null() || out_initial_ms.is_null() || out_length.is_null() {
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.check_static_consistency() {
+        Ok(None) => {
+            unsafe {
+                *out_present = false;
+                *out_initial_ms = 0;
+                *out_length = 0;
+            }
+            TS_OK
+        }
+        Ok(Some((ts, len))) => {
+            unsafe {
+                *out_present = true;
+                *out_initial_ms = datetime_to_unix_ms(ts).unwrap_or(0);
+                *out_length = len as i64;
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// List the distinct resolutions present in the store as a JSON array of integer
+/// milliseconds (ascending). When `has_time_series_type` is true the listing is
+/// restricted to that `TS_TYPE_*` code; otherwise all types are considered.
+///
+/// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
+/// learn the byte length via `out_len`, then again with a buffer of at least
+/// `len + 1` bytes.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle; the type filter args are plain scalars.
+/// `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_get_resolutions(
+    handle: *const TsStoreHandle,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let ts_type = if has_time_series_type {
+        match ts_type_from_int(time_series_type) {
+            Some(t) => Some(t),
+            None => {
+                set_error(format!("invalid time_series_type {time_series_type}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
+    } else {
+        None
+    };
+    let resolutions = match store.inner.get_resolutions(ts_type) {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = resolutions
+        .iter()
+        .map(|d| Value::from(d.num_milliseconds()))
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Association count grouped by time series type, as a JSON array of
+/// `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
+/// `ts_store_list_keys`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+/// null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_counts_by_type(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let counts = match store.inner.counts_by_type() {
+        Ok(c) => c,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = counts
+        .iter()
+        .map(|(ts_type, n)| {
+            let mut o = serde_json::Map::new();
+            o.insert("time_series_type".into(), Value::from(ts_type.as_str()));
+            o.insert("count".into(), Value::from(*n));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Write the number of distinct stored arrays (content hashes); shared series
+/// count once.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_count` must be valid for writing one
+/// `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_num_distinct_arrays(
+    handle: *const TsStoreHandle,
+    out_count: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_count.is_null() {
+        set_error("out_count is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.num_distinct_arrays() {
+        Ok(n) => {
+            unsafe { *out_count = n };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Write the detailed counts: distinct owners per category and distinct stored
+/// arrays per kind (static vs forecast).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. Each out pointer must be valid for
+/// writing one `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_counts_detailed(
+    handle: *const TsStoreHandle,
+    out_components: *mut i64,
+    out_supplemental_attributes: *mut i64,
+    out_static_time_series: *mut i64,
+    out_forecasts: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_components.is_null()
+        || out_supplemental_attributes.is_null()
+        || out_static_time_series.is_null()
+        || out_forecasts.is_null()
+    {
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.time_series_counts_detailed() {
+        Ok(c) => {
+            unsafe {
+                *out_components = c.components_with_time_series;
+                *out_supplemental_attributes = c.supplemental_attributes_with_time_series;
+                *out_static_time_series = c.static_time_series_count;
+                *out_forecasts = c.forecast_count;
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// List the distinct owner ids of `owner_category` (`0` = Component, `1` =
+/// SupplementalAttribute) that have a time series, as a JSON array of integers.
+/// Optionally restricted to one `time_series_type` (`TS_TYPE_*` code, gated by
+/// `has_time_series_type`) and/or `resolution_ms` (`<= 0` = no filter).
+/// Probe-then-fetch (see `ts_store_list_keys`).
+///
+/// # Safety
+///
+/// `handle` must be a live store handle; the filter args are plain scalars.
+/// `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_owner_ids(
+    handle: *const TsStoreHandle,
+    owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    resolution_ms: i64,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let category = match owner_category {
+        0 => core_lib::OwnerCategory::Component,
+        1 => core_lib::OwnerCategory::SupplementalAttribute,
+        other => {
+            set_error(format!("invalid owner_category {other}"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let ts_type = if has_time_series_type {
+        match ts_type_from_int(time_series_type) {
+            Some(t) => Some(t),
+            None => {
+                set_error(format!("invalid time_series_type {time_series_type}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
+    } else {
+        None
+    };
+    let resolution = if resolution_ms > 0 {
+        Some(Duration::milliseconds(resolution_ms))
+    } else {
+        None
+    };
+    let ids = match store.inner.list_owner_ids(category, ts_type, resolution) {
+        Ok(v) => v,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = ids.iter().map(|id| Value::from(*id)).collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Static-series summary as a JSON array. Each object has `owner_type`,
+/// `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+/// `resolution_ms`, `time_step_count`, and `count` (the number of associations in
+/// the group); fields that do not apply are `null`. Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+/// null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_static_summary(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let rows = match store.inner.static_summary() {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let dur = |d: Option<chrono::Duration>| {
+        d.map(|x| Value::from(x.num_milliseconds()))
+            .unwrap_or(Value::Null)
+    };
+    let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
+    let arr: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut o = serde_json::Map::new();
+            o.insert("owner_type".into(), Value::from(r.owner_type.clone()));
+            o.insert(
+                "owner_category".into(),
+                Value::from(r.owner_category.as_str()),
+            );
+            o.insert(
+                "time_series_type".into(),
+                Value::from(r.time_series_type.as_str()),
+            );
+            o.insert("name".into(), Value::from(r.name.clone()));
+            o.insert(
+                "initial_timestamp_ms".into(),
+                r.initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert("resolution_ms".into(), dur(r.resolution));
+            o.insert("time_step_count".into(), opt_i64(r.time_step_count));
+            o.insert("count".into(), Value::from(r.count));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Forecast summary as a JSON array. Each object has `owner_type`,
+/// `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+/// `resolution_ms`, `horizon_ms`, `interval_ms`, `window_count`, and `count` (the
+/// number of associations in the group); fields that do not apply are `null`.
+/// Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+/// null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_forecast_summary(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let rows = match store.inner.forecast_summary() {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let dur = |d: Option<chrono::Duration>| {
+        d.map(|x| Value::from(x.num_milliseconds()))
+            .unwrap_or(Value::Null)
+    };
+    let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
+    let arr: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let mut o = serde_json::Map::new();
+            o.insert("owner_type".into(), Value::from(r.owner_type.clone()));
+            o.insert(
+                "owner_category".into(),
+                Value::from(r.owner_category.as_str()),
+            );
+            o.insert(
+                "time_series_type".into(),
+                Value::from(r.time_series_type.as_str()),
+            );
+            o.insert("name".into(), Value::from(r.name.clone()));
+            o.insert(
+                "initial_timestamp_ms".into(),
+                r.initial_timestamp
+                    .and_then(datetime_to_unix_ms)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
+            o.insert("resolution_ms".into(), dur(r.resolution));
+            o.insert("horizon_ms".into(), dur(r.horizon));
+            o.insert("interval_ms".into(), dur(r.interval));
+            o.insert("window_count".into(), opt_i64(r.window_count));
+            o.insert("count".into(), Value::from(r.count));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
 }
 
 /// Write the store's compression policy.
@@ -1039,7 +1476,7 @@ unsafe fn build_key_from_attrs(
     name: *const c_char,
     resolution_ms: i64,
     features_json: *const c_char,
-) -> Result<core_lib::TimeSeriesKey, i32> {
+) -> Result<core_lib::KeyIdentity, i32> {
     let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
         set_error("name is invalid");
     })?;
@@ -1057,7 +1494,7 @@ unsafe fn build_key_from_attrs(
     } else {
         Some(Duration::milliseconds(resolution_ms))
     };
-    Ok(core_lib::TimeSeriesKey {
+    Ok(core_lib::KeyIdentity {
         owner_id,
         owner_category,
         time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
@@ -1459,7 +1896,7 @@ unsafe fn build_typed_key_from_attrs(
     ts_type: i32,
     resolution_ms: i64,
     features_json: *const c_char,
-) -> Result<core_lib::TimeSeriesKey, i32> {
+) -> Result<core_lib::KeyIdentity, i32> {
     let time_series_type = match ts_type_from_int(ts_type) {
         Some(t) => t,
         None => {
@@ -1547,7 +1984,7 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
+                inner: keys.remove(0).identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
@@ -1745,7 +2182,7 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     match store.inner.add_time_series_bulk(vec![req]) {
         Ok(mut keys) => {
             let handle = Box::new(TsKeyHandle {
-                inner: keys.remove(0),
+                inner: keys.remove(0).identity().clone(),
             });
             unsafe { *out_key = Box::into_raw(handle) };
             TS_OK
@@ -2181,7 +2618,11 @@ pub unsafe extern "C" fn ts_store_add_batch(
         Ok(keys) => {
             let mut handles: Vec<*mut TsKeyHandle> = keys
                 .into_iter()
-                .map(|k| Box::into_raw(Box::new(TsKeyHandle { inner: k })))
+                .map(|k| {
+                    Box::into_raw(Box::new(TsKeyHandle {
+                        inner: k.identity().clone(),
+                    }))
+                })
                 .collect();
             // Keep capacity == length so `ts_keys_buffer_free` can reconstruct the Vec.
             handles.shrink_to_fit();
@@ -2568,7 +3009,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
-    let matched_type = ts_type_to_int(key.time_series_type);
+    let matched_type = ts_type_to_int(key.time_series_type());
     let time_range = if time_range_present {
         let start = match unix_ms_to_datetime(time_range_start_ms) {
             Some(d) => d,
@@ -2590,7 +3031,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     } else {
         None
     };
-    let data = match store.inner.get_time_series(&key, time_range) {
+    let data = match store.inner.get_time_series(key.identity(), time_range) {
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
@@ -2998,7 +3439,11 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
     };
     let mut handles: Vec<*mut TsKeyHandle> = keys
         .into_iter()
-        .map(|k| Box::into_raw(Box::new(TsKeyHandle { inner: k })))
+        .map(|k| {
+            Box::into_raw(Box::new(TsKeyHandle {
+                inner: k.identity().clone(),
+            }))
+        })
         .collect();
     // Keep capacity == length so `ts_keys_buffer_free` can reconstruct the Vec.
     handles.shrink_to_fit();
@@ -3022,67 +3467,69 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
 /// binding needs to reconstruct a `TimeSeriesMetadata`. Durations are emitted
 /// as integer milliseconds, `initial_timestamp_ms` as Unix epoch milliseconds,
 /// and `data_hash` as a byte array; absent optionals are `null`.
-fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
-    let dur_ms = |d: &Option<chrono::Duration>| -> Value {
+// Serialize keys to a JSON array. Each object carries the identity tuple
+// (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution_ms`,
+// `features`) plus the per-variant descriptive snapshot. Physical storage detail
+// (`data_hash`, `dtype`, `logical_type`, `percentiles`) is deliberately absent —
+// it is read on demand via the metadata read descriptors.
+fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
+    let dur_ms = |d: Option<chrono::Duration>| -> Value {
         d.map(|x| Value::from(x.num_milliseconds()))
             .unwrap_or(Value::Null)
     };
-    let arr: Vec<Value> = rows
+    let arr: Vec<Value> = keys
         .iter()
-        .map(|m| {
+        .map(|k| {
+            let id = k.identity();
             let mut o = serde_json::Map::new();
-            o.insert("owner_id".into(), Value::from(m.owner_id));
-            o.insert("owner_type".into(), Value::from(m.owner_type.clone()));
+            o.insert("owner_id".into(), Value::from(id.owner_id));
             o.insert(
                 "owner_category".into(),
-                Value::from(m.owner_category.as_str()),
+                Value::from(id.owner_category.as_str()),
             );
             o.insert(
                 "time_series_type".into(),
-                Value::from(m.time_series_type.as_str()),
+                Value::from(id.time_series_type.as_str()),
             );
-            o.insert("name".into(), Value::from(m.name.clone()));
-            o.insert("data_hash".into(), Value::from(m.data_hash.to_vec()));
+            o.insert("name".into(), Value::from(id.name.clone()));
+            o.insert("resolution_ms".into(), dur_ms(id.resolution));
+            o.insert(
+                "features".into(),
+                serde_json::from_str(&features_to_json(&id.features))
+                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+            );
+            // Per-variant descriptive snapshot.
+            let (initial_timestamp, length, horizon, interval, count) = match k {
+                core_lib::TimeSeriesKey::Single(s) => {
+                    (Some(s.initial_timestamp), Some(s.length), None, None, None)
+                }
+                core_lib::TimeSeriesKey::NonSequential(s) => {
+                    (None, Some(s.length), None, None, None)
+                }
+                core_lib::TimeSeriesKey::Forecast(f) => (
+                    Some(f.initial_timestamp),
+                    None,
+                    Some(f.horizon),
+                    Some(f.interval),
+                    Some(f.count),
+                ),
+            };
             o.insert(
                 "initial_timestamp_ms".into(),
-                m.initial_timestamp
+                initial_timestamp
                     .and_then(datetime_to_unix_ms)
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
-            o.insert("resolution_ms".into(), dur_ms(&m.resolution));
             o.insert(
                 "length".into(),
-                m.length
-                    .map(|l| Value::from(l as u64))
-                    .unwrap_or(Value::Null),
+                length.map(|l| Value::from(l as u64)).unwrap_or(Value::Null),
             );
-            o.insert("horizon_ms".into(), dur_ms(&m.horizon));
-            o.insert("interval_ms".into(), dur_ms(&m.interval));
+            o.insert("horizon_ms".into(), dur_ms(horizon));
+            o.insert("interval_ms".into(), dur_ms(interval));
             o.insert(
                 "count".into(),
-                m.count
-                    .map(|c| Value::from(c as u64))
-                    .unwrap_or(Value::Null),
-            );
-            o.insert(
-                "features".into(),
-                serde_json::from_str(&features_to_json(&m.features))
-                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-            );
-            o.insert(
-                "percentiles".into(),
-                m.percentiles
-                    .clone()
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-            );
-            o.insert(
-                "logical_type".into(),
-                m.logical_type
-                    .clone()
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
+                count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
             );
             Value::Object(o)
         })
@@ -3090,12 +3537,16 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
     Value::Array(arr).to_string()
 }
 
-/// List time series metadata as a JSON array string (see `metadata_rows_to_json`
-/// for the per-row shape). When `has_owner` is true only `owner_id`'s rows
-/// are returned; when `has_owner_category` is true only rows whose owner category
-/// matches `owner_category` (`0` = Component, `1` = SupplementalAttribute) are
-/// returned. The two filters are independent; with neither set the whole store is
-/// listed.
+/// List time series keys as a JSON array string (see `keys_to_json` for the
+/// per-key shape). Every filter is optional and independent; with none set the
+/// whole store is listed. A `has_*` flag of `false` (or a null string pointer)
+/// disables that filter:
+/// - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+/// - `time_series_type` (the `TS_TYPE_*` code)
+/// - `name` (null = no name filter)
+/// - `resolution_ms` (`<= 0` = no resolution filter)
+/// - `features_json` (a JSON object; null or empty = no feature filter; matches as
+///   a subset, i.e. a key whose features include all the given ones)
 ///
 /// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
 /// learn the byte length via `out_len`, then call again with a buffer of at
@@ -3104,17 +3555,23 @@ fn metadata_rows_to_json(rows: &[core_lib::TimeSeriesMetadata]) -> String {
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `has_owner`, `owner_id`,
-/// `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
-/// writable; `buf` must be null or valid for `cap` bytes.
+/// `handle` must be a live store handle. The scalar filter flags/values are plain
+/// scalars. `name` and `features_json` must each be null or a null-terminated
+/// UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
+/// `cap` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn ts_store_list_metadata(
+pub unsafe extern "C" fn ts_store_list_keys(
     handle: *const TsStoreHandle,
     has_owner: bool,
     owner_id: i64,
     has_owner_category: bool,
     owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution_ms: i64,
+    features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
     out_len: *mut u64,
@@ -3143,11 +3600,38 @@ pub unsafe extern "C" fn ts_store_list_metadata(
         };
         filter = filter.owner_category(category);
     }
-    let rows = match store.inner.list_time_series(filter) {
-        Ok(r) => r,
+    if has_time_series_type {
+        match ts_type_from_int(time_series_type) {
+            Some(t) => filter = filter.time_series_type(t),
+            None => {
+                set_error(format!("invalid time_series_type {time_series_type}"));
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    match unsafe { cstr_to_optional_string(name) } {
+        Ok(Some(n)) => filter = filter.name(n),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("name is not valid UTF-8");
+            return c;
+        }
+    }
+    if resolution_ms > 0 {
+        filter = filter.resolution(Duration::milliseconds(resolution_ms));
+    }
+    let features = match unsafe { parse_features_json(features_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    if !features.is_empty() {
+        filter = filter.features(features);
+    }
+    let keys = match store.inner.list_keys(filter) {
+        Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
-    let json = metadata_rows_to_json(&rows);
+    let json = keys_to_json(&keys);
     unsafe { write_str_out(&json, buf, cap, out_len) };
     TS_OK
 }

@@ -442,11 +442,148 @@ end
     @test get_time_series(infos[sts_idx].time_series_type, store, keys[sts_idx]).data == underlying
 
     # Reference counting lives in the core: the STS and its derived DST share one
-    # underlying array, so count_array_references reports one of each.
-    md = list_metadata(store)
-    hash = md[1].data_hash
-    @test all(r.data_hash == hash for r in md)
+    # underlying array, so count_array_references reports one of each. The content
+    # hash is physical storage detail, read via the metadata descriptor — it is not
+    # carried on a key, so list_keys does not expose it.
+    hash = get_metadata(store, 400, Component, "dst").data_hash
     @test count_array_references(store, hash) == (sts = 1, dst = 1)
+end
+
+@testset "list_keys filters (owner, type, name, resolution, features)" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    vals = Float64[1, 2, 3, 4]
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load"); features=Dict("scenario" => "high"))
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load"); features=Dict("scenario" => "low"))
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Minute(5), vals, "wind"))
+    add_time_series!(store, 2, "Bus", SupplementalAttribute,
+        SingleTimeSeries(t0, Hour(1), vals, "load"))
+
+    @test length(list_keys(store)) == 4
+    @test length(list_keys(store; owner_id=1)) == 3
+    @test length(list_keys(store; owner_category=SupplementalAttribute)) == 1
+    @test length(list_keys(store; name="load")) == 3
+    @test length(list_keys(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE)) == 4
+    @test length(list_keys(store; resolution=Minute(5))) == 1
+    # Feature filter is a subset match.
+    fkeys = list_keys(store; owner_id=1, name="load", features=Dict("scenario" => "high"))
+    @test length(fkeys) == 1
+    @test fkeys[1].name == "load"
+    @test fkeys[1].resolution == Hour(1)
+    # Combined filters narrowing to a single key.
+    @test length(list_keys(store; owner_id=1, name="wind", resolution=Minute(5))) == 1
+    @test isempty(list_keys(store; owner_id=1, name="wind", resolution=Hour(1)))
+
+    # get_resolutions: distinct resolutions, ascending, optionally per type.
+    @test get_resolutions(store) == [Millisecond(Minute(5)), Millisecond(Hour(1))]
+    @test get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE) ==
+          [Millisecond(Minute(5)), Millisecond(Hour(1))]
+    @test isempty(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC))
+
+    # counts_by_type: all four are SingleTimeSeries here.
+    cbt = counts_by_type(store)
+    @test length(cbt) == 1
+    @test cbt[1].time_series_type == SingleTimeSeries
+    @test cbt[1].count == 4
+    # num_distinct_arrays: the two "load" Hour(1) series share content (same vals,
+    # initial, resolution) and dedup to one array; "wind" and the supp-attr "load"
+    # add two more distinct owner/name combos but identical values still dedup by
+    # content hash, so distinct arrays == 1.
+    @test num_distinct_arrays(store) == 1
+end
+
+@testset "time_series_counts and list_owner_ids" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    v = Float64[1, 2, 3, 4]
+    add_time_series!(store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "load"))
+    add_time_series!(store, 9, "Bus", SupplementalAttribute,
+        SingleTimeSeries(t0, Hour(1), v, "voltage"))  # shares content with owner 1
+    add_time_series!(store, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+
+    c = time_series_counts(store)
+    @test c.components_with_time_series == 2            # owners 1, 2
+    @test c.supplemental_attributes_with_time_series == 1  # owner 9
+    @test c.static_time_series_count == 2               # [1,2,3,4] (x2 shared) + [5,6,7,8]
+    @test c.forecast_count == 1                         # one Deterministic array
+
+    @test sort!(list_owner_ids(store, Component)) == [1, 2]
+    @test list_owner_ids(store, SupplementalAttribute) == [9]
+    @test list_owner_ids(store, Component;
+        time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC) == [1]
+    @test sort!(list_owner_ids(store, Component; resolution=Hour(1))) == [1, 2]
+    @test isempty(list_owner_ids(store, Component; resolution=Minute(5)))
+end
+
+@testset "check_static_consistency and filtered get_forecast_parameters" begin
+    store = Store(in_memory=true)
+    @test check_static_consistency(store) === nothing
+
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "a"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "a"))
+    cs = check_static_consistency(store)
+    @test cs.initial_timestamp == t0
+    @test cs.length == 4
+    # A differing length makes the store inconsistent.
+    add_time_series!(store, 3, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "a"))
+    @test_throws TimeSeriesStore.IntegrityError check_static_consistency(store)
+
+    # Filtered forecast parameters.
+    fstore = Store(in_memory=true)
+    add_time_series!(fstore, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+    p = get_forecast_parameters(fstore; resolution=Hour(1), interval=Hour(1))
+    @test p.horizon == Millisecond(Hour(2))
+    @test p.interval == Millisecond(Hour(1))
+    @test p.count == 2
+    @test p.initial_timestamp == t0
+    # A non-matching interval yields no parameters.
+    q = get_forecast_parameters(fstore; interval=Hour(3))
+    @test q.horizon === nothing
+    @test q.count === nothing
+end
+
+@testset "static_summary and forecast_summary" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    v = Float64[1, 2, 3, 4]
+    # owners 1 & 2 share the static group (Generator/load/Hour(1)/length 4).
+    add_time_series!(store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[9, 9, 9, 9], "load"))
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), v, "wind"))  # separate group (name)
+    add_time_series!(store, 1, "Generator", Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+
+    ss = static_summary(store)
+    @test length(ss) == 2
+    load_row = only(filter(r -> r.name == "load", ss))
+    @test load_row.count == 2                     # grouped across owners 1 and 2
+    @test load_row.time_step_count == 4
+    @test load_row.time_series_type == SingleTimeSeries
+    @test load_row.owner_type == "Generator"
+    @test load_row.resolution == Millisecond(Hour(1))
+    @test only(filter(r -> r.name == "wind", ss)).count == 1
+
+    fs = forecast_summary(store)
+    @test length(fs) == 1
+    @test fs[1].name == "fc"
+    @test fs[1].count == 1
+    @test fs[1].window_count == 2
+    @test fs[1].horizon == Millisecond(Hour(2))
+    @test fs[1].interval == Millisecond(Hour(1))
+    @test fs[1].time_series_type == Deterministic
 end
 
 @testset "AbstractDeterministic family resolution: miss and ambiguity" begin

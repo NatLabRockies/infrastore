@@ -1,6 +1,6 @@
 //! Resolving a stored time series from CLI selector flags.
 
-use time_series_store_core::{Features, ListFilter, Store, TimeSeriesKey, TimeSeriesMetadata};
+use time_series_store_core::{Features, KeyIdentity, ListFilter, Store, TimeSeriesMetadata};
 
 use crate::parse;
 
@@ -59,7 +59,7 @@ impl SelectorArgs {
 
     /// Resolve to exactly one stored series, returning its metadata and key.
     /// Errors with a helpful list when zero or multiple series match.
-    pub fn resolve(&self, store: &Store) -> Result<(TimeSeriesMetadata, TimeSeriesKey), String> {
+    pub fn resolve(&self, store: &Store) -> Result<(TimeSeriesMetadata, KeyIdentity), String> {
         let mut matches = store
             .list_time_series(self.to_filter()?)
             .map_err(|e| e.to_string())?;
@@ -92,9 +92,9 @@ impl SelectorArgs {
     }
 }
 
-/// Reconstruct the lookup key from a metadata record.
-pub fn key_of(meta: &TimeSeriesMetadata) -> TimeSeriesKey {
-    TimeSeriesKey {
+/// Reconstruct the lookup key (identity) from a metadata record.
+pub fn key_of(meta: &TimeSeriesMetadata) -> KeyIdentity {
+    KeyIdentity {
         owner_id: meta.owner_id,
         owner_category: meta.owner_category,
         time_series_type: meta.time_series_type,

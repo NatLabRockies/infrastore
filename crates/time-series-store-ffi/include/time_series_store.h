@@ -250,25 +250,164 @@ int32_t ts_store_counts(const struct TsStore *handle,
                         int64_t *out_forecasts);
 
 /**
- * Write the store's forecast parameters.
+ * Write the store's forecast parameters, optionally restricted to forecasts
+ * with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
  *
- * `out_present` is set to `true` when the store holds at least one forecast,
- * `false` otherwise. Each of `out_horizon_ms`, `out_interval_ms`,
- * `out_count`, and `out_resolution_ms` receives the corresponding value, or
- * `-1` when that field is absent (durations, resolution, and counts are always
- * non-negative when present, so `-1` is an unambiguous "unset" sentinel).
+ * `out_present` is set to `true` when a matching forecast exists, `false`
+ * otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`,
+ * `out_resolution_ms`, and `out_initial_ms` (the initial timestamp as unix ms)
+ * receives the corresponding value, or `-1` when that field is absent
+ * (durations, resolution, and counts are always non-negative when present, so
+ * `-1` is an unambiguous "unset" sentinel).
  *
  * # Safety
  *
- * `handle` must be a live store handle. `out_present` must be valid for writing
- * one `bool`; every other output pointer must be valid for writing one `i64`.
+ * `handle` must be a live store handle; the filter args are plain scalars.
+ * `out_present` must be valid for writing one `bool`; every other output pointer
+ * must be valid for writing one `i64`.
  */
 int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
+                                         int64_t filter_resolution_ms,
+                                         int64_t filter_interval_ms,
                                          bool *out_present,
                                          int64_t *out_horizon_ms,
                                          int64_t *out_interval_ms,
                                          int64_t *out_count,
-                                         int64_t *out_resolution_ms);
+                                         int64_t *out_resolution_ms,
+                                         int64_t *out_initial_ms);
+
+/**
+ * Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.
+ *
+ * `out_present` is `false` when the store has no `SingleTimeSeries`; otherwise
+ * `true` and `out_initial_ms` / `out_length` receive the shared pair. Returns an
+ * error when more than one distinct pair exists (the catalog is inconsistent).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. Each out pointer must be valid for one
+ * write.
+ */
+int32_t ts_store_check_static_consistency(const struct TsStore *handle,
+                                          bool *out_present,
+                                          int64_t *out_initial_ms,
+                                          int64_t *out_length);
+
+/**
+ * List the distinct resolutions present in the store as a JSON array of integer
+ * milliseconds (ascending). When `has_time_series_type` is true the listing is
+ * restricted to that `TS_TYPE_*` code; otherwise all types are considered.
+ *
+ * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
+ * learn the byte length via `out_len`, then again with a buffer of at least
+ * `len + 1` bytes.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; the type filter args are plain scalars.
+ * `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+ */
+int32_t ts_store_get_resolutions(const struct TsStore *handle,
+                                 bool has_time_series_type,
+                                 int32_t time_series_type,
+                                 char *buf,
+                                 uint64_t cap,
+                                 uint64_t *out_len);
+
+/**
+ * Association count grouped by time series type, as a JSON array of
+ * `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
+ * `ts_store_list_keys`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+ * null or valid for `cap` bytes.
+ */
+int32_t ts_store_counts_by_type(const struct TsStore *handle,
+                                char *buf,
+                                uint64_t cap,
+                                uint64_t *out_len);
+
+/**
+ * Write the number of distinct stored arrays (content hashes); shared series
+ * count once.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_count` must be valid for writing one
+ * `i64`.
+ */
+int32_t ts_store_num_distinct_arrays(const struct TsStore *handle, int64_t *out_count);
+
+/**
+ * Write the detailed counts: distinct owners per category and distinct stored
+ * arrays per kind (static vs forecast).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. Each out pointer must be valid for
+ * writing one `i64`.
+ */
+int32_t ts_store_counts_detailed(const struct TsStore *handle,
+                                 int64_t *out_components,
+                                 int64_t *out_supplemental_attributes,
+                                 int64_t *out_static_time_series,
+                                 int64_t *out_forecasts);
+
+/**
+ * List the distinct owner ids of `owner_category` (`0` = Component, `1` =
+ * SupplementalAttribute) that have a time series, as a JSON array of integers.
+ * Optionally restricted to one `time_series_type` (`TS_TYPE_*` code, gated by
+ * `has_time_series_type`) and/or `resolution_ms` (`<= 0` = no filter).
+ * Probe-then-fetch (see `ts_store_list_keys`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; the filter args are plain scalars.
+ * `out_len` must be writable; `buf` must be null or valid for `cap` bytes.
+ */
+int32_t ts_store_list_owner_ids(const struct TsStore *handle,
+                                int32_t owner_category,
+                                bool has_time_series_type,
+                                int32_t time_series_type,
+                                int64_t resolution_ms,
+                                char *buf,
+                                uint64_t cap,
+                                uint64_t *out_len);
+
+/**
+ * Static-series summary as a JSON array. Each object has `owner_type`,
+ * `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+ * `resolution_ms`, `time_step_count`, and `count` (the number of associations in
+ * the group); fields that do not apply are `null`. Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+ * null or valid for `cap` bytes.
+ */
+int32_t ts_store_static_summary(const struct TsStore *handle,
+                                char *buf,
+                                uint64_t cap,
+                                uint64_t *out_len);
+
+/**
+ * Forecast summary as a JSON array. Each object has `owner_type`,
+ * `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
+ * `resolution_ms`, `horizon_ms`, `interval_ms`, `window_count`, and `count` (the
+ * number of associations in the group); fields that do not apply are `null`.
+ * Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must be
+ * null or valid for `cap` bytes.
+ */
+int32_t ts_store_forecast_summary(const struct TsStore *handle,
+                                  char *buf,
+                                  uint64_t cap,
+                                  uint64_t *out_len);
 
 /**
  * Write the store's compression policy.
@@ -915,12 +1054,16 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
                                       uint64_t *out_len);
 
 /**
- * List time series metadata as a JSON array string (see `metadata_rows_to_json`
- * for the per-row shape). When `has_owner` is true only `owner_id`'s rows
- * are returned; when `has_owner_category` is true only rows whose owner category
- * matches `owner_category` (`0` = Component, `1` = SupplementalAttribute) are
- * returned. The two filters are independent; with neither set the whole store is
- * listed.
+ * List time series keys as a JSON array string (see `keys_to_json` for the
+ * per-key shape). Every filter is optional and independent; with none set the
+ * whole store is listed. A `has_*` flag of `false` (or a null string pointer)
+ * disables that filter:
+ * - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
+ * - `time_series_type` (the `TS_TYPE_*` code)
+ * - `name` (null = no name filter)
+ * - `resolution_ms` (`<= 0` = no resolution filter)
+ * - `features_json` (a JSON object; null or empty = no feature filter; matches as
+ *   a subset, i.e. a key whose features include all the given ones)
  *
  * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
  * learn the byte length via `out_len`, then call again with a buffer of at
@@ -929,18 +1072,24 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
  *
  * # Safety
  *
- * `handle` must be a live store handle. `has_owner`, `owner_id`,
- * `has_owner_category`, and `owner_category` are plain scalars. `out_len` must be
- * writable; `buf` must be null or valid for `cap` bytes.
+ * `handle` must be a live store handle. The scalar filter flags/values are plain
+ * scalars. `name` and `features_json` must each be null or a null-terminated
+ * UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
+ * `cap` bytes.
  */
-int32_t ts_store_list_metadata(const struct TsStore *handle,
-                               bool has_owner,
-                               int64_t owner_id,
-                               bool has_owner_category,
-                               int32_t owner_category,
-                               char *buf,
-                               uint64_t cap,
-                               uint64_t *out_len);
+int32_t ts_store_list_keys(const struct TsStore *handle,
+                           bool has_owner,
+                           int64_t owner_id,
+                           bool has_owner_category,
+                           int32_t owner_category,
+                           bool has_time_series_type,
+                           int32_t time_series_type,
+                           const char *name,
+                           int64_t resolution_ms,
+                           const char *features_json,
+                           char *buf,
+                           uint64_t cap,
+                           uint64_t *out_len);
 
 /**
  * Free the key-handle array returned by `ts_store_get_time_series_keys`.

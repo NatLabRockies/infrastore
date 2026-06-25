@@ -678,7 +678,9 @@ impl PyNonSequentialTimeSeries {
 #[pyclass(name = "TimeSeriesKey", module = "time_series_store", from_py_object)]
 #[derive(Clone)]
 pub struct PyTimeSeriesKey {
-    inner: core_lib::TimeSeriesKey,
+    // Lookup handle: carries the identity tuple, not the descriptive window
+    // fields (those are known only for a key returned from add/list).
+    inner: core_lib::KeyIdentity,
 }
 
 #[pymethods]
@@ -847,7 +849,9 @@ impl PyStore {
                 units,
             )
             .map_err(map_err)?;
-        Ok(PyTimeSeriesKey { inner: key })
+        Ok(PyTimeSeriesKey {
+            inner: key.identity().clone(),
+        })
     }
 
     /// Add many time series in one call, committing the metadata catalog once
@@ -901,7 +905,9 @@ impl PyStore {
         let keys = self.inner.add_time_series_bulk(requests).map_err(map_err)?;
         Ok(keys
             .into_iter()
-            .map(|k| PyTimeSeriesKey { inner: k })
+            .map(|k| PyTimeSeriesKey {
+                inner: k.identity().clone(),
+            })
             .collect())
     }
 
@@ -1071,7 +1077,9 @@ impl PyStore {
             .get_time_series_keys(owner_id, owner_category.into())
             .map_err(map_err)?
             .into_iter()
-            .map(|k| PyTimeSeriesKey { inner: k })
+            .map(|k| PyTimeSeriesKey {
+                inner: k.identity().clone(),
+            })
             .collect())
     }
 
@@ -1100,7 +1108,10 @@ impl PyStore {
     /// `interval` (timedeltas), `count` (int), and `resolution` (timedelta).
     /// Each value is `None` when the store holds no forecasts.
     fn get_forecast_parameters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let p = self.inner.get_forecast_parameters().map_err(map_err)?;
+        let p = self
+            .inner
+            .get_forecast_parameters(None, None)
+            .map_err(map_err)?;
         let d = PyDict::new(py);
         let dur = |py: Python<'py>, v: Option<chrono::Duration>| -> PyResult<Option<Py<PyDelta>>> {
             match v {

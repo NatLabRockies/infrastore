@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("MW".into()),
     )?;
 
-    let got = store.get_time_series(&key, None)?;
+    let got = store.get_time_series(key.identity(), None)?;
     let single = got.as_single().unwrap();
     println!(
         "round-tripped {} values @ {} resolution starting {}",

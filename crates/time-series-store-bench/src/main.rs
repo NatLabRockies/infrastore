@@ -21,8 +21,8 @@ use std::time::{Duration as StdDuration, Instant};
 use chrono::{TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use time_series_store_core::{
-    AddRequest, Deterministic, Features, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData,
-    TimeSeriesKey, TimeSeriesType, TypedArray,
+    AddRequest, Deterministic, Features, KeyIdentity, OwnerCategory, SingleTimeSeries, Store,
+    TimeSeriesData, TimeSeriesType, TypedArray,
 };
 
 // Deterministic forecast horizon, in hours.
@@ -247,9 +247,9 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
 /// Reconstruct TimeSeriesKeys for SingleTimeSeries without querying the store.
 ///
 /// This works because the bench creates deterministic owner_ids and names.
-fn sts_keys(count: usize) -> Vec<TimeSeriesKey> {
+fn sts_keys(count: usize) -> Vec<KeyIdentity> {
     (0..count)
-        .map(|i| TimeSeriesKey {
+        .map(|i| KeyIdentity {
             owner_id: i as i64,
             owner_category: OwnerCategory::Component,
             time_series_type: TimeSeriesType::SingleTimeSeries,
@@ -261,9 +261,9 @@ fn sts_keys(count: usize) -> Vec<TimeSeriesKey> {
 }
 
 /// Reconstruct TimeSeriesKeys for Deterministic without querying the store.
-fn det_keys(count: usize) -> Vec<TimeSeriesKey> {
+fn det_keys(count: usize) -> Vec<KeyIdentity> {
     (0..count)
-        .map(|i| TimeSeriesKey {
+        .map(|i| KeyIdentity {
             owner_id: i as i64,
             owner_category: OwnerCategory::Component,
             time_series_type: TimeSeriesType::Deterministic,

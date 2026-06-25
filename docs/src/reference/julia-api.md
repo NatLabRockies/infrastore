@@ -12,8 +12,10 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
 `Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
 `get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
-`get_counts`, `get_forecast_parameters`, `get_compression`, `verify_integrity`, `compact!`,
-`get_metadata`, `get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
+`get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
+`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
+`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
+`get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
 `transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
 
 ## Constructors
@@ -316,7 +318,15 @@ flattened array.
 
 ```julia
 get_counts(store) -> NamedTuple   # (components_with_time_series, static_time_series, forecasts)
-get_forecast_parameters(store) -> NamedTuple  # (horizon, interval, count, resolution); fields `nothing` when no forecasts
+counts_by_type(store) -> Vector{NamedTuple}   # (time_series_type, count) per stored type
+num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays count once
+time_series_counts(store) -> NamedTuple   # distinct owners per category + distinct arrays per kind
+list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
+static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
+forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
+get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
+check_static_consistency(store) -> Union{Nothing,NamedTuple}  # shared (initial_timestamp, length) of SingleTimeSeries; throws if they disagree
+get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}  # distinct resolutions, ascending
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
@@ -329,9 +339,11 @@ replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory)
 close!(store) -> Nothing
 ```
 
-`list_metadata(store; owner_id=nothing, owner_category=nothing, ...)` likewise accepts
-`owner_category` to scope the listing to a single owner; pass both `owner_id` and `owner_category`
-together to filter by owner.
+`list_keys(store; owner_id=nothing, owner_category=nothing)` lists the key of every stored series as
+`NamedTuple`s (identity plus the per-type descriptive snapshot: `initial_timestamp`, `resolution`,
+`length`, `horizon`, `interval`, `count`, `features`). It accepts `owner_id` and `owner_category` as
+independent filters to scope the listing. Physical storage detail (`data_hash`, `logical_type`,
+`percentiles`) is not on a key — read it via `get_metadata` / `get_forecast_metadata`.
 
 ## Errors
 

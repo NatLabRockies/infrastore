@@ -8,9 +8,11 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, AddBatch, add_time_series_bulk!,
-       get_time_series, get_time_series_keys, key_info, list_metadata,
+       get_time_series, get_time_series_keys, key_info, list_keys,
        remove_time_series!,
-       has_time_series, get_counts, get_forecast_parameters, get_compression,
+       has_time_series, get_counts, counts_by_type, num_distinct_arrays,
+       time_series_counts, list_owner_ids, static_summary, forecast_summary,
+       get_forecast_parameters, check_static_consistency, get_resolutions, get_compression,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
        open_store, flush!, clear!, replace_owner!,
@@ -896,16 +898,13 @@ _type_for_name(name::AbstractString) =
 _row_ms(x) = x === nothing ? nothing : Millisecond(Int64(x))
 _row_int(x) = x === nothing ? nothing : Int(x)
 
-function _decode_metadata_row(r::AbstractDict)
+function _decode_key_row(r::AbstractDict)
     its = r["initial_timestamp_ms"]
-    pcts = r["percentiles"]
     return (
         owner_id = Int64(r["owner_id"]),
-        owner_type = String(r["owner_type"]),
         owner_category = String(r["owner_category"]),
         time_series_type = _type_for_name(r["time_series_type"]),
         name = String(r["name"]),
-        data_hash = UInt8[UInt8(b) for b in r["data_hash"]],
         initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
         resolution = _row_ms(r["resolution_ms"]),
         length = _row_int(r["length"]),
@@ -913,41 +912,61 @@ function _decode_metadata_row(r::AbstractDict)
         interval = _row_ms(r["interval_ms"]),
         count = _row_int(r["count"]),
         features = Dict{String, Any}(r["features"]),
-        percentiles = pcts === nothing ? nothing : Float64[Float64(p) for p in pcts],
-        logical_type = r["logical_type"] === nothing ? nothing : String(r["logical_type"]),
     )
 end
 
 """
-    list_metadata(store; owner_id=nothing, owner_category=nothing) -> Vector{NamedTuple}
+    list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+              name=nothing, resolution=nothing, features=Dict()) -> Vector{NamedTuple}
 
-List time series metadata rows. When `owner_id` is given only that owner's rows
-are returned, and when `owner_category` (an `OwnerCategory`) is given only rows of
-that category are returned; the two filters are independent. With neither given the
-whole store is listed. Each row is a `NamedTuple` with `owner_id`, `owner_type`,
-`owner_category`, `time_series_type` (the Julia type), `name`, `data_hash`
-(`Vector{UInt8}`), `initial_timestamp`, `resolution`, `length`, `horizon`,
-`interval`, `count`, `features`, `percentiles`, and `logical_type`;
-fields that do not apply to a row are `nothing`.
+List the key of every stored time series matching the (all-optional, independent)
+filters. With no filter set the whole store is listed.
+
+- `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
+- `time_series_type` — a `TS_TYPE_*` integer code.
+- `name` — exact association name.
+- `resolution` — a `Period`.
+- `features` — match keys whose features include all the given entries (subset).
+
+Each key is a `NamedTuple` with `owner_id`, `owner_category`, `time_series_type`
+(the Julia type), `name`, `initial_timestamp`, `resolution`, `length`, `horizon`,
+`interval`, `count`, and `features`; fields that do not apply to a key's type are
+`nothing`. Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is
+not on the key — read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
 """
-function list_metadata(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                       owner_category::Union{Nothing, OwnerCategory} = nothing)
+function list_keys(store::Store; owner_id::Union{Nothing, Integer} = nothing,
+                   owner_category::Union{Nothing, OwnerCategory} = nothing,
+                   time_series_type::Union{Nothing, Integer} = nothing,
+                   name::Union{Nothing, AbstractString} = nothing,
+                   resolution::Union{Nothing, Period} = nothing,
+                   features::AbstractDict = Dict{String, Any}())
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    name_arg = name === nothing ? C_NULL : String(name)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_list_metadata, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg, C_NULL, UInt64(0), out_len)
+    code = ccall((:ts_store_list_keys, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Int64,
+                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 has_type, type_arg, name_arg, resolution_ms, features_json,
+                 C_NULL, UInt64(0), out_len)
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_list_metadata, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg, buf, UInt64(length(buf)), out_len)
+    code = ccall((:ts_store_list_keys, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Int64,
+                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 has_type, type_arg, name_arg, resolution_ms, features_json,
+                 buf, UInt64(length(buf)), out_len)
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [_decode_metadata_row(r) for r in rows]
+    return [_decode_key_row(r) for r in rows]
 end
 
 """
@@ -1076,28 +1095,234 @@ function get_counts(store::Store)
 end
 
 """
-    get_forecast_parameters(store)
+    counts_by_type(store) -> Vector{NamedTuple}
+
+Association count grouped by time series type, as `(time_series_type, count)`
+NamedTuples (`time_series_type` is the Julia type). One catalog query in the core.
+"""
+function counts_by_type(store::Store)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_counts_by_type, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_counts_by_type, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [(time_series_type=_type_for_name(r["time_series_type"]), count=Int(r["count"]))
+            for r in rows]
+end
+
+"""
+    num_distinct_arrays(store) -> Int
+
+Number of distinct stored arrays (content hashes); series that share an array
+(de-duplicated by content) count once.
+"""
+function num_distinct_arrays(store::Store)
+    out = Ref{Int64}(0)
+    code = ccall((:ts_store_num_distinct_arrays, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Int64}), store.handle, out)
+    _check(code)
+    return Int(out[])
+end
+
+"""
+    time_series_counts(store) -> NamedTuple
+
+Distinct owners per category and distinct stored arrays per kind:
+`(components_with_time_series, supplemental_attributes_with_time_series,
+static_time_series_count, forecast_count)`. Arrays shared by content count once.
+"""
+function time_series_counts(store::Store)
+    a = Ref{Int64}(0); b = Ref{Int64}(0); c = Ref{Int64}(0); d = Ref{Int64}(0)
+    code = ccall((:ts_store_counts_detailed, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+                 store.handle, a, b, c, d)
+    _check(code)
+    return (components_with_time_series=a[],
+            supplemental_attributes_with_time_series=b[],
+            static_time_series_count=c[], forecast_count=d[])
+end
+
+"""
+    list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
+
+Distinct owner ids of `owner_category` (an `OwnerCategory`) that have a time
+series, optionally restricted by `time_series_type` (a `TS_TYPE_*` integer code)
+and/or `resolution` (a `Period`).
+"""
+function list_owner_ids(store::Store, owner_category::OwnerCategory;
+                        time_series_type::Union{Nothing, Integer} = nothing,
+                        resolution::Union{Nothing, Period} = nothing)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    resolution_ms = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    cat = _category_int(owner_category)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_list_owner_ids, lib_path()), Int32,
+                 (Ptr{Cvoid}, Int32, Bool, Int32, Int64, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, cat, has_type, type_arg, resolution_ms, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_list_owner_ids, lib_path()), Int32,
+                 (Ptr{Cvoid}, Int32, Bool, Int32, Int64, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, cat, has_type, type_arg, resolution_ms, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    ids = JSON.parse(String(buf[1:Int(out_len[])]))
+    return Int[Int(i) for i in ids]
+end
+
+function _decode_static_summary_row(r::AbstractDict)
+    its = r["initial_timestamp_ms"]
+    return (
+        owner_type = String(r["owner_type"]),
+        owner_category = String(r["owner_category"]),
+        time_series_type = _type_for_name(r["time_series_type"]),
+        name = String(r["name"]),
+        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution = _row_ms(r["resolution_ms"]),
+        time_step_count = _row_int(r["time_step_count"]),
+        count = Int(r["count"]),
+    )
+end
+
+function _decode_forecast_summary_row(r::AbstractDict)
+    its = r["initial_timestamp_ms"]
+    return (
+        owner_type = String(r["owner_type"]),
+        owner_category = String(r["owner_category"]),
+        time_series_type = _type_for_name(r["time_series_type"]),
+        name = String(r["name"]),
+        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution = _row_ms(r["resolution_ms"]),
+        horizon = _row_ms(r["horizon_ms"]),
+        interval = _row_ms(r["interval_ms"]),
+        window_count = _row_int(r["window_count"]),
+        count = Int(r["count"]),
+    )
+end
+
+"""
+    static_summary(store) -> Vector{NamedTuple}
+
+Grouped static-series (SingleTimeSeries + NonSequentialTimeSeries) summary: one
+row per distinct `(owner_type, owner_category, time_series_type, name,
+initial_timestamp, resolution, time_step_count)` with `count` = the number of
+associations in the group. The core does the GROUP BY; callers build any
+presentation table (e.g. a DataFrame).
+"""
+function static_summary(store::Store)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_static_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_static_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [_decode_static_summary_row(r) for r in rows]
+end
+
+"""
+    forecast_summary(store) -> Vector{NamedTuple}
+
+Grouped forecast summary: one row per distinct `(owner_type, owner_category,
+time_series_type, name, initial_timestamp, resolution, horizon, interval,
+window_count)` with `count` = the number of associations in the group.
+"""
+function forecast_summary(store::Store)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_forecast_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_forecast_summary, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [_decode_forecast_summary_row(r) for r in rows]
+end
+
+"""
+    get_forecast_parameters(store; resolution=nothing, interval=nothing)
 
 Return the store's forecast parameters as a NamedTuple
-`(horizon, interval, count, resolution)`. `horizon`, `interval`, and
-`resolution` are `Millisecond` periods (or `nothing`); `count` is an `Int` (or
-`nothing`). Every field is `nothing` when the store holds no forecasts.
+`(horizon, interval, count, resolution, initial_timestamp)`, optionally restricted
+to forecasts with the given `resolution` and/or `interval` (`Period`s).
+`horizon`, `interval`, and `resolution` are `Millisecond` periods (or `nothing`);
+`count` is an `Int` (or `nothing`); `initial_timestamp` is a `DateTime` (or
+`nothing`). Every field is `nothing` when no forecast matches.
 """
-function get_forecast_parameters(store::Store)
+function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period} = nothing,
+                                 interval::Union{Nothing, Period} = nothing)
+    fres = resolution === nothing ? Int64(0) : _resolution_to_ms(resolution)
+    fivl = interval === nothing ? Int64(0) : _resolution_to_ms(interval)
     present = Ref{Bool}(false)
-    horizon = Ref{Int64}(-1); interval = Ref{Int64}(-1)
-    count = Ref{Int64}(-1); resolution = Ref{Int64}(-1)
+    horizon_out = Ref{Int64}(-1); interval_out = Ref{Int64}(-1)
+    count = Ref{Int64}(-1); resolution_out = Ref{Int64}(-1); initial_out = Ref{Int64}(-1)
     code = ccall((:ts_store_get_forecast_parameters, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-                 store.handle, present, horizon, interval, count, resolution)
+                 (Ptr{Cvoid}, Int64, Int64, Ref{Bool}, Ref{Int64}, Ref{Int64}, Ref{Int64},
+                  Ref{Int64}, Ref{Int64}),
+                 store.handle, fres, fivl, present, horizon_out, interval_out, count,
+                 resolution_out, initial_out)
     _check(code)
     _ms(x) = x < 0 ? nothing : Millisecond(x)
     return (
-        horizon=_ms(horizon[]),
-        interval=_ms(interval[]),
+        horizon=_ms(horizon_out[]),
+        interval=_ms(interval_out[]),
         count=(count[] < 0 ? nothing : Int(count[])),
-        resolution=_ms(resolution[]),
+        resolution=_ms(resolution_out[]),
+        initial_timestamp=(initial_out[] < 0 ? nothing : _from_unix_ms(initial_out[])),
     )
+end
+
+"""
+    check_static_consistency(store) -> Union{Nothing, NamedTuple}
+
+Return `(initial_timestamp, length)` shared by every `SingleTimeSeries`, or
+`nothing` when there are none. Throws if the stored `SingleTimeSeries` disagree on
+their `(initial_timestamp, length)`. One catalog query.
+"""
+function check_static_consistency(store::Store)
+    present = Ref{Bool}(false); initial_ms = Ref{Int64}(0); len = Ref{Int64}(0)
+    code = ccall((:ts_store_check_static_consistency, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{Bool}, Ref{Int64}, Ref{Int64}),
+                 store.handle, present, initial_ms, len)
+    _check(code)
+    return present[] ? (initial_timestamp=_from_unix_ms(initial_ms[]), length=Int(len[])) : nothing
+end
+
+"""
+    get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}
+
+Return the distinct resolutions stored, ascending. When `time_series_type` (a
+`TS_TYPE_*` integer code) is given the result is restricted to that type. This is
+a single catalog query in the core rather than a scan of every association.
+"""
+function get_resolutions(store::Store; time_series_type::Union{Nothing, Integer} = nothing)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_get_resolutions, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_type, type_arg, C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_get_resolutions, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_type, type_arg, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    ms = JSON.parse(String(buf[1:Int(out_len[])]))
+    return Millisecond[Millisecond(Int64(m)) for m in ms]
 end
 
 """

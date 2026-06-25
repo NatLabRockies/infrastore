@@ -12,13 +12,67 @@ use rusqlite::{Connection, Transaction, params};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
-use crate::types::key::TimeSeriesKey;
+use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
 use crate::types::time_series::TimeSeriesType;
 
 pub struct MetadataStore {
     conn: Connection,
     read_only: bool,
+}
+
+/// One grouped row of the static-series summary: a distinct
+/// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+/// length)` combination and how many associations share it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub name: String,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub resolution: Option<Duration>,
+    pub time_step_count: Option<i64>,
+    pub count: i64,
+}
+
+/// One grouped row of the forecast summary: a distinct
+/// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+/// horizon, interval, window_count)` combination and how many associations
+/// share it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForecastSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub name: String,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub resolution: Option<Duration>,
+    pub horizon: Option<Duration>,
+    pub interval: Option<Duration>,
+    pub window_count: Option<i64>,
+    pub count: i64,
+}
+
+fn parse_opt_rfc3339(s: Option<String>) -> Result<Option<DateTime<Utc>>> {
+    match s {
+        None => Ok(None),
+        Some(s) => Ok(Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| TimeSeriesError::IntegrityError(format!("bad timestamp: {e}")))?
+                .with_timezone(&Utc),
+        )),
+    }
+}
+
+fn parse_category(s: &str) -> Result<OwnerCategory> {
+    OwnerCategory::parse(s)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad owner_category {s}")))
+}
+
+fn parse_type(s: &str) -> Result<TimeSeriesType> {
+    TimeSeriesType::parse(s)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad time_series_type {s}")))
 }
 
 #[derive(Debug, Default, Clone)]
@@ -189,7 +243,7 @@ impl MetadataStore {
     /// Delete an association by primary-key tuple. Returns the number of rows
     /// deleted (0 if no match) and the data_hashes of the removed rows so the
     /// caller can decide whether to drop the underlying array.
-    pub fn delete_by_key(tx: &Transaction<'_>, key: &TimeSeriesKey) -> Result<Vec<[u8; 32]>> {
+    pub fn delete_by_key(tx: &Transaction<'_>, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
         let resolution_ms = key.resolution.map(duration_to_ms);
         let mut stmt = tx.prepare(
@@ -371,20 +425,10 @@ impl MetadataStore {
             owner_category: Some(owner_category),
             ..Default::default()
         })?;
-        Ok(metas
-            .into_iter()
-            .map(|m| TimeSeriesKey {
-                owner_id: m.owner_id,
-                owner_category: m.owner_category,
-                time_series_type: m.time_series_type,
-                name: m.name,
-                resolution: m.resolution,
-                features: m.features,
-            })
-            .collect())
+        metas.iter().map(TimeSeriesKey::from_metadata).collect()
     }
 
-    pub fn get_by_key(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata> {
+    pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
@@ -481,6 +525,201 @@ impl MetadataStore {
             |r| r.get(0),
         )?;
         Ok(n)
+    }
+
+    /// Association count grouped by time series type, as `(type, count)` pairs.
+    /// One grouped query; types the core does not recognize are skipped.
+    pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT time_series_type, COUNT(*) FROM time_series_associations
+             GROUP BY time_series_type",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts_type, n) = row?;
+            if let Some(ty) = TimeSeriesType::parse(&ts_type) {
+                out.push((ty, n));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Number of distinct stored arrays (content hashes) referenced by any
+    /// association. Series that share an array (de-duplicated by content) count
+    /// once. One `COUNT(DISTINCT)` query.
+    pub fn count_distinct_arrays(&self) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT data_hash) FROM time_series_associations",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Number of distinct owner ids in `category` that have any association.
+    pub fn count_distinct_owners_in_category(&self, category: OwnerCategory) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT owner_id) FROM time_series_associations
+             WHERE owner_category = ?1",
+            params![category.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Number of distinct stored arrays referenced by associations of any of
+    /// `types`. Empty `types` yields 0.
+    pub fn count_distinct_arrays_for_types(&self, types: &[TimeSeriesType]) -> Result<i64> {
+        if types.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; types.len()].join(",");
+        let sql = format!(
+            "SELECT COUNT(DISTINCT data_hash) FROM time_series_associations
+             WHERE time_series_type IN ({placeholders})"
+        );
+        let names: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
+        let n: i64 = self
+            .conn
+            .query_row(&sql, rusqlite::params_from_iter(names), |r| r.get(0))?;
+        Ok(n)
+    }
+
+    /// Grouped summary of the static series (SingleTimeSeries +
+    /// NonSequentialTimeSeries): one row per distinct
+    /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+    /// length)` with the association count. One `GROUP BY` query.
+    pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT owner_type, owner_category, time_series_type, name,
+                    initial_timestamp, resolution_ms, length, COUNT(*)
+             FROM time_series_associations
+             WHERE time_series_type IN ('SingleTimeSeries', 'NonSequentialTimeSeries')
+             GROUP BY owner_type, owner_category, time_series_type, name,
+                      initial_timestamp, resolution_ms, length",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (owner_type, oc, tt, name, its, res, len, count) = row?;
+            out.push(StaticSummaryRow {
+                owner_type,
+                owner_category: parse_category(&oc)?,
+                time_series_type: parse_type(&tt)?,
+                name,
+                initial_timestamp: parse_opt_rfc3339(its)?,
+                resolution: res.map(Duration::milliseconds),
+                time_step_count: len,
+                count,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Grouped summary of forecasts: one row per distinct
+    /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
+    /// horizon, interval, window_count)` with the association count. One
+    /// `GROUP BY` query.
+    pub fn forecast_summary(&self) -> Result<Vec<ForecastSummaryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT owner_type, owner_category, time_series_type, name,
+                    initial_timestamp, resolution_ms, horizon_ms, interval_ms, count, COUNT(*)
+             FROM time_series_associations
+             WHERE time_series_type IN
+                   ('Deterministic', 'DeterministicSingleTimeSeries', 'Probabilistic', 'Scenarios')
+             GROUP BY owner_type, owner_category, time_series_type, name,
+                      initial_timestamp, resolution_ms, horizon_ms, interval_ms, count",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<i64>>(8)?,
+                r.get::<_, i64>(9)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (owner_type, oc, tt, name, its, res, hor, iv, wcount, count) = row?;
+            out.push(ForecastSummaryRow {
+                owner_type,
+                owner_category: parse_category(&oc)?,
+                time_series_type: parse_type(&tt)?,
+                name,
+                initial_timestamp: parse_opt_rfc3339(its)?,
+                resolution: res.map(Duration::milliseconds),
+                horizon: hor.map(Duration::milliseconds),
+                interval: iv.map(Duration::milliseconds),
+                window_count: wcount,
+                count,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Distinct `(initial_timestamp, length)` pairs across all `SingleTimeSeries`
+    /// associations. Used to verify the store holds a single consistent static
+    /// horizon. One `DISTINCT` query.
+    pub fn distinct_single_initial_and_length(&self) -> Result<Vec<(DateTime<Utc>, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT initial_timestamp, length FROM time_series_associations
+             WHERE time_series_type = ?1",
+        )?;
+        let rows = stmt.query_map(params![TimeSeriesType::SingleTimeSeries.as_str()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (ts_str, len) = row?;
+            let ts = DateTime::parse_from_rfc3339(&ts_str)
+                .map_err(|e| {
+                    TimeSeriesError::IntegrityError(format!("bad initial_timestamp: {e}"))
+                })?
+                .with_timezone(&Utc);
+            out.push((ts, len));
+        }
+        Ok(out)
+    }
+
+    /// Distinct owner ids in `category` that have an association, optionally
+    /// restricted to one time series type and/or resolution.
+    pub fn list_owner_ids(
+        &self,
+        category: OwnerCategory,
+        ts_type: Option<TimeSeriesType>,
+        resolution: Option<Duration>,
+    ) -> Result<Vec<i64>> {
+        let ts_type_str = ts_type.map(|t| t.as_str());
+        let res_ms = resolution.map(duration_to_ms);
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT owner_id FROM time_series_associations
+             WHERE owner_category = ?1
+               AND (?2 IS NULL OR time_series_type = ?2)
+               AND (?3 IS NULL OR resolution_ms = ?3)",
+        )?;
+        let rows = stmt.query_map(params![category.as_str(), ts_type_str, res_ms], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn has_match(&self, filter: &MetadataFilter) -> Result<bool> {
