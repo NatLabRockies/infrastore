@@ -6,9 +6,21 @@
 
 use chrono::{DateTime, Utc};
 use time_series_store_core::{
-    KeyIdentity, OwnerCategory, Result as CoreResult, TimeSeriesData, TimeSeriesError,
+    KeyIdentity, OwnerCategory, Period, Result as CoreResult, TimeSeriesData, TimeSeriesError,
     TimeSeriesMetadata, TimeSeriesType,
 };
+
+/// Parse an ISO-8601 period received over the wire, mapping failures to a
+/// connection error (the server is the source of truth for the encoding).
+fn iso_to_period(s: &str) -> CoreResult<Period> {
+    Period::from_iso8601(s).map_err(|e| TimeSeriesError::ConnectionError(e.to_string()))
+}
+
+fn opt_iso_to_period(s: Option<String>) -> CoreResult<Option<Period>> {
+    s.filter(|s| !s.is_empty())
+        .map(|s| iso_to_period(&s))
+        .transpose()
+}
 use time_series_store_proto::convert::{
     features_to_pb, get_resp_to_time_series_data, key_from_pb, key_to_pb, metadata_from_pb,
 };
@@ -65,7 +77,7 @@ impl RemoteClient {
         owner_type: Option<String>,
         time_series_type: Option<TimeSeriesType>,
         name: Option<String>,
-        resolution_ms: Option<i64>,
+        resolution: Option<Period>,
         features: Option<&time_series_store_core::Features>,
     ) -> CoreResult<Vec<TimeSeriesMetadata>> {
         let req = ListReq {
@@ -74,7 +86,7 @@ impl RemoteClient {
             owner_type,
             time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
             name,
-            resolution_ms,
+            resolution: resolution.map(|p| p.to_iso8601()),
             features: features.map(features_to_pb),
         };
         let mut inner = self.inner.lock().await;
@@ -145,7 +157,7 @@ impl RemoteClient {
     pub async fn get_resolutions(
         &self,
         time_series_type: Option<TimeSeriesType>,
-    ) -> CoreResult<Vec<chrono::Duration>> {
+    ) -> CoreResult<Vec<Period>> {
         let req = ResolutionsReq {
             time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
         };
@@ -155,11 +167,7 @@ impl RemoteClient {
             .await
             .map_err(Self::map_status)?
             .into_inner();
-        Ok(resp
-            .resolution_ms
-            .into_iter()
-            .map(chrono::Duration::milliseconds)
-            .collect())
+        resp.resolution.iter().map(|s| iso_to_period(s)).collect()
     }
 
     pub async fn get_counts(&self) -> CoreResult<time_series_store_core::TimeSeriesCounts> {
@@ -186,10 +194,10 @@ impl RemoteClient {
             .map_err(Self::map_status)?
             .into_inner();
         Ok(time_series_store_core::ForecastParameters {
-            horizon: resp.horizon_ms.map(chrono::Duration::milliseconds),
-            interval: resp.interval_ms.map(chrono::Duration::milliseconds),
+            horizon: opt_iso_to_period(resp.horizon)?,
+            interval: opt_iso_to_period(resp.interval)?,
             count: resp.count.map(|c| c as usize),
-            resolution: resp.resolution_ms.map(chrono::Duration::milliseconds),
+            resolution: opt_iso_to_period(resp.resolution)?,
             // The forecast-parameters gRPC message does not carry the initial
             // timestamp; it is not part of the read-only wire contract.
             initial_timestamp: None,

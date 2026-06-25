@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::period::Period;
 use super::time_series::TimeSeriesType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -102,10 +103,10 @@ pub struct TimeSeriesMetadata {
 
     // Temporal fields (all `Option` so future variants can leave some unset).
     pub initial_timestamp: Option<DateTime<Utc>>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub length: Option<usize>,
-    pub horizon: Option<Duration>,
-    pub interval: Option<Duration>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
     pub count: Option<usize>,
     pub timestamps: Option<Vec<DateTime<Utc>>>,
 

@@ -2,8 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Duration;
-
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
@@ -17,6 +15,7 @@ use crate::types::key::{
     TimeSeriesKey,
 };
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
+use crate::types::period::Period;
 use crate::types::time_series::{
     Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
     TimeSeriesData, TimeSeriesType, compute_h,
@@ -29,7 +28,7 @@ pub struct ListFilter {
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub features: Option<Features>,
 }
 
@@ -57,8 +56,8 @@ impl ListFilter {
         self.name = Some(n.into());
         self
     }
-    pub fn resolution(mut self, r: Duration) -> Self {
-        self.resolution = Some(r);
+    pub fn resolution(mut self, r: impl Into<Period>) -> Self {
+        self.resolution = Some(r.into());
         self
     }
     pub fn features(mut self, f: Features) -> Self {
@@ -115,10 +114,10 @@ pub struct TimeSeriesCountsDetailed {
 
 #[derive(Debug, Default, Clone)]
 pub struct ForecastParameters {
-    pub horizon: Option<Duration>,
-    pub interval: Option<Duration>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
     pub count: Option<usize>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -237,12 +236,12 @@ impl Store {
         let mut keys = Vec::with_capacity(items.len());
 
         for item in &items {
-            let (hash, resolution_ms, packed, meta, key) = match &item.data {
+            let (hash, resolution, packed, meta, key) = match &item.data {
                 TimeSeriesData::SingleTimeSeries(single) => {
                     let hash = array_hash(&single.data);
                     (
                         hash,
-                        single.resolution.num_milliseconds(),
+                        single.resolution,
                         true,
                         TimeSeriesMetadata {
                             owner_id: item.owner_id,
@@ -281,7 +280,9 @@ impl Store {
                     let hash = array_hash(&non_sequential.data);
                     (
                         hash,
-                        0,
+                        // Non-sequential series are stored standalone, so the
+                        // resolution (which keys the packed pool) is unused.
+                        Period::Months(0),
                         false,
                         TimeSeriesMetadata {
                             owner_id: item.owner_id,
@@ -319,7 +320,7 @@ impl Store {
                 // [`Self::transform_single_time_series`].
                 TimeSeriesData::Deterministic(det) => (
                     array_hash(&det.data),
-                    det.resolution.num_milliseconds(),
+                    det.resolution,
                     false,
                     forecast_metadata(
                         item,
@@ -346,7 +347,7 @@ impl Store {
                 ),
                 TimeSeriesData::Probabilistic(prob) => (
                     array_hash(&prob.data),
-                    prob.resolution.num_milliseconds(),
+                    prob.resolution,
                     false,
                     forecast_metadata(
                         item,
@@ -373,7 +374,7 @@ impl Store {
                 ),
                 TimeSeriesData::Scenarios(scen) => (
                     array_hash(&scen.data),
-                    scen.resolution.num_milliseconds(),
+                    scen.resolution,
                     false,
                     forecast_metadata(
                         item,
@@ -415,7 +416,7 @@ impl Store {
                 already_present,
                 "backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution_ms, packed)?;
+            self.backend.put_array(&hash, data, resolution, packed)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
@@ -541,32 +542,30 @@ impl Store {
                         if end < start {
                             return Err(TimeSeriesError::InvalidParameter("end < start".into()));
                         }
-                        let resolution_ms = resolution.num_milliseconds();
-                        if resolution_ms <= 0 {
+                        if !resolution.is_positive() {
                             return Err(TimeSeriesError::InvalidParameter(
                                 "resolution must be positive".into(),
                             ));
                         }
-                        let total_ms = (start - initial).num_milliseconds();
-                        let start_idx = (total_ms / resolution_ms).max(0) as usize;
-                        let end_total_ms = (end - initial).num_milliseconds();
-                        // Ceiling division of a non-negative numerator. Written as
-                        // `(n - 1) / d + 1` rather than `(n + d - 1) / d` so a
-                        // far-future `end` (where `end_total_ms` is near `i64::MAX`)
-                        // cannot overflow the addition. Non-positive numerators map
-                        // to index 0.
-                        let end_idx = if end_total_ms <= 0 {
-                            0
-                        } else {
-                            ((end_total_ms - 1) / resolution_ms + 1) as usize
-                        };
-                        let start_idx = start_idx.min(length);
-                        let end_idx = end_idx.min(length).max(start_idx);
+                        // `start` is floored and `end` is ceil-ed onto the
+                        // resolution grid (calendar-aware for monthly periods); the
+                        // bounds need not be grid-aligned.
+                        let start_idx = resolution.floor_steps(initial, start).min(length);
+                        let end_idx = resolution
+                            .ceil_steps(initial, end)
+                            .min(length)
+                            .max(start_idx);
                         let data = self
                             .backend
                             .get_slice(&meta.data_hash, start_idx..end_idx)?;
                         let new_initial =
-                            initial + Duration::milliseconds(start_idx as i64 * resolution_ms);
+                            resolution
+                                .add_to(initial, start_idx as i64)
+                                .ok_or_else(|| {
+                                    TimeSeriesError::IntegrityError(
+                                        "sliced initial overflow".into(),
+                                    )
+                                })?;
                         (data, new_initial, end_idx - start_idx)
                     }
                 };
@@ -727,15 +726,14 @@ impl Store {
                 let interval = required_interval(&meta, "DeterministicSingleTimeSeries")?;
                 let count = required_count(&meta, "DeterministicSingleTimeSeries")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                let interval_ms = interval.num_milliseconds();
-                let res_ms = resolution.num_milliseconds();
-                if interval_ms % res_ms != 0 {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "DeterministicSingleTimeSeries: interval ({interval_ms} ms) \
-                         is not evenly divisible by resolution ({res_ms} ms)"
-                    )));
-                }
-                let interval_steps = (interval_ms / res_ms) as usize;
+                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::IntegrityError(format!(
+                        "DeterministicSingleTimeSeries: interval ({}) is not an integer \
+                         multiple of resolution ({})",
+                        interval.to_iso8601(),
+                        resolution.to_iso8601()
+                    ))
+                })?;
                 let total_len = arr.length();
                 // Validate that all windows fit in the underlying array.
                 let required = (count.saturating_sub(1)) * interval_steps + h;
@@ -977,7 +975,7 @@ impl Store {
         owner_id: i64,
         owner_category: OwnerCategory,
         name: &str,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
         features: Features,
         requested: crate::types::time_series::RequestedType,
     ) -> Result<TimeSeriesKey> {
@@ -1022,11 +1020,7 @@ impl Store {
                     .iter()
                     .map(|m| match m.resolution {
                         Some(r) => {
-                            format!(
-                                "{} at {}ms",
-                                m.time_series_type.as_str(),
-                                r.num_milliseconds()
-                            )
+                            format!("{} at {}", m.time_series_type.as_str(), r.to_iso8601())
                         }
                         None => m.time_series_type.as_str().to_string(),
                     })
@@ -1086,14 +1080,15 @@ impl Store {
     /// number of series transformed.
     pub fn transform_single_time_series(
         &mut self,
-        horizon: Duration,
-        interval: Duration,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         owner_category: Option<OwnerCategory>,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
     ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        let (horizon, interval) = (horizon.into(), interval.into());
         use crate::metadata::MetadataFilter;
         let mut sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
@@ -1121,7 +1116,7 @@ impl Store {
             i64,
             OwnerCategory,
             String,
-            Option<i64>,
+            Option<String>,
             [u8; 32],
         )> = self
             .metadata
@@ -1135,7 +1130,7 @@ impl Store {
                     m.owner_id,
                     m.owner_category,
                     m.name.clone(),
-                    m.resolution.map(|r| r.num_milliseconds()),
+                    m.resolution.map(|r| r.to_iso8601()),
                     crate::hash::features_hash(&m.features),
                 )
             })
@@ -1149,7 +1144,7 @@ impl Store {
                 src.owner_id,
                 src.owner_category,
                 src.name.clone(),
-                src.resolution.map(|r| r.num_milliseconds()),
+                src.resolution.map(|r| r.to_iso8601()),
                 crate::hash::features_hash(&src.features),
             );
             if existing_dst.contains(&src_key) {
@@ -1159,20 +1154,13 @@ impl Store {
             let total_len = src.length.ok_or_else(|| {
                 TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
             })?;
-            let res_ms = resolution.num_milliseconds();
-            let interval_ms = interval.num_milliseconds();
-            if res_ms <= 0 {
-                return Err(TimeSeriesError::InvalidParameter(
-                    "resolution must be positive".into(),
-                ));
-            }
-            if interval_ms <= 0 || interval_ms % res_ms != 0 {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "interval ({interval_ms} ms) must be a positive multiple of \
-                     resolution ({res_ms} ms)"
-                )));
-            }
-            let interval_steps = (interval_ms / res_ms) as usize;
+            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "interval ({}) must be a positive integer multiple of resolution ({})",
+                    interval.to_iso8601(),
+                    resolution.to_iso8601()
+                ))
+            })?;
             let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
             if h == 0 || h > total_len {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -1210,10 +1198,7 @@ impl Store {
         }
     }
 
-    pub fn get_resolutions(
-        &self,
-        time_series_type: Option<TimeSeriesType>,
-    ) -> Result<Vec<Duration>> {
+    pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
@@ -1230,8 +1215,8 @@ impl Store {
     /// returned rows.
     pub fn get_forecast_parameters(
         &self,
-        resolution: Option<Duration>,
-        interval: Option<Duration>,
+        resolution: Option<Period>,
+        interval: Option<Period>,
     ) -> Result<ForecastParameters> {
         use crate::metadata::MetadataFilter;
         // Check each forecast type in priority order.
@@ -1344,7 +1329,7 @@ impl Store {
         &self,
         category: OwnerCategory,
         time_series_type: Option<TimeSeriesType>,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         self.metadata
             .list_owner_ids(category, time_series_type, resolution)
@@ -1403,9 +1388,9 @@ fn forecast_metadata(
     time_series_type: TimeSeriesType,
     name: &str,
     initial_timestamp: chrono::DateTime<chrono::Utc>,
-    resolution: Duration,
-    horizon: Duration,
-    interval: Duration,
+    resolution: Period,
+    horizon: Period,
+    interval: Period,
     count: usize,
     data: &TypedArray,
     percentiles: Option<Vec<f64>>,
@@ -1440,10 +1425,10 @@ fn forecast_key(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
     name: &str,
-    resolution: Duration,
+    resolution: Period,
     initial_timestamp: chrono::DateTime<chrono::Utc>,
-    horizon: Duration,
-    interval: Duration,
+    horizon: Period,
+    interval: Period,
     count: usize,
 ) -> TimeSeriesKey {
     TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
@@ -1528,42 +1513,44 @@ pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usi
 /// On success, `w0 <= w1 <= count`. Empty selection returns `(0, 0, initial)`.
 fn resolve_windows(
     initial: chrono::DateTime<chrono::Utc>,
-    _resolution: Duration,
-    _horizon: Duration,
-    interval: Duration,
+    _resolution: Period,
+    _horizon: Period,
+    interval: Period,
     count: usize,
     time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
 ) -> Result<(usize, usize, chrono::DateTime<chrono::Utc>)> {
+    let window_start = |k: usize| -> Result<chrono::DateTime<chrono::Utc>> {
+        interval
+            .add_to(initial, k as i64)
+            .ok_or_else(|| TimeSeriesError::IntegrityError("window timestamp overflow".into()))
+    };
     match time_range {
         None => Ok((0, count, initial)),
         Some((start, end)) => {
             if end < start {
                 return Err(TimeSeriesError::InvalidParameter("end < start".into()));
             }
-            let interval_ms = interval.num_milliseconds();
-            if interval_ms <= 0 {
+            if !interval.is_positive() {
                 return Err(TimeSeriesError::InvalidParameter(
                     "forecast interval must be positive".into(),
                 ));
             }
-            // Check alignment: (start - initial) must be a non-negative integer
-            // multiple of interval.
-            let offset_ms = (start - initial).num_milliseconds();
-            if offset_ms < 0 || offset_ms % interval_ms != 0 {
-                return Err(TimeSeriesError::InvalidParameter(
+            // `start` must be a window boundary: `initial + k·interval`
+            // (calendar-aware for monthly intervals).
+            let start_k = interval.steps_between(initial, start).map_err(|_| {
+                TimeSeriesError::InvalidParameter(
                     "forecast start_time must align to a window boundary \
                      (initial_timestamp + k·interval)"
                         .into(),
-                ));
-            }
-            let start_k = (offset_ms / interval_ms) as usize;
+                )
+            })?;
 
             // Collect all k in [0, count) whose window start is in [start, end).
             let mut w0 = count; // sentinel: no window selected yet
             let mut w1 = 0usize;
             for k in 0..count {
-                let window_start = initial + Duration::milliseconds(k as i64 * interval_ms);
-                if window_start >= start && window_start < end {
+                let ws = window_start(k)?;
+                if ws >= start && ws < end {
                     if w0 == count {
                         w0 = k;
                     }
@@ -1571,15 +1558,12 @@ fn resolve_windows(
                 }
             }
 
-            // Empty selection.
+            // Empty selection: report the initial timestamp at the requested start.
             if w0 == count {
-                // Return initial_timestamp aligned to start (the requested start).
-                let first_ts = initial + Duration::milliseconds(start_k as i64 * interval_ms);
-                return Ok((0, 0, first_ts));
+                return Ok((0, 0, window_start(start_k)?));
             }
 
-            let first_ts = initial + Duration::milliseconds(w0 as i64 * interval_ms);
-            Ok((w0, w1, first_ts))
+            Ok((w0, w1, window_start(w0)?))
         }
     }
 }
@@ -1598,7 +1582,7 @@ fn required_initial(
 fn required_resolution(
     meta: &crate::types::metadata::TimeSeriesMetadata,
     label: &str,
-) -> Result<Duration> {
+) -> Result<Period> {
     meta.resolution
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing resolution")))
 }
@@ -1606,7 +1590,7 @@ fn required_resolution(
 fn required_horizon(
     meta: &crate::types::metadata::TimeSeriesMetadata,
     label: &str,
-) -> Result<Duration> {
+) -> Result<Period> {
     meta.horizon
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing horizon")))
 }
@@ -1614,7 +1598,7 @@ fn required_horizon(
 fn required_interval(
     meta: &crate::types::metadata::TimeSeriesMetadata,
     label: &str,
-) -> Result<Duration> {
+) -> Result<Period> {
     meta.interval
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing interval")))
 }

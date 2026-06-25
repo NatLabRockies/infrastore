@@ -1,9 +1,10 @@
 use std::str::FromStr;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::array::TypedArray;
+use super::period::Period;
 
 /// Discriminator for the six time series types defined in the spec.
 ///
@@ -92,7 +93,7 @@ impl RequestedType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SingleTimeSeries {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
+    pub resolution: Period,
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
@@ -101,14 +102,14 @@ pub struct SingleTimeSeries {
 impl SingleTimeSeries {
     pub fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
+        resolution: impl Into<Period>,
         data: TypedArray,
         name: impl Into<String>,
     ) -> Self {
         let length = data.length();
         Self {
             initial_timestamp,
-            resolution,
+            resolution: resolution.into(),
             length,
             data,
             name: name.into(),
@@ -160,9 +161,9 @@ impl NonSequentialTimeSeries {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Deterministic {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     /// Shape `[H, count, *E]`.
     pub data: TypedArray,
@@ -177,14 +178,15 @@ impl Deterministic {
     /// `H = horizon / resolution` and `*E` is any trailing element dims.
     pub fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
-        horizon: Duration,
-        interval: Duration,
+        resolution: impl Into<Period>,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         count: usize,
         data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String> {
-        validate_positive_durations(resolution, horizon, interval)?;
+        let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
+        validate_positive_periods(resolution, horizon, interval)?;
         let h = compute_h(horizon, resolution)?;
         // Derive element dims from trailing shape after [H, count].
         if data.shape.len() < 2 {
@@ -222,9 +224,9 @@ impl Deterministic {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Probabilistic {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub percentiles: Vec<f64>,
     /// Shape `[num_percentiles, H, count, *E]`.
@@ -240,15 +242,16 @@ impl Probabilistic {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
-        horizon: Duration,
-        interval: Duration,
+        resolution: impl Into<Period>,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         count: usize,
         percentiles: Vec<f64>,
         data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String> {
-        validate_positive_durations(resolution, horizon, interval)?;
+        let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
+        validate_positive_periods(resolution, horizon, interval)?;
         if percentiles.is_empty() {
             return Err("Probabilistic: percentiles must be non-empty".to_string());
         }
@@ -295,9 +298,9 @@ impl Probabilistic {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scenarios {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub scenario_count: usize,
     /// Shape `[scenario_count, H, count, *E]`.
@@ -310,15 +313,16 @@ impl Scenarios {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
-        horizon: Duration,
-        interval: Duration,
+        resolution: impl Into<Period>,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         count: usize,
         scenario_count: usize,
         data: TypedArray,
         name: impl Into<String>,
     ) -> Result<Self, String> {
-        validate_positive_durations(resolution, horizon, interval)?;
+        let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
+        validate_positive_periods(resolution, horizon, interval)?;
         let h = compute_h(horizon, resolution)?;
         let elem_dims: Vec<usize> = if data.shape.len() > 3 {
             data.shape[3..].to_vec()
@@ -351,32 +355,22 @@ impl Scenarios {
 }
 
 /// Compute H = horizon / resolution, requiring an exact integer division > 0.
-pub(crate) fn compute_h(horizon: Duration, resolution: Duration) -> Result<usize, String> {
-    let h_ms = horizon.num_milliseconds();
-    let r_ms = resolution.num_milliseconds();
-    if r_ms <= 0 {
-        return Err("resolution must be positive".to_string());
-    }
-    if h_ms % r_ms != 0 {
-        return Err(format!(
-            "horizon ({h_ms} ms) is not evenly divisible by resolution ({r_ms} ms)"
-        ));
-    }
-    let h = (h_ms / r_ms) as usize;
-    if h == 0 {
-        return Err("horizon / resolution = 0 (horizon must be ≥ resolution)".to_string());
-    }
-    Ok(h)
+///
+/// Because [`Period::divide_into`] requires both periods to be the same kind,
+/// this also enforces that a forecast's horizon and resolution are both fixed
+/// or both calendar (so `H` is a constant integer).
+pub(crate) fn compute_h(horizon: Period, resolution: Period) -> Result<usize, String> {
+    resolution.divide_into(&horizon).map_err(|e| e.to_string())
 }
 
 /// Validate that resolution, horizon, and interval are all strictly positive.
-fn validate_positive_durations(
-    resolution: Duration,
-    horizon: Duration,
-    interval: Duration,
+fn validate_positive_periods(
+    resolution: Period,
+    horizon: Period,
+    interval: Period,
 ) -> Result<(), String> {
-    let check = |d: Duration, name: &str| {
-        if d.num_milliseconds() <= 0 {
+    let check = |p: Period, name: &str| {
+        if !p.is_positive() {
             Err(format!("{name} must be strictly positive"))
         } else {
             Ok(())

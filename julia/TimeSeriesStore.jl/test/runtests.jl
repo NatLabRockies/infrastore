@@ -477,10 +477,11 @@ end
     @test length(list_keys(store; owner_id=1, name="wind", resolution=Minute(5))) == 1
     @test isempty(list_keys(store; owner_id=1, name="wind", resolution=Hour(1)))
 
-    # get_resolutions: distinct resolutions, ascending, optionally per type.
-    @test get_resolutions(store) == [Millisecond(Minute(5)), Millisecond(Hour(1))]
-    @test get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE) ==
-          [Millisecond(Minute(5)), Millisecond(Hour(1))]
+    # get_resolutions: distinct resolutions (order is lexical-by-ISO, so compare
+    # as a set — periods of different kinds have no numeric total order).
+    @test Set(get_resolutions(store)) == Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
+    @test Set(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE)) ==
+          Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
     @test isempty(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC))
 
     # counts_by_type: all four are SingleTimeSeries here.

@@ -13,8 +13,8 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Deterministic, Dtype, Features, ForecastTimeSeriesKey, OwnerCategory, Probabilistic, Scenarios,
-    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray,
+    Deterministic, Dtype, Features, ForecastTimeSeriesKey, OwnerCategory, Period, Probabilistic,
+    Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray,
     create_store, open_store,
 };
 
@@ -891,10 +891,22 @@ fn get_forecast_parameters_real() {
         },
         |store, _key, backend| {
             let params = store.get_forecast_parameters(None, None).unwrap();
-            assert_eq!(params.horizon, Some(horizon), "{backend}: horizon");
-            assert_eq!(params.interval, Some(interval), "{backend}: interval");
+            assert_eq!(
+                params.horizon,
+                Some(Period::Fixed(horizon)),
+                "{backend}: horizon"
+            );
+            assert_eq!(
+                params.interval,
+                Some(Period::Fixed(interval)),
+                "{backend}: interval"
+            );
             assert_eq!(params.count, Some(count), "{backend}: count");
-            assert_eq!(params.resolution, Some(resolution), "{backend}: resolution");
+            assert_eq!(
+                params.resolution,
+                Some(Period::Fixed(resolution)),
+                "{backend}: resolution"
+            );
         },
     );
 }
@@ -1021,7 +1033,7 @@ fn resolve_abstract_deterministic_matches_real_deterministic() {
                     1,
                     OwnerCategory::Component,
                     "load",
-                    Some(resolution),
+                    Some(Period::Fixed(resolution)),
                     Features::new(),
                     RequestedType::AbstractDeterministic,
                 )
@@ -1076,7 +1088,7 @@ fn resolve_abstract_deterministic_matches_dst() {
                     7,
                     OwnerCategory::Component,
                     "gen",
-                    Some(resolution),
+                    Some(Period::Fixed(resolution)),
                     Features::new(),
                     RequestedType::AbstractDeterministic,
                 )
@@ -1106,7 +1118,7 @@ fn resolve_abstract_deterministic_not_found_is_not_masked() {
             1,
             OwnerCategory::Component,
             "missing",
-            Some(Duration::hours(1)),
+            Some(Period::Fixed(Duration::hours(1))),
             Features::new(),
             RequestedType::AbstractDeterministic,
         )
@@ -1159,7 +1171,7 @@ fn resolve_abstract_deterministic_ambiguous_errors() {
             3,
             OwnerCategory::Component,
             "dup",
-            Some(resolution),
+            Some(Period::Fixed(resolution)),
             Features::new(),
             RequestedType::AbstractDeterministic,
         )
@@ -1175,7 +1187,7 @@ fn resolve_abstract_deterministic_ambiguous_errors() {
             3,
             OwnerCategory::Component,
             "dup",
-            Some(resolution),
+            Some(Period::Fixed(resolution)),
             Features::new(),
             RequestedType::Concrete(TimeSeriesType::Deterministic),
         )

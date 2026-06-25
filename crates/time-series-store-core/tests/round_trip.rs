@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
+    FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
+    open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -21,6 +22,70 @@ fn features_with_year(year: i64) -> Features {
     let mut f: Features = BTreeMap::new();
     f.insert("model_year".into(), FeatureValue::Int(year));
     f
+}
+
+#[test]
+fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
+    // A SingleTimeSeries on a calendar (irregular) monthly grid: 12 months from
+    // 2024-01-15. Exercises the ISO-8601 dataset-name + SQLite encoding for
+    // `Period::Months`, plus calendar-aware reader index math.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("monthly.nc");
+    let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+    let values: Vec<f64> = (0..12).map(|i| 100.0 + i as f64).collect();
+
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let s = SingleTimeSeries::new(
+            initial,
+            Period::Months(1),
+            TypedArray::from_f64(vec![12], &values),
+            "monthly_load",
+        );
+        store
+            .add_time_series(
+                7,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(s),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    // Reopen read-only: the resolution survives the ISO round trip as a calendar
+    // period (not a fixed ms span).
+    let store = open_store(path.as_path(), true).unwrap();
+    let keys = store.list_keys(ListFilter::new()).unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].resolution(), Some(Period::Months(1)));
+
+    // StaticReader over the monthly grid: month index 3 is 2024-04-15.
+    let mut reader = store
+        .build_static_reader(ListFilter::new().resolution(Period::Months(1)))
+        .unwrap();
+    assert_eq!(reader.resolution(), Period::Months(1));
+    store
+        .static_read(
+            &mut reader,
+            Utc.with_ymd_and_hms(2024, 4, 15, 0, 0, 0).unwrap(),
+        )
+        .unwrap();
+    let g = &reader.groups()[0];
+    let v = f64::from_le_bytes(g.values()[0..8].try_into().unwrap());
+    assert_eq!(v, 103.0);
+
+    // Off-grid (mid-month, not a calendar step) is a hard error.
+    assert!(
+        store
+            .static_read(
+                &mut reader,
+                Utc.with_ymd_and_hms(2024, 4, 20, 0, 0, 0).unwrap()
+            )
+            .is_err()
+    );
 }
 
 #[test]

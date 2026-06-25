@@ -5,6 +5,7 @@ use std::ops::Range;
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::types::array::TypedArray;
+use crate::types::period::Period;
 
 use super::{CompactionReport, IntegrityReport, StorageBackend};
 
@@ -30,7 +31,7 @@ impl StorageBackend for MemoryBackend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        _resolution_ms: i64,
+        _resolution: Period,
         _packed: bool,
     ) -> Result<bool> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.

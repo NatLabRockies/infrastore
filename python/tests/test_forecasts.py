@@ -55,8 +55,8 @@ def test_deterministic_scalar_round_trip():
     got = store.get_time_series(key)
     assert isinstance(got, Deterministic)
     assert got.count == C
-    assert got.horizon == HORIZON_6H
-    assert got.interval == INTERVAL_12H
+    assert got.horizon == "PT6H"
+    assert got.interval == "PT12H"
     assert got.initial_timestamp == T0
     assert got.name == "det_scalar"
     np.testing.assert_array_equal(np.asarray(got.data), data)
@@ -147,8 +147,8 @@ def test_probabilistic_round_trip():
     got = store.get_time_series(key)
     assert isinstance(got, Probabilistic)
     assert got.count == C
-    assert got.horizon == HORIZON_6H
-    assert got.interval == INTERVAL_12H
+    assert got.horizon == "PT6H"
+    assert got.interval == "PT12H"
     assert got.initial_timestamp == T0
     assert got.name == "prob_basic"
     assert got.percentiles == pytest.approx(percentiles)
@@ -205,8 +205,8 @@ def test_scenarios_round_trip():
     assert isinstance(got, Scenarios)
     assert got.count == C
     assert got.scenario_count == S
-    assert got.horizon == HORIZON_6H
-    assert got.interval == INTERVAL_12H
+    assert got.horizon == "PT6H"
+    assert got.interval == "PT12H"
     assert got.initial_timestamp == T0
     assert got.name == "scen_basic"
     arr = np.asarray(got.data)
@@ -374,10 +374,11 @@ def test_get_forecast_parameters():
     )
 
     params = store.get_forecast_parameters()
-    assert params["horizon"] == HORIZON_6H
-    assert params["interval"] == INTERVAL_12H
+    # Periods are returned as canonical ISO-8601 duration strings.
+    assert params["horizon"] == "PT6H"
+    assert params["interval"] == "PT12H"
     assert params["count"] == C
-    assert params["resolution"] == RES_1H
+    assert params["resolution"] == "PT1H"
 
 
 def test_get_forecast_parameters_no_forecasts():

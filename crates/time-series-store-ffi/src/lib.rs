@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::slice;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use time_series_store_core as core_lib;
 
@@ -133,6 +133,61 @@ unsafe fn cstr_to_optional_string(p: *const c_char) -> Result<Option<String>, i3
 
 unsafe fn cstr_to_optional_path(p: *const c_char) -> Result<Option<PathBuf>, i32> {
     Ok(unsafe { cstr_to_optional_string(p)? }.map(PathBuf::from))
+}
+
+/// Parse an ISO-8601 period from a C string. `null`/empty -> `None`; a malformed
+/// string sets the error and returns `TS_ERR_INVALID_PARAMETER`.
+unsafe fn cstr_to_optional_period(p: *const c_char) -> Result<Option<core_lib::Period>, i32> {
+    let s = unsafe { cstr_to_optional_string(p)? };
+    match s {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => core_lib::Period::from_iso8601(&s).map(Some).map_err(|e| {
+            set_error(e.to_string());
+            TS_ERR_INVALID_PARAMETER
+        }),
+    }
+}
+
+/// Parse a required ISO-8601 period from a C string.
+unsafe fn cstr_to_period(p: *const c_char) -> Result<core_lib::Period, i32> {
+    let s = unsafe { cstr_to_str(p)? };
+    core_lib::Period::from_iso8601(s).map_err(|e| {
+        set_error(e.to_string());
+        TS_ERR_INVALID_PARAMETER
+    })
+}
+
+/// Allocate an owned C string the caller must release with [`ts_string_free`].
+/// An interior NUL (never present in an ISO-8601 period) yields a null pointer.
+fn owned_cstr(s: &str) -> *mut c_char {
+    match std::ffi::CString::new(s) {
+        Ok(c) => c.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Owned ISO-8601 C string for a period (caller frees with [`ts_string_free`]).
+fn period_cstr(p: core_lib::Period) -> *mut c_char {
+    owned_cstr(&p.to_iso8601())
+}
+
+/// Owned ISO-8601 C string for an optional period; `None` -> null pointer.
+fn opt_period_cstr(p: Option<core_lib::Period>) -> *mut c_char {
+    p.map(period_cstr).unwrap_or(std::ptr::null_mut())
+}
+
+/// Free a C string returned by this library (e.g. a `*out_resolution`).
+///
+/// # Safety
+///
+/// `s` must be null or a pointer returned by this library's owned-string outputs,
+/// freed exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_string_free(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe { drop(std::ffi::CString::from_raw(s)) };
+    }
 }
 
 // ---- Store create / open / free ------------------------------------------
@@ -322,7 +377,7 @@ unsafe fn build_single_request(
     owner_category: i32,
     name: *const c_char,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
+    resolution: *const c_char,
     dtype: i32,
     ndims: u64,
     dims_ptr: *const u64,
@@ -369,7 +424,7 @@ unsafe fn build_single_request(
             return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let resolution = Duration::milliseconds(resolution_ms);
+    let resolution = unsafe { cstr_to_period(resolution)? };
     let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
 
@@ -406,7 +461,7 @@ pub unsafe extern "C" fn ts_store_add_single(
     owner_category: i32,
     name: *const c_char,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
+    resolution: *const c_char,
     dtype: i32,
     ndims: u64,
     dims_ptr: *const u64,
@@ -436,7 +491,7 @@ pub unsafe extern "C" fn ts_store_add_single(
             owner_category,
             name,
             initial_ts_unix_ms,
-            resolution_ms,
+            resolution,
             dtype,
             ndims,
             dims_ptr,
@@ -629,7 +684,7 @@ pub unsafe extern "C" fn ts_store_get_single(
     handle: *const TsStoreHandle,
     key: *const TsKeyHandle,
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
     out_dtype: *mut i32,
     out_shape: *mut *mut i64,
     out_shape_len: *mut u64,
@@ -652,7 +707,7 @@ pub unsafe extern "C" fn ts_store_get_single(
         }
     };
     if out_initial_ts_unix_ms.is_null()
-        || out_resolution_ms.is_null()
+        || out_resolution.is_null()
         || out_dtype.is_null()
         || out_shape.is_null()
         || out_shape_len.is_null()
@@ -687,7 +742,7 @@ pub unsafe extern "C" fn ts_store_get_single(
             return TS_ERR_INTEGRITY;
         }
     };
-    let resolution_ms = single.resolution.num_milliseconds();
+    let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
     let mut shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
@@ -701,7 +756,7 @@ pub unsafe extern "C" fn ts_store_get_single(
     std::mem::forget(bytes);
     unsafe {
         *out_initial_ts_unix_ms = initial_ms;
-        *out_resolution_ms = resolution_ms;
+        *out_resolution = resolution_cstr;
         *out_dtype = dtype.code();
         *out_shape = shape_ptr;
         *out_shape_len = shape_len;
@@ -894,11 +949,11 @@ pub unsafe extern "C" fn ts_store_counts(
 }
 
 /// Write the store's forecast parameters, optionally restricted to forecasts
-/// with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
+/// with `filter_resolution` and/or `filter_interval` (empty/null = no filter).
 ///
 /// `out_present` is set to `true` when a matching forecast exists, `false`
-/// otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`,
-/// `out_resolution_ms`, and `out_initial_ms` (the initial timestamp as unix ms)
+/// otherwise. Each of `out_horizon`, `out_interval`, `out_count`,
+/// `out_resolution`, and `out_initial_ms` (the initial timestamp as unix ms)
 /// receives the corresponding value, or `-1` when that field is absent
 /// (durations, resolution, and counts are always non-negative when present, so
 /// `-1` is an unambiguous "unset" sentinel).
@@ -912,13 +967,13 @@ pub unsafe extern "C" fn ts_store_counts(
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_parameters(
     handle: *const TsStoreHandle,
-    filter_resolution_ms: i64,
-    filter_interval_ms: i64,
+    filter_resolution: *const c_char,
+    filter_interval: *const c_char,
     out_present: *mut bool,
-    out_horizon_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_horizon: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut i64,
-    out_resolution_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
     out_initial_ms: *mut i64,
 ) -> i32 {
     clear_error();
@@ -927,23 +982,21 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
         None => return TS_ERR_NULL_POINTER,
     };
     if out_present.is_null()
-        || out_horizon_ms.is_null()
-        || out_interval_ms.is_null()
+        || out_horizon.is_null()
+        || out_interval.is_null()
         || out_count.is_null()
-        || out_resolution_ms.is_null()
+        || out_resolution.is_null()
         || out_initial_ms.is_null()
     {
         return TS_ERR_NULL_POINTER;
     }
-    let resolution = if filter_resolution_ms > 0 {
-        Some(Duration::milliseconds(filter_resolution_ms))
-    } else {
-        None
+    let resolution = match unsafe { cstr_to_optional_period(filter_resolution) } {
+        Ok(r) => r,
+        Err(c) => return c,
     };
-    let interval = if filter_interval_ms > 0 {
-        Some(Duration::milliseconds(filter_interval_ms))
-    } else {
-        None
+    let interval = match unsafe { cstr_to_optional_period(filter_interval) } {
+        Ok(i) => i,
+        Err(c) => return c,
     };
     match store.inner.get_forecast_parameters(resolution, interval) {
         Ok(p) => {
@@ -953,10 +1006,12 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
                 || p.resolution.is_some();
             unsafe {
                 *out_present = present;
-                *out_horizon_ms = p.horizon.map(|d| d.num_milliseconds()).unwrap_or(-1);
-                *out_interval_ms = p.interval.map(|d| d.num_milliseconds()).unwrap_or(-1);
+                // Period out-params are owned ISO-8601 C strings (null = unset),
+                // freed by the caller with `ts_string_free`.
+                *out_horizon = opt_period_cstr(p.horizon);
+                *out_interval = opt_period_cstr(p.interval);
                 *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
-                *out_resolution_ms = p.resolution.map(|d| d.num_milliseconds()).unwrap_or(-1);
+                *out_resolution = opt_period_cstr(p.resolution);
                 *out_initial_ms = p
                     .initial_timestamp
                     .and_then(datetime_to_unix_ms)
@@ -1061,7 +1116,7 @@ pub unsafe extern "C" fn ts_store_get_resolutions(
     };
     let arr: Vec<Value> = resolutions
         .iter()
-        .map(|d| Value::from(d.num_milliseconds()))
+        .map(|p| Value::from(p.to_iso8601()))
         .collect();
     let json = Value::Array(arr).to_string();
     unsafe { write_str_out(&json, buf, cap, out_len) };
@@ -1184,7 +1239,7 @@ pub unsafe extern "C" fn ts_store_counts_detailed(
 /// List the distinct owner ids of `owner_category` (`0` = Component, `1` =
 /// SupplementalAttribute) that have a time series, as a JSON array of integers.
 /// Optionally restricted to one `time_series_type` (`TS_TYPE_*` code, gated by
-/// `has_time_series_type`) and/or `resolution_ms` (`<= 0` = no filter).
+/// `has_time_series_type`) and/or `resolution` (empty/null = no filter).
 /// Probe-then-fetch (see `ts_store_list_keys`).
 ///
 /// # Safety
@@ -1197,7 +1252,7 @@ pub unsafe extern "C" fn ts_store_list_owner_ids(
     owner_category: i32,
     has_time_series_type: bool,
     time_series_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     buf: *mut c_char,
     cap: u64,
     out_len: *mut u64,
@@ -1230,10 +1285,9 @@ pub unsafe extern "C" fn ts_store_list_owner_ids(
     } else {
         None
     };
-    let resolution = if resolution_ms > 0 {
-        Some(Duration::milliseconds(resolution_ms))
-    } else {
-        None
+    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
+        Ok(r) => r,
+        Err(c) => return c,
     };
     let ids = match store.inner.list_owner_ids(category, ts_type, resolution) {
         Ok(v) => v,
@@ -1247,7 +1301,7 @@ pub unsafe extern "C" fn ts_store_list_owner_ids(
 
 /// Static-series summary as a JSON array. Each object has `owner_type`,
 /// `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
-/// `resolution_ms`, `time_step_count`, and `count` (the number of associations in
+/// `resolution`, `time_step_count`, and `count` (the number of associations in
 /// the group); fields that do not apply are `null`. Probe-then-fetch.
 ///
 /// # Safety
@@ -1274,8 +1328,8 @@ pub unsafe extern "C" fn ts_store_static_summary(
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
-    let dur = |d: Option<chrono::Duration>| {
-        d.map(|x| Value::from(x.num_milliseconds()))
+    let dur = |d: Option<core_lib::Period>| {
+        d.map(|x| Value::from(x.to_iso8601()))
             .unwrap_or(Value::Null)
     };
     let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
@@ -1300,7 +1354,7 @@ pub unsafe extern "C" fn ts_store_static_summary(
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
-            o.insert("resolution_ms".into(), dur(r.resolution));
+            o.insert("resolution".into(), dur(r.resolution));
             o.insert("time_step_count".into(), opt_i64(r.time_step_count));
             o.insert("count".into(), Value::from(r.count));
             Value::Object(o)
@@ -1313,7 +1367,7 @@ pub unsafe extern "C" fn ts_store_static_summary(
 
 /// Forecast summary as a JSON array. Each object has `owner_type`,
 /// `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
-/// `resolution_ms`, `horizon_ms`, `interval_ms`, `window_count`, and `count` (the
+/// `resolution`, `horizon`, `interval`, `window_count`, and `count` (the
 /// number of associations in the group); fields that do not apply are `null`.
 /// Probe-then-fetch.
 ///
@@ -1341,8 +1395,8 @@ pub unsafe extern "C" fn ts_store_forecast_summary(
         Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
-    let dur = |d: Option<chrono::Duration>| {
-        d.map(|x| Value::from(x.num_milliseconds()))
+    let dur = |d: Option<core_lib::Period>| {
+        d.map(|x| Value::from(x.to_iso8601()))
             .unwrap_or(Value::Null)
     };
     let opt_i64 = |n: Option<i64>| n.map(Value::from).unwrap_or(Value::Null);
@@ -1367,9 +1421,9 @@ pub unsafe extern "C" fn ts_store_forecast_summary(
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
-            o.insert("resolution_ms".into(), dur(r.resolution));
-            o.insert("horizon_ms".into(), dur(r.horizon));
-            o.insert("interval_ms".into(), dur(r.interval));
+            o.insert("resolution".into(), dur(r.resolution));
+            o.insert("horizon".into(), dur(r.horizon));
+            o.insert("interval".into(), dur(r.interval));
             o.insert("window_count".into(), opt_i64(r.window_count));
             o.insert("count".into(), Value::from(r.count));
             Value::Object(o)
@@ -1495,7 +1549,7 @@ unsafe fn build_key_from_attrs(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
 ) -> Result<core_lib::KeyIdentity, i32> {
     let name = unsafe { cstr_to_str(name) }.inspect_err(|_| {
@@ -1510,11 +1564,7 @@ unsafe fn build_key_from_attrs(
         }
     };
     let features = unsafe { parse_features_json(features_json) }?;
-    let resolution = if resolution_ms <= 0 {
-        None
-    } else {
-        Some(Duration::milliseconds(resolution_ms))
-    };
+    let resolution = unsafe { cstr_to_optional_period(resolution)? };
     Ok(core_lib::KeyIdentity {
         owner_id,
         owner_category,
@@ -1543,10 +1593,10 @@ pub unsafe extern "C" fn ts_store_get_metadata(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
     out_length: *mut u64,
     out_data_hash: *mut u8,
     out_dtype: *mut i32,
@@ -1560,7 +1610,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         None => return TS_ERR_NULL_POINTER,
     };
     if out_initial_ts_unix_ms.is_null()
-        || out_resolution_ms.is_null()
+        || out_resolution.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
         || out_dtype.is_null()
@@ -1570,7 +1620,7 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+        build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
     } {
         Ok(k) => k,
         Err(code) => return code,
@@ -1586,13 +1636,10 @@ pub unsafe extern "C" fn ts_store_get_metadata(
             return TS_ERR_INTEGRITY;
         }
     };
-    let res_ms = match meta.resolution {
-        Some(r) => r.num_milliseconds(),
-        None => 0,
-    };
+    let resolution_cstr = opt_period_cstr(meta.resolution);
     unsafe {
         *out_initial_ts_unix_ms = initial_ms;
-        *out_resolution_ms = res_ms;
+        *out_resolution = resolution_cstr;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
         *out_dtype = meta.dtype.code();
@@ -1625,7 +1672,7 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_present: *mut bool,
 ) -> i32 {
@@ -1638,7 +1685,7 @@ pub unsafe extern "C" fn ts_store_has_by_attrs(
         return TS_ERR_NULL_POINTER;
     }
     let key = match unsafe {
-        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+        build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
     } {
         Ok(k) => k,
         Err(code) => return code,
@@ -1722,7 +1769,7 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
@@ -1731,7 +1778,7 @@ pub unsafe extern "C" fn ts_store_remove_by_attrs(
         None => return TS_ERR_NULL_POINTER,
     };
     let key = match unsafe {
-        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+        build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
     } {
         Ok(k) => k,
         Err(code) => return code,
@@ -1915,7 +1962,7 @@ unsafe fn build_typed_key_from_attrs(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
 ) -> Result<core_lib::KeyIdentity, i32> {
     let time_series_type = match ts_type_from_int(ts_type) {
@@ -1925,9 +1972,8 @@ unsafe fn build_typed_key_from_attrs(
             return Err(TS_ERR_INVALID_PARAMETER);
         }
     };
-    let mut key = unsafe {
-        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
-    }?;
+    let mut key =
+        unsafe { build_key_from_attrs(owner_id, owner_category, name, resolution, features_json) }?;
     key.time_series_type = time_series_type;
     Ok(key)
 }
@@ -1954,9 +2000,9 @@ pub unsafe extern "C" fn ts_store_add_forecast(
     name: *const c_char,
     ts_type: i32,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
-    horizon_ms: i64,
-    interval_ms: i64,
+    resolution: *const c_char,
+    horizon: *const c_char,
+    interval: *const c_char,
     count: u64,
     dtype: i32,
     ndims: u64,
@@ -1985,9 +2031,9 @@ pub unsafe extern "C" fn ts_store_add_forecast(
             name,
             ts_type,
             initial_ts_unix_ms,
-            resolution_ms,
-            horizon_ms,
-            interval_ms,
+            resolution,
+            horizon,
+            interval,
             count,
             dtype,
             ndims,
@@ -2024,9 +2070,9 @@ unsafe fn build_forecast_request(
     name: *const c_char,
     ts_type: i32,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
-    horizon_ms: i64,
-    interval_ms: i64,
+    resolution: *const c_char,
+    horizon: *const c_char,
+    interval: *const c_char,
     count: u64,
     dtype: i32,
     ndims: u64,
@@ -2070,9 +2116,9 @@ unsafe fn build_forecast_request(
     let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
     let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
-    let resolution = Duration::milliseconds(resolution_ms);
-    let horizon = Duration::milliseconds(horizon_ms);
-    let interval = Duration::milliseconds(interval_ms);
+    let resolution = unsafe { cstr_to_period(resolution)? };
+    let horizon = unsafe { cstr_to_period(horizon)? };
+    let interval = unsafe { cstr_to_period(interval)? };
     let data = match time_series_type {
         core_lib::TimeSeriesType::Deterministic => match core_lib::Deterministic::new(
             initial_timestamp,
@@ -2149,9 +2195,9 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
     owner_category: i32,
     name: *const c_char,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
-    horizon_ms: i64,
-    interval_ms: i64,
+    resolution: *const c_char,
+    horizon: *const c_char,
+    interval: *const c_char,
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
@@ -2181,9 +2227,9 @@ pub unsafe extern "C" fn ts_store_add_probabilistic(
             owner_category,
             name,
             initial_ts_unix_ms,
-            resolution_ms,
-            horizon_ms,
-            interval_ms,
+            resolution,
+            horizon,
+            interval,
             count,
             percentiles_ptr,
             percentiles_len,
@@ -2221,9 +2267,9 @@ unsafe fn build_probabilistic_request(
     owner_category: i32,
     name: *const c_char,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
-    horizon_ms: i64,
-    interval_ms: i64,
+    resolution: *const c_char,
+    horizon: *const c_char,
+    interval: *const c_char,
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
@@ -2266,9 +2312,9 @@ unsafe fn build_probabilistic_request(
 
     let prob = match core_lib::Probabilistic::new(
         initial_timestamp,
-        Duration::milliseconds(resolution_ms),
-        Duration::milliseconds(horizon_ms),
-        Duration::milliseconds(interval_ms),
+        unsafe { cstr_to_period(resolution)? },
+        unsafe { cstr_to_period(horizon)? },
+        unsafe { cstr_to_period(interval)? },
         count as usize,
         percentiles,
         array,
@@ -2343,7 +2389,7 @@ pub unsafe extern "C" fn ts_batch_add_single(
     owner_category: i32,
     name: *const c_char,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
+    resolution: *const c_char,
     dtype: i32,
     ndims: u64,
     dims_ptr: *const u64,
@@ -2368,7 +2414,7 @@ pub unsafe extern "C" fn ts_batch_add_single(
             owner_category,
             name,
             initial_ts_unix_ms,
-            resolution_ms,
+            resolution,
             dtype,
             ndims,
             dims_ptr,
@@ -2470,9 +2516,9 @@ pub unsafe extern "C" fn ts_batch_add_forecast(
     name: *const c_char,
     ts_type: i32,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
-    horizon_ms: i64,
-    interval_ms: i64,
+    resolution: *const c_char,
+    horizon: *const c_char,
+    interval: *const c_char,
     count: u64,
     dtype: i32,
     ndims: u64,
@@ -2499,9 +2545,9 @@ pub unsafe extern "C" fn ts_batch_add_forecast(
             name,
             ts_type,
             initial_ts_unix_ms,
-            resolution_ms,
-            horizon_ms,
-            interval_ms,
+            resolution,
+            horizon,
+            interval,
             count,
             dtype,
             ndims,
@@ -2540,9 +2586,9 @@ pub unsafe extern "C" fn ts_batch_add_probabilistic(
     owner_category: i32,
     name: *const c_char,
     initial_ts_unix_ms: i64,
-    resolution_ms: i64,
-    horizon_ms: i64,
-    interval_ms: i64,
+    resolution: *const c_char,
+    horizon: *const c_char,
+    interval: *const c_char,
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
@@ -2570,9 +2616,9 @@ pub unsafe extern "C" fn ts_batch_add_probabilistic(
             owner_category,
             name,
             initial_ts_unix_ms,
-            resolution_ms,
-            horizon_ms,
-            interval_ms,
+            resolution,
+            horizon,
+            interval,
             count,
             percentiles_ptr,
             percentiles_len,
@@ -2676,10 +2722,10 @@ pub unsafe extern "C" fn ts_store_add_batch(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_transform_single_time_series(
     handle: *mut TsStoreHandle,
-    horizon_ms: i64,
-    interval_ms: i64,
+    horizon: *const c_char,
+    interval: *const c_char,
     owner_category: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
@@ -2691,7 +2737,7 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
         set_error("a required pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    // `owner_category < 0` means "all categories"; `resolution_ms <= 0` means
+    // `owner_category < 0` means "all categories"; an empty `resolution` means
     // "all resolutions".
     let category = match owner_category {
         c if c < 0 => None,
@@ -2702,17 +2748,22 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
             return TS_ERR_INVALID_PARAMETER;
         }
     };
-    let resolution = if resolution_ms > 0 {
-        Some(Duration::milliseconds(resolution_ms))
-    } else {
-        None
+    let resolution = match unsafe { cstr_to_optional_period(resolution) } {
+        Ok(r) => r,
+        Err(c) => return c,
     };
-    match store.inner.transform_single_time_series(
-        Duration::milliseconds(horizon_ms),
-        Duration::milliseconds(interval_ms),
-        category,
-        resolution,
-    ) {
+    let horizon = match unsafe { cstr_to_period(horizon) } {
+        Ok(h) => h,
+        Err(c) => return c,
+    };
+    let interval = match unsafe { cstr_to_period(interval) } {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match store
+        .inner
+        .transform_single_time_series(horizon, interval, category, resolution)
+    {
         Ok(n) => {
             unsafe { *out_count = n as u64 };
             TS_OK
@@ -2740,12 +2791,12 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
-    out_horizon_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_horizon: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut u64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
@@ -2767,7 +2818,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
             owner_category,
             name,
             4, // Probabilistic
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -2785,16 +2836,15 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
             return TS_ERR_INTEGRITY;
         }
     };
-    let dur_ms = |d: Option<Duration>| d.map(|x| x.num_milliseconds()).unwrap_or(0);
     let mut pct: Vec<f64> = meta.percentiles.unwrap_or_default();
     let pct_len = pct.len() as u64;
     let pct_ptr = pct.as_mut_ptr();
     std::mem::forget(pct);
     unsafe {
         *out_initial_ts_unix_ms = initial_ms;
-        *out_resolution_ms = dur_ms(meta.resolution);
-        *out_horizon_ms = dur_ms(meta.horizon);
-        *out_interval_ms = dur_ms(meta.interval);
+        *out_resolution = opt_period_cstr(meta.resolution);
+        *out_horizon = opt_period_cstr(meta.horizon);
+        *out_interval = opt_period_cstr(meta.interval);
         *out_count = meta.count.unwrap_or(0) as u64;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
@@ -2822,12 +2872,12 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
-    out_horizon_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_horizon: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut u64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
@@ -2841,9 +2891,9 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         None => return TS_ERR_NULL_POINTER,
     };
     if out_initial_ts_unix_ms.is_null()
-        || out_resolution_ms.is_null()
-        || out_horizon_ms.is_null()
-        || out_interval_ms.is_null()
+        || out_resolution.is_null()
+        || out_horizon.is_null()
+        || out_interval.is_null()
         || out_count.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
@@ -2858,7 +2908,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
             owner_category,
             name,
             ts_type,
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -2876,12 +2926,11 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
             return TS_ERR_INTEGRITY;
         }
     };
-    let dur_ms = |d: Option<Duration>| d.map(|x| x.num_milliseconds()).unwrap_or(0);
     unsafe {
         *out_initial_ts_unix_ms = initial_ms;
-        *out_resolution_ms = dur_ms(meta.resolution);
-        *out_horizon_ms = dur_ms(meta.horizon);
-        *out_interval_ms = dur_ms(meta.interval);
+        *out_resolution = opt_period_cstr(meta.resolution);
+        *out_horizon = opt_period_cstr(meta.horizon);
+        *out_interval = opt_period_cstr(meta.interval);
         *out_count = meta.count.unwrap_or(0) as u64;
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
@@ -2951,16 +3000,16 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     time_range_present: bool,
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     // scalar metadata outputs
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
-    out_horizon_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_horizon: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut u64,
     out_scenario_count: *mut u64, // Scenarios only; 0 for other types
     // array shape outputs (dims buffer)
@@ -2987,9 +3036,9 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     };
     // Null-check all output pointers.
     if out_initial_ts_unix_ms.is_null()
-        || out_resolution_ms.is_null()
-        || out_horizon_ms.is_null()
-        || out_interval_ms.is_null()
+        || out_resolution.is_null()
+        || out_horizon.is_null()
+        || out_interval.is_null()
         || out_count.is_null()
         || out_scenario_count.is_null()
         || out_ndims.is_null()
@@ -3014,7 +3063,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     // Parse the addressing attributes (the key's type field is unused here; the
     // catalog decides the concrete type via `resolve_forecast_key`).
     let attrs = match unsafe {
-        build_key_from_attrs(owner_id, owner_category, name, resolution_ms, features_json)
+        build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
     } {
         Ok(k) => k,
         Err(c) => return c,
@@ -3061,9 +3110,9 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
-            out_resolution_ms,
-            out_horizon_ms,
-            out_interval_ms,
+            out_resolution,
+            out_horizon,
+            out_interval,
             out_count,
             out_scenario_count,
             out_ndims,
@@ -3090,9 +3139,9 @@ pub unsafe extern "C" fn ts_store_get_forecast(
 unsafe fn emit_forecast_data(
     data: core_lib::TimeSeriesData,
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
-    out_horizon_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_horizon: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut u64,
     out_scenario_count: *mut u64,
     out_ndims: *mut u64,
@@ -3104,7 +3153,6 @@ unsafe fn emit_forecast_data(
     out_percentiles_len: *mut u64,
 ) -> i32 {
     // Helper: convert Duration to milliseconds.
-    let dur_to_ms = |d: Duration| d.num_milliseconds();
 
     match data {
         core_lib::TimeSeriesData::Deterministic(det) => {
@@ -3128,9 +3176,9 @@ unsafe fn emit_forecast_data(
 
             unsafe {
                 *out_initial_ts_unix_ms = initial_ms;
-                *out_resolution_ms = dur_to_ms(det.resolution);
-                *out_horizon_ms = dur_to_ms(det.horizon);
-                *out_interval_ms = dur_to_ms(det.interval);
+                *out_resolution = period_cstr(det.resolution);
+                *out_horizon = period_cstr(det.horizon);
+                *out_interval = period_cstr(det.interval);
                 *out_count = det.count as u64;
                 *out_scenario_count = 0;
                 *out_ndims = ndims;
@@ -3169,9 +3217,9 @@ unsafe fn emit_forecast_data(
 
             unsafe {
                 *out_initial_ts_unix_ms = initial_ms;
-                *out_resolution_ms = dur_to_ms(prob.resolution);
-                *out_horizon_ms = dur_to_ms(prob.horizon);
-                *out_interval_ms = dur_to_ms(prob.interval);
+                *out_resolution = period_cstr(prob.resolution);
+                *out_horizon = period_cstr(prob.horizon);
+                *out_interval = period_cstr(prob.interval);
                 *out_count = prob.count as u64;
                 *out_scenario_count = 0;
                 *out_ndims = ndims;
@@ -3207,9 +3255,9 @@ unsafe fn emit_forecast_data(
 
             unsafe {
                 *out_initial_ts_unix_ms = initial_ms;
-                *out_resolution_ms = dur_to_ms(scen.resolution);
-                *out_horizon_ms = dur_to_ms(scen.horizon);
-                *out_interval_ms = dur_to_ms(scen.interval);
+                *out_resolution = period_cstr(scen.resolution);
+                *out_horizon = period_cstr(scen.horizon);
+                *out_interval = period_cstr(scen.interval);
                 *out_count = scen.count as u64;
                 *out_scenario_count = scenario_count as u64;
                 *out_ndims = ndims;
@@ -3264,9 +3312,9 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
     time_range_start_ms: i64,
     time_range_end_ms: i64,
     out_initial_ts_unix_ms: *mut i64,
-    out_resolution_ms: *mut i64,
-    out_horizon_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_horizon: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut u64,
     out_scenario_count: *mut u64,
     out_ndims: *mut u64,
@@ -3296,9 +3344,9 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
         }
     };
     if out_initial_ts_unix_ms.is_null()
-        || out_resolution_ms.is_null()
-        || out_horizon_ms.is_null()
-        || out_interval_ms.is_null()
+        || out_resolution.is_null()
+        || out_horizon.is_null()
+        || out_interval.is_null()
         || out_count.is_null()
         || out_scenario_count.is_null()
         || out_ndims.is_null()
@@ -3344,9 +3392,9 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
-            out_resolution_ms,
-            out_horizon_ms,
-            out_interval_ms,
+            out_resolution,
+            out_horizon,
+            out_interval,
             out_count,
             out_scenario_count,
             out_ndims,
@@ -3367,7 +3415,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
 /// [`ts_store_get_single`], [`ts_store_get_non_sequential`],
 /// [`ts_store_get_forecast_by_key`]); it lets an attribute-addressed caller
 /// reuse the key-based read path without an `add`/lookup round trip.
-/// `resolution_ms <= 0` means "unspecified".
+/// an empty `resolution` means "unspecified".
 ///
 /// # Safety
 ///
@@ -3383,7 +3431,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_key: *mut *mut TsKeyHandle,
 ) -> i32 {
@@ -3398,7 +3446,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
             owner_category,
             name,
             ts_type,
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -3489,13 +3537,13 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
 /// as integer milliseconds, `initial_timestamp_ms` as Unix epoch milliseconds,
 /// and `data_hash` as a byte array; absent optionals are `null`.
 // Serialize keys to a JSON array. Each object carries the identity tuple
-// (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution_ms`,
+// (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
 // `features`) plus the per-variant descriptive snapshot. Physical storage detail
 // (`data_hash`, `dtype`, `logical_type`, `percentiles`) is deliberately absent —
 // it is read on demand via the metadata read descriptors.
 fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
-    let dur_ms = |d: Option<chrono::Duration>| -> Value {
-        d.map(|x| Value::from(x.num_milliseconds()))
+    let dur_ms = |d: Option<core_lib::Period>| -> Value {
+        d.map(|x| Value::from(x.to_iso8601()))
             .unwrap_or(Value::Null)
     };
     let arr: Vec<Value> = keys
@@ -3513,7 +3561,7 @@ fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
                 Value::from(id.time_series_type.as_str()),
             );
             o.insert("name".into(), Value::from(id.name.clone()));
-            o.insert("resolution_ms".into(), dur_ms(id.resolution));
+            o.insert("resolution".into(), dur_ms(id.resolution));
             o.insert(
                 "features".into(),
                 serde_json::from_str(&features_to_json(&id.features))
@@ -3546,8 +3594,8 @@ fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
                 "length".into(),
                 length.map(|l| Value::from(l as u64)).unwrap_or(Value::Null),
             );
-            o.insert("horizon_ms".into(), dur_ms(horizon));
-            o.insert("interval_ms".into(), dur_ms(interval));
+            o.insert("horizon".into(), dur_ms(horizon));
+            o.insert("interval".into(), dur_ms(interval));
             o.insert(
                 "count".into(),
                 count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
@@ -3565,7 +3613,7 @@ fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
 /// - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
 /// - `time_series_type` (the `TS_TYPE_*` code)
 /// - `name` (null = no name filter)
-/// - `resolution_ms` (`<= 0` = no resolution filter)
+/// - `resolution` (empty/null = no resolution filter)
 /// - `features_json` (a JSON object; null or empty = no feature filter; matches as
 ///   a subset, i.e. a key whose features include all the given ones)
 ///
@@ -3591,7 +3639,7 @@ pub unsafe extern "C" fn ts_store_list_keys(
     has_time_series_type: bool,
     time_series_type: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
@@ -3638,8 +3686,10 @@ pub unsafe extern "C" fn ts_store_list_keys(
             return c;
         }
     }
-    if resolution_ms > 0 {
-        filter = filter.resolution(Duration::milliseconds(resolution_ms));
+    match unsafe { cstr_to_optional_period(resolution) } {
+        Ok(Some(p)) => filter = filter.resolution(p),
+        Ok(None) => {}
+        Err(c) => return c,
     }
     let features = match unsafe { parse_features_json(features_json) } {
         Ok(f) => f,
@@ -3710,7 +3760,7 @@ fn features_to_json(features: &core_lib::Features) -> String {
 /// # Safety
 ///
 /// `key` must be a live key handle created by this library. `out_type`,
-/// `out_resolution_ms`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
+/// `out_resolution`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
 /// `out_features_len` must each be valid for writing one value. `out_owner_category`
 /// receives `0` (Component) or `1` (SupplementalAttribute). `name_buf` /
 /// `features_buf` may be null; when non-null they must be valid for writing
@@ -3720,7 +3770,7 @@ fn features_to_json(features: &core_lib::Features) -> String {
 pub unsafe extern "C" fn ts_key_attributes(
     key: *const TsKeyHandle,
     out_type: *mut i32,
-    out_resolution_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
     out_owner_id: *mut i64,
     out_owner_category: *mut i32,
     name_buf: *mut c_char,
@@ -3739,7 +3789,7 @@ pub unsafe extern "C" fn ts_key_attributes(
         }
     };
     if out_type.is_null()
-        || out_resolution_ms.is_null()
+        || out_resolution.is_null()
         || out_owner_id.is_null()
         || out_owner_category.is_null()
         || out_name_len.is_null()
@@ -3755,7 +3805,7 @@ pub unsafe extern "C" fn ts_key_attributes(
     };
     unsafe {
         *out_type = ts_type_to_int(k.time_series_type);
-        *out_resolution_ms = k.resolution.map(|r| r.num_milliseconds()).unwrap_or(0);
+        *out_resolution = opt_period_cstr(k.resolution);
         *out_owner_id = k.owner_id;
         *out_owner_category = category_code;
         write_str_out(&k.name, name_buf, name_cap, out_name_len);
@@ -3848,7 +3898,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_present: *mut bool,
 ) -> i32 {
@@ -3866,7 +3916,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
             owner_category,
             name,
             ts_type,
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -3897,7 +3947,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
@@ -3911,7 +3961,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
             owner_category,
             name,
             ts_type,
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -4207,7 +4257,7 @@ unsafe fn reader_filter(
     has_owner_category: bool,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
 ) -> Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
@@ -4233,8 +4283,8 @@ unsafe fn reader_filter(
             return Err(c);
         }
     }
-    if resolution_ms > 0 {
-        filter = filter.resolution(Duration::milliseconds(resolution_ms));
+    if let Some(p) = unsafe { cstr_to_optional_period(resolution)? } {
+        filter = filter.resolution(p);
     }
     let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
@@ -4264,7 +4314,7 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 // ---- StaticReader ---------------------------------------------------------
 
 /// Build a [`TsStaticReaderHandle`] over the SingleTimeSeries matching the
-/// filter. `resolution_ms` must be positive (one resolution per reader); the
+/// filter. `resolution` must be a non-empty ISO-8601 period (one resolution per reader); the
 /// matched series must share one grid (`initial_timestamp` + `length`).
 ///
 /// # Safety
@@ -4282,7 +4332,7 @@ pub unsafe extern "C" fn ts_store_build_static_reader(
     has_owner_category: bool,
     owner_category: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_reader: *mut *mut TsStaticReaderHandle,
 ) -> i32 {
@@ -4305,7 +4355,7 @@ pub unsafe extern "C" fn ts_store_build_static_reader(
             has_owner_category,
             owner_category,
             name,
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -4331,7 +4381,7 @@ pub unsafe extern "C" fn ts_store_build_static_reader(
 pub unsafe extern "C" fn ts_static_reader_grid(
     reader: *const TsStaticReaderHandle,
     out_initial_ms: *mut i64,
-    out_resolution_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
     out_length: *mut u64,
 ) -> i32 {
     clear_error();
@@ -4342,7 +4392,7 @@ pub unsafe extern "C" fn ts_static_reader_grid(
             return TS_ERR_NULL_POINTER;
         }
     };
-    if out_initial_ms.is_null() || out_resolution_ms.is_null() || out_length.is_null() {
+    if out_initial_ms.is_null() || out_resolution.is_null() || out_length.is_null() {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
@@ -4355,7 +4405,7 @@ pub unsafe extern "C" fn ts_static_reader_grid(
     };
     unsafe {
         *out_initial_ms = initial;
-        *out_resolution_ms = reader.inner.resolution().num_milliseconds();
+        *out_resolution = period_cstr(reader.inner.resolution());
         *out_length = reader.inner.length() as u64;
     }
     TS_OK
@@ -4584,7 +4634,7 @@ pub unsafe extern "C" fn ts_static_reader_free(reader: *mut TsStaticReaderHandle
 
 /// Build a [`TsForecastReaderHandle`] over the forecasts matching the filter.
 /// `time_series_type` must be a forecast type; a `Deterministic` reader is
-/// abstract and also includes `DeterministicSingleTimeSeries`. `resolution_ms`
+/// abstract and also includes `DeterministicSingleTimeSeries`. `resolution`
 /// must be positive; matched forecasts must share one window timeline.
 ///
 /// # Safety
@@ -4602,7 +4652,7 @@ pub unsafe extern "C" fn ts_store_build_forecast_reader(
     owner_category: i32,
     time_series_type: i32,
     name: *const c_char,
-    resolution_ms: i64,
+    resolution: *const c_char,
     features_json: *const c_char,
     out_reader: *mut *mut TsForecastReaderHandle,
 ) -> i32 {
@@ -4632,7 +4682,7 @@ pub unsafe extern "C" fn ts_store_build_forecast_reader(
             has_owner_category,
             owner_category,
             name,
-            resolution_ms,
+            resolution,
             features_json,
         )
     } {
@@ -4659,8 +4709,8 @@ pub unsafe extern "C" fn ts_store_build_forecast_reader(
 pub unsafe extern "C" fn ts_forecast_reader_timeline(
     reader: *const TsForecastReaderHandle,
     out_initial_ms: *mut i64,
-    out_resolution_ms: *mut i64,
-    out_interval_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_interval: *mut *mut c_char,
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
@@ -4672,8 +4722,8 @@ pub unsafe extern "C" fn ts_forecast_reader_timeline(
         }
     };
     if out_initial_ms.is_null()
-        || out_resolution_ms.is_null()
-        || out_interval_ms.is_null()
+        || out_resolution.is_null()
+        || out_interval.is_null()
         || out_count.is_null()
     {
         set_error("an out pointer is null");
@@ -4688,8 +4738,8 @@ pub unsafe extern "C" fn ts_forecast_reader_timeline(
     };
     unsafe {
         *out_initial_ms = initial;
-        *out_resolution_ms = reader.inner.resolution().num_milliseconds();
-        *out_interval_ms = reader.inner.interval().num_milliseconds();
+        *out_resolution = period_cstr(reader.inner.resolution());
+        *out_interval = period_cstr(reader.inner.interval());
         *out_count = reader.inner.count() as u64;
     }
     TS_OK
@@ -4936,6 +4986,7 @@ mod reader_ffi_tests {
         add_sts_f64(&mut store, 2, "load", &[20.0, 21.0, 22.0, 23.0]);
         let handle = TsStoreHandle { inner: store };
 
+        let hour = std::ffi::CString::new("PT1H").unwrap();
         let mut reader: *mut TsStaticReaderHandle = ptr::null_mut();
         let rc = unsafe {
             ts_store_build_static_reader(
@@ -4945,7 +4996,7 @@ mod reader_ffi_tests {
                 false,
                 0,
                 ptr::null(),
-                HOUR_MS,
+                hour.as_ptr(),
                 ptr::null(),
                 &mut reader,
             )
@@ -4953,13 +5004,16 @@ mod reader_ffi_tests {
         assert_eq!(rc, TS_OK);
         assert!(!reader.is_null());
 
-        // Grid.
-        let (mut initial, mut res, mut len) = (0i64, 0i64, 0u64);
+        // Grid. Resolution is an owned ISO-8601 C string.
+        let (mut initial, mut len) = (0i64, 0u64);
+        let mut res: *mut c_char = ptr::null_mut();
         assert_eq!(
             unsafe { ts_static_reader_grid(reader, &mut initial, &mut res, &mut len) },
             TS_OK
         );
-        assert_eq!((initial, res, len), (T0_MS, HOUR_MS, 4));
+        assert_eq!((initial, len), (T0_MS, 4));
+        assert_eq!(unsafe { CStr::from_ptr(res) }.to_str().unwrap(), "PT1H");
+        unsafe { ts_string_free(res) };
 
         // One f64 group, 2 columns, scalar shape.
         let mut n = 0u64;
@@ -5045,6 +5099,7 @@ mod reader_ffi_tests {
             .unwrap();
         let handle = TsStoreHandle { inner: store };
 
+        let hour = std::ffi::CString::new("PT1H").unwrap();
         let mut reader: *mut TsForecastReaderHandle = ptr::null_mut();
         let rc = unsafe {
             ts_store_build_forecast_reader(
@@ -5055,14 +5110,16 @@ mod reader_ffi_tests {
                 0,
                 2, // Deterministic
                 ptr::null(),
-                HOUR_MS,
+                hour.as_ptr(),
                 ptr::null(),
                 &mut reader,
             )
         };
         assert_eq!(rc, TS_OK);
 
-        let (mut initial, mut res, mut interval, mut count) = (0i64, 0i64, 0i64, 0u64);
+        let (mut initial, mut count) = (0i64, 0u64);
+        let (mut res, mut interval): (*mut c_char, *mut c_char) =
+            (ptr::null_mut(), ptr::null_mut());
         assert_eq!(
             unsafe {
                 ts_forecast_reader_timeline(
@@ -5075,7 +5132,16 @@ mod reader_ffi_tests {
             },
             TS_OK
         );
-        assert_eq!((initial, interval, count), (T0_MS, HOUR_MS, 3));
+        assert_eq!((initial, count), (T0_MS, 3));
+        assert_eq!(unsafe { CStr::from_ptr(res) }.to_str().unwrap(), "PT1H");
+        assert_eq!(
+            unsafe { CStr::from_ptr(interval) }.to_str().unwrap(),
+            "PT1H"
+        );
+        unsafe {
+            ts_string_free(res);
+            ts_string_free(interval);
+        }
 
         let mut n = 0u64;
         assert_eq!(
@@ -5160,15 +5226,17 @@ mod reader_ffi_tests {
         let handle = TsStoreHandle { inner: store };
 
         let name = CString::new("im").unwrap();
+        let hour = CString::new("PT1H").unwrap();
         let mut key: *mut TsKeyHandle = ptr::null_mut();
         assert_eq!(
             unsafe {
-                ts_make_key_from_attrs(5, 0, name.as_ptr(), 0, HOUR_MS, ptr::null(), &mut key)
+                ts_make_key_from_attrs(5, 0, name.as_ptr(), 0, hour.as_ptr(), ptr::null(), &mut key)
             },
             TS_OK
         );
 
-        let (mut initial, mut res, mut dtype) = (0i64, 0i64, -1i32);
+        let (mut initial, mut dtype) = (0i64, -1i32);
+        let mut res: *mut c_char = ptr::null_mut();
         let mut shape_ptr: *mut i64 = ptr::null_mut();
         let mut shape_len = 0u64;
         let mut data_ptr: *mut u8 = ptr::null_mut();
@@ -5201,6 +5269,7 @@ mod reader_ffi_tests {
         assert_eq!(vals, vec![10, 11, 20, 21, 30, 31]);
 
         unsafe {
+            ts_string_free(res);
             ts_buffer_free_i64(shape_ptr, shape_len);
             ts_buffer_free_u8(data_ptr, data_len);
             ts_key_free(key);

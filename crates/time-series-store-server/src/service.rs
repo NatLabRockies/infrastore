@@ -3,8 +3,16 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, Utc};
-use time_series_store_core::{ListFilter, OwnerCategory, Store, TimeSeriesError, TimeSeriesType};
+use chrono::{DateTime, Utc};
+use time_series_store_core::{
+    ListFilter, OwnerCategory, Period, Store, TimeSeriesError, TimeSeriesType,
+};
+
+/// Parse an ISO-8601 period from a request, mapping failures to an
+/// `invalid_argument` status.
+fn parse_period(s: &str) -> Result<Period, Status> {
+    Period::from_iso8601(s).map_err(|e| Status::invalid_argument(e.to_string()))
+}
 use time_series_store_proto::convert::{
     features_from_pb, key_from_pb, metadata_to_pb, time_series_data_to_get_resp,
 };
@@ -88,8 +96,8 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         if let Some(name) = req.name {
             filter = filter.name(name);
         }
-        if let Some(ms) = req.resolution_ms {
-            filter = filter.resolution(Duration::milliseconds(ms));
+        if let Some(iso) = req.resolution {
+            filter = filter.resolution(parse_period(&iso)?);
         }
         if let Some(f) = req.features {
             filter = filter.features(features_from_pb(f).map_err(map_convert_err)?);
@@ -170,7 +178,7 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         let store = self.store.lock().await;
         let durations = store.get_resolutions(ts_type).map_err(map_err)?;
         Ok(Response::new(ResolutionsResp {
-            resolution_ms: durations.iter().map(|d| d.num_milliseconds()).collect(),
+            resolution: durations.iter().map(|p| p.to_iso8601()).collect(),
         }))
     }
 
@@ -194,10 +202,10 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         let store = self.store.lock().await;
         let params = store.get_forecast_parameters(None, None).map_err(map_err)?;
         Ok(Response::new(ForecastParamsResp {
-            horizon_ms: params.horizon.map(|d| d.num_milliseconds()),
-            interval_ms: params.interval.map(|d| d.num_milliseconds()),
+            horizon: params.horizon.map(|p| p.to_iso8601()),
+            interval: params.interval.map(|p| p.to_iso8601()),
             count: params.count.map(|c| c as u64),
-            resolution_ms: params.resolution.map(|d| d.num_milliseconds()),
+            resolution: params.resolution.map(|p| p.to_iso8601()),
         }))
     }
 

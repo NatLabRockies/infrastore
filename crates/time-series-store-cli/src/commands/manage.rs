@@ -48,8 +48,8 @@ pub fn remove(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result
 
 /// `transform`: derive DeterministicSingleTimeSeries from stored SingleTimeSeries.
 pub fn transform(store_path: &Path, horizon: &str, interval: &str) -> Result<(), String> {
-    let horizon = parse::parse_duration(horizon)?;
-    let interval = parse::parse_duration(interval)?;
+    let horizon = parse::parse_period(horizon)?;
+    let interval = parse::parse_period(interval)?;
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .transform_single_time_series(horizon, interval, None, None)

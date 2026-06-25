@@ -29,6 +29,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
 use crate::storage::Compression;
 use crate::types::array::{Dtype, TypedArray};
+use crate::types::period::Period;
 use crate::version::DATA_FORMAT_VERSION;
 
 use super::{CompactionReport, IntegrityReport, StorageBackend};
@@ -95,14 +96,16 @@ fn dataset_base_name(
     dtype: Dtype,
     element_shape: &[usize],
     length: usize,
-    resolution_ms: i64,
+    resolution: Period,
 ) -> String {
+    // The resolution is the ISO-8601 duration (e.g. `PT1H`, `P1M`, `P1Y`); it
+    // contains no `_`, so the `splitn(4, '_')` parser below stays unambiguous.
     format!(
         "sts_{}_{}_{}_{}",
         dtype.as_str(),
         encode_shape(element_shape),
         length,
-        resolution_ms
+        resolution.to_iso8601()
     )
 }
 
@@ -114,7 +117,7 @@ fn spill_name(base: &str, n: usize) -> String {
     }
 }
 
-fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, i64)> {
+fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, Period)> {
     let core = name.strip_prefix("sts_").ok_or_else(|| {
         TimeSeriesError::IntegrityError(format!("dataset {name} missing 'sts_' prefix"))
     })?;
@@ -131,8 +134,7 @@ fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, i64)> {
     let length: usize = parts[2]
         .parse()
         .map_err(|_| TimeSeriesError::IntegrityError(format!("bad length in {name}")))?;
-    let resolution: i64 = parts[3]
-        .parse()
+    let resolution = Period::from_iso8601(parts[3])
         .map_err(|_| TimeSeriesError::IntegrityError(format!("bad resolution in {name}")))?;
     Ok((dtype, element_shape, length, resolution))
 }
@@ -237,8 +239,8 @@ pub struct NetCdfBackend {
 }
 
 /// Key grouping packed datasets that can hold the same arrays:
-/// (dtype, element_shape, length, resolution_ms).
-type DatasetGroupKey = (Dtype, Vec<usize>, usize, i64);
+/// (dtype, element_shape, length, resolution).
+type DatasetGroupKey = (Dtype, Vec<usize>, usize, Period);
 
 struct Inner {
     file: FileMut,
@@ -449,9 +451,9 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution_ms: i64,
+        resolution: Period,
     ) -> Result<String> {
-        let key = (dtype, element_shape.to_vec(), length, resolution_ms);
+        let key = (dtype, element_shape.to_vec(), length, resolution);
         let mut spill_count = 0;
         if let Some(names) = self.dataset_groups.get(&key) {
             spill_count = names.len();
@@ -463,9 +465,9 @@ impl Inner {
                 }
             }
         }
-        let base = dataset_base_name(dtype, element_shape, length, resolution_ms);
+        let base = dataset_base_name(dtype, element_shape, length, resolution);
         let new_name = spill_name(&base, spill_count);
-        self.create_dataset(&new_name, dtype, element_shape, length, resolution_ms)?;
+        self.create_dataset(&new_name, dtype, element_shape, length, resolution)?;
         Ok(new_name)
     }
 
@@ -475,7 +477,7 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution_ms: i64,
+        resolution: Period,
     ) -> Result<()> {
         let dim_time = format!("{name}_t");
         let dim_col = format!("{name}_c");
@@ -524,7 +526,7 @@ impl Inner {
         );
         let group = self
             .dataset_groups
-            .entry((dtype, element_shape.to_vec(), length, resolution_ms))
+            .entry((dtype, element_shape.to_vec(), length, resolution))
             .or_default();
         let pos = group
             .binary_search_by(|n| n.as_str().cmp(name))
@@ -561,14 +563,14 @@ impl Inner {
         ranges.as_slice().into()
     }
 
-    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len(), resolution_ms))]
-    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution_ms: i64) -> Result<()> {
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
+    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution: Period) -> Result<()> {
         let length = data.length();
         let element_shape = data.element_shape().to_vec();
         let dtype = data.dtype;
 
         let dataset_name =
-            self.ensure_writable_dataset(dtype, &element_shape, length, resolution_ms)?;
+            self.ensure_writable_dataset(dtype, &element_shape, length, resolution)?;
         let (col_index, hash_name) = {
             let state = self.datasets.get(&dataset_name).expect("dataset ensured");
             let col = state.first_free().ok_or_else(|| {
@@ -908,7 +910,7 @@ impl StorageBackend for NetCdfBackend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution_ms: i64,
+        resolution: Period,
         packed: bool,
     ) -> Result<bool> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
@@ -916,7 +918,7 @@ impl StorageBackend for NetCdfBackend {
             return Ok(false);
         }
         if packed {
-            inner.put_packed(hash, data, resolution_ms)?;
+            inner.put_packed(hash, data, resolution)?;
         } else {
             inner.put_standalone(hash, data)?;
         }

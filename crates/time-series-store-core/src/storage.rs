@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
+use crate::types::period::Period;
 
 pub mod memory;
 pub mod netcdf;
@@ -116,7 +117,7 @@ pub trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
     /// data is reused for content addressing) and `false` is returned; a write
     /// of new content returns `true`. The array's dtype + shape travel with it;
-    /// `resolution_ms` keys the packed storage pool.
+    /// `resolution` keys the packed storage pool.
     ///
     /// `packed = true` column-packs the array with other same-shaped arrays (for
     /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
@@ -125,7 +126,7 @@ pub trait StorageBackend: Send + Sync {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution_ms: i64,
+        resolution: Period,
         packed: bool,
     ) -> Result<bool>;
 

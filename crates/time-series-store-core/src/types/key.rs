@@ -1,6 +1,7 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use super::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
+use super::period::Period;
 use super::time_series::TimeSeriesType;
 use crate::error::{Result, TimeSeriesError};
 
@@ -22,7 +23,7 @@ pub struct KeyIdentity {
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,
     pub name: String,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub features: Features,
 }
 
@@ -52,8 +53,8 @@ pub struct NonSequentialTimeSeriesKey {
 pub struct ForecastTimeSeriesKey {
     pub identity: KeyIdentity,
     pub initial_timestamp: DateTime<Utc>,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
 }
 
@@ -79,7 +80,7 @@ impl SingleTimeSeriesKey {
         owner_id: i64,
         owner_category: OwnerCategory,
         name: String,
-        resolution: Duration,
+        resolution: impl Into<Period>,
         features: Features,
         initial_timestamp: DateTime<Utc>,
         length: usize,
@@ -90,7 +91,7 @@ impl SingleTimeSeriesKey {
                 owner_category,
                 time_series_type: TimeSeriesType::SingleTimeSeries,
                 name,
-                resolution: Some(resolution),
+                resolution: Some(resolution.into()),
                 features,
             },
             initial_timestamp,
@@ -132,11 +133,11 @@ impl ForecastTimeSeriesKey {
         owner_category: OwnerCategory,
         time_series_type: TimeSeriesType,
         name: String,
-        resolution: Duration,
+        resolution: impl Into<Period>,
         features: Features,
         initial_timestamp: DateTime<Utc>,
-        horizon: Duration,
-        interval: Duration,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         count: usize,
     ) -> Self {
         Self {
@@ -145,12 +146,12 @@ impl ForecastTimeSeriesKey {
                 owner_category,
                 time_series_type,
                 name,
-                resolution: Some(resolution),
+                resolution: Some(resolution.into()),
                 features,
             },
             initial_timestamp,
-            horizon,
-            interval,
+            horizon: horizon.into(),
+            interval: interval.into(),
             count,
         }
     }
@@ -183,7 +184,7 @@ impl TimeSeriesKey {
         &self.identity().name
     }
 
-    pub fn resolution(&self) -> Option<Duration> {
+    pub fn resolution(&self) -> Option<Period> {
         self.identity().resolution
     }
 

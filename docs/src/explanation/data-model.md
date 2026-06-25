@@ -56,8 +56,8 @@ standalone NetCDF array; timestamps are stored with the association metadata.
 
 ### `SingleTimeSeries`
 
-A `SingleTimeSeries` is an `initial_timestamp`, a `resolution` (a fixed step), and an array of
-values:
+A `SingleTimeSeries` is an `initial_timestamp`, a `resolution` (a [period](#periods)), and an array
+of values:
 
 ```text
 value
@@ -71,6 +71,21 @@ value
 
 The timestamps are implied — sample `i` is at `initial_timestamp + i * resolution` — so only the
 values are stored.
+
+### Periods
+
+`resolution`, and the forecast `horizon`/`interval`, are **calendar-aware periods**, not plain fixed
+spans. A period is one of two kinds:
+
+- **fixed** — a fixed nanosecond span (`Hour`, `Minute`, `Day`, `Week`), backed by a duration;
+- **calendar** — a count of calendar months (`Month` = 1, `Quarter` = 3, `Year` = 12), where
+  `initial_timestamp + i * resolution` is computed by calendar arithmetic (so a monthly grid lands
+  on the same day-of-month each step rather than every `N` milliseconds).
+
+A fixed period is **never** equal to a calendar one, even when their spans coincide for a given
+month. Periods are encoded as ISO-8601 duration strings (`PT1H`, `P1M`, `P1Y`) on disk and across
+every binding (the Python/gRPC surfaces accept a `timedelta`/duration for fixed periods and an
+ISO-8601 string for either kind, and return the ISO-8601 string).
 
 ### Typed, N-dimensional arrays
 

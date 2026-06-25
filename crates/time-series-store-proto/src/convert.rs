@@ -2,11 +2,11 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use time_series_store_core::{
     Deterministic, Dtype, FeatureValue, Features, KeyIdentity, NonSequentialTimeSeries,
-    OwnerCategory, Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesMetadata,
-    TimeSeriesType, TypedArray,
+    OwnerCategory, Period, Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData,
+    TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 
 use crate::pb;
@@ -130,7 +130,7 @@ pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
         owner_category: pb::OwnerCategory::from(k.owner_category) as i32,
         time_series_type: pb::TimeSeriesType::from(k.time_series_type) as i32,
         name: k.name.clone(),
-        resolution_ms: k.resolution.map(duration_to_ms).unwrap_or(0),
+        resolution: period_to_iso(k.resolution),
         features: Some(features_to_pb(&k.features)),
     }
 }
@@ -147,11 +147,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<KeyIdentity, ConvertError> {
             message: format!("unknown enum value {}", k.time_series_type),
         }
     })?;
-    let resolution = if k.resolution_ms == 0 {
-        None
-    } else {
-        Some(Duration::milliseconds(k.resolution_ms))
-    };
+    let resolution = optional_period(&k.resolution)?;
     let features = match k.features {
         Some(f) => features_from_pb(f)?,
         None => Features::new(),
@@ -178,10 +174,10 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .initial_timestamp
             .map(|t| t.to_rfc3339())
             .unwrap_or_default(),
-        resolution_ms: m.resolution.map(duration_to_ms).unwrap_or(0),
+        resolution: period_to_iso(m.resolution),
         length: m.length.unwrap_or(0) as u64,
-        horizon_ms: m.horizon.map(duration_to_ms).unwrap_or(0),
-        interval_ms: m.interval.map(duration_to_ms).unwrap_or(0),
+        horizon: period_to_iso(m.horizon),
+        interval: period_to_iso(m.interval),
         count: m.count.unwrap_or(0) as u64,
         timestamps_rfc3339: m
             .timestamps
@@ -239,10 +235,10 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         name: m.name,
         data_hash,
         initial_timestamp,
-        resolution: optional_ms(m.resolution_ms),
+        resolution: optional_period(&m.resolution)?,
         length: optional_usize(m.length),
-        horizon: optional_ms(m.horizon_ms),
-        interval: optional_ms(m.interval_ms),
+        horizon: optional_period(&m.horizon)?,
+        interval: optional_period(&m.interval)?,
         count: optional_usize(m.count),
         timestamps,
         features,
@@ -265,7 +261,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
-            resolution_ms: duration_to_ms(s.resolution),
+            resolution: s.resolution.to_iso8601(),
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
             dtype: s.data.dtype.code(),
@@ -273,15 +269,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ms: 0,
-            interval_ms: 0,
+            horizon: String::new(),
+            interval: String::new(),
             count: 0,
             percentiles: Vec::new(),
             scenario_count: 0,
         },
         TimeSeriesData::NonSequentialTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: String::new(),
-            resolution_ms: 0,
+            resolution: String::new(),
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
             dtype: s.data.dtype.code(),
@@ -289,15 +285,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
             logical_type: String::new(),
-            horizon_ms: 0,
-            interval_ms: 0,
+            horizon: String::new(),
+            interval: String::new(),
             count: 0,
             percentiles: Vec::new(),
             scenario_count: 0,
         },
         TimeSeriesData::Deterministic(d) => pb::GetResp {
             initial_timestamp_rfc3339: d.initial_timestamp.to_rfc3339(),
-            resolution_ms: duration_to_ms(d.resolution),
+            resolution: d.resolution.to_iso8601(),
             length: d.data.shape[0] as u64,
             shape: d.data.shape.iter().map(|x| *x as u64).collect(),
             dtype: d.data.dtype.code(),
@@ -305,15 +301,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ms: duration_to_ms(d.horizon),
-            interval_ms: duration_to_ms(d.interval),
+            horizon: d.horizon.to_iso8601(),
+            interval: d.interval.to_iso8601(),
             count: d.count as u64,
             percentiles: Vec::new(),
             scenario_count: 0,
         },
         TimeSeriesData::Probabilistic(p) => pb::GetResp {
             initial_timestamp_rfc3339: p.initial_timestamp.to_rfc3339(),
-            resolution_ms: duration_to_ms(p.resolution),
+            resolution: p.resolution.to_iso8601(),
             length: p.data.shape[0] as u64,
             shape: p.data.shape.iter().map(|x| *x as u64).collect(),
             dtype: p.data.dtype.code(),
@@ -321,15 +317,15 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ms: duration_to_ms(p.horizon),
-            interval_ms: duration_to_ms(p.interval),
+            horizon: p.horizon.to_iso8601(),
+            interval: p.interval.to_iso8601(),
             count: p.count as u64,
             percentiles: p.percentiles.clone(),
             scenario_count: 0,
         },
         TimeSeriesData::Scenarios(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
-            resolution_ms: duration_to_ms(s.resolution),
+            resolution: s.resolution.to_iso8601(),
             length: s.data.shape[0] as u64,
             shape: s.data.shape.iter().map(|x| *x as u64).collect(),
             dtype: s.data.dtype.code(),
@@ -337,8 +333,8 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
             timestamps_rfc3339: Vec::new(),
             logical_type: String::new(),
-            horizon_ms: duration_to_ms(s.horizon),
-            interval_ms: duration_to_ms(s.interval),
+            horizon: s.horizon.to_iso8601(),
+            interval: s.interval.to_iso8601(),
             count: s.count as u64,
             percentiles: Vec::new(),
             scenario_count: s.scenario_count as u64,
@@ -373,7 +369,7 @@ pub fn get_resp_to_time_series_data(
                 .map(|d| d.with_timezone(&Utc))?;
             Ok(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
                 initial_timestamp,
-                resolution: Duration::milliseconds(resp.resolution_ms),
+                resolution: period_from_iso(&resp.resolution)?,
                 length: resp.length as usize,
                 data,
                 name,
@@ -399,9 +395,9 @@ pub fn get_resp_to_time_series_data(
                 .map(|d| d.with_timezone(&Utc))?;
             let det = Deterministic::new(
                 initial_timestamp,
-                Duration::milliseconds(resp.resolution_ms),
-                Duration::milliseconds(resp.horizon_ms),
-                Duration::milliseconds(resp.interval_ms),
+                period_from_iso(&resp.resolution)?,
+                period_from_iso(&resp.horizon)?,
+                period_from_iso(&resp.interval)?,
                 resp.count as usize,
                 data,
                 name,
@@ -417,9 +413,9 @@ pub fn get_resp_to_time_series_data(
                 .map(|d| d.with_timezone(&Utc))?;
             let prob = Probabilistic::new(
                 initial_timestamp,
-                Duration::milliseconds(resp.resolution_ms),
-                Duration::milliseconds(resp.horizon_ms),
-                Duration::milliseconds(resp.interval_ms),
+                period_from_iso(&resp.resolution)?,
+                period_from_iso(&resp.horizon)?,
+                period_from_iso(&resp.interval)?,
                 resp.count as usize,
                 resp.percentiles,
                 data,
@@ -436,9 +432,9 @@ pub fn get_resp_to_time_series_data(
                 .map(|d| d.with_timezone(&Utc))?;
             let scen = Scenarios::new(
                 initial_timestamp,
-                Duration::milliseconds(resp.resolution_ms),
-                Duration::milliseconds(resp.horizon_ms),
-                Duration::milliseconds(resp.interval_ms),
+                period_from_iso(&resp.resolution)?,
+                period_from_iso(&resp.horizon)?,
+                period_from_iso(&resp.interval)?,
                 resp.count as usize,
                 resp.scenario_count as usize,
                 data,
@@ -455,16 +451,31 @@ pub fn get_resp_to_time_series_data(
 
 // ---- Helpers ----
 
-fn duration_to_ms(d: Duration) -> i64 {
-    d.num_milliseconds()
+/// Encode an optional period as its ISO-8601 string; `None` -> empty string.
+fn period_to_iso(p: Option<Period>) -> String {
+    p.map(|p| p.to_iso8601()).unwrap_or_default()
 }
 
-fn optional_ms(ms: i64) -> Option<Duration> {
-    if ms == 0 {
-        None
+/// Decode an ISO-8601 period string; empty -> `None`.
+fn optional_period(s: &str) -> Result<Option<Period>, ConvertError> {
+    if s.is_empty() {
+        Ok(None)
     } else {
-        Some(Duration::milliseconds(ms))
+        Period::from_iso8601(s)
+            .map(Some)
+            .map_err(|e| ConvertError::InvalidValue {
+                field: "period",
+                message: e.to_string(),
+            })
     }
+}
+
+/// Decode a required ISO-8601 period string.
+fn period_from_iso(s: &str) -> Result<Period, ConvertError> {
+    Period::from_iso8601(s).map_err(|e| ConvertError::InvalidValue {
+        field: "period",
+        message: e.to_string(),
+    })
 }
 
 fn optional_usize(v: u64) -> Option<usize> {
@@ -488,7 +499,7 @@ fn parse_optional_rfc3339(s: &str) -> Result<Option<DateTime<Utc>>, ConvertError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
     use time_series_store_core::{Dtype, TypedArray};
 
     fn make_ts() -> DateTime<Utc> {
@@ -537,8 +548,8 @@ mod tests {
             pb::TimeSeriesType::Deterministic as i32
         );
         assert_eq!(resp.count, 3);
-        assert_eq!(resp.horizon_ms, Duration::hours(4).num_milliseconds());
-        assert_eq!(resp.interval_ms, Duration::hours(6).num_milliseconds());
+        assert_eq!(resp.horizon, "PT4H");
+        assert_eq!(resp.interval, "PT6H");
         assert_eq!(resp.length, 4); // shape[0]
         assert!(resp.percentiles.is_empty());
         assert_eq!(resp.scenario_count, 0);

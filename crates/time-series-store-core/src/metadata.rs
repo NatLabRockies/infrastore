@@ -7,8 +7,10 @@ pub mod schema;
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Transaction, params};
+
+use crate::types::period::Period;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
@@ -31,7 +33,7 @@ pub struct StaticSummaryRow {
     pub time_series_type: TimeSeriesType,
     pub name: String,
     pub initial_timestamp: Option<DateTime<Utc>>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub time_step_count: Option<i64>,
     pub count: i64,
 }
@@ -47,9 +49,9 @@ pub struct ForecastSummaryRow {
     pub time_series_type: TimeSeriesType,
     pub name: String,
     pub initial_timestamp: Option<DateTime<Utc>>,
-    pub resolution: Option<Duration>,
-    pub horizon: Option<Duration>,
-    pub interval: Option<Duration>,
+    pub resolution: Option<Period>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
     pub window_count: Option<i64>,
     pub count: i64,
 }
@@ -82,7 +84,7 @@ pub struct MetadataFilter {
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     /// Subset match: rows must contain at least these key/value pairs.
     pub features: Option<Features>,
     /// Exact features-set match by precomputed hash. When set, this is pushed
@@ -158,9 +160,9 @@ impl MetadataStore {
     pub fn insert(tx: &Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<i64> {
         let f_hash = features_hash(&meta.features);
         let initial_ts = meta.initial_timestamp.map(|t| t.to_rfc3339());
-        let resolution_ms = meta.resolution.map(duration_to_ms);
-        let horizon_ms = meta.horizon.map(duration_to_ms);
-        let interval_ms = meta.interval.map(duration_to_ms);
+        let resolution_iso = meta.resolution.map(period_to_iso);
+        let horizon_iso = meta.horizon.map(period_to_iso);
+        let interval_iso = meta.interval.map(period_to_iso);
         let timestamps_json = match &meta.timestamps {
             Some(ts) => Some(serde_json::to_string(ts)?),
             None => None,
@@ -176,7 +178,7 @@ impl MetadataStore {
         let mut insert_stmt = tx.prepare_cached(
             "INSERT INTO time_series_associations
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
-              initial_timestamp, resolution_ms, length, horizon_ms, interval_ms, count,
+              initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_json, units, percentiles_json,
               dtype, element_shape, logical_type, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
@@ -190,10 +192,10 @@ impl MetadataStore {
             meta.name,
             meta.data_hash.as_slice(),
             initial_ts,
-            resolution_ms,
+            resolution_iso,
             meta.length.map(|l| l as i64),
-            horizon_ms,
-            interval_ms,
+            horizon_iso,
+            interval_iso,
             meta.count.map(|c| c as i64),
             timestamps_json,
             meta.units,
@@ -210,7 +212,7 @@ impl MetadataStore {
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
                 // The unique index covers (owner_id, time_series_type, name,
-                // resolution_ms, features_hash). Surface the spec error.
+                // resolution, features_hash). Surface the spec error.
                 return Err(TimeSeriesError::DuplicateTimeSeries);
             }
             Err(e) => return Err(e.into()),
@@ -245,11 +247,11 @@ impl MetadataStore {
     /// caller can decide whether to drop the underlying array.
     pub fn delete_by_key(tx: &Transaction<'_>, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
-        let resolution_ms = key.resolution.map(duration_to_ms);
+        let resolution_iso = key.resolution.map(period_to_iso);
         let mut stmt = tx.prepare(
             "SELECT id, data_hash FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
-               AND ((?5 IS NULL AND resolution_ms IS NULL) OR resolution_ms = ?5)
+               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
                AND features_hash = ?6",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
@@ -259,7 +261,7 @@ impl MetadataStore {
                     key.owner_category.as_str(),
                     key.time_series_type.as_str(),
                     key.name,
-                    resolution_ms,
+                    resolution_iso,
                     f_hash.as_slice(),
                 ],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -355,8 +357,8 @@ impl MetadataStore {
         // clauses using sqlite's parameter binding.
         let mut sql = String::from(
             "SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
-                    data_hash, initial_timestamp, resolution_ms, length, horizon_ms,
-                    interval_ms, count, timestamps_json, units, percentiles_json,
+                    data_hash, initial_timestamp, resolution, length, horizon,
+                    interval, count, timestamps_json, units, percentiles_json,
                     dtype, element_shape, logical_type
              FROM time_series_associations WHERE 1=1",
         );
@@ -382,8 +384,8 @@ impl MetadataStore {
             params_vec.push(Box::new(name.clone()));
         }
         if let Some(resolution) = filter.resolution {
-            sql.push_str(" AND resolution_ms = ?");
-            params_vec.push(Box::new(duration_to_ms(resolution)));
+            sql.push_str(" AND resolution = ?");
+            params_vec.push(Box::new(period_to_iso(resolution)));
         }
         if let Some(ref f_hash) = filter.features_hash {
             sql.push_str(" AND features_hash = ?");
@@ -452,17 +454,17 @@ impl MetadataStore {
         }
     }
 
-    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Duration>> {
+    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
-            "SELECT DISTINCT resolution_ms FROM time_series_associations
-             WHERE resolution_ms IS NOT NULL",
+            "SELECT DISTINCT resolution FROM time_series_associations
+             WHERE resolution IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
             sql.push_str(" AND time_series_type = ?");
             params_vec.push(Box::new(t.as_str().to_string()));
         }
-        sql.push_str(" ORDER BY resolution_ms ASC");
+        sql.push_str(" ORDER BY resolution ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
             .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
@@ -470,9 +472,9 @@ impl MetadataStore {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| row.get::<_, i64>(0))?
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows.into_iter().map(ms_to_duration).collect())
+        rows.into_iter().map(|s| iso_to_period(&s)).collect()
     }
 
     pub fn count(&self) -> Result<i64> {
@@ -593,11 +595,11 @@ impl MetadataStore {
     pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT owner_type, owner_category, time_series_type, name,
-                    initial_timestamp, resolution_ms, length, COUNT(*)
+                    initial_timestamp, resolution, length, COUNT(*)
              FROM time_series_associations
              WHERE time_series_type IN ('SingleTimeSeries', 'NonSequentialTimeSeries')
              GROUP BY owner_type, owner_category, time_series_type, name,
-                      initial_timestamp, resolution_ms, length",
+                      initial_timestamp, resolution, length",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -606,7 +608,7 @@ impl MetadataStore {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<String>>(5)?,
                 r.get::<_, Option<i64>>(6)?,
                 r.get::<_, i64>(7)?,
             ))
@@ -620,7 +622,7 @@ impl MetadataStore {
                 time_series_type: parse_type(&tt)?,
                 name,
                 initial_timestamp: parse_opt_rfc3339(its)?,
-                resolution: res.map(Duration::milliseconds),
+                resolution: res.map(|s| iso_to_period(&s)).transpose()?,
                 time_step_count: len,
                 count,
             });
@@ -635,12 +637,12 @@ impl MetadataStore {
     pub fn forecast_summary(&self) -> Result<Vec<ForecastSummaryRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT owner_type, owner_category, time_series_type, name,
-                    initial_timestamp, resolution_ms, horizon_ms, interval_ms, count, COUNT(*)
+                    initial_timestamp, resolution, horizon, interval, count, COUNT(*)
              FROM time_series_associations
              WHERE time_series_type IN
                    ('Deterministic', 'DeterministicSingleTimeSeries', 'Probabilistic', 'Scenarios')
              GROUP BY owner_type, owner_category, time_series_type, name,
-                      initial_timestamp, resolution_ms, horizon_ms, interval_ms, count",
+                      initial_timestamp, resolution, horizon, interval, count",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -649,9 +651,9 @@ impl MetadataStore {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, Option<i64>>(6)?,
-                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
                 r.get::<_, Option<i64>>(8)?,
                 r.get::<_, i64>(9)?,
             ))
@@ -665,9 +667,9 @@ impl MetadataStore {
                 time_series_type: parse_type(&tt)?,
                 name,
                 initial_timestamp: parse_opt_rfc3339(its)?,
-                resolution: res.map(Duration::milliseconds),
-                horizon: hor.map(Duration::milliseconds),
-                interval: iv.map(Duration::milliseconds),
+                resolution: res.map(|s| iso_to_period(&s)).transpose()?,
+                horizon: hor.map(|s| iso_to_period(&s)).transpose()?,
+                interval: iv.map(|s| iso_to_period(&s)).transpose()?,
                 window_count: wcount,
                 count,
             });
@@ -705,17 +707,17 @@ impl MetadataStore {
         &self,
         category: OwnerCategory,
         ts_type: Option<TimeSeriesType>,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         let ts_type_str = ts_type.map(|t| t.as_str());
-        let res_ms = resolution.map(duration_to_ms);
+        let res_iso = resolution.map(period_to_iso);
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT owner_id FROM time_series_associations
              WHERE owner_category = ?1
                AND (?2 IS NULL OR time_series_type = ?2)
-               AND (?3 IS NULL OR resolution_ms = ?3)",
+               AND (?3 IS NULL OR resolution = ?3)",
         )?;
-        let rows = stmt.query_map(params![category.as_str(), ts_type_str, res_ms], |r| {
+        let rows = stmt.query_map(params![category.as_str(), ts_type_str, res_iso], |r| {
             r.get::<_, i64>(0)
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -758,12 +760,16 @@ impl MetadataStore {
     }
 }
 
-fn duration_to_ms(d: Duration) -> i64 {
-    d.num_milliseconds()
+/// Canonical ISO-8601 encoding of a period for storage in the catalog.
+fn period_to_iso(p: Period) -> String {
+    p.to_iso8601()
 }
 
-fn ms_to_duration(ms: i64) -> Duration {
-    Duration::milliseconds(ms)
+/// Parse a period from its catalog ISO-8601 encoding. A parse failure is an
+/// integrity error: the value was written by [`period_to_iso`].
+fn iso_to_period(s: &str) -> Result<Period> {
+    Period::from_iso8601(s)
+        .map_err(|e| TimeSeriesError::IntegrityError(format!("bad period '{s}' in catalog: {e}")))
 }
 
 fn is_subset(required: &Features, actual: &Features) -> bool {
@@ -804,10 +810,10 @@ struct MetaRow {
     name: String,
     data_hash: [u8; 32],
     initial_timestamp: Option<DateTime<Utc>>,
-    resolution: Option<Duration>,
+    resolution: Option<Period>,
     length: Option<usize>,
-    horizon: Option<Duration>,
-    interval: Option<Duration>,
+    horizon: Option<Period>,
+    interval: Option<Period>,
     count: Option<usize>,
     timestamps: Option<Vec<DateTime<Utc>>>,
     units: Option<String>,
@@ -852,10 +858,10 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let name: String = row.get(5)?;
     let data_hash_bytes: Vec<u8> = row.get(6)?;
     let initial_timestamp: Option<String> = row.get(7)?;
-    let resolution_ms: Option<i64> = row.get(8)?;
+    let resolution_iso: Option<String> = row.get(8)?;
     let length: Option<i64> = row.get(9)?;
-    let horizon_ms: Option<i64> = row.get(10)?;
-    let interval_ms: Option<i64> = row.get(11)?;
+    let horizon_iso: Option<String> = row.get(10)?;
+    let interval_iso: Option<String> = row.get(11)?;
     let count: Option<i64> = row.get(12)?;
     let timestamps_json: Option<String> = row.get(13)?;
     let units: Option<String> = row.get(14)?;
@@ -936,6 +942,25 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
         })?
         .unwrap_or_default();
 
+    let parse_period = |col: usize, s: Option<String>| -> rusqlite::Result<Option<Period>> {
+        s.map(|s| {
+            Period::from_iso8601(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    col,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        e.to_string(),
+                    )),
+                )
+            })
+        })
+        .transpose()
+    };
+    let resolution = parse_period(8, resolution_iso)?;
+    let horizon = parse_period(10, horizon_iso)?;
+    let interval = parse_period(11, interval_iso)?;
+
     Ok((
         id,
         MetaRow {
@@ -946,10 +971,10 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
             name,
             data_hash,
             initial_timestamp,
-            resolution: resolution_ms.map(ms_to_duration),
+            resolution,
             length: length.map(|l| l as usize),
-            horizon: horizon_ms.map(ms_to_duration),
-            interval: interval_ms.map(ms_to_duration),
+            horizon,
+            interval,
             count: count.map(|c| c as usize),
             timestamps,
             units,

@@ -16,12 +16,16 @@ the authoritative description of both. For the rationale behind the split, see t
 The NetCDF root carries a global attribute:
 
 ```text
-data_format_version = "0.6.0"
+data_format_version = "0.7.0"
 ```
 
 This is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when the NetCDF
 layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md) changes in
-a backward-incompatible way. Readers should check it before trusting a file. (`0.6.0` added
+a backward-incompatible way. Readers should check it before trusting a file. (`0.7.0` made
+`resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
+now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
+milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
+(`Month`/`Quarter`/`Year`) can be represented distinctly from fixed spans; `0.6.0` added
 `owner_category` to the association uniqueness key (so the owner identity is the pair
 `(owner_id, owner_category)`), widening the unique indexes and `ix_owner`; `0.5.0` changed the owner
 identifier to a signed 64-bit integer (`owner_id`); `0.2.0` introduced typed, multi-dimensional
@@ -49,7 +53,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.nc
-├── attribute  data_format_version = "0.6.0"
+├── attribute  data_format_version = "0.7.0"
 └── group      time_series/
     └── group  single/
         ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, 1000, *element_shape)
@@ -71,7 +75,7 @@ dataset:
 | `{dtype}`  | Element dtype string (`f64`, `i64`, …)                            |
 | `{shape}`  | Element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`        |
 | `{length}` | Number of timesteps (size of the time axis)                       |
-| `{res}`    | Resolution in **milliseconds** (`Duration::num_milliseconds`)     |
+| `{res}`    | Resolution as an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`; no `_`) |
 | `__{n}`    | Spill suffix; absent for the first dataset, `__1`, `__2`, … after |
 
 The dataset shape is `(length, 1000, *element_shape)` (`MAX_COLS_PER_DATASET = 1000` columns) and
@@ -124,10 +128,10 @@ One row per association between an owner and a stored array.
 | `name`              | TEXT    | Series name                                                     |
 | `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable |
 | `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`           |
-| `resolution_ms`     | INTEGER | Resolution in milliseconds; `NULL` for non-sequential           |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential |
 | `length`            | INTEGER | Number of timesteps                                             |
-| `horizon_ms`        | INTEGER | Forecast horizon, milliseconds; `NULL` for non-forecasts        |
-| `interval_ms`       | INTEGER | Forecast interval, milliseconds; `NULL` for non-forecasts       |
+| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts             |
+| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts            |
 | `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                 |
 | `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (`NonSequentialTimeSeries`)   |
 | `units`             | TEXT    | Free-form units label                                           |
@@ -161,28 +165,30 @@ A single-column table holding the metadata schema version.
 
 ```sql
 CREATE UNIQUE INDEX uq_assoc ON time_series_associations
-    (owner_id, owner_category, time_series_type, name, resolution_ms, features_hash);
+    (owner_id, owner_category, time_series_type, name, resolution, features_hash);
 CREATE UNIQUE INDEX uq_assoc_null_resolution ON time_series_associations
     (owner_id, owner_category, time_series_type, name,
-     COALESCE(resolution_ms, -9223372036854775808), features_hash);
+     COALESCE(resolution, ''), features_hash);
 
 CREATE INDEX ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX ix_owner      ON time_series_associations(owner_id, owner_category);
-CREATE INDEX ix_resolution ON time_series_associations(resolution_ms);
+CREATE INDEX ix_resolution ON time_series_associations(resolution);
 ```
 
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
 violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the
 key, so a component and a supplemental attribute that share an `owner_id` are independent owners.
 SQLite treats `NULL` values as distinct in a `UNIQUE` index, so `uq_assoc` does not constrain rows
-with a `NULL` `resolution_ms` (e.g. `NonSequentialTimeSeries`). `uq_assoc_null_resolution` covers
-that case by folding `NULL` to a sentinel via `COALESCE` before enforcing uniqueness.
+with a `NULL` `resolution` (e.g. `NonSequentialTimeSeries`). `uq_assoc_null_resolution` covers that
+case by folding `NULL` to the empty-string sentinel via `COALESCE` before enforcing uniqueness (the
+empty string is never a valid ISO-8601 period).
 
 ## Field Encoding Notes
 
 - **Timestamps** are RFC 3339 strings in UTC.
-- **Durations** (`resolution`, `horizon`, `interval`) are integer **milliseconds** in SQLite, and
-  the packed dataset name's `{res}` field is likewise in **milliseconds**.
+- **Periods** (`resolution`, `horizon`, `interval`) are canonical **ISO-8601 duration strings** in
+  SQLite (`PT1H`, `P1M`, `P1Y`), and the packed dataset name's `{res}` field uses the same encoding.
+  Calendar periods (`Month`/`Quarter`/`Year`) are stored distinctly from fixed spans.
 - **Hashes** are raw 32-byte `BLOB`s in SQLite, lowercase hex in NetCDF (the `…_h` variable for
   packed arrays, the `arr_` variable name for standalone arrays).
 - **`element_shape`** is the per-step shape only (the trailing axes); the time `length` is a

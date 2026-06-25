@@ -50,8 +50,9 @@ message TimeSeriesKey {
   int64           owner_id          = 1;
   TimeSeriesType  time_series_type  = 2;
   string          name              = 3;
-  // Resolution in milliseconds. 0 = unset (e.g. NonSequentialTimeSeries).
-  int64           resolution_ms     = 4;
+  // Resolution as an ISO-8601 duration (e.g. "PT1H", "P1M", "P1Y"). Empty =
+  // unset (e.g. NonSequentialTimeSeries).
+  string          resolution        = 4;
   Features        features          = 5;
   OwnerCategory   owner_category    = 6;
 }
@@ -65,10 +66,10 @@ message TimeSeriesMetadata {
   bytes           data_hash                      = 6;        // 32 bytes
   // Temporal — populated when applicable to the time series type.
   string          initial_timestamp_rfc3339      = 7;
-  int64           resolution_ms                  = 8;
+  string          resolution                     = 8;        // ISO-8601 duration
   uint64          length                         = 9;
-  int64           horizon_ms                     = 10;
-  int64           interval_ms                    = 11;
+  string          horizon                        = 10;       // ISO-8601 duration
+  string          interval                       = 11;       // ISO-8601 duration
   uint64          count                          = 12;
   repeated string timestamps_rfc3339             = 13;
   Features        features                       = 14;
@@ -87,7 +88,7 @@ message ListReq {
   optional string          owner_type        = 2;
   optional TimeSeriesType  time_series_type  = 3;
   optional string          name              = 4;
-  optional int64           resolution_ms     = 5;
+  optional string          resolution        = 5;       // ISO-8601 duration
   Features                 features          = 6;
   optional OwnerCategory   owner_category    = 7;
 }
@@ -105,7 +106,7 @@ message GetReq {
 }
 message GetResp {
   string             initial_timestamp_rfc3339  = 1;
-  int64              resolution_ms              = 2;
+  string             resolution                 = 2;        // ISO-8601 duration
   uint64             length                     = 3;
   repeated uint64    shape                      = 4;
   reserved 5;  // was: repeated double values (replaced by dtype + value_bytes)
@@ -115,8 +116,8 @@ message GetResp {
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
   string             logical_type                = 10;
   // Forecast-specific fields (fields 1–10 are backward-compatible).
-  int64              horizon_ms                  = 11;
-  int64              interval_ms                 = 12;
+  string             horizon                     = 11;       // ISO-8601 duration
+  string             interval                    = 12;       // ISO-8601 duration
   uint64             count                       = 13;
   repeated double    percentiles                 = 14;       // Probabilistic only
   uint64             scenario_count              = 15;       // Scenarios only
@@ -138,7 +139,7 @@ message ResolutionsReq {
   optional TimeSeriesType time_series_type = 1;
 }
 message ResolutionsResp {
-  repeated int64 resolution_ms = 1;
+  repeated string resolution = 1;       // ISO-8601 durations
 }
 
 // ---- GetCounts ----
@@ -156,10 +157,10 @@ message ForecastParamsReq {}
 // All fields optional: absent when the store holds no forecasts (or that
 // particular field is not populated for the forecast type found).
 message ForecastParamsResp {
-  optional int64  horizon_ms    = 1;
-  optional int64  interval_ms   = 2;
-  optional uint64 count         = 3;
-  optional int64  resolution_ms = 4;
+  optional string horizon    = 1;       // ISO-8601 duration
+  optional string interval   = 2;       // ISO-8601 duration
+  optional uint64 count      = 3;
+  optional string resolution = 4;       // ISO-8601 duration
 }
 
 // ---- HasTimeSeries ----

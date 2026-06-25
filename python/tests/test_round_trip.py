@@ -222,8 +222,9 @@ def test_counts_and_resolutions():
     assert counts["static_time_series"] == 3
     assert counts["components_with_time_series"] == 3
 
+    # Resolutions are returned as canonical ISO-8601 duration strings.
     resolutions = store.get_resolutions()
-    assert resolutions == [timedelta(minutes=15), timedelta(hours=1), timedelta(hours=4)]
+    assert sorted(resolutions) == ["PT15M", "PT1H", "PT4H"]
 
 
 def test_numpy_array_received_as_ndarray():

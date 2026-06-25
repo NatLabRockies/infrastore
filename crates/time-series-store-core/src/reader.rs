@@ -30,12 +30,13 @@
 //! [`StaticReader::groups`] to read the bytes. This keeps the type free of
 //! self-referential borrows, which matters for the FFI handle.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::types::array::Dtype;
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
+use crate::types::period::Period;
 use crate::types::time_series::{TimeSeriesType, compute_h};
 
 /// A prepared reader returning the value of every matching `SingleTimeSeries`
@@ -45,7 +46,7 @@ use crate::types::time_series::{TimeSeriesType, compute_h};
 pub struct StaticReader {
     /// Shared master grid for every series in the reader.
     initial_timestamp: DateTime<Utc>,
-    resolution: Duration,
+    resolution: Period,
     length: usize,
     /// Columnar groups, in a deterministic order (by dtype code then shape).
     groups: Vec<StaticGroup>,
@@ -121,7 +122,7 @@ impl StaticReader {
         self.initial_timestamp
     }
 
-    pub fn resolution(&self) -> Duration {
+    pub fn resolution(&self) -> Period {
         self.resolution
     }
 
@@ -164,29 +165,14 @@ impl StaticReader {
 /// len = window count). `what` names the grid in error messages.
 fn index_on_grid(
     initial: DateTime<Utc>,
-    step: Duration,
+    step: Period,
     len: usize,
     at: DateTime<Utc>,
     what: &str,
 ) -> Result<usize> {
-    let step_ms = step.num_milliseconds();
-    if step_ms <= 0 {
-        return Err(TimeSeriesError::IntegrityError(format!(
-            "{what} step must be positive"
-        )));
-    }
-    let delta = (at - initial).num_milliseconds();
-    if delta < 0 {
-        return Err(TimeSeriesError::InvalidParameter(format!(
-            "timestamp {at} is before the {what} origin {initial}"
-        )));
-    }
-    if delta % step_ms != 0 {
-        return Err(TimeSeriesError::InvalidParameter(format!(
-            "timestamp {at} is not aligned to the {what} step ({step_ms} ms)"
-        )));
-    }
-    let idx = (delta / step_ms) as usize;
+    // `steps_between` is calendar-aware and rejects off-grid / pre-origin
+    // timestamps; here we add the extent bound.
+    let idx = step.steps_between(initial, at)?;
     if idx >= len {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "timestamp {at} (index {idx}) is past the {what} extent ({len})"
@@ -202,7 +188,7 @@ fn index_on_grid(
 /// every row shares one grid; this is what makes the per-read path mask-free.
 pub(crate) fn build_groups(
     mut rows: Vec<TimeSeriesMetadata>,
-) -> Result<(DateTime<Utc>, Duration, usize, Vec<StaticGroup>)> {
+) -> Result<(DateTime<Utc>, Period, usize, Vec<StaticGroup>)> {
     if rows.is_empty() {
         return Err(TimeSeriesError::InvalidParameter(
             "build_static_reader: no SingleTimeSeries match the filter".into(),
@@ -270,7 +256,7 @@ impl StaticReader {
     /// [`Store::build_static_reader`].
     pub(crate) fn from_parts(
         initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
+        resolution: Period,
         length: usize,
         groups: Vec<StaticGroup>,
     ) -> Self {
@@ -301,8 +287,8 @@ impl StaticReader {
 pub struct ForecastReader {
     time_series_type: TimeSeriesType,
     initial_timestamp: DateTime<Utc>,
-    resolution: Duration,
-    interval: Duration,
+    resolution: Period,
+    interval: Period,
     count: usize,
     entries: Vec<ForecastEntry>,
     last_read: Option<DateTime<Utc>>,
@@ -384,11 +370,11 @@ impl ForecastReader {
         self.initial_timestamp
     }
 
-    pub fn resolution(&self) -> Duration {
+    pub fn resolution(&self) -> Period {
         self.resolution
     }
 
-    pub fn interval(&self) -> Duration {
+    pub fn interval(&self) -> Period {
         self.interval
     }
 
@@ -424,8 +410,8 @@ impl ForecastReader {
     pub(crate) fn from_parts(
         time_series_type: TimeSeriesType,
         initial_timestamp: DateTime<Utc>,
-        resolution: Duration,
-        interval: Duration,
+        resolution: Period,
+        interval: Period,
         count: usize,
         entries: Vec<ForecastEntry>,
     ) -> Self {
@@ -500,16 +486,15 @@ fn entry_layout(
             let horizon = m.horizon.ok_or_else(|| missing("horizon"))?;
             let interval = m.interval.ok_or_else(|| missing("interval"))?;
             let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-            let res_ms = resolution.num_milliseconds();
-            let interval_ms = interval.num_milliseconds();
-            if res_ms <= 0 || interval_ms % res_ms != 0 {
-                return Err(TimeSeriesError::IntegrityError(format!(
-                    "DeterministicSingleTimeSeries '{}' interval ({interval_ms} ms) is not a \
-                     multiple of resolution ({res_ms} ms)",
-                    m.name
-                )));
-            }
-            let interval_steps = (interval_ms / res_ms) as usize;
+            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                TimeSeriesError::IntegrityError(format!(
+                    "DeterministicSingleTimeSeries '{}' interval ({}) is not a multiple of \
+                     resolution ({})",
+                    m.name,
+                    interval.to_iso8601(),
+                    resolution.to_iso8601()
+                ))
+            })?;
             let total_len = shape.first().copied().unwrap_or(0);
             let required = count.saturating_sub(1) * interval_steps + h;
             if required > total_len {
@@ -538,7 +523,7 @@ fn entry_layout(
 }
 
 /// `(initial_timestamp, resolution, interval, count)` of a forecast row.
-fn forecast_timeline(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Duration, Duration, usize)> {
+fn forecast_timeline(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Period, Period, usize)> {
     let missing = |f: &str| {
         TimeSeriesError::IntegrityError(format!("{} missing {f}", m.time_series_type.as_str()))
     };
@@ -611,7 +596,7 @@ pub(crate) fn build_forecast_entries(
 
 /// `(initial_timestamp, resolution, length)` of a `SingleTimeSeries` row, or an
 /// error if a required field is missing or the row is not a `SingleTimeSeries`.
-fn grid_of(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Duration, usize)> {
+fn grid_of(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Period, usize)> {
     if m.time_series_type != TimeSeriesType::SingleTimeSeries {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "StaticReader handles SingleTimeSeries only; got {}",
@@ -637,7 +622,7 @@ fn identity_sort_key(m: &TimeSeriesMetadata) -> (i64, &'static str, &str) {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     use std::collections::HashMap;
 

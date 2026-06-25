@@ -25,6 +25,7 @@ pub use types::{
         TimeSeriesKey,
     },
     metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
+    period::Period,
     time_series::{
         Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
         SingleTimeSeries, TimeSeriesData, TimeSeriesType,

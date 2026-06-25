@@ -6,8 +6,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesType, TypedArray, create_store,
+    Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
+    SingleTimeSeries, Store, TimeSeriesData, TimeSeriesType, TypedArray, create_store,
 };
 use time_series_store_server::client::RemoteClient;
 use time_series_store_server::service::TimeSeriesStoreService;
@@ -169,7 +169,7 @@ async fn missing_key_returns_not_found() {
         owner_category: OwnerCategory::Component,
         time_series_type: TimeSeriesType::SingleTimeSeries,
         name: "load".into(),
-        resolution: Some(Duration::hours(1)),
+        resolution: Some(Period::Fixed(Duration::hours(1))),
         features: Features::new(),
     };
     let err = client.get_time_series(&bogus_key, None).await.unwrap_err();
