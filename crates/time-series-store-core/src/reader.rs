@@ -328,6 +328,10 @@ mod tests {
         );
     }
 
+    fn add_f64_nd(store: &mut Store, owner_id: i64, name: &str, shape: Vec<usize>, vals: &[f64]) {
+        add(store, owner_id, name, TypedArray::from_f64(shape, vals));
+    }
+
     fn add_i64(store: &mut Store, owner_id: i64, name: &str, vals: &[i64]) {
         let mut bytes = Vec::new();
         for v in vals {
@@ -424,5 +428,69 @@ mod tests {
             .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
             .unwrap_err();
         assert!(matches!(err, TimeSeriesError::InvalidParameter(_)));
+    }
+
+    /// Populate `store` with the same mixed-dtype, mixed-shape set used to
+    /// exercise both the default and NetCDF read paths.
+    fn populate(store: &mut Store) {
+        add_f64(store, 2, "load", &[20.0, 21.0, 22.0, 23.0]);
+        add_f64(store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
+        add_i64(store, 3, "count", &[100, 101, 102, 103]);
+        // f64 with a 2-element per-step shape -> its own group. Step t = [t0+.., ..].
+        add_f64_nd(
+            store,
+            5,
+            "pair",
+            vec![4, 2],
+            &[0.0, 0.5, 10.0, 10.5, 20.0, 20.5, 30.0, 30.5],
+        );
+    }
+
+    /// On-disk store: drives `NetCdfBackend::read_index_into` (the one-hyperslab-
+    /// per-dataset override) and cross-checks it byte-for-byte against the
+    /// in-memory backend (the default per-hash path).
+    #[test]
+    fn netcdf_override_matches_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.nc");
+
+        let mut disk = Store::create(Some(&path), false).unwrap();
+        populate(&mut disk);
+        let mut mem = Store::create(None, true).unwrap();
+        populate(&mut mem);
+
+        let filter = || ListFilter::new().resolution(Duration::hours(1));
+        let mut r_disk = disk.build_static_reader(filter()).unwrap();
+        let mut r_mem = mem.build_static_reader(filter()).unwrap();
+
+        // Layout must be identical across backends.
+        assert_eq!(r_disk.groups().len(), 3);
+        assert_eq!(r_mem.groups().len(), 3);
+
+        for idx in 0..4u32 {
+            let at = t0() + Duration::hours(idx as i64);
+            disk.static_read(&mut r_disk, at).unwrap();
+            mem.static_read(&mut r_mem, at).unwrap();
+            for (gd, gm) in r_disk.groups().iter().zip(r_mem.groups()) {
+                assert_eq!(gd.dtype(), gm.dtype());
+                assert_eq!(gd.element_shape(), gm.element_shape());
+                assert_eq!(gd.keys(), gm.keys());
+                assert_eq!(gd.values(), gm.values(), "mismatch at index {idx}");
+            }
+        }
+
+        // Spot-check concrete values at index 2 on the on-disk (override) reader.
+        disk.static_read(&mut r_disk, t0() + Duration::hours(2))
+            .unwrap();
+        // Group 0: f64 scalar, owners 1 then 2.
+        assert_eq!(r_disk.groups()[0].element_shape(), &[] as &[usize]);
+        assert_eq!(f64_cols(&r_disk.groups()[0]), vec![12.0, 22.0]);
+        // Group 1: f64 shape [2], owner 5 -> step 2 = [20.0, 20.5].
+        assert_eq!(r_disk.groups()[1].element_shape(), &[2]);
+        assert_eq!(f64_cols(&r_disk.groups()[1]), vec![20.0, 20.5]);
+        // Group 2: i64 scalar, owner 3.
+        let g2 = &r_disk.groups()[2];
+        assert_eq!(g2.dtype(), Dtype::I64);
+        assert_eq!(i64::from_le_bytes(g2.values().try_into().unwrap()), 102);
     }
 }

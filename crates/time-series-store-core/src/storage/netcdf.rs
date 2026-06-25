@@ -541,6 +541,17 @@ impl Inner {
         ranges.as_slice().into()
     }
 
+    /// Extents selecting a single time index across *all* columns of a packed
+    /// dataset: `[idx, 0..ncols, *element_shape]`. One hyperslab feeds a whole
+    /// timestamp row to the [`StorageBackend::read_index_into`] override.
+    fn packed_row_extents(time_index: usize, ncols: usize, element_shape: &[usize]) -> Extents {
+        let mut ranges: Vec<Range<usize>> = vec![time_index..time_index + 1, 0..ncols];
+        for &k in element_shape {
+            ranges.push(0..k);
+        }
+        ranges.as_slice().into()
+    }
+
     fn standalone_extents(time: Range<usize>, element_shape: &[usize]) -> Extents {
         let mut ranges: Vec<Range<usize>> = vec![time];
         for &k in element_shape {
@@ -690,6 +701,98 @@ impl Inner {
             }),
         }
     }
+
+    /// Read the value at a single time `index` for a set of packed arrays,
+    /// appending each array's element block to `out` in `hashes` order.
+    ///
+    /// Backs the [`StorageBackend::read_index_into`] override: hashes are grouped
+    /// by their physical dataset so each dataset's timestamp row is read with one
+    /// hyperslab, then the requested columns are gathered. A `StaticReader`
+    /// supplies same-shape packed hashes; any standalone hash (not expected)
+    /// falls back to an individual single-step read.
+    fn read_index_locked(
+        &self,
+        hashes: &[[u8; 32]],
+        index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        out.clear();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+
+        enum Placement {
+            Packed { dataset: String, col: usize },
+            Standalone { hash: [u8; 32] },
+        }
+
+        // Resolve placements, collecting the distinct datasets to read once.
+        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
+        let mut datasets: Vec<String> = Vec::new();
+        for hash in hashes {
+            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => {
+                    if !datasets.iter().any(|d| d == dataset) {
+                        datasets.push(dataset.clone());
+                    }
+                    placements.push(Placement::Packed {
+                        dataset: dataset.clone(),
+                        col: *col,
+                    });
+                }
+                Location::Standalone { .. } => {
+                    placements.push(Placement::Standalone { hash: *hash });
+                }
+            }
+        }
+
+        // One hyperslab per dataset: the full `[idx, :, *element_shape]` row.
+        let mut rows: HashMap<String, (Vec<u8>, usize)> = HashMap::new();
+        for dataset in &datasets {
+            let state = self.datasets.get(dataset).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+            })?;
+            if index >= state.length {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "index {index} out of bounds for dataset {dataset} length {}",
+                    state.length
+                )));
+            }
+            let ncols = state.columns.len();
+            let dtype = state.dtype;
+            let element_shape = state.element_shape.clone();
+            let elem_bytes = element_shape.iter().product::<usize>().max(1) * dtype.size();
+            let bytes = self.with_single(|single| {
+                let var = single.variable(dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {dataset}"))
+                })?;
+                let extents = Inner::packed_row_extents(index, ncols, &element_shape);
+                get_typed(&var, dtype, extents)
+            })?;
+            rows.insert(dataset.clone(), (bytes, elem_bytes));
+        }
+
+        // Gather each column's block into `out`, in the caller's hash order.
+        for placement in &placements {
+            match placement {
+                Placement::Packed { dataset, col } => {
+                    let (row, elem_bytes) = rows.get(dataset).expect("dataset row read above");
+                    let start = col * elem_bytes;
+                    let block = row.get(start..start + elem_bytes).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!(
+                            "column {col} out of row bounds for dataset {dataset}"
+                        ))
+                    })?;
+                    out.extend_from_slice(block);
+                }
+                Placement::Standalone { hash } => {
+                    let arr = self.read_locked(hash, Some(index..index + 1))?;
+                    out.extend_from_slice(&arr.bytes);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Map a NetCDF variable's element type back to a [`Dtype`].
@@ -741,6 +844,12 @@ impl StorageBackend for NetCdfBackend {
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_locked(hash, Some(range))
+    }
+
+    #[tracing::instrument(skip(self, hashes, out), fields(n = hashes.len(), index))]
+    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_index_locked(hashes, index, out)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
