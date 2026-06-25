@@ -493,4 +493,43 @@ mod tests {
         assert_eq!(g2.dtype(), Dtype::I64);
         assert_eq!(i64::from_le_bytes(g2.values().try_into().unwrap()), 102);
     }
+
+    /// After removals the surviving series sit at non-contiguous, higher column
+    /// indices. Exercises the bounded row read (`width = max_col + 1`) and the
+    /// per-column gather offsets for a non-zero column.
+    #[test]
+    fn override_handles_noncontiguous_high_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.nc");
+        let mut store = Store::create(Some(&path), false).unwrap();
+
+        // Four f64 scalar series -> columns 0,1,2,3 in add order.
+        add_f64(&mut store, 1, "load", &[10.0, 11.0, 12.0, 13.0]); // col 0
+        add_f64(&mut store, 2, "load", &[20.0, 21.0, 22.0, 23.0]); // col 1
+        add_f64(&mut store, 3, "load", &[30.0, 31.0, 32.0, 33.0]); // col 2
+        add_f64(&mut store, 4, "load", &[40.0, 41.0, 42.0, 43.0]); // col 3
+
+        // Remove owners 2 and 3 -> survivors keep columns 0 and 3 (gap + high col).
+        let keys = store.list_keys(ListFilter::new()).unwrap();
+        for k in &keys {
+            if k.owner_id() == 2 || k.owner_id() == 3 {
+                store.remove_time_series(k.identity()).unwrap();
+            }
+        }
+
+        let mut reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        assert_eq!(reader.groups().len(), 1);
+        assert_eq!(reader.groups()[0].num_columns(), 2);
+
+        store
+            .static_read(&mut reader, t0() + Duration::hours(2))
+            .unwrap();
+        let g = &reader.groups()[0];
+        assert_eq!(g.keys()[0].owner_id(), 1);
+        assert_eq!(g.keys()[1].owner_id(), 4);
+        // col 0 @ idx 2 -> 12.0; col 3 @ idx 2 -> 42.0.
+        assert_eq!(f64_cols(g), vec![12.0, 42.0]);
+    }
 }

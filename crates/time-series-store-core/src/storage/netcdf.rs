@@ -541,11 +541,12 @@ impl Inner {
         ranges.as_slice().into()
     }
 
-    /// Extents selecting a single time index across *all* columns of a packed
-    /// dataset: `[idx, 0..ncols, *element_shape]`. One hyperslab feeds a whole
-    /// timestamp row to the [`StorageBackend::read_index_into`] override.
-    fn packed_row_extents(time_index: usize, ncols: usize, element_shape: &[usize]) -> Extents {
-        let mut ranges: Vec<Range<usize>> = vec![time_index..time_index + 1, 0..ncols];
+    /// Extents selecting a single time index across the first `width` columns of
+    /// a packed dataset: `[idx, 0..width, *element_shape]`. One hyperslab feeds a
+    /// timestamp row to the [`StorageBackend::read_index_into`] override; `width`
+    /// is bounded to the highest column that read actually gathers.
+    fn packed_row_extents(time_index: usize, width: usize, element_shape: &[usize]) -> Extents {
+        let mut ranges: Vec<Range<usize>> = vec![time_index..time_index + 1, 0..width];
         for &k in element_shape {
             ranges.push(0..k);
         }
@@ -726,15 +727,18 @@ impl Inner {
             Standalone { hash: [u8; 32] },
         }
 
-        // Resolve placements, collecting the distinct datasets to read once.
+        // Resolve placements; track the highest column needed per dataset so the
+        // row read is bounded to `[0, max_col]` rather than the full (up to
+        // MAX_COLS_PER_DATASET) column dimension.
         let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
-        let mut datasets: Vec<String> = Vec::new();
+        let mut max_col: HashMap<String, usize> = HashMap::new();
         for hash in hashes {
             match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
                 Location::Packed { dataset, col } => {
-                    if !datasets.iter().any(|d| d == dataset) {
-                        datasets.push(dataset.clone());
-                    }
+                    max_col
+                        .entry(dataset.clone())
+                        .and_modify(|m| *m = (*m).max(*col))
+                        .or_insert(*col);
                     placements.push(Placement::Packed {
                         dataset: dataset.clone(),
                         col: *col,
@@ -746,9 +750,11 @@ impl Inner {
             }
         }
 
-        // One hyperslab per dataset: the full `[idx, :, *element_shape]` row.
+        // One hyperslab per dataset: `[idx, 0..=max_col, *element_shape]`.
+        // Unneeded columns below `max_col` are read and discarded, but the read
+        // never spans more columns than the highest one this call gathers.
         let mut rows: HashMap<String, (Vec<u8>, usize)> = HashMap::new();
-        for dataset in &datasets {
+        for (dataset, &top) in &max_col {
             let state = self.datasets.get(dataset).ok_or_else(|| {
                 TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
             })?;
@@ -758,7 +764,7 @@ impl Inner {
                     state.length
                 )));
             }
-            let ncols = state.columns.len();
+            let width = top + 1;
             let dtype = state.dtype;
             let element_shape = state.element_shape.clone();
             let elem_bytes = element_shape.iter().product::<usize>().max(1) * dtype.size();
@@ -766,7 +772,7 @@ impl Inner {
                 let var = single.variable(dataset).ok_or_else(|| {
                     TimeSeriesError::IntegrityError(format!("missing variable {dataset}"))
                 })?;
-                let extents = Inner::packed_row_extents(index, ncols, &element_shape);
+                let extents = Inner::packed_row_extents(index, width, &element_shape);
                 get_typed(&var, dtype, extents)
             })?;
             rows.insert(dataset.clone(), (bytes, elem_bytes));
