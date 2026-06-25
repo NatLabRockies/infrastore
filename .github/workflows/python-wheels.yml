@@ -23,9 +23,6 @@ jobs:
         # OS version; the wheel's deployment target must match or delocate rejects
         # the libraries. Keep each macos-NN entry in sync with its runner image.
         include:
-          - os: ubuntu-latest
-          - os: macos-13
-            macosx_deployment_target: "13.0"
           - os: macos-14
             macosx_deployment_target: "14.0"
           - os: windows-latest
@@ -36,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
       # cibuildwheel's before-all handles HDF5/NetCDF on Linux/macOS, but Windows
       # has no system package manager, so provision via vcpkg here (mirrors test.yml)
       # and export the locations for the netcdf-sys/hdf5-metno-sys build scripts.
