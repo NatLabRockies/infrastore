@@ -9,8 +9,9 @@
 //! # Design (locked 2026-06-25)
 //!
 //! * **One resolution per reader.** The build filter must pin a resolution.
-//! * **Static and forecast are separate readers.** This module is the static
-//!   side; forecasts get a sibling `ForecastReader` (not yet sketched).
+//! * **Static and forecast are separate readers.** [`StaticReader`] serves
+//!   `SingleTimeSeries`; [`ForecastReader`] serves dense forecasts (one type per
+//!   reader, with `Deterministic` abstract over `DeterministicSingleTimeSeries`).
 //! * **Columnar batches.** Results are grouped by `(dtype, element_shape)` — the
 //!   same partition the packed datasets already use — so each group is a dense
 //!   `[num_columns, *element_shape]` typed buffer.
@@ -35,7 +36,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::types::array::Dtype;
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
-use crate::types::time_series::TimeSeriesType;
+use crate::types::time_series::{TimeSeriesType, compute_h};
 
 /// A prepared reader returning the value of every matching `SingleTimeSeries`
 /// at one timestamp. Build with [`Store::build_static_reader`], drive with
@@ -307,20 +308,36 @@ pub struct ForecastReader {
     last_read: Option<DateTime<Utc>>,
 }
 
+/// How an entry's window is read from storage. Dense forecasts slice a
+/// standalone array along its count axis; a `DeterministicSingleTimeSeries`
+/// gathers a contiguous run from the packed underlying `SingleTimeSeries`, so
+/// both yield an identical `[H, *E]` window.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum WindowRead {
+    /// Dense forecast: slice the standalone array at the window index along
+    /// `count_axis` (1 for Deterministic, 2 for Probabilistic/Scenarios).
+    Dense { count_axis: usize },
+    /// `DeterministicSingleTimeSeries`: read `horizon_steps` consecutive steps
+    /// of the underlying array starting at `window · interval_steps`.
+    Derived {
+        interval_steps: usize,
+        horizon_steps: usize,
+    },
+}
+
 /// One forecast's window slot. After a read, [`Self::window`] holds the
 /// row-major, little-endian bytes of a single window and [`Self::window_shape`]
-/// its shape — the stored shape with the window/count axis removed: `[H, *E]`
-/// (Deterministic), `[P, H, *E]` (Probabilistic), `[scenarios, H, *E]`
-/// (Scenarios).
+/// its shape: `[H, *E]` (Deterministic / DeterministicSingleTimeSeries),
+/// `[P, H, *E]` (Probabilistic), `[scenarios, H, *E]` (Scenarios).
 #[derive(Debug)]
 pub struct ForecastEntry {
     key: TimeSeriesKey,
     hash: [u8; 32],
     dtype: Dtype,
-    /// Shape of a single window (the stored shape with `count_axis` removed).
+    /// Shape of a single window.
     window_shape: Vec<usize>,
-    /// Index of the window/count axis in the full stored array.
-    count_axis: usize,
+    /// How to read this entry's window from storage.
+    read: WindowRead,
     /// Reused output buffer: `product(window_shape) * dtype.size()` bytes.
     buf: Vec<u8>,
     filled: bool,
@@ -346,12 +363,13 @@ impl ForecastEntry {
     }
 
     /// Drive a backend window read into this entry's reusable buffer. The closure
-    /// receives the array hash, the count axis, and the buffer to fill.
+    /// receives the read descriptor, the array hash, and the buffer to fill;
+    /// splitting the borrow across fields avoids aliasing.
     pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
     where
-        F: FnOnce(&[u8; 32], usize, &mut Vec<u8>) -> Result<()>,
+        F: FnOnce(&WindowRead, &[u8; 32], &mut Vec<u8>) -> Result<()>,
     {
-        read(&self.hash, self.count_axis, &mut self.buf)?;
+        read(&self.read, &self.hash, &mut self.buf)?;
         self.filled = true;
         Ok(())
     }
@@ -423,20 +441,100 @@ impl ForecastReader {
     }
 }
 
-/// The window/count axis position in the stored array of a dense forecast type:
-/// `[H, count, *E]` (Deterministic, axis 1), `[P, H, count, *E]` (Probabilistic,
-/// axis 2), `[scenarios, H, count, *E]` (Scenarios, axis 2).
-fn forecast_count_axis(ts: TimeSeriesType) -> Result<usize> {
-    Ok(match ts {
-        TimeSeriesType::Deterministic => 1,
-        TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => 2,
-        other => {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "ForecastReader handles dense forecast types only; got {}",
-                other.as_str()
+/// Whether a stored forecast of concrete type `concrete` belongs in a reader
+/// built for `reported`. A `Deterministic` reader is abstract — it also accepts
+/// `DeterministicSingleTimeSeries` (mirroring core's `AbstractDeterministic`),
+/// which is read into an identical `[H, *E]` window. Other types are exact.
+fn type_accepted(reported: TimeSeriesType, concrete: TimeSeriesType) -> bool {
+    match reported {
+        TimeSeriesType::Deterministic => matches!(
+            concrete,
+            TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries
+        ),
+        other => concrete == other,
+    }
+}
+
+/// Derive one entry's `(window_shape, read)` from its stored shape, concrete
+/// type, and the shared window `count`.
+fn entry_layout(
+    m: &TimeSeriesMetadata,
+    shape: &[usize],
+    count: usize,
+) -> Result<(Vec<usize>, WindowRead)> {
+    let dense = |count_axis: usize| -> Result<(Vec<usize>, WindowRead)> {
+        if count_axis >= shape.len() {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "forecast '{}' stored shape {shape:?} has no count axis {count_axis}",
+                m.name
             )));
         }
-    })
+        if shape[count_axis] != count {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "forecast '{}' window count {count} disagrees with stored axis length {}",
+                m.name, shape[count_axis]
+            )));
+        }
+        let window_shape = shape
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &d)| (i != count_axis).then_some(d))
+            .collect();
+        Ok((window_shape, WindowRead::Dense { count_axis }))
+    };
+
+    match m.time_series_type {
+        // Stored `[H, count, *E]` / `[P, H, count, *E]` / `[scenarios, H, count, *E]`.
+        TimeSeriesType::Deterministic => dense(1),
+        TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => dense(2),
+        // Derived from the packed underlying SingleTimeSeries `[total_len, *E]`:
+        // window k is the contiguous slice `[k·interval_steps .. +H]`.
+        TimeSeriesType::DeterministicSingleTimeSeries => {
+            let missing = |f: &str| {
+                TimeSeriesError::IntegrityError(format!(
+                    "DeterministicSingleTimeSeries '{}' missing {f}",
+                    m.name
+                ))
+            };
+            let resolution = m.resolution.ok_or_else(|| missing("resolution"))?;
+            let horizon = m.horizon.ok_or_else(|| missing("horizon"))?;
+            let interval = m.interval.ok_or_else(|| missing("interval"))?;
+            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
+            let res_ms = resolution.num_milliseconds();
+            let interval_ms = interval.num_milliseconds();
+            if res_ms <= 0 || interval_ms % res_ms != 0 {
+                return Err(TimeSeriesError::IntegrityError(format!(
+                    "DeterministicSingleTimeSeries '{}' interval ({interval_ms} ms) is not a \
+                     multiple of resolution ({res_ms} ms)",
+                    m.name
+                )));
+            }
+            let interval_steps = (interval_ms / res_ms) as usize;
+            let total_len = shape.first().copied().unwrap_or(0);
+            let required = count.saturating_sub(1) * interval_steps + h;
+            if required > total_len {
+                return Err(TimeSeriesError::IntegrityError(format!(
+                    "DeterministicSingleTimeSeries '{}' needs {required} underlying steps \
+                     ((count-1)·interval_steps + H) but the array has {total_len}",
+                    m.name
+                )));
+            }
+            let mut window_shape = vec![h];
+            window_shape.extend_from_slice(shape.get(1..).unwrap_or(&[]));
+            Ok((
+                window_shape,
+                WindowRead::Derived {
+                    interval_steps,
+                    horizon_steps: h,
+                },
+            ))
+        }
+        other => Err(TimeSeriesError::InvalidParameter(format!(
+            "ForecastReader handles dense forecast types and DeterministicSingleTimeSeries; \
+             got {}",
+            other.as_str()
+        ))),
+    }
 }
 
 /// `(initial_timestamp, resolution, interval, count)` of a forecast row.
@@ -454,10 +552,11 @@ fn forecast_timeline(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Duration,
 }
 
 /// Resolve forecast metadata rows (paired with their stored array shapes) into
-/// a [`ForecastReader`]. Pure (no I/O). Validates a uniform window timeline
-/// across all rows, mirroring [`build_groups`] for static.
+/// a [`ForecastReader`] reported as `reported`. Pure (no I/O). Validates a
+/// uniform window timeline across all rows (mirroring [`build_groups`] for
+/// static) and that each row's concrete type is acceptable for `reported`.
 pub(crate) fn build_forecast_entries(
-    ts_type: TimeSeriesType,
+    reported: TimeSeriesType,
     mut items: Vec<(TimeSeriesMetadata, Vec<usize>)>,
 ) -> Result<ForecastReader> {
     if items.is_empty() {
@@ -465,18 +564,18 @@ pub(crate) fn build_forecast_entries(
             "build_forecast_reader: no forecasts match the filter".into(),
         ));
     }
-    let count_axis = forecast_count_axis(ts_type)?;
 
     // Deterministic entry order, by key identity.
     items.sort_by(|a, b| identity_sort_key(&a.0).cmp(&identity_sort_key(&b.0)));
 
     let timeline = forecast_timeline(&items[0].0)?;
+    let (_, _, _, count) = timeline;
     let mut entries = Vec::with_capacity(items.len());
     for (m, shape) in items {
-        if m.time_series_type != ts_type {
+        if !type_accepted(reported, m.time_series_type) {
             return Err(TimeSeriesError::IntegrityError(format!(
-                "ForecastReader expected {}, found {} for '{}'",
-                ts_type.as_str(),
+                "ForecastReader for {} cannot hold {} '{}'",
+                reported.as_str(),
                 m.time_series_type.as_str(),
                 m.name
             )));
@@ -489,23 +588,7 @@ pub(crate) fn build_forecast_entries(
                 m.name, m.owner_id, tl, timeline
             )));
         }
-        if count_axis >= shape.len() {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "forecast '{}' stored shape {:?} has no count axis {count_axis}",
-                m.name, shape
-            )));
-        }
-        if shape[count_axis] != timeline.3 {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "forecast '{}' window count {} disagrees with stored axis length {}",
-                m.name, timeline.3, shape[count_axis]
-            )));
-        }
-        let window_shape: Vec<usize> = shape
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &d)| (i != count_axis).then_some(d))
-            .collect();
+        let (window_shape, read) = entry_layout(&m, &shape, count)?;
         let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
         let mut buf = vec![0u8; bytes];
         buf.clear();
@@ -514,7 +597,7 @@ pub(crate) fn build_forecast_entries(
             hash: m.data_hash,
             dtype: m.dtype,
             window_shape,
-            count_axis,
+            read,
             buf,
             filled: false,
         });
@@ -522,7 +605,7 @@ pub(crate) fn build_forecast_entries(
 
     let (initial, resolution, interval, count) = timeline;
     Ok(ForecastReader::from_parts(
-        ts_type, initial, resolution, interval, count, entries,
+        reported, initial, resolution, interval, count, entries,
     ))
 }
 
@@ -951,5 +1034,72 @@ mod tests {
                 .forecast_read(&mut reader, t0() + Duration::hours(3))
                 .is_err()
         );
+    }
+
+    /// A Deterministic reader is abstract: it includes DeterministicSingleTime-
+    /// Series, read into windows byte-identical to a real Deterministic with the
+    /// same windows. DST window k is the contiguous underlying slice
+    /// `[k·interval_steps .. +H]`. Cross-checked disk vs memory.
+    #[test]
+    fn deterministic_reader_includes_dst_identically() {
+        // Underlying SingleTimeSeries: total_len 6, resolution 1h.
+        let sts = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
+        // Real Deterministic whose windows match the DST: value[s, k] = sts[k+s].
+        // Shape [H=2, count=5], row-major [s, k].
+        let det = [
+            10.0, 11.0, 12.0, 13.0, 14.0, // s=0
+            11.0, 12.0, 13.0, 14.0, 15.0, // s=1
+        ];
+        let populate = |store: &mut Store| {
+            add_f64(store, 1, "load", &sts);
+            add_det(store, 2, "gen", 2, 5, vec![], &det);
+            // Derive a DST view for owner 1 from its SingleTimeSeries.
+            store
+                .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+                .unwrap();
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.nc");
+        let mut disk = Store::create(Some(&path), false).unwrap();
+        populate(&mut disk);
+        let mut mem = Store::create(None, true).unwrap();
+        populate(&mut mem);
+
+        let mut rd = disk.build_forecast_reader(forecast_filter()).unwrap();
+        let mut rm = mem.build_forecast_reader(forecast_filter()).unwrap();
+
+        // DST (owner 1) + Deterministic (owner 2); the SingleTimeSeries is excluded.
+        assert_eq!(rd.entries().len(), 2);
+        assert_eq!(rd.count(), 5);
+        assert_eq!(
+            rd.entries()[0].key().time_series_type(),
+            TimeSeriesType::DeterministicSingleTimeSeries
+        );
+        assert_eq!(
+            rd.entries()[1].key().time_series_type(),
+            TimeSeriesType::Deterministic
+        );
+
+        for k in 0..5u32 {
+            let at = t0() + Duration::hours(k as i64);
+            disk.forecast_read(&mut rd, at).unwrap();
+            mem.forecast_read(&mut rm, at).unwrap();
+            let dst = &rd.entries()[0];
+            let det_entry = &rd.entries()[1];
+            // DST read identically to Deterministic: same shape and bytes.
+            assert_eq!(dst.window_shape(), &[2]);
+            assert_eq!(dst.window_shape(), det_entry.window_shape());
+            assert_eq!(
+                dst.window(),
+                det_entry.window(),
+                "DST != Deterministic at window {k}"
+            );
+            // Concrete expectation: window k = [sts[k], sts[k+1]].
+            assert_eq!(f64_window(dst), vec![sts[k as usize], sts[k as usize + 1]]);
+            // NetCDF (packed underlying hyperslab) == in-memory default.
+            assert_eq!(dst.window(), rm.entries()[0].window());
+            assert_eq!(det_entry.window(), rm.entries()[1].window());
+        }
     }
 }

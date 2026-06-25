@@ -182,6 +182,24 @@ pub trait StorageBackend: Send + Sync {
         write_window(&arr, count_axis, window_index, out)
     }
 
+    /// Read `len` consecutive time steps along axis 0 starting at `start`,
+    /// filling `out` (cleared first) with their row-major, little-endian bytes.
+    /// Backs `DeterministicSingleTimeSeries` window reads, which gather a
+    /// contiguous run from the packed underlying `SingleTimeSeries`; on the
+    /// NetCDF backend [`Self::get_slice`] is already a single packed hyperslab.
+    fn read_range_into(
+        &self,
+        hash: &[u8; 32],
+        start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let slice = self.get_slice(hash, start..start + len)?;
+        out.clear();
+        out.extend_from_slice(&slice.bytes);
+        Ok(())
+    }
+
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
 
