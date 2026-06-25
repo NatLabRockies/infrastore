@@ -726,23 +726,34 @@ end
 function get_time_series(store::Store, key::TimeSeriesKey)
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Int64}(0)
-    out_data = Ref{Ptr{Float64}}(C_NULL)
-    out_len = Ref{UInt64}(0)
+    out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
+    out_shape_len = Ref{UInt64}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_data_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_single, lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Ptr{Float64}}, Ref{UInt64}),
-        store.handle, key.handle, out_initial, out_resolution, out_data, out_len,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int32},
+         Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64}),
+        store.handle, key.handle, out_initial, out_resolution, out_dtype,
+        out_shape, out_shape_len, out_data, out_data_len,
     )
     _check(code)
 
-    n = Int(out_len[])
-    # Copy into a Julia-managed array, then free the FFI buffer.
-    raw = unsafe_wrap(Array, out_data[], n; own=false)
-    data = copy(raw)
-    ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_data[], out_len[])
+    # Full array shape [length, *element_shape] (row-major dims), then bytes.
+    dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
+    ccall((:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64), out_shape[], out_shape_len[])
+    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_data_len[])
+
+    T = _julia_dtype(out_dtype[])
+    flat = collect(reinterpret(T, bytes))
+    nd = length(dims)
+    # Stored row-major → canonical column-major Julia layout (see get_array_nd).
+    data = nd <= 1 ? flat :
+           permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
 
     initial = _from_unix_ms(out_initial[])
-    # resolution_ms is integer milliseconds.
     resolution = Millisecond(out_resolution[])
     assoc = _get_association(store, key)
     return SingleTimeSeries(initial, resolution, data, assoc.name)

@@ -609,24 +609,32 @@ pub unsafe extern "C" fn ts_store_add_non_sequential(
 
 // ---- get_single -----------------------------------------------------------
 
-/// Fetch a SingleTimeSeries by key.
+/// Fetch a SingleTimeSeries by key in its native dtype and shape.
 ///
-/// On success, the caller owns the buffer pointed to by `*out_data` and must
-/// free it with `ts_buffer_free_f64(*out_data, *out_data_len)`.
+/// `out_dtype` receives the element dtype code (see [`ts_type_from_int`]'s dtype
+/// siblings: f64=0, f32=1, i64=2, i32=3, u64=4, bool=5). `out_shape` /
+/// `out_shape_len` return the full array shape `[length, *element_shape]` (the
+/// first dim is time); `out_data` / `out_data_byte_len` return the raw
+/// little-endian element bytes. The caller owns both buffers and must free
+/// `*out_shape` with `ts_buffer_free_i64` and `*out_data` with
+/// `ts_buffer_free_u8`, each using its returned length.
 ///
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library. Every output pointer must be
-/// valid for writing its indicated value. The returned data buffer must be released exactly once
-/// with `ts_buffer_free_f64` using the returned length.
+/// valid for writing its indicated value. The returned shape and data buffers must each be released
+/// exactly once with the matching free function and returned length.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_get_single(
     handle: *const TsStoreHandle,
     key: *const TsKeyHandle,
     out_initial_ts_unix_ms: *mut i64,
     out_resolution_ms: *mut i64,
-    out_data: *mut *mut f64,
-    out_data_len: *mut u64,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -645,8 +653,11 @@ pub unsafe extern "C" fn ts_store_get_single(
     };
     if out_initial_ts_unix_ms.is_null()
         || out_resolution_ms.is_null()
+        || out_dtype.is_null()
+        || out_shape.is_null()
+        || out_shape_len.is_null()
         || out_data.is_null()
-        || out_data_len.is_null()
+        || out_data_byte_len.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
@@ -677,15 +688,25 @@ pub unsafe extern "C" fn ts_store_get_single(
         }
     };
     let resolution_ms = single.resolution.num_milliseconds();
-    let mut buf: Vec<f64> = single.data.to_f64_vec().unwrap_or_default();
-    let len = buf.len() as u64;
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
+    let dtype = single.data.dtype;
+    // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
+    let mut shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
+    let shape_len = shape.len() as u64;
+    let shape_ptr = shape.as_mut_ptr();
+    std::mem::forget(shape);
+    // Native little-endian element bytes, returned as an owned u8 buffer.
+    let mut bytes = single.data.bytes;
+    let data_len = bytes.len() as u64;
+    let data_ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
     unsafe {
         *out_initial_ts_unix_ms = initial_ms;
         *out_resolution_ms = resolution_ms;
-        *out_data = ptr;
-        *out_data_len = len;
+        *out_dtype = dtype.code();
+        *out_shape = shape_ptr;
+        *out_shape_len = shape_len;
+        *out_data = data_ptr;
+        *out_data_byte_len = data_len;
     }
     TS_OK
 }
@@ -5111,5 +5132,78 @@ mod reader_ffi_tests {
         assert_eq!(vals, &[10.0, 11.0]);
 
         unsafe { ts_forecast_reader_free(reader) };
+    }
+
+    #[test]
+    fn get_single_returns_native_dtype_and_shape() {
+        use core_lib::Dtype;
+        use std::ffi::CString;
+
+        let mut store = Store::create(None, true).unwrap();
+        // Int64 with a 2-element shape: stored array shape [3, 2].
+        let mut bytes = Vec::new();
+        for v in [10i64, 11, 20, 21, 30, 31] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let data = TypedArray::new(Dtype::I64, vec![3, 2], bytes).unwrap();
+        let ts = SingleTimeSeries::new(t0(), ChronoDuration::hours(1), data, "im");
+        store
+            .add_time_series(
+                5,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(ts),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+        let handle = TsStoreHandle { inner: store };
+
+        let name = CString::new("im").unwrap();
+        let mut key: *mut TsKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                ts_make_key_from_attrs(5, 0, name.as_ptr(), 0, HOUR_MS, ptr::null(), &mut key)
+            },
+            TS_OK
+        );
+
+        let (mut initial, mut res, mut dtype) = (0i64, 0i64, -1i32);
+        let mut shape_ptr: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        assert_eq!(
+            unsafe {
+                ts_store_get_single(
+                    &handle,
+                    key,
+                    &mut initial,
+                    &mut res,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            TS_OK
+        );
+        assert_eq!(dtype, 2); // I64
+        assert_eq!(
+            unsafe { slice::from_raw_parts(shape_ptr, shape_len as usize) },
+            &[3, 2]
+        );
+        let vals: Vec<i64> = unsafe { slice::from_raw_parts(data_ptr, data_len as usize) }
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(vals, vec![10, 11, 20, 21, 30, 31]);
+
+        unsafe {
+            ts_buffer_free_i64(shape_ptr, shape_len);
+            ts_buffer_free_u8(data_ptr, data_len);
+            ts_key_free(key);
+        }
     }
 }

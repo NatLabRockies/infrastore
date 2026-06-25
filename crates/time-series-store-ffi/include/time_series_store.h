@@ -190,23 +190,31 @@ int32_t ts_store_add_non_sequential(struct TsStore *handle,
                                     struct TsKey **out_key);
 
 /**
- * Fetch a SingleTimeSeries by key.
+ * Fetch a SingleTimeSeries by key in its native dtype and shape.
  *
- * On success, the caller owns the buffer pointed to by `*out_data` and must
- * free it with `ts_buffer_free_f64(*out_data, *out_data_len)`.
+ * `out_dtype` receives the element dtype code (see [`ts_type_from_int`]'s dtype
+ * siblings: f64=0, f32=1, i64=2, i32=3, u64=4, bool=5). `out_shape` /
+ * `out_shape_len` return the full array shape `[length, *element_shape]` (the
+ * first dim is time); `out_data` / `out_data_byte_len` return the raw
+ * little-endian element bytes. The caller owns both buffers and must free
+ * `*out_shape` with `ts_buffer_free_i64` and `*out_data` with
+ * `ts_buffer_free_u8`, each using its returned length.
  *
  * # Safety
  *
  * `handle` and `key` must be live handles created by this library. Every output pointer must be
- * valid for writing its indicated value. The returned data buffer must be released exactly once
- * with `ts_buffer_free_f64` using the returned length.
+ * valid for writing its indicated value. The returned shape and data buffers must each be released
+ * exactly once with the matching free function and returned length.
  */
 int32_t ts_store_get_single(const struct TsStore *handle,
                             const struct TsKey *key,
                             int64_t *out_initial_ts_unix_ms,
                             int64_t *out_resolution_ms,
-                            double **out_data,
-                            uint64_t *out_data_len);
+                            int32_t *out_dtype,
+                            int64_t **out_shape,
+                            uint64_t *out_shape_len,
+                            uint8_t **out_data,
+                            uint64_t *out_data_byte_len);
 
 /**
  * Fetch a NonSequentialTimeSeries by key.

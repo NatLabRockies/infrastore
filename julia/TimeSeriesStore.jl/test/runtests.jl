@@ -921,18 +921,19 @@ end
     res = Hour(1)
 
     # Static with a 2-D element shape (2, 3): data shape (time=4, 2, 3). The
-    # reader reshapes each timestep's element block back to (2, 3); compare to
-    # the array as stored. (The 2-arg get_time_series returns multi-dim static
-    # data flat, so the stored array is the oracle here.)
+    # reader reshapes each timestep's element block back to (2, 3); cross-check
+    # against get_time_series (which also reshapes dtype/shape-correctly).
     sdata = Float64[t * 100 + a * 10 + b for t in 1:4, a in 1:2, b in 1:3]
-    add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, sdata, "v"))
+    skey = add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, sdata, "v"))
+    full = get_time_series(store, skey)
+    @test full.data == sdata
     r = build_static_reader(store; resolution=res)
     @test static_groups(r)[1].element_shape == [2, 3]
     for i in 0:3
         static_read!(r, t0 + Hour(i))
         vals = static_values(r, 1)                    # (ncols=1, 2, 3)
         @test size(vals) == (1, 2, 3)
-        @test vals[1, :, :] == sdata[i + 1, :, :]     # reader reshape == stored
+        @test vals[1, :, :] == full.data[i + 1, :, :] # reader reshape == get_time_series
     end
 
     # Probabilistic window reshape (P, H) — count axis (2) removed.
@@ -951,4 +952,44 @@ end
         @test size(w) == (P, H)
         @test w == full_p.data[:, :, k + 1]
     end
+end
+
+@testset "get_time_series(store, key) preserves dtype and shape" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2033, 1, 1)
+    res = Hour(1)
+
+    # Non-Float64 dtype is preserved (previously forced to Float64).
+    k_i = add_time_series!(store, 1, "Gen", Component,
+                           SingleTimeSeries(t0, res, Int64[10, 20, 30], "i"))
+    si = get_time_series(store, k_i)
+    @test eltype(si.data) == Int64
+    @test si.data == Int64[10, 20, 30]
+
+    k_f = add_time_series!(store, 2, "Gen", Component,
+                           SingleTimeSeries(t0, res, Float32[1.5, 2.5, 3.5], "f"))
+    sf = get_time_series(store, k_f)
+    @test eltype(sf.data) == Float32
+    @test sf.data == Float32[1.5, 2.5, 3.5]
+
+    k_b = add_time_series!(store, 3, "Gen", Component,
+                           SingleTimeSeries(t0, res, Bool[true, false, true, false], "b"))
+    sb = get_time_series(store, k_b)
+    @test eltype(sb.data) == Bool
+    @test sb.data == Bool[true, false, true, false]
+
+    # Multi-dimensional element shape is reshaped (previously flattened).
+    A = Float64[t * 100 + a * 10 + b for t in 1:4, a in 1:2, b in 1:3]  # (4, 2, 3)
+    k_m = add_time_series!(store, 4, "Gen", Component, SingleTimeSeries(t0, res, A, "m"))
+    sm = get_time_series(store, k_m)
+    @test size(sm.data) == (4, 2, 3)
+    @test sm.data == A
+
+    # Int64 multi-dim: both dtype and shape preserved together.
+    B = Int64[t * 10 + e for t in 1:3, e in 1:2]  # (3, 2)
+    k_im = add_time_series!(store, 5, "Gen", Component, SingleTimeSeries(t0, res, B, "im"))
+    sim = get_time_series(store, k_im)
+    @test eltype(sim.data) == Int64
+    @test size(sim.data) == (3, 2)
+    @test sim.data == B
 end
