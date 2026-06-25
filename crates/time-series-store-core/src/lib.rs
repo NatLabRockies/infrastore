@@ -13,7 +13,7 @@ pub mod version;
 
 pub use error::{Result, TimeSeriesError};
 pub use metadata::{ForecastSummaryRow, StaticSummaryRow};
-pub use reader::{StaticGroup, StaticReader};
+pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,

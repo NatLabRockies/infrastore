@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use crate::error::{Result, TimeSeriesError};
-use crate::types::array::TypedArray;
+use crate::types::array::{Dtype, TypedArray};
 
 pub mod memory;
 pub mod netcdf;
@@ -155,6 +155,33 @@ pub trait StorageBackend: Send + Sync {
         Ok(())
     }
 
+    /// The stored `(dtype, shape)` of an array, ideally without reading its data.
+    /// Used by the forecast reader to plan window slicing. The default reads the
+    /// whole array; the NetCDF backend overrides it to inspect dimensions only.
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+        let arr = self.get_array(hash)?;
+        Ok((arr.dtype, arr.shape))
+    }
+
+    /// Read a single forecast window: the `window_index` slice along `count_axis`
+    /// of a standalone array, with that axis removed. `out` is cleared then
+    /// filled with the window's row-major, little-endian bytes. Reusing the
+    /// caller's buffer keeps a per-timestamp forecast loop allocation-free.
+    ///
+    /// The default materializes the whole array and copies out one window; the
+    /// NetCDF backend overrides this to read just the window with a hyperslab.
+    fn read_window_into(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        window_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let arr = self.get_array(hash)?;
+        out.clear();
+        write_window(&arr, count_axis, window_index, out)
+    }
+
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
 
@@ -176,4 +203,32 @@ pub trait StorageBackend: Send + Sync {
     fn compression(&self) -> Compression {
         Compression::None
     }
+}
+
+/// Append the bytes of one window — the slice at `w` along `count_axis`, with
+/// that axis removed — to `out`. The size-1 axis contributes nothing to the
+/// row-major layout, so the gathered bytes are exactly the window in order.
+/// Shared by the default [`StorageBackend::read_window_into`].
+fn write_window(arr: &TypedArray, count_axis: usize, w: usize, out: &mut Vec<u8>) -> Result<()> {
+    if count_axis >= arr.shape.len() {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "count axis {count_axis} out of bounds for shape {:?}",
+            arr.shape
+        )));
+    }
+    let axis_len = arr.shape[count_axis];
+    if w >= axis_len {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "window index {w} out of bounds for axis length {axis_len}"
+        )));
+    }
+    let outer: usize = arr.shape[..count_axis].iter().product();
+    let inner_bytes: usize =
+        arr.shape[count_axis + 1..].iter().product::<usize>() * arr.dtype.size();
+    out.reserve(outer * inner_bytes);
+    for o in 0..outer {
+        let start = (o * axis_len + w) * inner_bytes;
+        out.extend_from_slice(&arr.bytes[start..start + inner_bytes]);
+    }
+    Ok(())
 }

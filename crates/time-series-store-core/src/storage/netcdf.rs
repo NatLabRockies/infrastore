@@ -799,6 +799,89 @@ impl Inner {
         }
         Ok(())
     }
+
+    /// The stored `(dtype, shape)` of an array without reading its data.
+    fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
+        match loc {
+            Location::Standalone { var } => self.with_single(|single| {
+                let v = single.variable(&var).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {var}"))
+                })?;
+                let shape: Vec<usize> = v.dimensions().iter().map(|d| d.len()).collect();
+                Ok((dtype_of_variable(&v)?, shape))
+            }),
+            Location::Packed { dataset, .. } => {
+                let state = self.datasets.get(&dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                })?;
+                let mut shape = vec![state.length];
+                shape.extend_from_slice(&state.element_shape);
+                Ok((state.dtype, shape))
+            }
+        }
+    }
+
+    /// Read one forecast window with a single hyperslab: the standalone array's
+    /// slice at `window_index` along `count_axis`. The selected axis is size 1 in
+    /// the read, contributing nothing to the row-major byte layout, so the result
+    /// is exactly the window (axis removed). Appends to `out` (cleared first).
+    fn read_window_locked(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        window_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        out.clear();
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
+        match loc {
+            Location::Standalone { var } => self.with_single(|single| {
+                let v = single.variable(&var).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {var}"))
+                })?;
+                let dims: Vec<usize> = v.dimensions().iter().map(|d| d.len()).collect();
+                if count_axis >= dims.len() {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "count axis {count_axis} out of bounds for shape {dims:?}"
+                    )));
+                }
+                if window_index >= dims[count_axis] {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "window index {window_index} out of bounds for axis length {}",
+                        dims[count_axis]
+                    )));
+                }
+                let dtype = dtype_of_variable(&v)?;
+                let ranges: Vec<Range<usize>> = dims
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &len)| {
+                        if i == count_axis {
+                            window_index..window_index + 1
+                        } else {
+                            0..len
+                        }
+                    })
+                    .collect();
+                let extents: Extents = ranges.as_slice().into();
+                let bytes = get_typed(&v, dtype, extents)?;
+                out.extend_from_slice(&bytes);
+                Ok(())
+            }),
+            Location::Packed { .. } => Err(TimeSeriesError::IntegrityError(
+                "forecast window read expects a standalone array, found a packed one".into(),
+            )),
+        }
+    }
 }
 
 /// Map a NetCDF variable's element type back to a [`Dtype`].
@@ -856,6 +939,23 @@ impl StorageBackend for NetCdfBackend {
     fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_index_locked(hashes, index, out)
+    }
+
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.array_shape_locked(hash)
+    }
+
+    #[tracing::instrument(skip(self, hash, out), fields(count_axis, window_index))]
+    fn read_window_into(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        window_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_window_locked(hash, count_axis, window_index, out)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {

@@ -7,7 +7,7 @@ use chrono::Duration;
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
-use crate::reader::StaticReader;
+use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
@@ -857,6 +857,69 @@ impl Store {
         let index = reader.index_at(at)?;
         for group in reader.groups_mut() {
             group.fill(|hashes, out| self.backend.read_index_into(hashes, index, out))?;
+        }
+        reader.mark_read(at);
+        Ok(())
+    }
+
+    /// Build a [`ForecastReader`] over the dense forecasts matching `filter`.
+    ///
+    /// The filter must name one dense forecast type (`Deterministic`,
+    /// `Probabilistic`, or `Scenarios`) and pin a resolution. All matched
+    /// forecasts must share one window timeline (`initial_timestamp` +
+    /// `interval` + `count`); this is validated here and errors on divergence.
+    /// Drive the reader with [`Self::forecast_read`]. See [`crate::reader`].
+    pub fn build_forecast_reader(&self, mut filter: ListFilter) -> Result<ForecastReader> {
+        let ts_type = match filter.time_series_type {
+            Some(
+                t @ (TimeSeriesType::Deterministic
+                | TimeSeriesType::Probabilistic
+                | TimeSeriesType::Scenarios),
+            ) => t,
+            Some(other) => {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "build_forecast_reader handles dense forecast types \
+                     (Deterministic/Probabilistic/Scenarios); got {}",
+                    other.as_str()
+                )));
+            }
+            None => {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "build_forecast_reader requires a forecast time_series_type in the filter"
+                        .into(),
+                ));
+            }
+        };
+        if filter.resolution.is_none() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "build_forecast_reader requires a resolution filter (one resolution per reader)"
+                    .into(),
+            ));
+        }
+        filter.time_series_type = Some(ts_type);
+        let rows = self.list_time_series(filter)?;
+        let mut items = Vec::with_capacity(rows.len());
+        for m in rows {
+            let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
+            items.push((m, shape));
+        }
+        crate::reader::build_forecast_entries(ts_type, items)
+    }
+
+    /// Read the forecast window at timestamp `at` for every forecast in `reader`,
+    /// filling the reader's reusable per-entry buffers in place. Afterwards walk
+    /// [`ForecastReader::entries`] for the window bytes. Errors (never clamps) if
+    /// `at` is off the reader's window timeline.
+    pub fn forecast_read(
+        &self,
+        reader: &mut ForecastReader,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let window = reader.window_index(at)?;
+        for entry in reader.entries_mut() {
+            entry.fill(|hash, count_axis, out| {
+                self.backend.read_window_into(hash, count_axis, window, out)
+            })?;
         }
         reader.mark_read(at);
         Ok(())

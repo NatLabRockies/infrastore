@@ -146,33 +146,52 @@ impl StaticReader {
     /// to the resolution, or past the end — the simulation contract is that it
     /// only ever reads valid grid points.
     pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize> {
-        let res_ms = self.resolution.num_milliseconds();
-        if res_ms <= 0 {
-            return Err(TimeSeriesError::IntegrityError(
-                "StaticReader resolution must be positive".into(),
-            ));
-        }
-        let delta = (at - self.initial_timestamp).num_milliseconds();
-        if delta < 0 {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "timestamp {at} is before the reader's initial timestamp {}",
-                self.initial_timestamp
-            )));
-        }
-        if delta % res_ms != 0 {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "timestamp {at} is not aligned to resolution {res_ms} ms"
-            )));
-        }
-        let idx = (delta / res_ms) as usize;
-        if idx >= self.length {
-            return Err(TimeSeriesError::InvalidParameter(format!(
-                "timestamp {at} (index {idx}) is past the grid length {}",
-                self.length
-            )));
-        }
-        Ok(idx)
+        index_on_grid(
+            self.initial_timestamp,
+            self.resolution,
+            self.length,
+            at,
+            "grid",
+        )
     }
+}
+
+/// Map `at` to a 0-based index on a regular grid `initial + k·step` for
+/// `k ∈ [0, len)`. Errors (never clamps) if `at` precedes `initial`, is not
+/// aligned to `step`, or lands at/after `len`. Shared by [`StaticReader`]
+/// (step = resolution, len = length) and [`ForecastReader`] (step = interval,
+/// len = window count). `what` names the grid in error messages.
+fn index_on_grid(
+    initial: DateTime<Utc>,
+    step: Duration,
+    len: usize,
+    at: DateTime<Utc>,
+    what: &str,
+) -> Result<usize> {
+    let step_ms = step.num_milliseconds();
+    if step_ms <= 0 {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "{what} step must be positive"
+        )));
+    }
+    let delta = (at - initial).num_milliseconds();
+    if delta < 0 {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} is before the {what} origin {initial}"
+        )));
+    }
+    if delta % step_ms != 0 {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} is not aligned to the {what} step ({step_ms} ms)"
+        )));
+    }
+    let idx = (delta / step_ms) as usize;
+    if idx >= len {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} (index {idx}) is past the {what} extent ({len})"
+        )));
+    }
+    Ok(idx)
 }
 
 /// Resolve a set of `SingleTimeSeries` metadata rows into the reader's master
@@ -264,6 +283,249 @@ impl StaticReader {
     }
 }
 
+// ---- ForecastReader -------------------------------------------------------
+
+/// A prepared reader returning the forecast window at one timestamp for every
+/// matching dense forecast of a single type. Build with
+/// [`Store::build_forecast_reader`], drive with [`Store::forecast_read`], then
+/// read results via [`Self::entries`].
+///
+/// Dense forecasts (`Deterministic` / `Probabilistic` / `Scenarios`) are stored
+/// as standalone, native-shape arrays, so unlike [`StaticReader`] the result is
+/// a **per-key window list**, not columnar batches. One reader covers exactly
+/// one forecast type; every entry shares the window timeline
+/// (`initial_timestamp`, `interval`, `count`), validated at build — the
+/// forecast analog of the static uniform-grid check.
+#[derive(Debug)]
+pub struct ForecastReader {
+    time_series_type: TimeSeriesType,
+    initial_timestamp: DateTime<Utc>,
+    resolution: Duration,
+    interval: Duration,
+    count: usize,
+    entries: Vec<ForecastEntry>,
+    last_read: Option<DateTime<Utc>>,
+}
+
+/// One forecast's window slot. After a read, [`Self::window`] holds the
+/// row-major, little-endian bytes of a single window and [`Self::window_shape`]
+/// its shape — the stored shape with the window/count axis removed: `[H, *E]`
+/// (Deterministic), `[P, H, *E]` (Probabilistic), `[scenarios, H, *E]`
+/// (Scenarios).
+#[derive(Debug)]
+pub struct ForecastEntry {
+    key: TimeSeriesKey,
+    hash: [u8; 32],
+    dtype: Dtype,
+    /// Shape of a single window (the stored shape with `count_axis` removed).
+    window_shape: Vec<usize>,
+    /// Index of the window/count axis in the full stored array.
+    count_axis: usize,
+    /// Reused output buffer: `product(window_shape) * dtype.size()` bytes.
+    buf: Vec<u8>,
+    filled: bool,
+}
+
+impl ForecastEntry {
+    pub fn key(&self) -> &TimeSeriesKey {
+        &self.key
+    }
+
+    pub fn dtype(&self) -> Dtype {
+        self.dtype
+    }
+
+    pub fn window_shape(&self) -> &[usize] {
+        &self.window_shape
+    }
+
+    /// Raw window bytes from the most recent read. Empty until
+    /// [`Store::forecast_read`] has run at least once.
+    pub fn window(&self) -> &[u8] {
+        if self.filled { &self.buf } else { &[] }
+    }
+
+    /// Drive a backend window read into this entry's reusable buffer. The closure
+    /// receives the array hash, the count axis, and the buffer to fill.
+    pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
+    where
+        F: FnOnce(&[u8; 32], usize, &mut Vec<u8>) -> Result<()>,
+    {
+        read(&self.hash, self.count_axis, &mut self.buf)?;
+        self.filled = true;
+        Ok(())
+    }
+}
+
+impl ForecastReader {
+    pub fn time_series_type(&self) -> TimeSeriesType {
+        self.time_series_type
+    }
+
+    pub fn initial_timestamp(&self) -> DateTime<Utc> {
+        self.initial_timestamp
+    }
+
+    pub fn resolution(&self) -> Duration {
+        self.resolution
+    }
+
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// Number of windows on the forecast timeline (`[0, count)`).
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn entries(&self) -> &[ForecastEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn entries_mut(&mut self) -> &mut [ForecastEntry] {
+        &mut self.entries
+    }
+
+    pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
+        self.last_read = Some(at);
+    }
+
+    /// Window index for `at` on the forecast timeline (`initial + k·interval`).
+    /// Hard error (never clamps) if off-grid.
+    pub fn window_index(&self, at: DateTime<Utc>) -> Result<usize> {
+        index_on_grid(
+            self.initial_timestamp,
+            self.interval,
+            self.count,
+            at,
+            "forecast window",
+        )
+    }
+
+    pub(crate) fn from_parts(
+        time_series_type: TimeSeriesType,
+        initial_timestamp: DateTime<Utc>,
+        resolution: Duration,
+        interval: Duration,
+        count: usize,
+        entries: Vec<ForecastEntry>,
+    ) -> Self {
+        Self {
+            time_series_type,
+            initial_timestamp,
+            resolution,
+            interval,
+            count,
+            entries,
+            last_read: None,
+        }
+    }
+}
+
+/// The window/count axis position in the stored array of a dense forecast type:
+/// `[H, count, *E]` (Deterministic, axis 1), `[P, H, count, *E]` (Probabilistic,
+/// axis 2), `[scenarios, H, count, *E]` (Scenarios, axis 2).
+fn forecast_count_axis(ts: TimeSeriesType) -> Result<usize> {
+    Ok(match ts {
+        TimeSeriesType::Deterministic => 1,
+        TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => 2,
+        other => {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "ForecastReader handles dense forecast types only; got {}",
+                other.as_str()
+            )));
+        }
+    })
+}
+
+/// `(initial_timestamp, resolution, interval, count)` of a forecast row.
+fn forecast_timeline(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Duration, Duration, usize)> {
+    let missing = |f: &str| {
+        TimeSeriesError::IntegrityError(format!("{} missing {f}", m.time_series_type.as_str()))
+    };
+    Ok((
+        m.initial_timestamp
+            .ok_or_else(|| missing("initial_timestamp"))?,
+        m.resolution.ok_or_else(|| missing("resolution"))?,
+        m.interval.ok_or_else(|| missing("interval"))?,
+        m.count.ok_or_else(|| missing("count"))?,
+    ))
+}
+
+/// Resolve forecast metadata rows (paired with their stored array shapes) into
+/// a [`ForecastReader`]. Pure (no I/O). Validates a uniform window timeline
+/// across all rows, mirroring [`build_groups`] for static.
+pub(crate) fn build_forecast_entries(
+    ts_type: TimeSeriesType,
+    mut items: Vec<(TimeSeriesMetadata, Vec<usize>)>,
+) -> Result<ForecastReader> {
+    if items.is_empty() {
+        return Err(TimeSeriesError::InvalidParameter(
+            "build_forecast_reader: no forecasts match the filter".into(),
+        ));
+    }
+    let count_axis = forecast_count_axis(ts_type)?;
+
+    // Deterministic entry order, by key identity.
+    items.sort_by(|a, b| identity_sort_key(&a.0).cmp(&identity_sort_key(&b.0)));
+
+    let timeline = forecast_timeline(&items[0].0)?;
+    let mut entries = Vec::with_capacity(items.len());
+    for (m, shape) in items {
+        if m.time_series_type != ts_type {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "ForecastReader expected {}, found {} for '{}'",
+                ts_type.as_str(),
+                m.time_series_type.as_str(),
+                m.name
+            )));
+        }
+        let tl = forecast_timeline(&m)?;
+        if tl != timeline {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "ForecastReader requires a uniform window timeline; forecast '{}' (owner {}) \
+                 has timeline {:?} but the reader timeline is {:?}",
+                m.name, m.owner_id, tl, timeline
+            )));
+        }
+        if count_axis >= shape.len() {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "forecast '{}' stored shape {:?} has no count axis {count_axis}",
+                m.name, shape
+            )));
+        }
+        if shape[count_axis] != timeline.3 {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "forecast '{}' window count {} disagrees with stored axis length {}",
+                m.name, timeline.3, shape[count_axis]
+            )));
+        }
+        let window_shape: Vec<usize> = shape
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &d)| (i != count_axis).then_some(d))
+            .collect();
+        let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
+        let mut buf = vec![0u8; bytes];
+        buf.clear();
+        entries.push(ForecastEntry {
+            key: TimeSeriesKey::from_metadata(&m)?,
+            hash: m.data_hash,
+            dtype: m.dtype,
+            window_shape,
+            count_axis,
+            buf,
+            filled: false,
+        });
+    }
+
+    let (initial, resolution, interval, count) = timeline;
+    Ok(ForecastReader::from_parts(
+        ts_type, initial, resolution, interval, count, entries,
+    ))
+}
+
 /// `(initial_timestamp, resolution, length)` of a `SingleTimeSeries` row, or an
 /// error if a required field is missing or the row is not a `SingleTimeSeries`.
 fn grid_of(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Duration, usize)> {
@@ -297,7 +559,7 @@ mod tests {
     use crate::store::{ListFilter, Store};
     use crate::types::array::{Dtype, TypedArray};
     use crate::types::metadata::OwnerCategory;
-    use crate::types::time_series::{SingleTimeSeries, TimeSeriesData};
+    use crate::types::time_series::{Deterministic, SingleTimeSeries, TimeSeriesData};
 
     use super::*;
 
@@ -531,5 +793,163 @@ mod tests {
         assert_eq!(g.keys()[1].owner_id(), 4);
         // col 0 @ idx 2 -> 12.0; col 3 @ idx 2 -> 42.0.
         assert_eq!(f64_cols(g), vec![12.0, 42.0]);
+    }
+
+    // ---- ForecastReader ---------------------------------------------------
+
+    fn f64_window(e: &ForecastEntry) -> Vec<f64> {
+        e.window()
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    /// Add a dense `Deterministic` forecast: resolution 1h, horizon = `h` hours,
+    /// interval 1h, `count` windows. `vals` is the row-major `[h, count, *E]`
+    /// array.
+    fn add_det(
+        store: &mut Store,
+        owner_id: i64,
+        name: &str,
+        h: usize,
+        count: usize,
+        element_shape: Vec<usize>,
+        vals: &[f64],
+    ) {
+        let mut shape = vec![h, count];
+        shape.extend_from_slice(&element_shape);
+        let data = TypedArray::from_f64(shape, vals);
+        let det = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(h as i64),
+            Duration::hours(1),
+            count,
+            data,
+            name,
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                owner_id,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(det),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+    }
+
+    fn forecast_filter() -> ListFilter {
+        ListFilter::new()
+            .time_series_type(TimeSeriesType::Deterministic)
+            .resolution(Duration::hours(1))
+    }
+
+    /// On-disk forecast reader (drives the NetCDF hyperslab window read) cross-
+    /// checked byte-for-byte against the in-memory default, plus concrete value
+    /// assertions including a multi-dimensional per-step shape.
+    #[test]
+    fn forecast_reader_reads_windows() {
+        // Scalar forecast: H=2, count=3. Row-major [s, k]; value = k*10 + s.
+        let scalar = [0.0, 10.0, 20.0, 1.0, 11.0, 21.0];
+        // Shaped forecast: H=2, count=3, E=[2]. Row-major [s, k, e].
+        let shaped = [
+            100.0, 101.0, 110.0, 111.0, 120.0, 121.0, // s=0
+            200.0, 201.0, 210.0, 211.0, 220.0, 221.0, // s=1
+        ];
+        let populate = |store: &mut Store| {
+            add_det(store, 1, "gen", 2, 3, vec![], &scalar);
+            add_det(store, 2, "gen", 2, 3, vec![2], &shaped);
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.nc");
+        let mut disk = Store::create(Some(&path), false).unwrap();
+        populate(&mut disk);
+        let mut mem = Store::create(None, true).unwrap();
+        populate(&mut mem);
+
+        let mut rd = disk.build_forecast_reader(forecast_filter()).unwrap();
+        let mut rm = mem.build_forecast_reader(forecast_filter()).unwrap();
+        assert_eq!(rd.entries().len(), 2);
+        assert_eq!(rd.count(), 3);
+        assert_eq!(rd.time_series_type(), TimeSeriesType::Deterministic);
+
+        for k in 0..3u32 {
+            let at = t0() + Duration::hours(k as i64);
+            disk.forecast_read(&mut rd, at).unwrap();
+            mem.forecast_read(&mut rm, at).unwrap();
+            for (ed, em) in rd.entries().iter().zip(rm.entries()) {
+                assert_eq!(ed.key(), em.key());
+                assert_eq!(ed.window_shape(), em.window_shape());
+                assert_eq!(ed.window(), em.window(), "mismatch at window {k}");
+            }
+        }
+
+        // Window at index 1 (t0 + 1h) on the on-disk (override) reader.
+        disk.forecast_read(&mut rd, t0() + Duration::hours(1))
+            .unwrap();
+        // Entry 0: scalar, owner 1 -> window k=1 = [value(1,0), value(1,1)] = [10, 11].
+        let e0 = &rd.entries()[0];
+        assert_eq!(e0.key().owner_id(), 1);
+        assert_eq!(e0.window_shape(), &[2]); // [H]
+        assert_eq!(f64_window(e0), vec![10.0, 11.0]);
+        // Entry 1: shaped, owner 2 -> window k=1, shape [H, E] = [2, 2].
+        let e1 = &rd.entries()[1];
+        assert_eq!(e1.key().owner_id(), 2);
+        assert_eq!(e1.window_shape(), &[2, 2]);
+        assert_eq!(f64_window(e1), vec![110.0, 111.0, 210.0, 211.0]);
+    }
+
+    #[test]
+    fn forecast_reader_build_validation() {
+        let mut store = Store::create(None, true).unwrap();
+        add_det(&mut store, 1, "gen", 2, 3, vec![], &[0.0; 6]);
+
+        // No forecast type in the filter.
+        assert!(
+            store
+                .build_forecast_reader(ListFilter::new().resolution(Duration::hours(1)))
+                .is_err()
+        );
+        // A static type is rejected.
+        assert!(
+            store
+                .build_forecast_reader(
+                    ListFilter::new()
+                        .time_series_type(TimeSeriesType::SingleTimeSeries)
+                        .resolution(Duration::hours(1)),
+                )
+                .is_err()
+        );
+        // Missing resolution.
+        assert!(
+            store
+                .build_forecast_reader(
+                    ListFilter::new().time_series_type(TimeSeriesType::Deterministic)
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn forecast_reader_off_grid_is_an_error() {
+        let mut store = Store::create(None, true).unwrap();
+        add_det(&mut store, 1, "gen", 2, 3, vec![], &[0.0; 6]);
+        let mut reader = store.build_forecast_reader(forecast_filter()).unwrap();
+        // Unaligned to the interval.
+        assert!(
+            store
+                .forecast_read(&mut reader, t0() + Duration::minutes(30))
+                .is_err()
+        );
+        // Past the last window (count 3 -> valid 0..=2).
+        assert!(
+            store
+                .forecast_read(&mut reader, t0() + Duration::hours(3))
+                .is_err()
+        );
     }
 }
