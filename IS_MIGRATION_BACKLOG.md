@@ -64,6 +64,34 @@ the table below into new core fns + FFI + Julia wrappers (they now have `Period`
 delete the corresponding Julia code. `get_resolutions` ordering is now lexical-by-ISO (mixed period
 kinds have no numeric total order) — callers must not assume numeric sort.
 
+**Done (2026-06-25): forecast window-slicing pushdown.** The bridge no longer fetches every forecast
+window and slices in Julia. `_rust_get_forecast` (`IS3.jl/src/rust_time_series_store.jl`) now
+computes a `time_range` from the matched key's `(initial_timestamp, interval, count)` and pushes it
+into `TSS.get_time_series(...; time_range=)`, so the core's `resolve_windows` slices server-side;
+the four branches then iterate `1:result.count`. `_forecast_window_range` is **replaced** by
+`_forecast_time_range` (returns the half-open `[start, end)` instead of `(start_idx, n)`). The
+bounds/alignment/over-request **validation stays Julia-side** on purpose: core `resolve_windows`
+silently truncates an over-request, so the explicit `ArgumentError` would otherwise be lost. No
+Rust/FFI/TSS.jl change (the `time_range` path already shipped end-to-end). Validated: IS3.jl
+time-series + cache testsets green (5176 pass, 0 fail/error, only the pre-existing
+irregular-interval `@test_broken`). Committed `0eab3ad5` on IS branch `feat/rust-time-series`.
+
+**Fail-invalid follow-up (DONE).** Per "always fail invalid requests": core `resolve_windows`
+(`store.rs`) now **errors** (`InvalidParameter`) when an aligned `start` is at/past the window count
+(`start_k >= count`) instead of returning an empty selection — so Python/gRPC/CLI fail-fast too, not
+just IS. A zero-width range (`end == start`) over an in-range start still legitimately returns
+empty. The count-based over-request check necessarily **stays in IS** (the core takes a timestamp
+`end`, not a count, and a loose upper-bound `end` past the data is valid interval semantics). Tests
+added: core `resolve_windows_tests`, Python `test_start_past_last_window_raises`.
+
+**Re-scoping note from that pass:** most of the table below is already in core via the `Period`
+methods (`steps_between` = `compute_periods_between`, `divide_into` = `get_horizon_count`,
+`to_iso8601`/`from_iso8601`, `is_irregular`) — porting them across the FFI would add per-call
+overhead for no correctness gain (Julia `Dates` is itself calendar-aware and now provably agrees).
+The rows that remain genuinely Julia-domain (`get_initial_times`, `get_window`, `get_total_period`)
+return Julia `StepRange`/`TimeArray` and are "poor candidates" by this file's own rule.
+`get_forecast_window_count` is ingest-path (Item 3).
+
 Introduce a period type in the core that can represent irregular periods, then migrate the
 timestamp/window-index math that depends on it.
 

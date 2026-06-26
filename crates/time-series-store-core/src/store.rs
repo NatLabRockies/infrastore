@@ -1510,7 +1510,11 @@ pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usi
 /// window (`initial_timestamp + k·interval`), `end` is exclusive. Returns
 /// `(w0, w1, first_window_initial_timestamp)`.
 ///
-/// On success, `w0 <= w1 <= count`. Empty selection returns `(0, 0, initial)`.
+/// On success, `w0 <= w1 <= count`. A `start` aligned to the grid but at or
+/// beyond `count` (i.e. past the last stored window) is rejected with
+/// [`TimeSeriesError::InvalidParameter`] rather than returning an empty
+/// selection. A zero-width range (`end == start`) over an in-range `start`
+/// legitimately selects nothing and returns `(0, 0, start)`.
 fn resolve_windows(
     initial: chrono::DateTime<chrono::Utc>,
     _resolution: Period,
@@ -1544,6 +1548,16 @@ fn resolve_windows(
                         .into(),
                 )
             })?;
+
+            // A start aligned to the grid but at or beyond the window count
+            // refers to windows that do not exist; reject it rather than
+            // silently returning an empty selection.
+            if start_k >= count {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "forecast start_time is past the last window (resolves to window \
+                     index {start_k}, but only {count} window(s) are stored)"
+                )));
+            }
 
             // Collect all k in [0, count) whose window start is in [start, end).
             let mut w0 = count; // sentinel: no window selected yet
@@ -1626,4 +1640,74 @@ fn validate_forecast_shape(arr: &TypedArray, expected_prefix: &[usize], label: &
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_windows_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+
+    // A forecast grid of 4 windows spaced 12h apart at hours 0, 12, 24, 36.
+    fn t(h: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(h)
+    }
+
+    fn rw(start_h: i64, end_h: i64) -> Result<(usize, usize, DateTime<Utc>)> {
+        let interval = Period::Fixed(Duration::hours(12));
+        let res = Period::Fixed(Duration::hours(1));
+        let horizon = Period::Fixed(Duration::hours(6));
+        resolve_windows(
+            t(0),
+            res,
+            horizon,
+            interval,
+            4,
+            Some((t(start_h), t(end_h))),
+        )
+    }
+
+    #[test]
+    fn full_and_partial_selection() {
+        let interval = Period::Fixed(Duration::hours(12));
+        let res = Period::Fixed(Duration::hours(1));
+        let horizon = Period::Fixed(Duration::hours(6));
+        // `None` selects every window.
+        assert_eq!(
+            resolve_windows(t(0), res, horizon, interval, 4, None).unwrap(),
+            (0, 4, t(0))
+        );
+        // Middle range [12h, 36h) -> windows 1 and 2.
+        assert_eq!(rw(12, 36).unwrap(), (1, 3, t(12)));
+        // The exact last window (index 3) is in range.
+        assert_eq!(rw(36, 48).unwrap(), (3, 4, t(36)));
+    }
+
+    #[test]
+    fn zero_width_in_range_is_empty() {
+        // An in-range start with `end == start` legitimately selects nothing.
+        assert_eq!(rw(12, 12).unwrap(), (0, 0, t(12)));
+    }
+
+    #[test]
+    fn start_past_last_window_errors() {
+        // Hour 48 resolves to window index 4, but only 4 windows (0..=3) exist.
+        assert!(matches!(
+            rw(48, 60),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+    }
+
+    #[test]
+    fn misaligned_or_reversed_errors() {
+        // 1h off the 12h window grid.
+        assert!(matches!(
+            rw(1, 24),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+        // end < start.
+        assert!(matches!(
+            rw(24, 12),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+    }
 }

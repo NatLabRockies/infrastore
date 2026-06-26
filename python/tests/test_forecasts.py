@@ -338,6 +338,22 @@ def test_end_before_start_raises():
         )
 
 
+def test_start_past_last_window_raises():
+    """A time_range whose aligned start is past the last window raises."""
+    store = TimeSeriesStore.create(in_memory=True)
+    H, C = 6, 4
+    data = np.zeros((H, C), dtype=np.float64)
+    key = store.add_time_series(
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_past"),
+    )
+
+    # Windows exist at indices 0..3; index C (one past the last) does not.
+    past_start = T0 + C * INTERVAL_12H
+    with pytest.raises(InvalidParameterError):
+        store.get_time_series(key, time_range=(past_start, past_start + INTERVAL_12H))
+
+
 def test_empty_window_range():
     """A time_range selecting zero windows returns count=0 array."""
     store = TimeSeriesStore.create(in_memory=True)
