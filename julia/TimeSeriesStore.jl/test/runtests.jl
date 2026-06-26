@@ -966,18 +966,21 @@ end
     si = get_time_series(store, k_i)
     @test eltype(si.data) == Int64
     @test si.data == Int64[10, 20, 30]
+    @test typeof(si) == SingleTimeSeries{Int64,1}
 
     k_f = add_time_series!(store, 2, "Gen", Component,
                            SingleTimeSeries(t0, res, Float32[1.5, 2.5, 3.5], "f"))
     sf = get_time_series(store, k_f)
     @test eltype(sf.data) == Float32
     @test sf.data == Float32[1.5, 2.5, 3.5]
+    @test typeof(sf) == SingleTimeSeries{Float32,1}
 
     k_b = add_time_series!(store, 3, "Gen", Component,
                            SingleTimeSeries(t0, res, Bool[true, false, true, false], "b"))
     sb = get_time_series(store, k_b)
     @test eltype(sb.data) == Bool
     @test sb.data == Bool[true, false, true, false]
+    @test typeof(sb) == SingleTimeSeries{Bool,1}
 
     # Multi-dimensional element shape is reshaped (previously flattened).
     A = Float64[t * 100 + a * 10 + b for t in 1:4, a in 1:2, b in 1:3]  # (4, 2, 3)
@@ -985,6 +988,7 @@ end
     sm = get_time_series(store, k_m)
     @test size(sm.data) == (4, 2, 3)
     @test sm.data == A
+    @test typeof(sm) == SingleTimeSeries{Float64,3}
 
     # Int64 multi-dim: both dtype and shape preserved together.
     B = Int64[t * 10 + e for t in 1:3, e in 1:2]  # (3, 2)
@@ -993,4 +997,30 @@ end
     @test eltype(sim.data) == Int64
     @test size(sim.data) == (3, 2)
     @test sim.data == B
+    @test typeof(sim) == SingleTimeSeries{Int64,2}
+end
+
+@testset "parametric constructors infer {T,N} and normalize views" begin
+    t0 = DateTime(2033, 1, 1)
+    res = Hour(1)
+
+    # Inference from the value array's eltype/ndims.
+    @test typeof(SingleTimeSeries(t0, res, Float64[1, 2, 3], "f")) == SingleTimeSeries{Float64,1}
+    @test typeof(SingleTimeSeries(t0, res, Int32[1 2; 3 4], "i")) == SingleTimeSeries{Int32,2}
+    @test typeof(NonSequentialTimeSeries([t0, t0 + res], Float32[1, 2], "n")) ==
+          NonSequentialTimeSeries{Float32}
+
+    # Views/ranges/reshapes normalize to a concrete Array{T,N}.
+    base = Float64[1, 2, 3, 4, 5, 6]
+    sts_view = SingleTimeSeries(t0, res, view(base, 1:3), "v")
+    @test sts_view.data isa Array{Float64,1}
+    @test sts_view.data == Float64[1, 2, 3]
+    sts_reshaped = SingleTimeSeries(t0, res, reshape(base, 2, 3), "r")
+    @test sts_reshaped.data isa Array{Float64,2}
+
+    # Forecast structs infer {T,N} too.
+    det = Deterministic(t0, res, Hour(2), Hour(1), 5, Float64[i + s for s in 0:1, i in 1:5], "d")
+    @test typeof(det) == Deterministic{Float64,2}
+    scen = Scenarios(t0, res, Hour(2), Hour(1), 5, Float32[v for v in 1:(3 * 2 * 5)] |> a -> reshape(a, 3, 2, 5), "s")
+    @test typeof(scen) == Scenarios{Float32,3}
 end

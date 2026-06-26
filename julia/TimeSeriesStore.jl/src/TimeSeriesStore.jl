@@ -166,40 +166,44 @@ _maybe_string(s::AbstractString) = String(s)
 
 # ---- Single time series ---------------------------------------------------
 
-struct SingleTimeSeries
+struct SingleTimeSeries{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time)."
-    data              :: AbstractArray
+    data              :: Array{T,N}
     "Association name (required; the same array may be stored under different names)."
     name              :: String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type      :: Union{Nothing,String}
 end
 
+# Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
+# `Array` (copy-free when already one).
 SingleTimeSeries(initial, resolution, data::AbstractArray, name::AbstractString;
                  logical_type::Union{Nothing,AbstractString}=nothing) =
-    SingleTimeSeries(initial, resolution, data, String(name),
-                     _maybe_string(logical_type))
+    SingleTimeSeries{eltype(data),ndims(data)}(
+        initial, resolution, data isa Array ? data : Array(data), String(name),
+        _maybe_string(logical_type))
 
 # ---- Non-sequential time series -------------------------------------------
 
-struct NonSequentialTimeSeries
+struct NonSequentialTimeSeries{T}
     timestamps  :: Vector{DateTime}
     "Values: a 1-D vector with one value per timestamp."
-    data        :: AbstractVector
+    data        :: Vector{T}
     "Association name (required)."
     name        :: String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type :: Union{Nothing,String}
 
-    function NonSequentialTimeSeries(timestamps, data, name::AbstractString;
+    function NonSequentialTimeSeries(timestamps, data::AbstractVector, name::AbstractString;
             logical_type::Union{Nothing,AbstractString}=nothing)
         length(timestamps) == length(data) ||
             throw(InvalidParameterError("timestamp count must match data length"))
         all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
             throw(InvalidParameterError("timestamps must be strictly increasing"))
-        new(Vector{DateTime}(timestamps), data, String(name),
+        arr = data isa Vector ? data : Vector(data)
+        new{eltype(arr)}(Vector{DateTime}(timestamps), arr, String(name),
             _maybe_string(logical_type))
     end
 end
@@ -226,14 +230,14 @@ the identity.
 """
 abstract type AbstractDeterministic end
 
-struct Deterministic <: AbstractDeterministic
+struct Deterministic{T,N} <: AbstractDeterministic
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
     interval          :: Period
     count             :: Int
     "Values with canonical shape `(H, count, element_dims...)`."
-    data              :: AbstractArray
+    data              :: Array{T,N}
     "Association name (required)."
     name              :: String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
@@ -243,10 +247,11 @@ end
 Deterministic(initial, resolution, horizon, interval, count, data::AbstractArray,
               name::AbstractString;
               logical_type::Union{Nothing,AbstractString}=nothing) =
-    Deterministic(initial, resolution, horizon, interval, Int(count), data, String(name),
-                  _maybe_string(logical_type))
+    Deterministic{eltype(data),ndims(data)}(
+        initial, resolution, horizon, interval, Int(count),
+        data isa Array ? data : Array(data), String(name), _maybe_string(logical_type))
 
-struct Probabilistic
+struct Probabilistic{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
@@ -254,7 +259,7 @@ struct Probabilistic
     count             :: Int
     percentiles       :: Vector{Float64}
     "Values with canonical shape `(num_percentiles, H, count, element_dims...)`."
-    data              :: AbstractArray
+    data              :: Array{T,N}
     "Association name (required)."
     name              :: String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
@@ -264,11 +269,12 @@ end
 Probabilistic(initial, resolution, horizon, interval, count, percentiles, data::AbstractArray,
               name::AbstractString;
               logical_type::Union{Nothing,AbstractString}=nothing) =
-    Probabilistic(initial, resolution, horizon, interval, Int(count),
-                  Vector{Float64}(percentiles), data, String(name),
-                  _maybe_string(logical_type))
+    Probabilistic{eltype(data),ndims(data)}(
+        initial, resolution, horizon, interval, Int(count),
+        Vector{Float64}(percentiles), data isa Array ? data : Array(data), String(name),
+        _maybe_string(logical_type))
 
-struct Scenarios
+struct Scenarios{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
@@ -276,7 +282,7 @@ struct Scenarios
     count             :: Int
     scenario_count    :: Int
     "Values with canonical shape `(scenario_count, H, count, element_dims...)`."
-    data              :: AbstractArray
+    data              :: Array{T,N}
     "Association name (required)."
     name              :: String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
@@ -287,8 +293,9 @@ end
 Scenarios(initial, resolution, horizon, interval, count, data::AbstractArray,
           name::AbstractString;
           logical_type::Union{Nothing,AbstractString}=nothing) =
-    Scenarios(initial, resolution, horizon, interval, Int(count), size(data, 1), data,
-              String(name), _maybe_string(logical_type))
+    Scenarios{eltype(data),ndims(data)}(
+        initial, resolution, horizon, interval, Int(count), size(data, 1),
+        data isa Array ? data : Array(data), String(name), _maybe_string(logical_type))
 
 """
     DeterministicSingleTimeSeries
