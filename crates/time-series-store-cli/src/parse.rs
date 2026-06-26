@@ -9,7 +9,9 @@ use time_series_store_core::{Dtype, FeatureValue, OwnerCategory, Period, TimeSer
 /// a fixed-span [`Period::Fixed`].
 pub fn parse_period(s: &str) -> Result<Period, String> {
     let s = s.trim();
-    if s.starts_with('P') || s.starts_with('p') {
+    // ISO-8601 duration designators are uppercase `P`; the legacy human form
+    // (`1h`, `7d`) never starts with `p`, so only `P` routes to the ISO parser.
+    if s.starts_with('P') {
         Period::from_iso8601(s).map_err(|e| e.to_string())
     } else {
         Ok(Period::Fixed(parse_duration(s)?))

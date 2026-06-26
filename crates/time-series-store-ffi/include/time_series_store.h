@@ -1346,13 +1346,15 @@ int32_t ts_store_build_static_reader(const struct TsStore *handle,
                                      struct TsStaticReaderHandle **out_reader);
 
 /**
- * Read the reader's master grid: `initial_timestamp` (unix ms), resolution
- * (ms), and the number of timestamps on the grid.
+ * Read the reader's master grid: `initial_timestamp` (unix ms), `resolution`
+ * (an owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
+ * timestamps on the grid.
  *
  * # Safety
  *
  * `reader` must be a live static-reader handle. Each out pointer must be valid
- * for writing one value.
+ * for writing one value. On success `*out_resolution` is an owned C string the
+ * caller must free exactly once with [`ts_string_free`].
  */
 int32_t ts_static_reader_grid(const struct TsStaticReaderHandle *reader,
                               int64_t *out_initial_ms,
@@ -1466,13 +1468,16 @@ int32_t ts_store_build_forecast_reader(const struct TsStore *handle,
                                        struct TsForecastReaderHandle **out_reader);
 
 /**
- * Read the reader's window timeline: `initial_timestamp` (unix ms), resolution
- * (ms), interval (ms), and the window count.
+ * Read the reader's window timeline: `initial_timestamp` (unix ms),
+ * `resolution` and `interval` (each an owned ISO-8601 duration string, e.g.
+ * `PT1H` / `P1M`), and the window count.
  *
  * # Safety
  *
  * `reader` must be a live forecast-reader handle. Each out pointer must be
- * valid for writing one value.
+ * valid for writing one value. On success `*out_resolution` and `*out_interval`
+ * are owned C strings the caller must each free exactly once with
+ * [`ts_string_free`].
  */
 int32_t ts_forecast_reader_timeline(const struct TsForecastReaderHandle *reader,
                                     int64_t *out_initial_ms,

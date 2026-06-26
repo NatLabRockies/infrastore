@@ -233,10 +233,15 @@ impl Period {
     pub fn to_iso8601(&self) -> String {
         match self {
             Period::Months(m) => {
-                if *m != 0 && *m % 12 == 0 {
-                    format!("P{}Y", m / 12)
+                // Use a leading `-` for negatives so the output round-trips
+                // through `from_iso8601` (which strips an optional sign), matching
+                // the `Fixed` branch's convention.
+                let sign = if *m < 0 { "-" } else { "" };
+                let a = m.unsigned_abs();
+                if a != 0 && a % 12 == 0 {
+                    format!("{sign}P{}Y", a / 12)
                 } else {
-                    format!("P{m}M")
+                    format!("{sign}P{a}M")
                 }
             }
             Period::Fixed(d) => {
@@ -288,12 +293,21 @@ impl Period {
     /// Calendar units (`Y`, `M` before the `T`) map to [`Period::Months`];
     /// fixed units (`W`, `D`, and `H`/`M`/`S` after the `T`) map to
     /// [`Period::Fixed`]. Mixing calendar and fixed units in one string is an
-    /// error (a period is one kind or the other).
+    /// error (a period is one kind or the other). An optional leading `-`
+    /// (e.g. `-PT1H`, `-P1M`) parses as a negative period, so the output of
+    /// [`Period::to_iso8601`] always round-trips.
     pub fn from_iso8601(s: &str) -> Result<Period> {
         let trimmed = s.trim();
         let invalid =
             || TimeSeriesError::InvalidParameter(format!("invalid ISO-8601 period '{trimmed}'"));
-        let body = trimmed.strip_prefix('P').ok_or_else(invalid)?;
+        // An optional leading `-` denotes a negative period (the form
+        // `to_iso8601` emits for negative magnitudes); strip it and negate the
+        // parsed magnitude at the end so encode/decode round-trip.
+        let (negative, unsigned) = match trimmed.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, trimmed),
+        };
+        let body = unsigned.strip_prefix('P').ok_or_else(invalid)?;
         let (date_part, time_part) = match body.split_once('T') {
             Some((d, t)) => (d, Some(t)),
             None => (body, None),
@@ -354,11 +368,13 @@ impl Period {
             )));
         }
         if has_calendar {
+            let signed = if negative { -months } else { months };
             Ok(Period::Months(
-                i32::try_from(months).map_err(|_| invalid())?,
+                i32::try_from(signed).map_err(|_| invalid())?,
             ))
         } else if has_fixed {
-            Ok(Period::Fixed(Duration::milliseconds(fixed_ms)))
+            let ms = if negative { -fixed_ms } else { fixed_ms };
+            Ok(Period::Fixed(Duration::milliseconds(ms)))
         } else {
             Err(invalid())
         }
@@ -477,6 +493,21 @@ mod tests {
             Period::from_iso8601("P1W").unwrap(),
             Period::Fixed(Duration::days(7))
         );
+    }
+
+    #[test]
+    fn iso_round_trip_negative() {
+        // Negative magnitudes use a leading `-` for both kinds and round-trip.
+        let cases = [
+            (Period::Fixed(Duration::hours(-1)), "-PT1H"),
+            (Period::Fixed(Duration::minutes(-90)), "-PT1H30M"),
+            (Period::Months(-1), "-P1M"),
+            (Period::Months(-12), "-P1Y"),
+        ];
+        for (p, iso) in cases {
+            assert_eq!(p.to_iso8601(), iso, "encode {p:?}");
+            assert_eq!(Period::from_iso8601(iso).unwrap(), p, "decode {iso}");
+        }
     }
 
     #[test]

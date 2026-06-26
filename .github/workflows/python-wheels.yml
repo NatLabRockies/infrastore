@@ -23,6 +23,7 @@ jobs:
         # OS version; the wheel's deployment target must match or delocate rejects
         # the libraries. Keep each macos-NN entry in sync with its runner image.
         include:
+          - os: ubuntu-latest
           - os: macos-14
             macosx_deployment_target: "14.0"
           - os: windows-latest

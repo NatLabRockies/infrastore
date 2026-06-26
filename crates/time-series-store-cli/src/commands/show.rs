@@ -111,9 +111,15 @@ pub fn get(
                     s.resolution
                         .add_to(s.initial_timestamp, i as i64)
                         .map(|t| t.to_rfc3339())
-                        .unwrap_or_default()
+                        .ok_or_else(|| {
+                            format!(
+                                "timestamp overflow at grid index {i} (initial {}, \
+                                 resolution {})",
+                                s.initial_timestamp, s.resolution
+                            )
+                        })
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
             render_sequential(&meta, &ts, &s.data, format, limit, full, false)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
