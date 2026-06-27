@@ -229,8 +229,15 @@ int32_t ts_store_get_single(const struct TsStore *handle,
 /**
  * Fetch a NonSequentialTimeSeries by key.
  *
- * The caller owns both output buffers and must release them with
- * `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+ * `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
+ * N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
+ * and `out_data` carry the row-major element bytes. `out_logical_type` is an optional opaque
+ * element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
+ * `logical_type_cap` bytes; the full length is reported in `out_logical_type_len` so the caller can
+ * probe with a null/zero-capacity buffer first.
+ *
+ * The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
+ * with `ts_buffer_free_i64`, `ts_buffer_free_i64`, and `ts_buffer_free_u8` respectively.
  *
  * # Safety
  *
@@ -243,8 +250,13 @@ int32_t ts_store_get_non_sequential(const struct TsStore *handle,
                                     int64_t **out_timestamps,
                                     uint64_t *out_timestamps_len,
                                     int32_t *out_dtype,
+                                    int64_t **out_shape,
+                                    uint64_t *out_shape_len,
                                     uint8_t **out_data,
-                                    uint64_t *out_data_byte_len);
+                                    uint64_t *out_data_byte_len,
+                                    char *out_logical_type,
+                                    uint64_t logical_type_cap,
+                                    uint64_t *out_logical_type_len);
 
 /**
  * Remove the time series identified by `key`.

@@ -187,25 +187,28 @@ SingleTimeSeries(initial, resolution, data::AbstractArray, name::AbstractString;
 
 # ---- Non-sequential time series -------------------------------------------
 
-struct NonSequentialTimeSeries{T}
+struct NonSequentialTimeSeries{T,N}
     timestamps  :: Vector{DateTime}
-    "Values: a 1-D vector with one value per timestamp."
-    data        :: Vector{T}
+    "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time, one entry per timestamp)."
+    data        :: Array{T,N}
     "Association name (required)."
     name        :: String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
     logical_type :: Union{Nothing,String}
+end
 
-    function NonSequentialTimeSeries(timestamps, data::AbstractVector, name::AbstractString;
-            logical_type::Union{Nothing,AbstractString}=nothing)
-        length(timestamps) == length(data) ||
-            throw(InvalidParameterError("timestamp count must match data length"))
-        all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
-            throw(InvalidParameterError("timestamps must be strictly increasing"))
-        arr = data isa Vector ? data : Vector(data)
-        new{eltype(arr)}(Vector{DateTime}(timestamps), arr, String(name),
-            _maybe_string(logical_type))
-    end
+# Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
+# `Array`. Timestamps are explicit and must be strictly increasing, with one entry
+# per leading-dimension row (`size(data, 1)`).
+function NonSequentialTimeSeries(timestamps, data::AbstractArray, name::AbstractString;
+        logical_type::Union{Nothing,AbstractString}=nothing)
+    length(timestamps) == size(data, 1) ||
+        throw(InvalidParameterError("timestamp count must match data length"))
+    all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
+        throw(InvalidParameterError("timestamps must be strictly increasing"))
+    arr = data isa Array ? data : Array(data)
+    return NonSequentialTimeSeries{eltype(arr),ndims(arr)}(
+        Vector{DateTime}(timestamps), arr, String(name), _maybe_string(logical_type))
 end
 
 # ---- Forecast types -------------------------------------------------------
@@ -536,7 +539,7 @@ function add_time_series!(
     name = ts.name
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
-    dims = UInt64[length(ts.data)]
+    dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     units_ptr = units === nothing ? C_NULL : pointer(String(units))
@@ -548,7 +551,7 @@ function add_time_series!(
          Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
          Cstring, Cstring, Ref{Ptr{Cvoid}}),
         store.handle, Int64(owner_id), owner_type, Int32(Int(owner_category)), name,
-        timestamps, UInt64(length(timestamps)), dtype, UInt64(1), dims, bytes,
+        timestamps, UInt64(length(timestamps)), dtype, UInt64(length(dims)), dims, bytes,
         UInt64(length(bytes)), logical_ptr, features_json, units_ptr,
         out_key,
     )
@@ -835,14 +838,20 @@ function get_time_series(
     out_timestamps = Ref{Ptr{Int64}}(C_NULL)
     out_timestamps_len = Ref{UInt64}(0)
     out_dtype = Ref{Int32}(0)
+    out_shape = Ref{Ptr{Int64}}(C_NULL)
+    out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
+    lt_buf = Vector{UInt8}(undef, 256)
+    out_lt_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_non_sequential, lib_path()), Int32,
         (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Int32},
-         Ref{Ptr{UInt8}}, Ref{UInt64}),
+         Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64},
+         Ptr{UInt8}, UInt64, Ref{UInt64}),
         store.handle, key.handle, out_timestamps, out_timestamps_len, out_dtype,
-        out_data, out_data_len,
+        out_shape, out_shape_len, out_data, out_data_len,
+        lt_buf, UInt64(length(lt_buf)), out_lt_len,
     )
     _check(code)
 
@@ -853,15 +862,28 @@ function get_time_series(
         (:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64),
         out_timestamps[], out_timestamps_len[],
     )
+    # Full array shape [length, *element_shape] (row-major dims), then bytes.
+    dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
+    ccall(
+        (:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64),
+        out_shape[], out_shape_len[],
+    )
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
     ccall(
         (:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64),
         out_data[], out_data_len[],
     )
-    dtype = _julia_dtype(out_dtype[])
-    values = collect(reinterpret(dtype, bytes))
+    T = _julia_dtype(out_dtype[])
+    flat = collect(reinterpret(T, bytes))
+    nd = length(dims)
+    # Stored row-major → canonical column-major Julia layout (see get_array_nd).
+    data = nd <= 1 ? flat :
+           permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+    n = min(Int(out_lt_len[]), length(lt_buf))
+    logical_type = n == 0 ? nothing : String(lt_buf[1:n])
     assoc = _get_association(store, key)
-    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), values, assoc.name)
+    return NonSequentialTimeSeries(
+        _from_unix_ms.(timestamp_ms), data, assoc.name; logical_type=logical_type)
 end
 
 # ---- Attribute-addressed static reads --------------------------------------
@@ -1788,14 +1810,14 @@ function add_time_series!(
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
-    dims = UInt64[length(ts.data)]
+    dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = ccall(
         (:ts_batch_add_non_sequential, lib_path()), Int32,
         (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Ptr{Int64}, UInt64,
          Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring),
         batch.handle, Int64(owner_id), owner_type, _category_int(owner_category), ts.name,
-        timestamps, UInt64(length(timestamps)), dtype, UInt64(1), dims, bytes,
+        timestamps, UInt64(length(timestamps)), dtype, UInt64(length(dims)), dims, bytes,
         UInt64(length(bytes)),
         _opt_string_arg(logical_type), _features_arg(features), _opt_string_arg(units),
     )

@@ -768,8 +768,15 @@ pub unsafe extern "C" fn ts_store_get_single(
 
 /// Fetch a NonSequentialTimeSeries by key.
 ///
-/// The caller owns both output buffers and must release them with
-/// `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+/// `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
+/// N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
+/// and `out_data` carry the row-major element bytes. `out_logical_type` is an optional opaque
+/// element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
+/// `logical_type_cap` bytes; the full length is reported in `out_logical_type_len` so the caller can
+/// probe with a null/zero-capacity buffer first.
+///
+/// The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
+/// with `ts_buffer_free_i64`, `ts_buffer_free_i64`, and `ts_buffer_free_u8` respectively.
 ///
 /// # Safety
 ///
@@ -777,14 +784,20 @@ pub unsafe extern "C" fn ts_store_get_single(
 /// valid for writing its indicated value. Returned buffers must each be released exactly once with
 /// the matching free function and returned length.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_non_sequential(
     handle: *const TsStoreHandle,
     key: *const TsKeyHandle,
     out_timestamps: *mut *mut i64,
     out_timestamps_len: *mut u64,
     out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
+    out_logical_type: *mut c_char,
+    logical_type_cap: u64,
+    out_logical_type_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -798,8 +811,11 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
     if out_timestamps.is_null()
         || out_timestamps_len.is_null()
         || out_dtype.is_null()
+        || out_shape.is_null()
+        || out_shape_len.is_null()
         || out_data.is_null()
         || out_data_byte_len.is_null()
+        || out_logical_type_len.is_null()
     {
         return TS_ERR_NULL_POINTER;
     }
@@ -820,6 +836,11 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
         }
         Err(error) => return map_core_error(error),
     };
+    // The logical-type tag lives on the metadata row, not on the reconstructed series.
+    let logical_type = match store.inner.get_metadata(&key.inner) {
+        Ok(meta) => meta.logical_type.unwrap_or_default(),
+        Err(error) => return map_core_error(error),
+    };
     let mut timestamps = match series
         .timestamps
         .iter()
@@ -836,6 +857,12 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
     let timestamps_ptr = timestamps.as_mut_ptr();
     std::mem::forget(timestamps);
 
+    // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
+    let mut shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
+    let shape_len = shape.len() as u64;
+    let shape_ptr = shape.as_mut_ptr();
+    std::mem::forget(shape);
+
     let dtype = series.data.dtype.code();
     let mut bytes = series.data.bytes;
     let data_byte_len = bytes.len() as u64;
@@ -845,8 +872,16 @@ pub unsafe extern "C" fn ts_store_get_non_sequential(
         *out_timestamps = timestamps_ptr;
         *out_timestamps_len = timestamps_len;
         *out_dtype = dtype;
+        *out_shape = shape_ptr;
+        *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
+        write_str_out(
+            &logical_type,
+            out_logical_type,
+            logical_type_cap,
+            out_logical_type_len,
+        );
     }
     TS_OK
 }

@@ -69,6 +69,26 @@ end
     @test got_attr.name == "events"
 end
 
+@testset "non-sequential N-D + logical_type round-trip" begin
+    store = Store(in_memory=true)
+    timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]
+    # A (length, k) per-step element array tagged with an opaque logical type, as a
+    # FunctionData encoding would produce on the InfrastructureSystems.jl side.
+    data = Float64[1 2; 3 4; 5 6]
+    series = NonSequentialTimeSeries(timestamps, data, "curves"; logical_type="LinearFunctionData")
+    key = add_time_series!(store, 9, "Generator", Component, series)
+    got = get_time_series(NonSequentialTimeSeries, store, key)
+    @test got.timestamps == timestamps
+    @test got.data == data
+    @test got.data isa Array{Float64,2}
+    @test got.logical_type == "LinearFunctionData"
+    @test got.name == "curves"
+
+    got_attr = get_time_series(NonSequentialTimeSeries, store, 9, Component, "curves")
+    @test got_attr.data == data
+    @test got_attr.logical_type == "LinearFunctionData"
+end
+
 @testset "attribute-based metadata + hash access" begin
     store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1)
@@ -1008,7 +1028,9 @@ end
     @test typeof(SingleTimeSeries(t0, res, Float64[1, 2, 3], "f")) == SingleTimeSeries{Float64,1}
     @test typeof(SingleTimeSeries(t0, res, Int32[1 2; 3 4], "i")) == SingleTimeSeries{Int32,2}
     @test typeof(NonSequentialTimeSeries([t0, t0 + res], Float32[1, 2], "n")) ==
-          NonSequentialTimeSeries{Float32}
+          NonSequentialTimeSeries{Float32,1}
+    @test typeof(NonSequentialTimeSeries([t0, t0 + res], Int32[1 2; 3 4], "n2")) ==
+          NonSequentialTimeSeries{Int32,2}
 
     # Views/ranges/reshapes normalize to a concrete Array{T,N}.
     base = Float64[1, 2, 3, 4, 5, 6]
