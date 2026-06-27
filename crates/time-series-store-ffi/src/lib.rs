@@ -3576,65 +3576,88 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
 // `features`) plus the per-variant descriptive snapshot. Physical storage detail
 // (`data_hash`, `dtype`, `logical_type`, `percentiles`) is deliberately absent —
 // it is read on demand via the metadata read descriptors.
-fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
+/// Build the JSON object for one key (the per-row shape shared by
+/// `keys_to_json` and `keys_with_hash_to_json`).
+fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
     let dur_ms = |d: Option<core_lib::Period>| -> Value {
         d.map(|x| Value::from(x.to_iso8601()))
             .unwrap_or(Value::Null)
     };
-    let arr: Vec<Value> = keys
+    let id = k.identity();
+    let mut o = serde_json::Map::new();
+    o.insert("owner_id".into(), Value::from(id.owner_id));
+    o.insert(
+        "owner_category".into(),
+        Value::from(id.owner_category.as_str()),
+    );
+    o.insert(
+        "time_series_type".into(),
+        Value::from(id.time_series_type.as_str()),
+    );
+    o.insert("name".into(), Value::from(id.name.clone()));
+    o.insert("resolution".into(), dur_ms(id.resolution));
+    o.insert(
+        "features".into(),
+        serde_json::from_str(&features_to_json(&id.features))
+            .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+    );
+    // Per-variant descriptive snapshot.
+    let (initial_timestamp, length, horizon, interval, count) = match k {
+        core_lib::TimeSeriesKey::Single(s) => {
+            (Some(s.initial_timestamp), Some(s.length), None, None, None)
+        }
+        core_lib::TimeSeriesKey::NonSequential(s) => (None, Some(s.length), None, None, None),
+        core_lib::TimeSeriesKey::Forecast(f) => (
+            Some(f.initial_timestamp),
+            None,
+            Some(f.horizon),
+            Some(f.interval),
+            Some(f.count),
+        ),
+    };
+    o.insert(
+        "initial_timestamp_ms".into(),
+        initial_timestamp
+            .and_then(datetime_to_unix_ms)
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    o.insert(
+        "length".into(),
+        length.map(|l| Value::from(l as u64)).unwrap_or(Value::Null),
+    );
+    o.insert("horizon".into(), dur_ms(horizon));
+    o.insert("interval".into(), dur_ms(interval));
+    o.insert(
+        "count".into(),
+        count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
+    );
+    o
+}
+
+fn keys_to_json(keys: &[core_lib::TimeSeriesKey]) -> String {
+    let arr: Vec<Value> = keys.iter().map(|k| Value::Object(key_to_map(k))).collect();
+    Value::Array(arr).to_string()
+}
+
+/// Lowercase hex of a 32-byte content hash (64 chars).
+fn hash_to_hex(hash: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in hash {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Like `keys_to_json`, but each row carries an extra `data_hash` field (the
+/// lowercase hex content hash). Rows that share a stored array share the hash.
+fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> String {
+    let arr: Vec<Value> = rows
         .iter()
-        .map(|k| {
-            let id = k.identity();
-            let mut o = serde_json::Map::new();
-            o.insert("owner_id".into(), Value::from(id.owner_id));
-            o.insert(
-                "owner_category".into(),
-                Value::from(id.owner_category.as_str()),
-            );
-            o.insert(
-                "time_series_type".into(),
-                Value::from(id.time_series_type.as_str()),
-            );
-            o.insert("name".into(), Value::from(id.name.clone()));
-            o.insert("resolution".into(), dur_ms(id.resolution));
-            o.insert(
-                "features".into(),
-                serde_json::from_str(&features_to_json(&id.features))
-                    .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
-            );
-            // Per-variant descriptive snapshot.
-            let (initial_timestamp, length, horizon, interval, count) = match k {
-                core_lib::TimeSeriesKey::Single(s) => {
-                    (Some(s.initial_timestamp), Some(s.length), None, None, None)
-                }
-                core_lib::TimeSeriesKey::NonSequential(s) => {
-                    (None, Some(s.length), None, None, None)
-                }
-                core_lib::TimeSeriesKey::Forecast(f) => (
-                    Some(f.initial_timestamp),
-                    None,
-                    Some(f.horizon),
-                    Some(f.interval),
-                    Some(f.count),
-                ),
-            };
-            o.insert(
-                "initial_timestamp_ms".into(),
-                initial_timestamp
-                    .and_then(datetime_to_unix_ms)
-                    .map(Value::from)
-                    .unwrap_or(Value::Null),
-            );
-            o.insert(
-                "length".into(),
-                length.map(|l| Value::from(l as u64)).unwrap_or(Value::Null),
-            );
-            o.insert("horizon".into(), dur_ms(horizon));
-            o.insert("interval".into(), dur_ms(interval));
-            o.insert(
-                "count".into(),
-                count.map(|c| Value::from(c as u64)).unwrap_or(Value::Null),
-            );
+        .map(|(k, h)| {
+            let mut o = key_to_map(k);
+            o.insert("data_hash".into(), Value::from(hash_to_hex(h)));
             Value::Object(o)
         })
         .collect();
@@ -3689,6 +3712,52 @@ pub unsafe extern "C" fn ts_store_list_keys(
         set_error("out_len is null");
         return TS_ERR_NULL_POINTER;
     }
+    let filter = match unsafe {
+        build_list_filter(
+            has_owner,
+            owner_id,
+            has_owner_category,
+            owner_category,
+            has_time_series_type,
+            time_series_type,
+            name,
+            resolution,
+            features_json,
+        )
+    } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let keys = match store.inner.list_keys(filter) {
+        Ok(k) => k,
+        Err(e) => return map_core_error(e),
+    };
+    let json = keys_to_json(&keys);
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Build a [`core_lib::ListFilter`] from the optional scalar/string filter args
+/// shared by `ts_store_list_keys` and `ts_store_list_array_groups`. On a bad
+/// argument it sets the thread-local error (where appropriate) and returns the
+/// error code to propagate.
+///
+/// # Safety
+///
+/// `name` and `features_json` must each be null or a null-terminated UTF-8
+/// string; `resolution` must be null or a null-terminated ISO-8601 period.
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_list_filter(
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution: *const c_char,
+    features_json: *const c_char,
+) -> std::result::Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
         filter = filter.owner_id(owner_id);
@@ -3699,7 +3768,7 @@ pub unsafe extern "C" fn ts_store_list_keys(
             1 => core_lib::OwnerCategory::SupplementalAttribute,
             other => {
                 set_error(format!("invalid owner_category {other}"));
-                return TS_ERR_INVALID_PARAMETER;
+                return Err(TS_ERR_INVALID_PARAMETER);
             }
         };
         filter = filter.owner_category(category);
@@ -3709,7 +3778,7 @@ pub unsafe extern "C" fn ts_store_list_keys(
             Some(t) => filter = filter.time_series_type(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
-                return TS_ERR_INVALID_PARAMETER;
+                return Err(TS_ERR_INVALID_PARAMETER);
             }
         }
     }
@@ -3718,26 +3787,83 @@ pub unsafe extern "C" fn ts_store_list_keys(
         Ok(None) => {}
         Err(c) => {
             set_error("name is not valid UTF-8");
-            return c;
+            return Err(c);
         }
     }
     match unsafe { cstr_to_optional_period(resolution) } {
         Ok(Some(p)) => filter = filter.resolution(p),
         Ok(None) => {}
-        Err(c) => return c,
+        Err(c) => return Err(c),
     }
-    let features = match unsafe { parse_features_json(features_json) } {
-        Ok(f) => f,
-        Err(c) => return c,
-    };
+    let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
         filter = filter.features(features);
     }
-    let keys = match store.inner.list_keys(filter) {
-        Ok(k) => k,
+    Ok(filter)
+}
+
+/// List time series keys, each annotated with the hex content hash of the array
+/// it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
+/// per-row shape — `keys_to_json`'s shape plus a `data_hash` field). Rows that
+/// share a stored array share their `data_hash`, so a caller can group time
+/// series by their underlying data in one query (no per-row metadata fetch).
+///
+/// Filters and the probe-then-fetch buffer convention are identical to
+/// `ts_store_list_keys`.
+///
+/// # Safety
+///
+/// Identical to `ts_store_list_keys`: `handle` must be a live store handle;
+/// `name` / `features_json` / `resolution` must each be null or a
+/// null-terminated UTF-8 string; `out_len` must be writable; `buf` must be null
+/// or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_list_array_groups(
+    handle: *const TsStoreHandle,
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution: *const c_char,
+    features_json: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter = match unsafe {
+        build_list_filter(
+            has_owner,
+            owner_id,
+            has_owner_category,
+            owner_category,
+            has_time_series_type,
+            time_series_type,
+            name,
+            resolution,
+            features_json,
+        )
+    } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let rows = match store.inner.list_keys_with_hash(filter) {
+        Ok(r) => r,
         Err(e) => return map_core_error(e),
     };
-    let json = keys_to_json(&keys);
+    let json = keys_with_hash_to_json(&rows);
     unsafe { write_str_out(&json, buf, cap, out_len) };
     TS_OK
 }

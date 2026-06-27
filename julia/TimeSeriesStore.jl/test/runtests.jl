@@ -516,6 +516,39 @@ end
     @test num_distinct_arrays(store) == 1
 end
 
+@testset "list_array_groups annotates rows with the content hash" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    shared = Float64[1, 2, 3, 4]
+    # Two owners with identical data dedup to one array (one hash); a third owner's
+    # distinct data gets a different hash.
+    add_time_series!(store, 1, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), copy(shared), "load"))
+    add_time_series!(store, 2, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), copy(shared), "load"))
+    add_time_series!(store, 3, "Generator", Component,
+        SingleTimeSeries(t0, Hour(1), Float64[9, 8, 7, 6], "load"))
+
+    rows = list_array_groups(store)
+    @test length(rows) == 3
+    # Rows carry every list_keys field plus a 64-char hex data_hash.
+    @test all(r -> r.data_hash isa String && length(r.data_hash) == 64, rows)
+    @test all(r -> r.name == "load", rows)
+
+    groups = Dict{String, Vector{Int}}()
+    for r in rows
+        push!(get!(groups, r.data_hash, Int[]), Int(r.owner_id))
+    end
+    @test length(groups) == 2
+    shared_owners = only([v for v in values(groups) if length(v) > 1])
+    @test sort(shared_owners) == [1, 2]
+
+    # Filters behave exactly like list_keys.
+    @test length(list_array_groups(store; owner_id=3)) == 1
+    @test only(list_array_groups(store; owner_id=1)).data_hash ==
+          only(list_array_groups(store; owner_id=2)).data_hash
+end
+
 @testset "time_series_counts and list_owner_ids" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)

@@ -8,7 +8,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, AddBatch, add_time_series_bulk!,
-       get_time_series, get_time_series_keys, key_info, list_keys,
+       get_time_series, get_time_series_keys, key_info, list_keys, list_array_groups,
        remove_time_series!,
        has_time_series, get_counts, counts_by_type, num_distinct_arrays,
        time_series_counts, list_owner_ids, static_summary, forecast_summary,
@@ -1073,6 +1073,56 @@ function list_keys(store::Store; owner_id::Union{Nothing, Integer} = nothing,
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [_decode_key_row(r) for r in rows]
+end
+
+"""
+    list_array_groups(store; owner_id=nothing, owner_category=nothing,
+                      time_series_type=nothing, name=nothing, resolution=nothing,
+                      features=Dict()) -> Vector{NamedTuple}
+
+Like [`list_keys`](@ref) (same filters, same row fields), but each row additionally
+carries `data_hash`: the 64-character lowercase hex content hash of the array the
+row resolves to. Rows that share a stored array share their `data_hash` — both
+deduplicated identical arrays and a `SingleTimeSeries` together with any
+`DeterministicSingleTimeSeries` derived from it. Group the returned rows by
+`data_hash` to find which time series share their underlying data.
+
+Resolved by a single catalog query in the core (the hash is read off each metadata
+row); there are no per-row `get_metadata` round-trips.
+"""
+function list_array_groups(store::Store; owner_id::Union{Nothing, Integer} = nothing,
+                           owner_category::Union{Nothing, OwnerCategory} = nothing,
+                           time_series_type::Union{Nothing, Integer} = nothing,
+                           name::Union{Nothing, AbstractString} = nothing,
+                           resolution::Union{Nothing, Period} = nothing,
+                           features::AbstractDict = Dict{String, Any}())
+    has_owner = owner_id !== nothing
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+    has_category = owner_category !== nothing
+    category_arg = has_category ? _category_int(owner_category) : Int32(0)
+    has_type = time_series_type !== nothing
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    name_arg = name === nothing ? C_NULL : String(name)
+    resolution_iso = _period_to_cstr(resolution)
+    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    out_len = Ref{UInt64}(0)
+    code = ccall((:ts_store_list_array_groups, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring,
+                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 has_type, type_arg, name_arg, resolution_iso, features_json,
+                 C_NULL, UInt64(0), out_len)
+    _check(code)
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_list_array_groups, lib_path()), Int32,
+                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring,
+                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, has_owner, owner_arg, has_category, category_arg,
+                 has_type, type_arg, name_arg, resolution_iso, features_json,
+                 buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [(; _decode_key_row(r)..., data_hash = String(r["data_hash"])) for r in rows]
 end
 
 """

@@ -1133,6 +1133,37 @@ int32_t ts_store_list_keys(const struct TsStore *handle,
                            uint64_t *out_len);
 
 /**
+ * List time series keys, each annotated with the hex content hash of the array
+ * it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
+ * per-row shape — `keys_to_json`'s shape plus a `data_hash` field). Rows that
+ * share a stored array share their `data_hash`, so a caller can group time
+ * series by their underlying data in one query (no per-row metadata fetch).
+ *
+ * Filters and the probe-then-fetch buffer convention are identical to
+ * `ts_store_list_keys`.
+ *
+ * # Safety
+ *
+ * Identical to `ts_store_list_keys`: `handle` must be a live store handle;
+ * `name` / `features_json` / `resolution` must each be null or a
+ * null-terminated UTF-8 string; `out_len` must be writable; `buf` must be null
+ * or valid for `cap` bytes.
+ */
+int32_t ts_store_list_array_groups(const struct TsStore *handle,
+                                   bool has_owner,
+                                   int64_t owner_id,
+                                   bool has_owner_category,
+                                   int32_t owner_category,
+                                   bool has_time_series_type,
+                                   int32_t time_series_type,
+                                   const char *name,
+                                   const char *resolution,
+                                   const char *features_json,
+                                   char *buf,
+                                   uint64_t cap,
+                                   uint64_t *out_len);
+
+/**
  * Free the key-handle array returned by `ts_store_get_time_series_keys`.
  *
  * This releases only the array buffer, not the keys it held: transfer each

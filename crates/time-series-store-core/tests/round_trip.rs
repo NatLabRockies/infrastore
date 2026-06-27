@@ -565,3 +565,54 @@ fn duplicate_non_sequential_key_is_rejected() {
         }
     }
 }
+
+#[test]
+fn list_keys_with_hash_groups_shared_arrays() {
+    use std::collections::HashMap;
+
+    let mut store = create_store(None, true).unwrap();
+    // Two owners with identical data: deduplicated to one stored array (one hash).
+    for owner in [1, 2] {
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+    }
+    // A third owner with distinct data: a different hash.
+    store
+        .add_time_series(
+            3,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    let rows = store.list_keys_with_hash(ListFilter::new()).unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // Each row's hash agrees with the per-key get_metadata hash.
+    for (key, hash) in &rows {
+        let meta = store.get_metadata(key.identity()).unwrap();
+        assert_eq!(&meta.data_hash, hash);
+    }
+
+    // Group by hash: owners 1 and 2 share one array, owner 3 is alone.
+    let mut groups: HashMap<[u8; 32], Vec<i64>> = HashMap::new();
+    for (key, hash) in &rows {
+        groups.entry(*hash).or_default().push(key.owner_id());
+    }
+    assert_eq!(groups.len(), 2);
+    let mut shared: Vec<Vec<i64>> = groups.values().filter(|v| v.len() > 1).cloned().collect();
+    assert_eq!(shared.len(), 1);
+    shared[0].sort();
+    assert_eq!(shared[0], vec![1, 2]);
+}

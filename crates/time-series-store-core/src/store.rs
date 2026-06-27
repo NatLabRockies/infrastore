@@ -810,6 +810,23 @@ impl Store {
             .collect()
     }
 
+    /// Like [`Self::list_keys`], but pairs each key with the 32-byte content hash
+    /// of the array it resolves to. Rows that share a stored array carry the same
+    /// hash, which is what lets a caller group time series by their underlying
+    /// data: deduplicated identical arrays, and a `SingleTimeSeries` together with
+    /// any `DeterministicSingleTimeSeries` derived from it. The hash is read
+    /// straight off each metadata row, so this is still one catalog query.
+    pub fn list_keys_with_hash(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(TimeSeriesKey, [u8; 32])>> {
+        self.metadata
+            .list(&filter.into())?
+            .iter()
+            .map(|m| Ok((TimeSeriesKey::from_metadata(m)?, m.data_hash)))
+            .collect()
+    }
+
     /// Build a [`StaticReader`] over the `SingleTimeSeries` matching `filter`.
     ///
     /// The filter must pin a resolution (one resolution per reader). All matched
