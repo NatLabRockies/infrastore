@@ -163,6 +163,66 @@ end
 `get_metadata` + `get_array_by_hash` path is still available for raw access. See the
 [Julia API reference](../reference/julia-api.md#forecasts).
 
+## Per-Timestamp Reads (Simulation Loop)
+
+`get_time_series` hands back a whole series or forecast. Simulations instead walk the timeline and,
+at each timestamp, want the value of _every_ series at that instant. For that, build a **reader**
+once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
+allocates almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves
+forecasts. (Full signatures:
+[Julia API reference](../reference/julia-api.md#readers-per-timestamp-iteration).)
+
+### Static series
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1))
+grid = static_grid(reader)                 # (initial_timestamp, resolution, length)
+for k in 0:(grid.length - 1)
+    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+    for (gi, g) in enumerate(static_groups(reader))
+        vals = static_values(reader, gi)   # (num_columns, element_dims...); column j ↔ g.keys[j]
+    end
+end
+```
+
+Series are grouped by `(dtype, element_shape)`; each group's `static_values` is one dense array
+whose columns line up with the group's `keys`. All matched series must share one grid
+(`initial_timestamp` + `length`), validated at build.
+
+### Forecasts
+
+```julia
+reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
+tl = forecast_timeline(reader)             # (initial_timestamp, resolution, interval, count)
+for k in 0:(tl.count - 1)
+    forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
+    for (i, e) in enumerate(forecast_entries(reader))
+        window = forecast_values(reader, i)   # shape e.window_shape, for e.key
+    end
+end
+```
+
+A `Deterministic` reader is abstract — it also includes any `DeterministicSingleTimeSeries` (read
+into identical windows).
+
+### Shared forecasts are read once
+
+Forecasts that share a backing array (deduplicated identical data, or several
+`DeterministicSingleTimeSeries` over one `SingleTimeSeries`) collapse to a single **window slot**.
+`forecast_read!` reads each slot from the `.nc` file once per timestamp, so a forecast shared by 10
+components costs one read, not ten. `forecast_num_slots(reader)` is the physical read count, and
+each `ForecastEntry.slot` says which slot an entry uses — group by `slot` to materialize each unique
+window only once:
+
+```julia
+forecast_read!(reader, t)
+windows = Dict{Int, Any}()
+for (i, e) in enumerate(forecast_entries(reader))
+    w = get!(() -> forecast_values(reader, i), windows, e.slot)
+    # apply w to e.key's owner
+end
+```
+
 ## Store-Wide Operations
 
 ```julia
@@ -214,6 +274,11 @@ The model is designed to back an InfrastructureSystems.jl time-series store:
 - The attribute-based accessors (`get_metadata`, `has_time_series`, `remove_time_series!`) plus
   `get_array_by_hash` let an InfrastructureSystems.jl-side store keep its own key objects and reach
   the array layer without holding a `TimeSeriesKey`.
+- For the simulation read pattern — iterate every component's value at each timestamp, reading a
+  forecast shared across components only once — use the readers
+  ([Per-Timestamp Reads](#per-timestamp-reads-simulation-loop)). The `ForecastEntry.slot` /
+  `forecast_num_slots` surface lets the wrapping store dedup its own per-component work, mirroring
+  the store's one-read-per-shared-array behavior.
 
 See [Language Bindings](../explanation/bindings.md#infrastructuresystemsjl-integration) for how this
 maps onto the FFI.

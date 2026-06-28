@@ -153,6 +153,9 @@ plus optional `resolution` / `features` keywords (attribute-based, the same addr
 `get_metadata` / `has_time_series` / `remove_time_series!`). Both forms return the same struct. The
 bare `get_time_series(store, key)` remains a convenience alias for `SingleTimeSeries`.
 
+To read every series' value at one timestamp in a loop (the simulation pattern), use a
+[`StaticReader`](#staticreader) rather than calling `get_time_series` per series.
+
 ## Bulk Adds
 
 ```julia
@@ -313,6 +316,105 @@ key or attributes) — which likewise returns a `Deterministic`.
 
 Alternatively, use `get_metadata` to obtain the `data_hash`, then `get_array_by_hash` for the raw
 flattened array.
+
+For the per-timestamp simulation access pattern (walk the timeline, read every series at each
+instant) prefer a reader — see [Readers](#readers-per-timestamp-iteration) below.
+
+## Readers (per-timestamp iteration)
+
+`get_time_series` returns a whole series or forecast struct. For the simulation access pattern —
+_walk every timestamp and, at each, read the value of every series_ — use a **reader** instead. A
+reader is built once over a filter, pins one resolution, and reuses output buffers that each read
+overwrites in place, so a tight loop allocates almost nothing. There are two: `StaticReader` for
+`SingleTimeSeries`, and `ForecastReader` for forecasts. Both follow the same lifecycle: build →
+inspect the layout once → `*_read!(t)` in a loop → pull values per group/entry.
+
+### StaticReader
+
+Reads the value of every matching `SingleTimeSeries` at one timestamp. Results are **columnar**:
+series are partitioned into `(dtype, element_shape)` groups, and each group's values come back as
+one dense `(num_columns, element_dims...)` array.
+
+```julia
+build_static_reader(store; resolution::Period, owner_id=nothing,
+                    owner_category=nothing, name=nothing, features=Dict()) -> StaticReader
+
+static_grid(reader)   -> NamedTuple  # (initial_timestamp::DateTime, resolution::Period, length::Int)
+static_groups(reader) -> Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_read!(reader, t::DateTime) -> reader   # fills buffers; errors if t is off the grid
+static_values(reader, group_index::Integer) -> Array
+       # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
+```
+
+All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
+and errors on divergence, so there is no presence mask — every column has a value at every valid
+timestamp.
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1))
+grid = static_grid(reader)
+for k in 0:(grid.length - 1)
+    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+    for (gi, g) in enumerate(static_groups(reader))
+        vals = static_values(reader, gi)   # column j ↔ g.keys[j]
+    end
+end
+```
+
+### ForecastReader
+
+Reads the forecast _window_ at one timestamp for every matching forecast of one type. The build
+filter must name a forecast type and pin a resolution; a `Deterministic` reader is abstract and also
+includes `DeterministicSingleTimeSeries` (read into identical `[H, *E]` windows). All matched
+forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
+
+```julia
+build_forecast_reader(store, time_series_type::Type; resolution::Period,
+                      owner_id=nothing, owner_category=nothing, name=nothing,
+                      features=Dict()) -> ForecastReader
+
+forecast_timeline(reader)  -> NamedTuple
+       # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
+forecast_entries(reader)   -> Vector{ForecastEntry}  # each: .dtype, .window_shape, .key, .slot
+forecast_num_slots(reader) -> Int                    # physical reads per timestamp (see below)
+forecast_read!(reader, t::DateTime) -> reader        # fills buffers; errors if t is off the timeline
+forecast_values(reader, entry_index::Integer) -> Array  # window of size .window_shape
+```
+
+Valid read timestamps are `initial_timestamp + k·interval` for `k in 0:count-1` (each names the
+window forecast _from_ that instant). A window's shape is `[H, *E]` for `Deterministic` /
+`DeterministicSingleTimeSeries`, `[num_percentiles, H, *E]` for `Probabilistic`, and
+`[scenario_count, H, *E]` for `Scenarios`.
+
+```julia
+reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
+tl = forecast_timeline(reader)
+for k in 0:(tl.count - 1)
+    forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
+    for (i, e) in enumerate(forecast_entries(reader))
+        window = forecast_values(reader, i)   # shape e.window_shape, for e.key's owner
+    end
+end
+```
+
+#### Window-read deduplication
+
+Forecasts that reference the **same backing array and read plan** — deduplicated identical data, or
+several `DeterministicSingleTimeSeries` over one `SingleTimeSeries` — collapse to a single _window
+slot_. `forecast_read!` performs one backend (`.nc`) read per slot, not per entry, so a forecast
+shared by N owners is read once per timestamp. `forecast_num_slots(reader)` is that physical read
+count (`≤ length(forecast_entries(reader))`), and every `ForecastEntry.slot` (0-based) identifies
+the slot backing that entry; entries that share data report the same `slot`. Group entries by `slot`
+to also materialize each unique window only once on the Julia side:
+
+```julia
+forecast_read!(reader, t)
+windows = Dict{Int, Any}()
+for (i, e) in enumerate(forecast_entries(reader))
+    window = get!(() -> forecast_values(reader, i), windows, e.slot)   # materialize once per slot
+    # apply `window` to e.key's owner
+end
+```
 
 ## Store-Wide Operations
 
