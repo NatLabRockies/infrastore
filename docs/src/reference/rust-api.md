@@ -106,6 +106,12 @@ impl Store {
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts>;
     pub fn get_forecast_parameters(&self) -> Result<ForecastParameters>;
 
+    // Per-timestamp readers (see "Readers" below).
+    pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader>;
+    pub fn static_read(&self, reader: &mut StaticReader, at: DateTime<Utc>) -> Result<()>;
+    pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader>;
+    pub fn forecast_read(&self, reader: &mut ForecastReader, at: DateTime<Utc>) -> Result<()>;
+
     pub fn compact(&mut self) -> Result<CompactionReport>;
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
     pub fn flush(&mut self) -> Result<()>;
@@ -186,6 +192,60 @@ Conventional array shapes:
 the underlying packed array. The low-level pair still works for direct array access: resolve a
 [`TimeSeriesMetadata`](#timeseriesmetadata) with `get_metadata` (it carries `horizon`, `interval`,
 `count`, and `percentiles`), then fetch the array with `get_array_by_hash(&meta.data_hash)`.
+
+### Readers
+
+`get_time_series` returns a whole series or forecast. For the timestamp-oriented access pattern —
+_walk the timeline and read every series' value at each instant_ — build a **reader** instead. A
+reader is built once over a [`ListFilter`](#listfilter), pins one resolution, and holds reusable
+buffers that each read overwrites in place, so a tight loop allocates nothing. The reader is a
+passive plan: it does not borrow the `Store`, so reads go through `Store::static_read` /
+`Store::forecast_read`, which fill the buffers; the caller then walks the groups/entries. There are
+two: [`StaticReader`](#staticreader-and-staticgroup) for `SingleTimeSeries` and
+[`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for forecasts.
+
+```rust
+// Static: value of every SingleTimeSeries at one timestamp, columnar.
+let mut reader = store.build_static_reader(ListFilter::new().resolution(res))?;
+for k in 0..reader.length() {
+    let at = reader.initial_timestamp() + /* k · resolution */;
+    store.static_read(&mut reader, at)?;
+    for group in reader.groups() {
+        let bytes = group.values();        // [num_columns, *element_shape], row-major LE
+        // group.keys()[j] identifies column j; group.dtype(), group.element_shape()
+    }
+}
+
+// Forecast: the window at one timestamp for every matching forecast of one type.
+let mut reader = store.build_forecast_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::Deterministic).resolution(res),
+)?;
+for k in 0..reader.count() {
+    let at = reader.initial_timestamp() + /* k · interval */;
+    store.forecast_read(&mut reader, at)?;
+    for entry in reader.entries() {
+        let slot = reader.entry_slot(entry.slot());
+        let bytes = slot.window();         // window of slot.window_shape(), row-major LE
+        // entry.key() identifies the forecast/owner
+    }
+}
+```
+
+`build_static_reader` requires the filter to pin a resolution and that all matched series share one
+grid (`initial_timestamp` + `length`) — validated at build, so there is no presence mask.
+`build_forecast_reader` requires a forecast type and a resolution; a `Deterministic` reader is
+abstract (also matches `DeterministicSingleTimeSeries`), and all matched forecasts must share one
+window timeline (`initial_timestamp` + `interval` + `count`). `static_read` / `forecast_read` error
+(never clamp) if `at` is off the grid/timeline.
+
+**Window-read deduplication.** A `ForecastReader` groups its entries into `WindowSlot`s keyed by
+`(array hash, read plan)`: forecasts that reference the same array and slice it the same way —
+deduplicated identical data, or several `DeterministicSingleTimeSeries` over one `SingleTimeSeries`
+— share one slot. `forecast_read` performs one backend read per **slot**, not per entry, so a
+forecast shared by N owners is read once per timestamp (the forecast analog of `StaticReader`
+reading a packed column once and gathering it to many columns). `reader.slots()` /
+`reader.entry_slot(i)` expose the slots; `entry.slot()` is the slot index backing each entry, equal
+for entries that share data.
 
 ## Types
 
@@ -324,6 +384,60 @@ impl Scenarios {
         horizon: Duration, interval: Duration, count: usize,
         scenario_count: usize, data: TypedArray,
     ) -> Result<Self, String>;
+}
+```
+
+### `StaticReader` and `StaticGroup`
+
+The columnar `SingleTimeSeries` reader (see [Readers](#readers)). `Period` is the crate's resolution
+type. `values()` is empty until the first `Store::static_read`.
+
+```rust
+impl StaticReader {
+    pub fn initial_timestamp(&self) -> DateTime<Utc>;
+    pub fn resolution(&self) -> Period;
+    pub fn length(&self) -> usize;            // grid points; valid timestamps initial + k·resolution
+    pub fn groups(&self) -> &[StaticGroup];
+    pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize>;
+}
+
+impl StaticGroup {
+    pub fn dtype(&self) -> Dtype;
+    pub fn element_shape(&self) -> &[usize];  // trailing per-step dims; empty == scalar
+    pub fn keys(&self) -> &[TimeSeriesKey];   // column j identity
+    pub fn num_columns(&self) -> usize;
+    pub fn values(&self) -> &[u8];            // [num_columns, *element_shape], row-major LE
+}
+```
+
+### `ForecastReader`, `WindowSlot`, and `ForecastEntry`
+
+The forecast-window reader (see [Readers](#readers)). Entries are the per-key forecasts; slots are
+the deduplicated physical reads. `WindowSlot::window()` is empty until the first
+`Store::forecast_read`.
+
+```rust
+impl ForecastReader {
+    pub fn time_series_type(&self) -> TimeSeriesType;
+    pub fn initial_timestamp(&self) -> DateTime<Utc>;
+    pub fn resolution(&self) -> Period;
+    pub fn interval(&self) -> Period;
+    pub fn count(&self) -> usize;             // windows; valid timestamps initial + k·interval
+    pub fn entries(&self) -> &[ForecastEntry];
+    pub fn slots(&self) -> &[WindowSlot];     // one backend read each per forecast_read
+    pub fn entry_slot(&self, i: usize) -> &WindowSlot;  // slot backing entry i
+    pub fn window_index(&self, at: DateTime<Utc>) -> Result<usize>;
+}
+
+impl ForecastEntry {
+    pub fn key(&self) -> &TimeSeriesKey;
+    pub fn slot(&self) -> usize;              // index into slots(); equal for entries sharing data
+}
+
+impl WindowSlot {
+    pub fn dtype(&self) -> Dtype;
+    pub fn window_shape(&self) -> &[usize];   // [H,*E] / [P,H,*E] / [scenarios,H,*E]
+    pub fn window(&self) -> &[u8];            // most recent window, row-major LE
 }
 ```
 

@@ -9,14 +9,18 @@ using TimeSeriesStore
 ```
 
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
-`Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
-`get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
-`get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
-`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
-`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
-`get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
-`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
+`DeterministicSingleTimeSeries`, `AbstractDeterministic`, `Probabilistic`, `Scenarios`,
+`TimeSeriesKey`, `OwnerCategory`, `Component`, `SupplementalAttribute`, `add_time_series!`,
+`AddBatch`, `add_time_series_bulk!`, `get_time_series`, `get_time_series_keys`, `key_info`,
+`list_keys`, `list_array_groups`, `remove_time_series!`, `has_time_series`, `get_counts`,
+`counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`, `static_summary`,
+`forecast_summary`, `get_forecast_parameters`, `check_static_consistency`, `get_resolutions`,
+`get_compression`, `verify_integrity`, `compact!`, `get_metadata`, `get_forecast_metadata`,
+`get_array_by_hash`, `count_array_references`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
+`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`, `StaticReader`,
+`build_static_reader`, `static_grid`, `static_groups`, `static_read!`, `static_values`,
+`ForecastReader`, `build_forecast_reader`, `forecast_timeline`, `forecast_entries`,
+`forecast_num_slots`, `forecast_read!`, `forecast_values`, `init_logging`.
 
 ## Constructors
 
@@ -93,6 +97,10 @@ end
 # Marker type; never constructed. Derived via transform_single_time_series! and
 # read back as a Deterministic. Surfaces as a key's time_series_type.
 abstract type DeterministicSingleTimeSeries end
+
+# Supertype of Deterministic and DeterministicSingleTimeSeries. Pass it as the
+# reader/filter type to match both at once (see build_forecast_reader).
+abstract type AbstractDeterministic end
 
 mutable struct Store
     handle :: Ptr{Cvoid}
@@ -424,6 +432,10 @@ counts_by_type(store) -> Vector{NamedTuple}   # (time_series_type, count) per st
 num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays count once
 time_series_counts(store) -> NamedTuple   # distinct owners per category + distinct arrays per kind
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
+list_array_groups(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+                  name=nothing, resolution=nothing, features=Dict()) -> Vector{NamedTuple}
+                                  # list_keys rows + `data_hash`; group by it to find shared arrays
+count_array_references(store, data_hash::Vector{UInt8}) -> NamedTuple  # (sts, dst) refs to a 32-byte hash
 static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
 forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
@@ -446,6 +458,21 @@ close!(store) -> Nothing
 `length`, `horizon`, `interval`, `count`, `features`). It accepts `owner_id` and `owner_category` as
 independent filters to scope the listing. Physical storage detail (`data_hash`, `logical_type`,
 `percentiles`) is not on a key — read it via `get_metadata` / `get_forecast_metadata`.
+
+`list_array_groups` takes the same filters and returns the same row fields as `list_keys`, but each
+row additionally carries `data_hash` — the **64-character lowercase hex** content hash of the array
+the row resolves to (note this is a hex `String`, whereas `get_metadata` returns the hash as a
+32-byte `Vector{UInt8}`). Rows that share a stored array share their `data_hash`: both deduplicated
+identical arrays and a `SingleTimeSeries` together with any `DeterministicSingleTimeSeries` derived
+from it. **Group rows by `data_hash` to discover which time series share their underlying data** —
+the foundation for reading a shared series once (see
+[Window-read deduplication](#window-read-deduplication)). It is one catalog query (the hash is read
+off each metadata row); there are no per-row `get_metadata` round-trips.
+
+`count_array_references(store, data_hash)` returns `(; sts, dst)` — how many `SingleTimeSeries` and
+`DeterministicSingleTimeSeries` associations reference the given 32-byte hash, across all owners.
+Because a DST shares its backing `SingleTimeSeries` array, a caller uses these counts to decide
+whether removing a `SingleTimeSeries` would orphan a derived DST.
 
 ## Errors
 

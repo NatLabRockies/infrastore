@@ -313,6 +313,106 @@ int32_t ts_store_remove_typed(struct TsStore *handle,
                               int32_t ts_type, int64_t resolution_ms, const char *features_json);
 ```
 
+## Readers
+
+The per-timestamp read path is exposed as two opaque reader handles — `TsStaticReaderHandle` for
+`SingleTimeSeries` and `TsForecastReaderHandle` for forecasts. A reader is built once over a filter
+(the same `has_owner` / `owner_id` / `has_owner_category` / `owner_category` / `name` / `resolution`
+/ `features_json` convention as the attribute-based access, with a forecast reader also taking a
+`ts_type`), then driven per timestamp. The lifecycle is: **build → read the layout once → `*_read`
+in a loop → fetch values per group/entry → free**. Each reader pins one resolution and owns reusable
+buffers that each read overwrites in place.
+
+Ownership rules: the `*_grid` / `*_timeline` resolution/interval out-strings (`char **`) are owned —
+free each with `ts_string_free`. Keys from `*_group_key` / `*_entry_key` are owned `TsKey *` — free
+with `ts_key_free`. The `*_values` buffers (`const uint8_t **`) are **borrowed**: they point into
+reader memory, stay valid only until the next read or `*_free`, and must not be freed. Group/entry
+shapes follow the probe-then-fetch convention — call `*_info` with `shape_buf = NULL` /
+`shape_cap =
+0` to learn `*out_shape_len`, then again with a buffer of that length. `*_read` errors
+(never clamps) if `at_unix_ms` is off the reader's grid/timeline.
+
+### StaticReader
+
+Reads every matching `SingleTimeSeries` at one timestamp, partitioned into `(dtype, element_shape)`
+groups; each group's values are one dense `[num_columns, *element_shape]` little-endian buffer whose
+column `j` is the key from `ts_static_reader_group_key(reader, group_idx, j, …)`.
+
+```c
+int32_t ts_store_build_static_reader(const struct TsStore *handle,
+                                     bool has_owner, int64_t owner_id,
+                                     bool has_owner_category, int32_t owner_category,
+                                     const char *name, const char *resolution,
+                                     const char *features_json,
+                                     struct TsStaticReaderHandle **out_reader);
+
+int32_t ts_static_reader_grid(const struct TsStaticReaderHandle *reader,
+                              int64_t *out_initial_ms, char **out_resolution,  /* free with ts_string_free */
+                              uint64_t *out_length);
+int32_t ts_static_reader_num_groups(const struct TsStaticReaderHandle *reader, uint64_t *out_n);
+int32_t ts_static_reader_group_info(const struct TsStaticReaderHandle *reader, uint64_t group_idx,
+                                    int32_t *out_dtype, uint64_t *out_num_columns,
+                                    int64_t *shape_buf, uint64_t shape_cap, uint64_t *out_shape_len);
+int32_t ts_static_reader_group_key(const struct TsStaticReaderHandle *reader,
+                                   uint64_t group_idx, uint64_t col_idx,
+                                   struct TsKey **out_key);  /* free with ts_key_free */
+int32_t ts_static_reader_read(struct TsStaticReaderHandle *reader,
+                              const struct TsStore *store, int64_t at_unix_ms);
+int32_t ts_static_reader_group_values(const struct TsStaticReaderHandle *reader, uint64_t group_idx,
+                                      const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
+                                      uint64_t *out_byte_len);
+void ts_static_reader_free(struct TsStaticReaderHandle *reader);
+```
+
+All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
+and errors on divergence, so every column has a value at every valid timestamp (no presence mask).
+
+### ForecastReader
+
+Reads the forecast window at one timestamp for every matching forecast of one type. The build
+`ts_type` names the forecast type; a `Deterministic` reader (`2`) is abstract and also includes
+`DeterministicSingleTimeSeries` (`3`), read into identical `[H, *E]` windows. All matched forecasts
+must share one window timeline (`initial_timestamp` + `interval` + `count`). Each entry's window is
+a little-endian buffer of its `*_entry_info` shape.
+
+```c
+int32_t ts_store_build_forecast_reader(const struct TsStore *handle,
+                                       bool has_owner, int64_t owner_id,
+                                       bool has_owner_category, int32_t owner_category,
+                                       int32_t time_series_type,
+                                       const char *name, const char *resolution,
+                                       const char *features_json,
+                                       struct TsForecastReaderHandle **out_reader);
+
+int32_t ts_forecast_reader_timeline(const struct TsForecastReaderHandle *reader,
+                                    int64_t *out_initial_ms,
+                                    char **out_resolution, char **out_interval,  /* free each with ts_string_free */
+                                    uint64_t *out_count);
+int32_t ts_forecast_reader_num_entries(const struct TsForecastReaderHandle *reader, uint64_t *out_n);
+int32_t ts_forecast_reader_num_slots(const struct TsForecastReaderHandle *reader, uint64_t *out_n);
+int32_t ts_forecast_reader_entry_slot(const struct TsForecastReaderHandle *reader,
+                                      uint64_t entry_idx, uint64_t *out_slot);
+int32_t ts_forecast_reader_entry_info(const struct TsForecastReaderHandle *reader, uint64_t entry_idx,
+                                      int32_t *out_dtype,
+                                      int64_t *shape_buf, uint64_t shape_cap, uint64_t *out_shape_len);
+int32_t ts_forecast_reader_entry_key(const struct TsForecastReaderHandle *reader,
+                                     uint64_t entry_idx, struct TsKey **out_key);  /* free with ts_key_free */
+int32_t ts_forecast_reader_read(struct TsForecastReaderHandle *reader,
+                                const struct TsStore *store, int64_t at_unix_ms);
+int32_t ts_forecast_reader_entry_values(const struct TsForecastReaderHandle *reader, uint64_t entry_idx,
+                                        const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
+                                        uint64_t *out_byte_len);
+void ts_forecast_reader_free(struct TsForecastReaderHandle *reader);
+```
+
+**Window-read deduplication.** Forecasts that reference the same backing array and read plan
+(deduplicated identical data, or several `DeterministicSingleTimeSeries` over one
+`SingleTimeSeries`) collapse to a single _window slot_. `ts_forecast_reader_read` performs one
+backend read per slot, not per entry, so a forecast shared by N owners is read once per timestamp.
+`ts_forecast_reader_num_slots` is that physical read count, and `ts_forecast_reader_entry_slot`
+gives the 0-based slot backing each entry (entries that share data report the same slot) — group
+entries by slot to also decode each unique window only once.
+
 ## Bulk Adds
 
 A batch accumulates add requests client-side (no store I/O); `ts_store_add_batch` commits them all

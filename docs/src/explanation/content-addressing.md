@@ -80,6 +80,33 @@ Because arrays are shared, deleting an association cannot blindly delete its arr
 
 This keeps shared arrays alive until the last referencing key is gone.
 
+## Discovering Shared Series
+
+Sharing is observable on read, not just an internal write optimization. Every metadata row carries
+its array's `data_hash`, so a caller can group series by that hash to learn which ones resolve to
+the same stored array — without reading any array bytes. Two cases land in the same group: arrays
+that were deduplicated because their content was identical, and a `SingleTimeSeries` together with
+any `DeterministicSingleTimeSeries` derived from it (the DST shares the backing array).
+
+In the Julia binding, `list_array_groups` returns the `list_keys` rows plus a `data_hash` field (a
+64-character hex string); group by it to find the shared sets. `count_array_references` reports, for
+one hash, how many `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations point at it.
+
+```julia
+groups = Dict{String, Vector{NamedTuple}}()
+for row in list_array_groups(store)
+    push!(get!(groups, row.data_hash, eltype(values(groups))[]), row)
+end
+shared = filter(((_, rows),) -> length(rows) > 1, groups)   # arrays referenced by >1 series
+```
+
+This read-side view is what lets a downstream caller collapse work across owners that share data.
+The [`ForecastReader`](../reference/julia-api.md#forecastreader) builds on the same grouping
+internally: forecasts that share an array (and read plan) are read from disk **once per timestamp**
+no matter how many components reference them — see
+[Window-read deduplication](../reference/julia-api.md#window-read-deduplication). (This is exactly
+how InfrastructureSystems.jl backs its own `get_shared_time_series` and forecast reader.)
+
 ## Stability is a Contract
 
 These hashes are part of the on-disk format. The `hash_golden` integration test pins the SHA-256 of
