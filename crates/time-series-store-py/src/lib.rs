@@ -711,6 +711,11 @@ impl PyTimeSeriesKey {
     }
 
     #[getter]
+    fn interval(&self) -> Option<String> {
+        self.inner.interval.map(|p| p.to_iso8601())
+    }
+
+    #[getter]
     fn features<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         features_to_dict(py, &self.inner.features)
     }

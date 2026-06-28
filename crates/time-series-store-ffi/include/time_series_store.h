@@ -903,7 +903,9 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
  *
  * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
  * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
- * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
+ * null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
+ * ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
+ * Scalar output pointers must each be valid for
  * one value and `out_data_hash` must be valid for 32 bytes.
  */
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
@@ -912,6 +914,7 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        const char *name,
                                        int32_t ts_type,
                                        const char *resolution,
+                                       const char *interval,
                                        const char *features_json,
                                        int64_t *out_initial_ts_unix_ms,
                                        char **out_resolution,
@@ -960,6 +963,10 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
  * - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
  *   identify the owner. `name` must point to a valid, null-terminated
  *   UTF-8 string for the duration of the call; `features_json` may be null.
+ * - `resolution` and `interval`, when non-null, must be valid null-terminated
+ *   UTF-8 ISO-8601 durations; either may be null to leave that part of the
+ *   identity unconstrained (the catalog reports an error if the request is
+ *   then ambiguous).
  * - All `out_*` scalar pointers, including `out_matched_type`, must be valid
  *   for writing one value each.
  * - `out_dims` must be valid for writing one pointer; the returned pointer
@@ -980,6 +987,7 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
                               const char *name,
                               int32_t ts_type,
                               const char *resolution,
+                              const char *interval,
                               const char *features_json,
                               bool time_range_present,
                               int64_t time_range_start_ms,
@@ -1052,7 +1060,8 @@ int32_t ts_store_get_forecast_by_key(const struct TsStore *handle,
  * [`ts_store_get_single`], [`ts_store_get_non_sequential`],
  * [`ts_store_get_forecast_by_key`]); it lets an attribute-addressed caller
  * reuse the key-based read path without an `add`/lookup round trip.
- * an empty `resolution` means "unspecified".
+ * an empty `resolution` means "unspecified"; likewise an empty/null `interval`
+ * leaves the forecast interval (part of the identity) unconstrained.
  *
  * # Safety
  *
@@ -1067,6 +1076,7 @@ int32_t ts_make_key_from_attrs(int64_t owner_id,
                                const char *name,
                                int32_t ts_type,
                                const char *resolution,
+                               const char *interval,
                                const char *features_json,
                                struct TsKey **out_key);
 

@@ -647,27 +647,59 @@ end
     @test_throws TimeSeriesStore.NotFoundError get_time_series(
         AbstractDeterministic, store, 999, Component, "nope")
 
-    # An identity that matches BOTH a concrete Deterministic and a DST is
-    # ambiguous for the family — the core rejects it; a concrete read still works.
+    # Two Deterministic forecasts of one variable at the same resolution but
+    # different intervals (e.g. day-ahead vs intra-day). Interval is part of the
+    # identity, so both coexist; a read that does not pin the interval is
+    # ambiguous, and pinning it disambiguates.
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    hor = Hour(2)
+    add_time_series!(
+        store, 401, "Generator", Component,
+        Deterministic(t0, res, hor, Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
+    )
+    add_time_series!(
+        store, 401, "Generator", Component,
+        Deterministic(t0, res, hor, Hour(6), 2, reshape(Float64[10, 11, 12, 13], 2, 2), "dup"),
+    )
+    @test_throws TimeSeriesStore.InvalidParameterError get_time_series(
+        Deterministic, store, 401, Component, "dup")
+    # Pinning the interval disambiguates.
+    cd = get_time_series(Deterministic, store, 401, Component, "dup"; interval=Hour(6))
+    @test cd isa Deterministic
+    @test cd.interval == Hour(6)
+end
+
+@testset "Deterministic and DeterministicSingleTimeSeries are mutually exclusive" begin
     t0 = DateTime(2024, 6, 1)
     res = Hour(1)
     hor = Hour(2)
     ivl = Hour(1)
+
+    # Adding a Deterministic when a DST view of the same family exists is rejected.
+    store = Store(in_memory=true)
     add_time_series!(
         store, 401, "Generator", Component,
         SingleTimeSeries(t0, res, Float64[i for i in 0:7], "dup"),
     )
     transform_single_time_series!(store, hor, ivl)
-    # Canonical [H, C] Deterministic sharing (owner, name, resolution).
-    add_time_series!(
+    @test_throws TimeSeriesStore.InvalidParameterError add_time_series!(
         store, 401, "Generator", Component,
         Deterministic(t0, res, hor, ivl, 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
     )
-    @test_throws TimeSeriesStore.InvalidParameterError get_time_series(
-        AbstractDeterministic, store, 401, Component, "dup")
-    # The concrete request disambiguates.
-    cd = get_time_series(Deterministic, store, 401, Component, "dup")
-    @test cd isa Deterministic
+
+    # The reverse: deriving a DST when a Deterministic of the same family exists.
+    store2 = Store(in_memory=true)
+    add_time_series!(
+        store2, 401, "Generator", Component,
+        Deterministic(t0, res, hor, ivl, 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
+    )
+    add_time_series!(
+        store2, 401, "Generator", Component,
+        SingleTimeSeries(t0, res, Float64[i for i in 0:7], "dup"),
+    )
+    @test_throws TimeSeriesStore.InvalidParameterError transform_single_time_series!(
+        store2, hor, ivl)
 end
 
 @testset "get_time_series_keys empty owner" begin

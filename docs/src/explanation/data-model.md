@@ -1,6 +1,6 @@
 # Data Model
 
-The data model mirrors the time-series concepts in
+The data model mirrors the time-series concepts originally developed in
 [InfrastructureSystems.jl](https://github.com/NLR-Sienna/InfrastructureSystems.jl): a **component**
 (or supplemental attribute) owns one or more named time series, and each time series may exist in
 several variants distinguished by **features**.
@@ -118,9 +118,13 @@ takes a row-major byte buffer with explicit dims, and the Julia wrapper accepts 
 serializes it row-major), and a `DeterministicSingleTimeSeries` deduplicates against the static
 series it forecasts. A `DeterministicSingleTimeSeries` is not added directly — it is derived from
 every stored `SingleTimeSeries` by `transform_single_time_series` (Rust core, C ABI, Python, Julia),
-sharing the underlying array. Forecast values read back through the high-level path —
-`get_time_series` returns a forecast object in the Rust core, Python, and over gRPC, and Julia
-exposes `get_time_series(Deterministic, …)` / `get_time_series(Probabilistic, …)` /
+sharing the underlying array. Because a `DeterministicSingleTimeSeries` is a synthetic view of a
+`SingleTimeSeries`, it is **mutually exclusive** with a real `Deterministic` for the same family
+(`owner`, `name`, `resolution`, `features`, regardless of interval): adding a `Deterministic` when a
+`DeterministicSingleTimeSeries` view exists — or deriving one when a `Deterministic` exists — raises
+`InvalidParameter`. Forecast values read back through the high-level path — `get_time_series`
+returns a forecast object in the Rust core, Python, and over gRPC, and Julia exposes
+`get_time_series(Deterministic, …)` / `get_time_series(Probabilistic, …)` /
 `get_time_series(Scenarios, …)` — while the low-level metadata + array path remains available for
 raw access. See the [Rust API](../reference/rust-api.md#forecasts) and
 [C ABI](../reference/c-abi.md#forecasts).
@@ -143,19 +147,22 @@ A **`TimeSeriesKey`** is the logical handle that re-finds a series. It is exactl
 must be unique:
 
 ```text
-TimeSeriesKey = (owner_id, owner_category, time_series_type, name, resolution, features)
+TimeSeriesKey = (owner_id, owner_category, time_series_type, name, resolution, interval, features)
 ```
 
 `add_time_series` returns a key; `get_time_series`, `has_time_series`, and `remove_time_series` take
 one. Two series with the same key cannot coexist — attempting to add a duplicate raises
 `DuplicateTimeSeries`. Change any element of the tuple (a different `name`, a different `model_year`
-feature, a different `resolution`, or a different `owner_category`) and you have a distinct series.
-Because `owner_category` is part of the key, a component and a supplemental attribute that share a
-numeric `owner_id` keep entirely separate sets of series.
+feature, a different `resolution`, a different forecast `interval`, or a different `owner_category`)
+and you have a distinct series. `interval` is `NULL` for the static types (which never carry one);
+for forecasts it lets two series of one variable at the same resolution but different intervals
+(e.g. a day-ahead and a real-time forecast) coexist as distinct series. Because `owner_category` is
+part of the key, a component and a supplemental attribute that share a numeric `owner_id` keep
+entirely separate sets of series.
 
 ```mermaid
 flowchart LR
-    OWNER["Owner<br/>id=42, category=Component, type=Generator"]
+    OWNER["owner_id=42, category=Component, type=Generator"]
     OWNER --> K1["name=load<br/>year=2030"]
     OWNER --> K2["name=load<br/>year=2050"]
     OWNER --> K3["name=max_active_power"]

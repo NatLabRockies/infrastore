@@ -1034,6 +1034,7 @@ fn resolve_abstract_deterministic_matches_real_deterministic() {
                     OwnerCategory::Component,
                     "load",
                     Some(Period::Fixed(resolution)),
+                    None,
                     Features::new(),
                     RequestedType::AbstractDeterministic,
                 )
@@ -1089,6 +1090,7 @@ fn resolve_abstract_deterministic_matches_dst() {
                     OwnerCategory::Component,
                     "gen",
                     Some(Period::Fixed(resolution)),
+                    None,
                     Features::new(),
                     RequestedType::AbstractDeterministic,
                 )
@@ -1119,6 +1121,7 @@ fn resolve_abstract_deterministic_not_found_is_not_masked() {
             OwnerCategory::Component,
             "missing",
             Some(Period::Fixed(Duration::hours(1))),
+            None,
             Features::new(),
             RequestedType::AbstractDeterministic,
         )
@@ -1130,26 +1133,26 @@ fn resolve_abstract_deterministic_not_found_is_not_masked() {
 }
 
 #[test]
-fn resolve_abstract_deterministic_ambiguous_errors() {
+fn resolve_deterministic_ambiguous_by_interval_errors() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(2);
-    let interval = Duration::hours(1);
     let mut store = create_store(None, true).unwrap();
 
-    // A DST (derived from a transformed STS) and a real Deterministic sharing the
-    // same (owner, name, resolution, features) identity — distinct only by type.
+    // Two Deterministic forecasts of one variable at the same resolution but
+    // different intervals (e.g. day-ahead vs intra-day). Interval is part of the
+    // identity, so both coexist as distinct series.
     add_forecast(
         &mut store,
         3,
         "dup",
-        TimeSeriesType::DeterministicSingleTimeSeries,
+        TimeSeriesType::Deterministic,
         initial,
         resolution,
         horizon,
-        interval,
-        0,
-        f64_arr(vec![8], &dst_source_vals()),
+        Duration::hours(1),
+        2,
+        f64_arr(vec![2, 2], &[0.0, 1.0, 2.0, 3.0]),
         None,
     );
     add_forecast(
@@ -1160,39 +1163,134 @@ fn resolve_abstract_deterministic_ambiguous_errors() {
         initial,
         resolution,
         horizon,
-        interval,
+        Duration::hours(6),
         2,
-        f64_arr(vec![2, 2], &[0.0, 1.0, 2.0, 3.0]),
+        f64_arr(vec![2, 2], &[10.0, 11.0, 12.0, 13.0]),
         None,
     );
 
+    // Resolving without an interval is ambiguous: two candidates differ only by
+    // interval.
     let err = store
         .resolve_forecast_key(
             3,
             OwnerCategory::Component,
             "dup",
             Some(Period::Fixed(resolution)),
+            None,
             Features::new(),
-            RequestedType::AbstractDeterministic,
+            RequestedType::Concrete(TimeSeriesType::Deterministic),
         )
         .unwrap_err();
     assert!(
         matches!(err, TimeSeriesError::InvalidParameter(_)),
-        "ambiguous family should error, got {err:?}"
+        "ambiguous interval should error, got {err:?}"
     );
 
-    // A concrete request still disambiguates each one.
+    // Specifying the interval disambiguates.
     let d = store
         .resolve_forecast_key(
             3,
             OwnerCategory::Component,
             "dup",
             Some(Period::Fixed(resolution)),
+            Some(Period::Fixed(Duration::hours(6))),
             Features::new(),
             RequestedType::Concrete(TimeSeriesType::Deterministic),
         )
         .unwrap();
     assert_eq!(d.time_series_type(), TimeSeriesType::Deterministic);
+    assert_eq!(d.interval(), Some(Period::Fixed(Duration::hours(6))));
+}
+
+#[test]
+fn deterministic_and_dst_are_mutually_exclusive() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+
+    // Adding a Deterministic when a DST view of the same family exists is
+    // rejected: a DST is a synthetic view of a SingleTimeSeries and the two may
+    // never coexist.
+    let mut store = create_store(None, true).unwrap();
+    add_forecast(
+        &mut store,
+        3,
+        "load",
+        TimeSeriesType::DeterministicSingleTimeSeries,
+        initial,
+        resolution,
+        horizon,
+        interval,
+        0,
+        f64_arr(vec![8], &dst_source_vals()),
+        None,
+    );
+    let err = store
+        .add_time_series(
+            3,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(
+                Deterministic::new(
+                    initial,
+                    resolution,
+                    horizon,
+                    interval,
+                    2,
+                    f64_arr(vec![2, 2], &[0.0, 1.0, 2.0, 3.0]),
+                    "load",
+                )
+                .unwrap(),
+            ),
+            Features::new(),
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "adding Deterministic over a DST family should error, got {err:?}"
+    );
+
+    // The reverse: transforming a SingleTimeSeries into a DST is rejected when a
+    // Deterministic of the same family already exists.
+    let mut store = create_store(None, true).unwrap();
+    add_forecast(
+        &mut store,
+        5,
+        "load",
+        TimeSeriesType::Deterministic,
+        initial,
+        resolution,
+        horizon,
+        interval,
+        2,
+        f64_arr(vec![2, 2], &[0.0, 1.0, 2.0, 3.0]),
+        None,
+    );
+    store
+        .add_time_series(
+            5,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution,
+                f64_arr(vec![8], &dst_source_vals()),
+                "load",
+            )),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    let err = store
+        .transform_single_time_series(horizon, interval, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "deriving a DST over a Deterministic family should error, got {err:?}"
+    );
 }
 
 #[test]

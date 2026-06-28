@@ -75,7 +75,7 @@ async fn list_and_get_round_trip() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None)
+        .list_time_series(None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 2);
@@ -123,7 +123,7 @@ async fn list_filter_by_features_subset() {
     let mut filter: Features = BTreeMap::new();
     filter.insert("model_year".into(), FeatureValue::Int(2030));
     let metas = client
-        .list_time_series(None, None, None, None, None, None, Some(&filter))
+        .list_time_series(None, None, None, None, None, None, None, Some(&filter))
         .await
         .unwrap();
     assert_eq!(metas.len(), 1);
@@ -170,6 +170,7 @@ async fn missing_key_returns_not_found() {
         time_series_type: TimeSeriesType::SingleTimeSeries,
         name: "load".into(),
         resolution: Some(Period::Fixed(Duration::hours(1))),
+        interval: None,
         features: Features::new(),
     };
     let err = client.get_time_series(&bogus_key, None).await.unwrap_err();

@@ -15,12 +15,12 @@ see the [On-Disk File Format reference](../reference/file-format.md).
 
 Arrays and metadata pull in opposite directions:
 
-| Concern        | Arrays                             | Metadata                                  |
-| -------------- | ---------------------------------- | ----------------------------------------- |
-| Size           | Large (thousands of values each)   | Small (a row plus a few feature rows)     |
-| Access pattern | Bulk read by content               | Filtered queries by owner, name, features |
-| Mutation       | Append-mostly, dedup-on-write      | Insert / delete with constraints          |
-| Best tool      | NetCDF4 (chunked, compressed HDF5) | SQLite (indexes, transactions)            |
+| Concern        | Arrays                                            | Metadata                                  |
+| -------------- | ------------------------------------------------- | ----------------------------------------- |
+| Size           | Large (thousands of values each)                  | Small (a row plus a few feature rows)     |
+| Access pattern | Bulk read by content                              | Filtered queries by owner, name, features |
+| Mutation       | Immutable; whole-array add/delete, dedup-on-write | Insert / delete with constraints          |
+| Best tool      | NetCDF4 (chunked, compressed HDF5)                | SQLite (indexes, transactions)            |
 
 Forcing both into one format would compromise one of them. Instead, each lives where it is
 strongest, and the `Store` layer coordinates them.
@@ -29,6 +29,11 @@ strongest, and the `Store` layer coordinates them.
 
 Arrays live under `time_series/single/` in the NetCDF file, in one of **two storage modes**.
 
+Stored arrays are **immutable**: a value array is added or deleted as a whole and is never edited in
+place — there is no API to mutate a row, slice, or column of an array already in the store. Changing
+data means writing a new array (content-addressed and deduplicated on write) and, if desired,
+deleting the old one.
+
 **Packed mode** holds `SingleTimeSeries` (and the backing array of a
 `DeterministicSingleTimeSeries`). Arrays that share a `(dtype, element_shape, length, resolution)`
 are packed together as columns of one dataset named `sts_{dtype}_{shape}_{length}_{res}`, with shape
@@ -36,7 +41,7 @@ are packed together as columns of one dataset named `sts_{dtype}_{shape}_{length
 
 ```mermaid
 flowchart TB
-    subgraph ds["dataset sts_f64_s_8760_3600  shape (8760, 1000)"]
+    subgraph ds["dataset&nbsp;sts_f64_s_8760_3600&nbsp;&nbsp;shape&nbsp;(8760,&nbsp;1000)"]
         direction LR
         C0["col 0<br/>series A"]
         C1["col 1<br/>series B"]
@@ -91,13 +96,14 @@ The catalog holds two tables:
   a `value_kind` discriminator.
 
 A unique index over
-`(owner_id, owner_category, time_series_type, name, resolution_ms, features_hash)` enforces the
-[key uniqueness](./data-model.md#keys) invariant at the database level. `owner_category` is part of
-the key, so a component and a supplemental attribute that share an `owner_id` are independent.
-Because SQLite treats `NULL` as distinct in a `UNIQUE` index, a second index folds a `NULL`
-`resolution_ms` to a sentinel so series without a resolution (e.g. `NonSequentialTimeSeries`) are
-still constrained. Indexes on `data_hash`, `(owner_id, owner_category)`, and `resolution_ms` keep
-lookups fast.
+`(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)` enforces
+the [key uniqueness](./data-model.md#keys) invariant at the database level. `owner_category` is part
+of the key, so a component and a supplemental attribute that share an `owner_id` are independent;
+`interval` is part of the key too, so forecasts of one variable that differ only by interval are
+distinct. Because SQLite treats `NULL` as distinct in a `UNIQUE` index, a second index folds `NULL`
+`resolution` and `interval` to a sentinel so series without them (e.g. `NonSequentialTimeSeries`, or
+any static series, which carry no interval) are still constrained. Indexes on `data_hash`,
+`(owner_id, owner_category)`, and `resolution` keep lookups fast.
 
 ## Keeping the Two Files Consistent
 

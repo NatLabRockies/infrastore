@@ -131,6 +131,7 @@ pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
         time_series_type: pb::TimeSeriesType::from(k.time_series_type) as i32,
         name: k.name.clone(),
         resolution: period_to_iso(k.resolution),
+        interval: period_to_iso(k.interval),
         features: Some(features_to_pb(&k.features)),
     }
 }
@@ -148,6 +149,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<KeyIdentity, ConvertError> {
         }
     })?;
     let resolution = optional_period(&k.resolution)?;
+    let interval = optional_period(&k.interval)?;
     let features = match k.features {
         Some(f) => features_from_pb(f)?,
         None => Features::new(),
@@ -158,6 +160,7 @@ pub fn key_from_pb(k: pb::TimeSeriesKey) -> Result<KeyIdentity, ConvertError> {
         time_series_type: TimeSeriesType::from(ts_type),
         name: k.name,
         resolution,
+        interval,
         features,
     })
 }

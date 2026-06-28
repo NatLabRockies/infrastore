@@ -29,6 +29,7 @@ pub struct ListFilter {
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
     pub resolution: Option<Period>,
+    pub interval: Option<Period>,
     pub features: Option<Features>,
 }
 
@@ -60,6 +61,10 @@ impl ListFilter {
         self.resolution = Some(r.into());
         self
     }
+    pub fn interval(mut self, i: impl Into<Period>) -> Self {
+        self.interval = Some(i.into());
+        self
+    }
     pub fn features(mut self, f: Features) -> Self {
         self.features = Some(f);
         self
@@ -75,6 +80,7 @@ impl From<ListFilter> for MetadataFilter {
             time_series_type: value.time_series_type,
             name: value.name,
             resolution: value.resolution,
+            interval: value.interval,
             features: value.features,
             features_hash: None,
         }
@@ -421,8 +427,35 @@ impl Store {
                 staged_hashes.push(hash);
             }
 
-            match MetadataStore::insert(&tx, &meta) {
-                Ok(_) => {
+            // Enforce the Deterministic/DeterministicSingleTimeSeries mutual
+            // exclusion: a DST is a synthetic view of a SingleTimeSeries, so a
+            // family may hold one or the other but never both. A DST is only
+            // ever created by `transform_single_time_series`, so the only overlap
+            // reachable here is adding a Deterministic when a DST already exists.
+            let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
+                crate::metadata::forecast_family_conflict(
+                    &tx,
+                    meta.owner_id,
+                    meta.owner_category,
+                    &meta.name,
+                    meta.resolution,
+                    &crate::hash::features_hash(&meta.features),
+                    TimeSeriesType::DeterministicSingleTimeSeries,
+                )
+            } else {
+                Ok(false)
+            };
+            let insert_result = match conflict {
+                Ok(true) => Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot add Deterministic '{}': a DeterministicSingleTimeSeries view of the \
+                     same series already exists; they are mutually exclusive",
+                    meta.name
+                ))),
+                Ok(false) => MetadataStore::insert(&tx, &meta).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            match insert_result {
+                Ok(()) => {
                     keys.push(key);
                 }
                 Err(e) => {
@@ -978,51 +1011,46 @@ impl Store {
     /// concrete [`TimeSeriesKey`] of the single matching association. The returned
     /// key's `time_series_type` is the concrete type that matched.
     ///
-    /// For a [`RequestedType::Concrete`] request this is the unique-index lookup
-    /// in [`Store::get_metadata`]. For [`RequestedType::AbstractDeterministic`] it
-    /// matches a stored `Deterministic` or `DeterministicSingleTimeSeries`,
-    /// returning whichever exists. This is the authoritative replacement for the
-    /// bindings' former guess-and-retry fallback: the catalog — not the caller —
-    /// decides which concrete type satisfies the request.
+    /// For a [`RequestedType::Concrete`] request the concrete type must match;
+    /// for [`RequestedType::AbstractDeterministic`] a stored `Deterministic` or
+    /// `DeterministicSingleTimeSeries` matches (the two cannot coexist for one
+    /// family, so at most one ever does). This is the authoritative replacement
+    /// for the bindings' former guess-and-retry fallback: the catalog — not the
+    /// caller — decides which concrete type satisfies the request.
+    ///
+    /// `resolution` and `interval` are optional filters on the identity. Leave
+    /// either unset to match across it; supply it to disambiguate when several
+    /// series share the other attributes (e.g. a day-ahead and a real-time
+    /// forecast that differ only by interval).
     ///
     /// Errors:
     /// - [`TimeSeriesError::NotFound`] if nothing matches.
-    /// - [`TimeSeriesError::InvalidParameter`] if an abstract request is
-    ///   ambiguous (both a `Deterministic` and a `DeterministicSingleTimeSeries`
-    ///   share the identity); the caller must then request a concrete type.
+    /// - [`TimeSeriesError::InvalidParameter`] if the request is ambiguous (more
+    ///   than one stored series matches); the caller must then narrow it with a
+    ///   concrete type, a resolution, and/or an interval.
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_forecast_key(
         &self,
         owner_id: i64,
         owner_category: OwnerCategory,
         name: &str,
         resolution: Option<Period>,
+        interval: Option<Period>,
         features: Features,
         requested: crate::types::time_series::RequestedType,
     ) -> Result<TimeSeriesKey> {
-        use crate::types::time_series::RequestedType;
-        // A concrete request maps to exactly one key; reuse the unique-index
-        // lookup so resolution stays cheap and NotFound is reported uniformly.
-        if let RequestedType::Concrete(time_series_type) = requested {
-            let identity = KeyIdentity {
-                owner_id,
-                owner_category,
-                time_series_type,
-                name: name.to_string(),
-                resolution,
-                features,
-            };
-            let meta = self.metadata.get_by_key(&identity)?;
-            return TimeSeriesKey::from_metadata(&meta);
-        }
-
-        // Abstract family: list candidates sharing (owner, name, resolution,
-        // features), then keep those whose concrete type satisfies the family.
+        // List candidates sharing (owner, name, resolution, interval, features),
+        // then keep those whose concrete type satisfies the request. A concrete
+        // request with resolution+interval pinned resolves to one row via the
+        // unique index; looser requests may match several and are reported as
+        // ambiguous rather than silently picking one.
         let f_hash = crate::hash::features_hash(&features);
         let mut matches = self.metadata.list(&MetadataFilter {
             owner_id: Some(owner_id),
             owner_category: Some(owner_category),
             name: Some(name.to_string()),
             resolution,
+            interval,
             features_hash: Some(f_hash),
             ..Default::default()
         })?;
@@ -1031,24 +1059,29 @@ impl Store {
             0 => Err(TimeSeriesError::NotFound),
             1 => TimeSeriesKey::from_metadata(&matches.pop().unwrap()),
             _ => {
-                // More than one candidate satisfies the family. This is usually a
-                // Deterministic + DeterministicSingleTimeSeries sharing an identity,
-                // but with `resolution` unset it can also be several forecasts at
-                // different resolutions, so report the actual candidates rather than
+                // More than one candidate matches: with `resolution`/`interval`
+                // unset this can be several forecasts at different resolutions or
+                // intervals, so report the actual candidates rather than
                 // asserting a single shape.
+                let describe = |p: Option<Period>| match p {
+                    Some(p) => p.to_iso8601(),
+                    None => "-".to_string(),
+                };
                 let mut candidates: Vec<String> = matches
                     .iter()
-                    .map(|m| match m.resolution {
-                        Some(r) => {
-                            format!("{} at {}", m.time_series_type.as_str(), r.to_iso8601())
-                        }
-                        None => m.time_series_type.as_str().to_string(),
+                    .map(|m| {
+                        format!(
+                            "{} (resolution={}, interval={})",
+                            m.time_series_type.as_str(),
+                            describe(m.resolution),
+                            describe(m.interval),
+                        )
                     })
                     .collect();
                 candidates.sort();
                 Err(TimeSeriesError::InvalidParameter(format!(
-                    "ambiguous AbstractDeterministic request for '{name}': {} candidates match \
-                     ({}); request a concrete type and/or resolution",
+                    "ambiguous forecast request for '{name}': {} candidates match \
+                     ({}); narrow it with a concrete type, resolution, and/or interval",
                     candidates.len(),
                     candidates.join(", "),
                 )))
@@ -1126,13 +1159,46 @@ impl Store {
             sources.retain(|m| m.resolution == Some(res));
         }
 
-        // Series that already have a DeterministicSingleTimeSeries view are
-        // skipped so the transform is idempotent (e.g. re-deriving one series
-        // when others were transformed earlier, as during a component copy).
-        // The dedup key is the full owner identity (owner_id, owner_category)
-        // plus name/resolution/features.
+        // Series that already have a DeterministicSingleTimeSeries view *at this
+        // interval* are skipped so the transform is idempotent (e.g. re-deriving
+        // one series when others were transformed earlier, as during a component
+        // copy). The dedup key is the full identity: owner_id/owner_category plus
+        // name/resolution/interval/features. Interval is part of the identity, so
+        // re-deriving the same series at a different interval is a distinct view.
+        let interval_iso = interval.to_iso8601();
         #[allow(clippy::type_complexity)]
         let existing_dst: std::collections::HashSet<(
+            i64,
+            OwnerCategory,
+            String,
+            Option<String>,
+            Option<String>,
+            [u8; 32],
+        )> = self
+            .metadata
+            .list(&MetadataFilter {
+                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
+                ..Default::default()
+            })?
+            .iter()
+            .map(|m| {
+                (
+                    m.owner_id,
+                    m.owner_category,
+                    m.name.clone(),
+                    m.resolution.map(|r| r.to_iso8601()),
+                    m.interval.map(|i| i.to_iso8601()),
+                    crate::hash::features_hash(&m.features),
+                )
+            })
+            .collect();
+
+        // Families that already hold a real `Deterministic` forecast. A DST is a
+        // synthetic view and is mutually exclusive with a `Deterministic` for one
+        // family (owner, name, resolution, features, ignoring interval), so
+        // deriving a DST over such a family is rejected.
+        #[allow(clippy::type_complexity)]
+        let existing_det: std::collections::HashSet<(
             i64,
             OwnerCategory,
             String,
@@ -1141,7 +1207,7 @@ impl Store {
         )> = self
             .metadata
             .list(&MetadataFilter {
-                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
+                time_series_type: Some(TimeSeriesType::Deterministic),
                 ..Default::default()
             })?
             .iter()
@@ -1160,12 +1226,31 @@ impl Store {
         // aborts the whole transform before any write.
         let mut new_metas = Vec::with_capacity(sources.len());
         for src in &sources {
+            let src_features_hash = crate::hash::features_hash(&src.features);
+            let src_resolution_iso = src.resolution.map(|r| r.to_iso8601());
+            // Reject deriving a DST over a family that already holds a real
+            // Deterministic forecast (interval-independent).
+            let det_family = (
+                src.owner_id,
+                src.owner_category,
+                src.name.clone(),
+                src_resolution_iso.clone(),
+                src_features_hash,
+            );
+            if existing_det.contains(&det_family) {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot derive DeterministicSingleTimeSeries for '{}': a Deterministic \
+                     forecast of the same series already exists; they are mutually exclusive",
+                    src.name
+                )));
+            }
             let src_key = (
                 src.owner_id,
                 src.owner_category,
                 src.name.clone(),
-                src.resolution.map(|r| r.to_iso8601()),
-                crate::hash::features_hash(&src.features),
+                src_resolution_iso,
+                Some(interval_iso.clone()),
+                src_features_hash,
             );
             if existing_dst.contains(&src_key) {
                 continue;
@@ -1230,9 +1315,8 @@ impl Store {
     /// If none match, returns [`ForecastParameters::default()`]. When multiple
     /// match, returns the first one found (v0 stores a single coherent forecast
     /// configuration; callers that need per-type parameters should use
-    /// [`Self::list_time_series`] directly). `resolution` is pushed into the
-    /// catalog query; `interval` (not a catalog filter column) is matched on the
-    /// returned rows.
+    /// [`Self::list_time_series`] directly). Both `resolution` and `interval`
+    /// are pushed into the catalog query.
     pub fn get_forecast_parameters(
         &self,
         resolution: Option<Period>,
@@ -1249,12 +1333,10 @@ impl Store {
             let rows = self.metadata.list(&MetadataFilter {
                 time_series_type: Some(ts_type),
                 resolution,
+                interval,
                 ..Default::default()
             })?;
-            for row in rows {
-                if interval.is_some() && row.interval != interval {
-                    continue;
-                }
+            if let Some(row) = rows.into_iter().next() {
                 return Ok(ForecastParameters {
                     horizon: row.horizon,
                     interval: row.interval,

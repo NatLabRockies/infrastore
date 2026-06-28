@@ -55,6 +55,9 @@ message TimeSeriesKey {
   string          resolution        = 4;
   Features        features          = 5;
   OwnerCategory   owner_category    = 6;
+  // Forecast interval as an ISO-8601 duration; part of the identity. Empty =
+  // unset (static series, which never carry an interval).
+  string          interval          = 7;
 }
 
 message TimeSeriesMetadata {
@@ -91,6 +94,7 @@ message ListReq {
   optional string          resolution        = 5;       // ISO-8601 duration
   Features                 features          = 6;
   optional OwnerCategory   owner_category    = 7;
+  optional string          interval          = 8;       // ISO-8601 duration
 }
 message ListResp {
   repeated TimeSeriesMetadata metadata = 1;

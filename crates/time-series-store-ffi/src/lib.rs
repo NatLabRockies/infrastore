@@ -1606,6 +1606,7 @@ unsafe fn build_key_from_attrs(
         time_series_type: core_lib::TimeSeriesType::SingleTimeSeries,
         name: name.to_string(),
         resolution,
+        interval: None,
         features,
     })
 }
@@ -2897,7 +2898,9 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
 ///
 /// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
 /// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
-/// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
+/// null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
+/// ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
+/// Scalar output pointers must each be valid for
 /// one value and `out_data_hash` must be valid for 32 bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -2908,6 +2911,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     name: *const c_char,
     ts_type: i32,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     out_initial_ts_unix_ms: *mut i64,
     out_resolution: *mut *mut c_char,
@@ -2937,7 +2941,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe {
+    let mut key = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
             owner_category,
@@ -2948,6 +2952,10 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         )
     } {
         Ok(k) => k,
+        Err(c) => return c,
+    };
+    key.interval = match unsafe { cstr_to_optional_period(interval) } {
+        Ok(i) => i,
         Err(c) => return c,
     };
     let meta = match store.inner.get_metadata(&key) {
@@ -3014,6 +3022,10 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
 /// - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
 ///   identify the owner. `name` must point to a valid, null-terminated
 ///   UTF-8 string for the duration of the call; `features_json` may be null.
+/// - `resolution` and `interval`, when non-null, must be valid null-terminated
+///   UTF-8 ISO-8601 durations; either may be null to leave that part of the
+///   identity unconstrained (the catalog reports an error if the request is
+///   then ambiguous).
 /// - All `out_*` scalar pointers, including `out_matched_type`, must be valid
 ///   for writing one value each.
 /// - `out_dims` must be valid for writing one pointer; the returned pointer
@@ -3036,6 +3048,7 @@ pub unsafe extern "C" fn ts_store_get_forecast(
     name: *const c_char,
     ts_type: i32,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     time_range_present: bool,
     time_range_start_ms: i64,
@@ -3103,11 +3116,16 @@ pub unsafe extern "C" fn ts_store_get_forecast(
         Ok(k) => k,
         Err(c) => return c,
     };
+    let interval = match unsafe { cstr_to_optional_period(interval) } {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
     let key = match store.inner.resolve_forecast_key(
         attrs.owner_id,
         attrs.owner_category,
         &attrs.name,
         attrs.resolution,
+        interval,
         attrs.features,
         requested,
     ) {
@@ -3450,7 +3468,8 @@ pub unsafe extern "C" fn ts_store_get_forecast_by_key(
 /// [`ts_store_get_single`], [`ts_store_get_non_sequential`],
 /// [`ts_store_get_forecast_by_key`]); it lets an attribute-addressed caller
 /// reuse the key-based read path without an `add`/lookup round trip.
-/// an empty `resolution` means "unspecified".
+/// an empty `resolution` means "unspecified"; likewise an empty/null `interval`
+/// leaves the forecast interval (part of the identity) unconstrained.
 ///
 /// # Safety
 ///
@@ -3467,6 +3486,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
     name: *const c_char,
     ts_type: i32,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     out_key: *mut *mut TsKeyHandle,
 ) -> i32 {
@@ -3475,7 +3495,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
         set_error("out_key pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let key = match unsafe {
+    let mut key = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
             owner_category,
@@ -3486,6 +3506,10 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
         )
     } {
         Ok(k) => k,
+        Err(c) => return c,
+    };
+    key.interval = match unsafe { cstr_to_optional_period(interval) } {
+        Ok(i) => i,
         Err(c) => return c,
     };
     let handle = Box::new(TsKeyHandle { inner: key });
@@ -3611,7 +3635,7 @@ fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
             Some(f.initial_timestamp),
             None,
             Some(f.horizon),
-            Some(f.interval),
+            Some(f.interval()),
             Some(f.count),
         ),
     };
@@ -5457,7 +5481,16 @@ mod reader_ffi_tests {
         let mut key: *mut TsKeyHandle = ptr::null_mut();
         assert_eq!(
             unsafe {
-                ts_make_key_from_attrs(5, 0, name.as_ptr(), 0, hour.as_ptr(), ptr::null(), &mut key)
+                ts_make_key_from_attrs(
+                    5,
+                    0,
+                    name.as_ptr(),
+                    0,
+                    hour.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut key,
+                )
             },
             TS_OK
         );

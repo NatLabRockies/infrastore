@@ -78,6 +78,7 @@ impl RemoteClient {
         time_series_type: Option<TimeSeriesType>,
         name: Option<String>,
         resolution: Option<Period>,
+        interval: Option<Period>,
         features: Option<&time_series_store_core::Features>,
     ) -> CoreResult<Vec<TimeSeriesMetadata>> {
         let req = ListReq {
@@ -87,6 +88,7 @@ impl RemoteClient {
             time_series_type: time_series_type.map(|t| pb::TimeSeriesType::from(t) as i32),
             name,
             resolution: resolution.map(|p| p.to_iso8601()),
+            interval: interval.map(|p| p.to_iso8601()),
             features: features.map(features_to_pb),
         };
         let mut inner = self.inner.lock().await;

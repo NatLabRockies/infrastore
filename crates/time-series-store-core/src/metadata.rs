@@ -8,7 +8,7 @@ pub mod schema;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::types::period::Period;
 
@@ -85,6 +85,9 @@ pub struct MetadataFilter {
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
     pub resolution: Option<Period>,
+    /// Forecast window interval. When set, restricts to rows with exactly this
+    /// interval (part of the identity); `None` does not filter on interval.
+    pub interval: Option<Period>,
     /// Subset match: rows must contain at least these key/value pairs.
     pub features: Option<Features>,
     /// Exact features-set match by precomputed hash. When set, this is pushed
@@ -211,8 +214,9 @@ impl MetadataStore {
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
             {
-                // The unique index covers (owner_id, time_series_type, name,
-                // resolution, features_hash). Surface the spec error.
+                // The unique index covers (owner_id, owner_category,
+                // time_series_type, name, resolution, interval, features_hash).
+                // Surface the spec error.
                 return Err(TimeSeriesError::DuplicateTimeSeries);
             }
             Err(e) => return Err(e.into()),
@@ -248,11 +252,13 @@ impl MetadataStore {
     pub fn delete_by_key(tx: &Transaction<'_>, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
+        let interval_iso = key.interval.map(period_to_iso);
         let mut stmt = tx.prepare(
             "SELECT id, data_hash FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
                AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
-               AND features_hash = ?6",
+               AND ((?6 IS NULL AND interval IS NULL) OR interval = ?6)
+               AND features_hash = ?7",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
             .query_map(
@@ -262,6 +268,7 @@ impl MetadataStore {
                     key.time_series_type.as_str(),
                     key.name,
                     resolution_iso,
+                    interval_iso,
                     f_hash.as_slice(),
                 ],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
@@ -387,6 +394,10 @@ impl MetadataStore {
             sql.push_str(" AND resolution = ?");
             params_vec.push(Box::new(period_to_iso(resolution)));
         }
+        if let Some(interval) = filter.interval {
+            sql.push_str(" AND interval = ?");
+            params_vec.push(Box::new(period_to_iso(interval)));
+        }
         if let Some(ref f_hash) = filter.features_hash {
             sql.push_str(" AND features_hash = ?");
             params_vec.push(Box::new(f_hash.to_vec()));
@@ -437,6 +448,7 @@ impl MetadataStore {
             time_series_type: Some(key.time_series_type),
             name: Some(key.name.clone()),
             resolution: key.resolution,
+            interval: key.interval,
             // Pinpoint the row via the unique index rather than an in-memory
             // subset scan; the exact `retain` below guards against the
             // (astronomically unlikely) hash collision.
@@ -996,4 +1008,46 @@ pub fn references_to_in_tx(tx: &Transaction<'_>, data_hash: &[u8; 32]) -> Result
         |row| row.get(0),
     )?;
     Ok(count)
+}
+
+/// Does an association of `conflicting_type` already exist sharing the
+/// abstract-deterministic family identity `(owner_id, owner_category, name,
+/// resolution, features)`, *ignoring* interval and the requesting type?
+///
+/// `Deterministic` and `DeterministicSingleTimeSeries` are mutually exclusive
+/// for one family: the latter is a synthetic view of a `SingleTimeSeries`, so a
+/// caller should never hold both. The catalog's unique index keys on
+/// `time_series_type` and so cannot enforce this; the add and transform paths
+/// call this inside their transaction to reject the overlap. The match is by
+/// `features_hash` (a SHA-256 collision is the only false positive), which is
+/// sufficient for a guard.
+pub fn forecast_family_conflict(
+    tx: &Transaction<'_>,
+    owner_id: i64,
+    owner_category: OwnerCategory,
+    name: &str,
+    resolution: Option<Period>,
+    features_hash: &[u8; 32],
+    conflicting_type: TimeSeriesType,
+) -> Result<bool> {
+    let resolution_iso = resolution.map(period_to_iso);
+    let exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM time_series_associations
+             WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
+               AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
+               AND features_hash = ?6
+             LIMIT 1",
+            params![
+                owner_id,
+                owner_category.as_str(),
+                conflicting_type.as_str(),
+                name,
+                resolution_iso,
+                features_hash.as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(exists.is_some())
 }

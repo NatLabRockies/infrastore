@@ -622,9 +622,11 @@ function get_forecast_metadata(
     name::AbstractString,
     ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_initial = Ref{Int64}(0); out_resolution = Ref{Ptr{Cchar}}(C_NULL)
     out_horizon = Ref{Ptr{Cchar}}(C_NULL); out_interval = Ref{Ptr{Cchar}}(C_NULL)
@@ -633,10 +635,10 @@ function get_forecast_metadata(
     lt_buf = Vector{UInt8}(undef, 256); out_lt_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_forecast_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring,
          Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, features_json,
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json,
         out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
         lt_buf, UInt64(length(lt_buf)), out_lt_len,
     )
@@ -902,15 +904,17 @@ function _make_key(
     name::AbstractString,
     ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:ts_make_key_from_attrs, lib_path()), Int32,
-        (Int64, Int32, Cstring, Int32, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, features_json, out_key,
+        (Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json, out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -941,8 +945,8 @@ end
 # Association attributes for an attribute-addressed read: build the matching key,
 # then look up `name`.
 _assoc_attrs(store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-             resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}()) =
-    _get_association(store, _make_key(owner_id, owner_category, name, ts_type; resolution=resolution, features=features))
+             resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}()) =
+    _get_association(store, _make_key(owner_id, owner_category, name, ts_type; resolution=resolution, interval=interval, features=features))
 
 """
     get_time_series_keys(store, owner_id, owner_category) -> Vector{TimeSeriesKey}
@@ -2032,10 +2036,12 @@ function _get_forecast_raw(
     name::AbstractString,
     ts_type::Integer;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
 
     time_range_present = time_range !== nothing
@@ -2065,6 +2071,7 @@ function _get_forecast_raw(
          Cstring,      # name
          Int32,        # ts_type
          Cstring,      # resolution (ISO-8601)
+         Cstring,      # interval (ISO-8601)
          Cstring,      # features_json
          Bool,         # time_range_present
          Int64,        # time_range_start_ms
@@ -2089,6 +2096,7 @@ function _get_forecast_raw(
         name,
         Int32(ts_type),
         resolution_iso,
+        interval_iso,
         features_json,
         time_range_present,
         range_start_ms,
@@ -2271,15 +2279,16 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
         store, owner_id, owner_category, name, TS_TYPE_ABSTRACT_DETERMINISTIC;
-        resolution=resolution, features=features, time_range=time_range,
+        resolution=resolution, interval=interval, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, r.matched_type; resolution=resolution, features=features)
+    a = _assoc_attrs(store, owner_id, owner_category, name, r.matched_type; resolution=resolution, interval=interval, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                          a.name)
 end
@@ -2302,16 +2311,17 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
         store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
-        resolution=resolution, features=features, time_range=time_range,
+        resolution=resolution, interval=interval, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
-                     resolution=resolution, features=features)
+                     resolution=resolution, interval=interval, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                          a.name)
 end
@@ -2331,16 +2341,17 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
         store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
-        resolution=resolution, features=features, time_range=time_range,
+        resolution=resolution, interval=interval, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
-                     resolution=resolution, features=features)
+                     resolution=resolution, interval=interval, features=features)
     return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                          a.name)
 end
@@ -2359,16 +2370,17 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
         store, owner_id, owner_category, name, TS_TYPE_PROBABILISTIC;
-        resolution=resolution, features=features, time_range=time_range,
+        resolution=resolution, interval=interval, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_PROBABILISTIC;
-                     resolution=resolution, features=features)
+                     resolution=resolution, interval=interval, features=features)
     return Probabilistic(
         r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
         a.name,
@@ -2389,16 +2401,17 @@ function get_time_series(
     owner_category::OwnerCategory,
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
         store, owner_id, owner_category, name, TS_TYPE_SCENARIOS;
-        resolution=resolution, features=features, time_range=time_range,
+        resolution=resolution, interval=interval, features=features, time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_SCENARIOS;
-                     resolution=resolution, features=features)
+                     resolution=resolution, interval=interval, features=features)
     # `scenario_count` is the leading axis of the decoded data.
     return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
                      a.name)

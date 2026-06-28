@@ -99,6 +99,9 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
         if let Some(iso) = req.resolution {
             filter = filter.resolution(parse_period(&iso)?);
         }
+        if let Some(iso) = req.interval {
+            filter = filter.interval(parse_period(&iso)?);
+        }
         if let Some(f) = req.features {
             filter = filter.features(features_from_pb(f).map_err(map_convert_err)?);
         }

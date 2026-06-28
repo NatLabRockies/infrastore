@@ -16,20 +16,23 @@ the authoritative description of both. For the rationale behind the split, see t
 The NetCDF root carries a global attribute:
 
 ```text
-data_format_version = "0.7.0"
+data_format_version = "0.8.0"
 ```
 
 This is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when the NetCDF
 layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md) changes in
-a backward-incompatible way. Readers should check it before trusting a file. (`0.7.0` made
-`resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
-now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
-milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
-(`Month`/`Quarter`/`Year`) can be represented distinctly from fixed spans; `0.6.0` added
-`owner_category` to the association uniqueness key (so the owner identity is the pair
-`(owner_id, owner_category)`), widening the unique indexes and `ix_owner`; `0.5.0` changed the owner
-identifier to a signed 64-bit integer (`owner_id`); `0.2.0` introduced typed, multi-dimensional
-arrays and the two-mode NetCDF layout below; `0.1.0` stored only 1-D `f64`.)
+a backward-incompatible way. Readers should check it before trusting a file. (`0.8.0` added the
+forecast `interval` to the association uniqueness key — so two forecasts of one variable that differ
+only by interval are now distinct series — widening both unique indexes (the `NULL`-folding index
+now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made `resolution`/`horizon`/`interval`
+calendar-aware [periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration
+strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset
+names and the SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented
+distinctly from fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so
+the owner identity is the pair `(owner_id, owner_category)`), widening the unique indexes and
+`ix_owner`; `0.5.0` changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.2.0`
+introduced typed, multi-dimensional arrays and the two-mode NetCDF layout below; `0.1.0` stored only
+1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -53,7 +56,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.nc
-├── attribute  data_format_version = "0.7.0"
+├── attribute  data_format_version = "0.8.0"
 └── group      time_series/
     └── group  single/
         ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, 1000, *element_shape)
@@ -165,10 +168,10 @@ A single-column table holding the metadata schema version.
 
 ```sql
 CREATE UNIQUE INDEX uq_assoc ON time_series_associations
-    (owner_id, owner_category, time_series_type, name, resolution, features_hash);
-CREATE UNIQUE INDEX uq_assoc_null_resolution ON time_series_associations
+    (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);
+CREATE UNIQUE INDEX uq_assoc_coalesced ON time_series_associations
     (owner_id, owner_category, time_series_type, name,
-     COALESCE(resolution, ''), features_hash);
+     COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
 
 CREATE INDEX ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX ix_owner      ON time_series_associations(owner_id, owner_category);
@@ -178,10 +181,12 @@ CREATE INDEX ix_resolution ON time_series_associations(resolution);
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
 violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the
 key, so a component and a supplemental attribute that share an `owner_id` are independent owners.
-SQLite treats `NULL` values as distinct in a `UNIQUE` index, so `uq_assoc` does not constrain rows
-with a `NULL` `resolution` (e.g. `NonSequentialTimeSeries`). `uq_assoc_null_resolution` covers that
-case by folding `NULL` to the empty-string sentinel via `COALESCE` before enforcing uniqueness (the
-empty string is never a valid ISO-8601 period).
+`interval` is part of the key, so two forecasts of one variable at the same resolution but different
+intervals are distinct series. SQLite treats `NULL` values as distinct in a `UNIQUE` index, so
+`uq_assoc` does not constrain rows with a `NULL` `resolution` or `interval` (e.g.
+`NonSequentialTimeSeries`, or any static series, which carry no interval). `uq_assoc_coalesced`
+covers that case by folding `NULL` to the empty-string sentinel via `COALESCE` before enforcing
+uniqueness (the empty string is never a valid ISO-8601 period).
 
 ## Field Encoding Notes
 

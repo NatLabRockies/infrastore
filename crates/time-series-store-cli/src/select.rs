@@ -100,6 +100,7 @@ pub fn key_of(meta: &TimeSeriesMetadata) -> KeyIdentity {
         time_series_type: meta.time_series_type,
         name: meta.name.clone(),
         resolution: meta.resolution,
+        interval: meta.interval,
         features: meta.features.clone(),
     }
 }
