@@ -37,18 +37,20 @@ deleting the old one.
 **Packed mode** holds `SingleTimeSeries` (and the backing array of a
 `DeterministicSingleTimeSeries`). Arrays that share a `(dtype, element_shape, length, resolution)`
 are packed together as columns of one dataset named `sts_{dtype}_{shape}_{length}_{res}`, with shape
-`(length, 1000, *element_shape)`:
+`(length, cols, *element_shape)`. The column count `cols` is sized to the batch that created the
+dataset (capped so one chunk stays within a byte budget); an incremental, one-at-a-time write path
+uses a default width of 1,000:
 
 ```mermaid
 flowchart TB
-    subgraph ds["dataset&nbsp;sts_f64_s_8760_3600&nbsp;&nbsp;shape&nbsp;(8760,&nbsp;1000)"]
+    subgraph ds["dataset&nbsp;sts_f64_s_8760_3600&nbsp;&nbsp;shape&nbsp;(8760,&nbsp;cols)"]
         direction LR
         C0["col 0<br/>series A"]
         C1["col 1<br/>series B"]
         C2["col 2<br/>(free)"]
-        CN["col 999<br/>(free)"]
+        CN["col cols-1<br/>(free)"]
     end
-    H["companion sts_f64_s_8760_3600_h<br/>1000 hash strings"]
+    H["companion sts_f64_s_8760_3600_h<br/>cols hash strings"]
     C0 -.hash.-> H
     C1 -.hash.-> H
 
@@ -59,13 +61,16 @@ flowchart TB
     style H fill:#6f42c1,color:#fff
 ```
 
-- **Columns are series, rows are timesteps.** Chunking is `(length, 1, *element_shape)`, so each
-  column occupies exactly one HDF5 chunk — the layout favors bulk writes and reads of individual
-  series.
+- **Columns are series, rows are timesteps.** Chunking is `(1, cols, *element_shape)`, so one HDF5
+  chunk holds a single timestamp across every column. The layout favors **bulk writes** (a batch
+  fills whole chunks in one pass) and **reads across series by timestamp** (one timestamp is one
+  chunk). The reverse directions are the slow ones, by design: reading a single series in full
+  touches every chunk band, and adding one series at a time rewrites a chunk band per timestep.
 - **A companion string variable holds the hashes.** For each packed dataset there is a sibling
   `{dataset}_h`; slot `i` holds the SHA-256 hex of column `i`, or an empty string if the slot is
   free. This is the on-disk index the backend rebuilds on open.
-- **Datasets spill at 1,000 columns** into `…__1`, `…__2`, and so on.
+- **Datasets spill when full** into `…__1`, `…__2`, and so on — when a batch exceeds the per-dataset
+  column cap, or when incremental writes fill a default-width (1,000-column) dataset.
 - **Compression is configurable** at store creation and applies to every data variable (packed and
   standalone). The default is DEFLATE (zlib) level 3 with the byte-shuffle filter; you may change
   the level (0–9), disable shuffle, or turn compression off entirely. The choice is recorded in a
@@ -134,8 +139,10 @@ sequenceDiagram
 - **Metadata commit is the point of no return.** If the SQLite insert fails (most commonly a
   `DuplicateTimeSeries` constraint violation), the transaction rolls back and any array column
   staged _in this call_ is removed, returning the store to its prior state.
-- **Bulk writes are all-or-nothing.** `add_time_series_bulk` stages every array and inserts every
-  association in one transaction; any error rolls the whole batch back.
+- **Bulk writes are all-or-nothing.** `add_time_series_bulk` (and the buffered `bulk_add` session)
+  group packed series by shape and stage each group as one batch-sized block — filling whole chunks
+  — then insert every association in one transaction; any error rolls the whole batch back and
+  removes the staged arrays.
 
 On delete, the order reverses and is reference-counted: the association rows are removed inside a
 transaction, then an array column is only zeroed/freed if no remaining association references that

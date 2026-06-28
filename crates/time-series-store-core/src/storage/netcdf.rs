@@ -5,9 +5,12 @@
 //! * **Packed** (`packed = true`, used for SingleTimeSeries and the underlying
 //!   array of a DeterministicSingleTimeSeries): many same-shaped arrays are
 //!   column-packed into a dataset `sts_{dtype}_{shape}_{length}_{res}` of shape
-//!   `(length, MAX_COLS, *element_shape)`, chunked `(length, 1, *element_shape)`.
-//!   A companion string variable `{name}_h` holds the per-column hex hash
-//!   (empty = free slot). Removal frees a slot; `compact` is a stub because
+//!   `(length, cols, *element_shape)`, chunked `(1, cols, *element_shape)` — one
+//!   timestamp row across every column per chunk, so a read-by-timestamp gathers
+//!   one chunk. `cols` is sized per dataset to the batch that created it (capped
+//!   so a chunk stays within a byte budget); a group spills into a new dataset
+//!   once full. A companion string variable `{name}_h` holds the per-column hex
+//!   hash (empty = free slot). Removal frees a slot; `compact` is a stub because
 //!   NetCDF can't shrink in place.
 //!
 //! * **Standalone** (`packed = false`, used for NonSequentialTimeSeries and
@@ -34,8 +37,31 @@ use crate::version::DATA_FORMAT_VERSION;
 
 use super::{CompactionReport, IntegrityReport, StorageBackend};
 
-/// Max columns per compacted dataset before we spill into a new dataset.
-pub const MAX_COLS_PER_DATASET: usize = 1000;
+/// Default column width for a packed dataset created by an un-managed
+/// (one-at-a-time) write. A buffered bulk-add sizes its datasets to the batch
+/// instead; either way a group spills into a new dataset once full.
+pub const DEFAULT_COLS_PER_DATASET: usize = 1000;
+
+/// Target upper bound on the bytes of one packed chunk. A dataset is chunked
+/// `(1, cols, *element_shape)` — one timestamp row across every column — so the
+/// column count is capped to keep that chunk at or below this budget. Batches
+/// wider than the cap spill into additional datasets.
+const MAX_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Bytes in one column's element block at a single timestep.
+fn element_block_bytes(dtype: Dtype, element_shape: &[usize]) -> usize {
+    element_shape.iter().product::<usize>() * dtype.size()
+}
+
+/// Resolve a packed dataset's column width: the `requested` count (defaulting to
+/// [`DEFAULT_COLS_PER_DATASET`] for un-managed writes) clamped to at least one
+/// column and to the [`MAX_CHUNK_BYTES`] budget, so a `(1, cols, *element_shape)`
+/// timestamp-row chunk stays bounded regardless of dtype or element shape.
+fn resolve_dataset_cols(requested: Option<usize>, dtype: Dtype, element_shape: &[usize]) -> usize {
+    let block = element_block_bytes(dtype, element_shape).max(1);
+    let cap = (MAX_CHUNK_BYTES / block).max(1);
+    requested.unwrap_or(DEFAULT_COLS_PER_DATASET).clamp(1, cap)
+}
 
 const ROOT_GROUP: &str = "time_series";
 const SINGLE_GROUP: &str = "single";
@@ -467,7 +493,9 @@ impl Inner {
         }
         let base = dataset_base_name(dtype, element_shape, length, resolution);
         let new_name = spill_name(&base, spill_count);
-        self.create_dataset(&new_name, dtype, element_shape, length, resolution)?;
+        // Un-managed (single) writes use the default width; the buffered bulk-add
+        // path sizes datasets to the batch via its own creation route.
+        self.create_dataset(&new_name, dtype, element_shape, length, resolution, None)?;
         Ok(new_name)
     }
 
@@ -478,7 +506,9 @@ impl Inner {
         element_shape: &[usize],
         length: usize,
         resolution: Period,
+        requested_cols: Option<usize>,
     ) -> Result<()> {
+        let cols = resolve_dataset_cols(requested_cols, dtype, element_shape);
         let dim_time = format!("{name}_t");
         let dim_col = format!("{name}_c");
         let elem_dims: Vec<(String, usize)> = element_shape
@@ -489,17 +519,19 @@ impl Inner {
         let hash_name = format!("{name}{HASH_SUFFIX}");
         let name_owned = name.to_string();
         let hash_name_for_closure = hash_name.clone();
-        let chunks: Vec<usize> = std::iter::once(length)
-            .chain(std::iter::once(1usize))
+        // Chunk one timestamp row across every column: `(1, cols, *element_shape)`.
+        // This makes a read-by-timestamp gather one whole chunk and a buffered
+        // full-width bulk write fill whole chunks; a single-column write becomes a
+        // read-modify-write of every time-band chunk (the accepted un-managed cost).
+        let chunks: Vec<usize> = std::iter::once(1usize)
+            .chain(std::iter::once(cols))
             .chain(element_shape.iter().copied())
             .collect();
         let compression = self.compression;
 
         self.with_single_mut(|single| {
             single.add_dimension(&dim_time, length).map_err(map_nc)?;
-            single
-                .add_dimension(&dim_col, MAX_COLS_PER_DATASET)
-                .map_err(map_nc)?;
+            single.add_dimension(&dim_col, cols).map_err(map_nc)?;
             for (dn, sz) in &elem_dims {
                 single.add_dimension(dn, *sz).map_err(map_nc)?;
             }
@@ -521,7 +553,7 @@ impl Inner {
                 dtype,
                 element_shape: element_shape.to_vec(),
                 length,
-                columns: vec![None; MAX_COLS_PER_DATASET],
+                columns: vec![None; cols],
             },
         );
         let group = self
@@ -549,6 +581,18 @@ impl Inner {
     /// is bounded to the highest column that read actually gathers.
     fn packed_row_extents(time_index: usize, width: usize, element_shape: &[usize]) -> Extents {
         let mut ranges: Vec<Range<usize>> = vec![time_index..time_index + 1, 0..width];
+        for &k in element_shape {
+            ranges.push(0..k);
+        }
+        ranges.as_slice().into()
+    }
+
+    /// Extents selecting the full time axis across the first `width` columns of a
+    /// packed dataset: `[0..length, 0..width, *element_shape]`. One hyperslab feeds
+    /// a whole column span to the [`StorageBackend::read_arrays`] override, which
+    /// then scatters individual series out of the row-major block.
+    fn packed_block_extents(length: usize, width: usize, element_shape: &[usize]) -> Extents {
+        let mut ranges: Vec<Range<usize>> = vec![0..length, 0..width];
         for &k in element_shape {
             ranges.push(0..k);
         }
@@ -605,6 +649,108 @@ impl Inner {
             },
         );
         Ok(())
+    }
+
+    /// Write a block of same-shaped packed arrays into one or more freshly
+    /// created, batch-sized datasets. Skips hashes already stored and duplicates
+    /// within the block; returns a per-input flag (`true` = physically written).
+    ///
+    /// Each created dataset is sized to the block (capped so a `(1, cols, *elem)`
+    /// chunk stays within [`MAX_CHUNK_BYTES`]); a block wider than the cap spills
+    /// across consecutive datasets. Columns are written one timestamp row at a
+    /// time, so every write covers exactly one full chunk — no read-modify-write.
+    #[tracing::instrument(skip(self, hashes, arrays), fields(n = hashes.len()))]
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>> {
+        let mut written = vec![false; hashes.len()];
+
+        // Keep only inputs that are new on disk and unique within the block,
+        // preserving order. `new[k] = (original_index, hash, array)`.
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        let mut new: Vec<(usize, [u8; 32], &TypedArray)> = Vec::with_capacity(hashes.len());
+        for (i, (&hash, &array)) in hashes.iter().zip(arrays).enumerate() {
+            if self.by_hash.contains_key(&hash) || !seen.insert(hash) {
+                continue;
+            }
+            new.push((i, hash, array));
+        }
+        if new.is_empty() {
+            return Ok(written);
+        }
+
+        let dtype = new[0].2.dtype;
+        let element_shape = new[0].2.element_shape().to_vec();
+        let length = new[0].2.length();
+        let block = element_block_bytes(dtype, &element_shape);
+        let group_key = (dtype, element_shape.clone(), length, resolution);
+
+        let mut start = 0;
+        while start < new.len() {
+            let remaining = new.len() - start;
+            // Width of this dataset: the rest of the block, capped to the chunk
+            // budget. `resolve_dataset_cols(Some(remaining))` == min(remaining, cap).
+            let width = resolve_dataset_cols(Some(remaining), dtype, &element_shape);
+            let seg = &new[start..start + width];
+
+            let base = dataset_base_name(dtype, &element_shape, length, resolution);
+            let spill_count = self.dataset_groups.get(&group_key).map_or(0, Vec::len);
+            let name = spill_name(&base, spill_count);
+            self.create_dataset(
+                &name,
+                dtype,
+                &element_shape,
+                length,
+                resolution,
+                Some(width),
+            )?;
+            let hash_name = format!("{name}{HASH_SUFFIX}");
+
+            self.with_single_mut(|single| {
+                let mut data_var = single.variable_mut(&name).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {name}"))
+                })?;
+                // One full-chunk write per timestep: gather column c's element block
+                // at time t into the row buffer, laid out `[col, *element_shape]`.
+                let mut row = vec![0u8; width * block];
+                for t in 0..length {
+                    for (c, (_, _, array)) in seg.iter().enumerate() {
+                        let src = &array.bytes[t * block..(t + 1) * block];
+                        row[c * block..(c + 1) * block].copy_from_slice(src);
+                    }
+                    let extents = Inner::packed_row_extents(t, width, &element_shape);
+                    put_typed(&mut data_var, dtype, &row, extents)?;
+                }
+                drop(data_var);
+                let mut hash_var = single.variable_mut(&hash_name).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {hash_name}"))
+                })?;
+                for (c, (_, hash, _)) in seg.iter().enumerate() {
+                    hash_var.put_string(&hash_hex(hash), c).map_err(map_nc)?;
+                }
+                Ok(())
+            })?;
+
+            let state = self.datasets.get_mut(&name).expect("dataset created");
+            for (c, (_, hash, _)) in seg.iter().enumerate() {
+                state.columns[c] = Some(hash_hex(hash));
+            }
+            for (c, (orig, hash, _)) in seg.iter().enumerate() {
+                self.by_hash.insert(
+                    *hash,
+                    Location::Packed {
+                        dataset: name.clone(),
+                        col: c,
+                    },
+                );
+                written[*orig] = true;
+            }
+            start += width;
+        }
+        Ok(written)
     }
 
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
@@ -730,8 +876,8 @@ impl Inner {
         }
 
         // Resolve placements; track the highest column needed per dataset so the
-        // row read is bounded to `[0, max_col]` rather than the full (up to
-        // MAX_COLS_PER_DATASET) column dimension.
+        // row read is bounded to `[0, max_col]` rather than the full column
+        // dimension (which is sized per dataset to the batch that created it).
         let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
         let mut max_col: HashMap<String, usize> = HashMap::new();
         for hash in hashes {
@@ -800,6 +946,113 @@ impl Inner {
             }
         }
         Ok(())
+    }
+
+    /// Read many full arrays at once, returning one [`TypedArray`] per input hash
+    /// in order. Backs [`StorageBackend::read_arrays`]: packed hashes are grouped
+    /// by dataset and that dataset's whole column span is read with one hyperslab
+    /// (`[0..length, 0..=max_col, *element_shape]`), decompressing each timestamp-
+    /// major chunk once; each requested series is then gathered out of the
+    /// row-major block. Standalone hashes fall back to an individual read.
+    fn read_arrays_locked(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        enum Placement {
+            Packed { dataset: String, col: usize },
+            Standalone { hash: [u8; 32] },
+        }
+
+        // Resolve placements; bound each dataset read to its highest needed column.
+        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
+        let mut max_col: HashMap<String, usize> = HashMap::new();
+        for hash in hashes {
+            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => {
+                    max_col
+                        .entry(dataset.clone())
+                        .and_modify(|m| *m = (*m).max(*col))
+                        .or_insert(*col);
+                    placements.push(Placement::Packed {
+                        dataset: dataset.clone(),
+                        col: *col,
+                    });
+                }
+                Location::Standalone { .. } => {
+                    placements.push(Placement::Standalone { hash: *hash });
+                }
+            }
+        }
+
+        // One hyperslab per dataset: the full time axis across `[0, max_col]`.
+        struct DatasetRead {
+            bytes: Vec<u8>,
+            width: usize,
+            length: usize,
+            dtype: Dtype,
+            element_shape: Vec<usize>,
+            elem_bytes: usize,
+        }
+        let mut reads: HashMap<String, DatasetRead> = HashMap::new();
+        for (dataset, &top) in &max_col {
+            let state = self.datasets.get(dataset).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+            })?;
+            let width = top + 1;
+            let length = state.length;
+            let dtype = state.dtype;
+            let element_shape = state.element_shape.clone();
+            let elem_bytes = element_shape.iter().product::<usize>().max(1) * dtype.size();
+            let bytes = self.with_single(|single| {
+                let var = single.variable(dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("missing variable {dataset}"))
+                })?;
+                let extents = Inner::packed_block_extents(length, width, &element_shape);
+                get_typed(&var, dtype, extents)
+            })?;
+            reads.insert(
+                dataset.clone(),
+                DatasetRead {
+                    bytes,
+                    width,
+                    length,
+                    dtype,
+                    element_shape,
+                    elem_bytes,
+                },
+            );
+        }
+
+        // Scatter each series out of its dataset block, in the caller's order.
+        let mut out: Vec<TypedArray> = Vec::with_capacity(hashes.len());
+        for placement in &placements {
+            match placement {
+                Placement::Packed { dataset, col } => {
+                    let r = reads.get(dataset).expect("dataset read above");
+                    let mut col_bytes = Vec::with_capacity(r.length * r.elem_bytes);
+                    for t in 0..r.length {
+                        let start = (t * r.width + col) * r.elem_bytes;
+                        let block = r.bytes.get(start..start + r.elem_bytes).ok_or_else(|| {
+                            TimeSeriesError::IntegrityError(format!(
+                                "column {col} out of block bounds for dataset {dataset}"
+                            ))
+                        })?;
+                        col_bytes.extend_from_slice(block);
+                    }
+                    let mut shape = vec![r.length];
+                    shape.extend_from_slice(&r.element_shape);
+                    out.push(
+                        TypedArray::new(r.dtype, shape, col_bytes)
+                            .map_err(TimeSeriesError::IntegrityError)?,
+                    );
+                }
+                Placement::Standalone { hash } => {
+                    out.push(self.read_locked(hash, None)?);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// The stored `(dtype, shape)` of an array without reading its data.
@@ -925,6 +1178,17 @@ impl StorageBackend for NetCdfBackend {
         Ok(true)
     }
 
+    #[tracing::instrument(skip(self, hashes, arrays), fields(n = hashes.len()))]
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        inner.put_packed_block(hashes, arrays, resolution)
+    }
+
     #[tracing::instrument(skip(self, hash))]
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
@@ -941,6 +1205,12 @@ impl StorageBackend for NetCdfBackend {
     fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.read_index_locked(hashes, index, out)
+    }
+
+    #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]
+    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_arrays_locked(hashes)
     }
 
     fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {

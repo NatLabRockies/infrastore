@@ -72,13 +72,26 @@ impl Store {
         units: Option<String>,
     ) -> Result<TimeSeriesKey>;
 
+    // A managed batch: packed series are written into batch-sized datasets that
+    // fill whole HDF5 chunks (the optimized bulk-write path).
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>>;
+
+    // Begin a buffered bulk add. Requests pushed onto the returned guard are
+    // accumulated in memory and written together by `BulkAdd::commit` (same
+    // block-write path as `add_time_series_bulk`); dropping without committing
+    // discards the buffer.
+    pub fn bulk_add(&mut self) -> BulkAdd<'_>;
 
     pub fn get_time_series(
         &self,
         key: &TimeSeriesKey,
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> Result<TimeSeriesData>;
+
+    // Read many full series at once (no time-range slicing). Packed
+    // `SingleTimeSeries` are read in one decompress-once pass per dataset; other
+    // types reuse the per-key path. Returns a `TimeSeriesData` per key, in order.
+    pub fn bulk_read(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesData>>;
 
     pub fn transform_single_time_series(
         &mut self,
@@ -202,14 +215,18 @@ the underlying packed array. The low-level pair still works for direct array acc
 
 ### Readers
 
-`get_time_series` returns a whole series or forecast. For the timestamp-oriented access pattern —
-_walk the timeline and read every series' value at each instant_ — build a **reader** instead. A
-reader is built once over a [`ListFilter`](#listfilter), pins one resolution, and holds reusable
-buffers that each read overwrites in place, so a tight loop allocates nothing. The reader is a
-passive plan: it does not borrow the `Store`, so reads go through `Store::static_read` /
-`Store::forecast_read`, which fill the buffers; the caller then walks the groups/entries. There are
-two: [`StaticReader`](#staticreader-and-staticgroup) for `SingleTimeSeries` and
-[`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for forecasts.
+`get_time_series` returns a whole series or forecast. To read **many whole series at once** (e.g.
+exploration or plotting), `bulk_read` takes a slice of keys and reads packed `SingleTimeSeries` in
+one decompress-once pass per dataset — far cheaper than a `get_time_series` per key under the
+timestamp-major chunking, where a single full-series read touches every chunk. For the
+timestamp-oriented access pattern — _walk the timeline and read every series' value at each instant_
+— build a **reader** instead. A reader is built once over a [`ListFilter`](#listfilter), pins one
+resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
+nothing. The reader is a passive plan: it does not borrow the `Store`, so reads go through
+`Store::static_read` / `Store::forecast_read`, which fill the buffers; the caller then walks the
+groups/entries. There are two: [`StaticReader`](#staticreader-and-staticgroup) for
+`SingleTimeSeries` and [`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for
+forecasts.
 
 ```rust
 // Static: value of every SingleTimeSeries at one timestamp, columnar.

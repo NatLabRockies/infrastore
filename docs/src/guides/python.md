@@ -87,6 +87,14 @@ window = store.get_time_series(
 )
 ```
 
+To read **many whole series at once** — e.g. loading everything for a plot — `bulk_read` takes a
+list of keys and returns the typed series objects in the same order. Packed `SingleTimeSeries` are
+read in one decompress-once pass per dataset, which is much faster than a `get_time_series` per key:
+
+```python
+series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
+```
+
 ## Query Metadata
 
 `list_time_series` returns a list of plain dicts, filtered by any combination of arguments (the

@@ -115,6 +115,13 @@ pub struct TsBatchHandle {
     items: Vec<core_lib::AddRequest>,
 }
 
+/// Owns the results of a `ts_store_bulk_read_single` call: the `SingleTimeSeries`
+/// fetched for a batch of keys, in input order. Elements are read out with
+/// `ts_bulk_result_get_single` and the handle released with `ts_bulk_result_free`.
+pub struct TsBulkReadHandle {
+    items: Vec<core_lib::SingleTimeSeries>,
+}
+
 unsafe fn cstr_to_str<'a>(p: *const c_char) -> Result<&'a str, i32> {
     if p.is_null() {
         return Err(TS_ERR_NULL_POINTER);
@@ -2744,6 +2751,189 @@ pub unsafe extern "C" fn ts_store_add_batch(
             TS_OK
         }
         Err(e) => map_core_error(e),
+    }
+}
+
+// A bulk read fetches many full SingleTimeSeries in one call, reading each
+// packed dataset's column span once (`Store::bulk_read`) instead of re-reading
+// every chunk per series. Results are held in a `TsBulkReadHandle` and read out
+// element-by-element with the same out-parameter shape as `ts_store_get_single`.
+
+/// Read many full `SingleTimeSeries` at once. `keys` points to `n` live key
+/// handles; the results are returned through `out_result` as a handle whose
+/// elements line up with `keys` in order. Every key must identify a
+/// `SingleTimeSeries`; a forecast or non-sequential key makes the whole call
+/// fail with `TS_ERR_INVALID_PARAMETER`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `keys` must point to `n` live key
+/// handles created by this library (it may be null only when `n` is 0).
+/// `out_result` must be valid for writing one pointer. On `TS_OK` the returned
+/// handle must be released exactly once with `ts_bulk_result_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_bulk_read_single(
+    handle: *const TsStoreHandle,
+    keys: *const *const TsKeyHandle,
+    n: u64,
+    out_result: *mut *mut TsBulkReadHandle,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => {
+            set_error("store handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_result.is_null() {
+        set_error("out_result pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let count = n as usize;
+    if count != 0 && keys.is_null() {
+        set_error("keys pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let key_ptrs = if count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(keys, count) }
+    };
+    let mut identities: Vec<&core_lib::KeyIdentity> = Vec::with_capacity(count);
+    for &kp in key_ptrs {
+        match unsafe { kp.as_ref() } {
+            Some(k) => identities.push(&k.inner),
+            None => {
+                set_error("a key handle is null");
+                return TS_ERR_NULL_POINTER;
+            }
+        }
+    }
+    let datas = match store.inner.bulk_read(&identities) {
+        Ok(d) => d,
+        Err(e) => return map_core_error(e),
+    };
+    let mut items = Vec::with_capacity(datas.len());
+    for data in datas {
+        match data {
+            core_lib::TimeSeriesData::SingleTimeSeries(s) => items.push(s),
+            _ => {
+                set_error(
+                    "ts_store_bulk_read_single requires every key to identify a SingleTimeSeries",
+                );
+                return TS_ERR_INVALID_PARAMETER;
+            }
+        }
+    }
+    unsafe { *out_result = Box::into_raw(Box::new(TsBulkReadHandle { items })) };
+    TS_OK
+}
+
+/// The number of series held by a bulk-read result handle, or `-1` if `result`
+/// is null.
+///
+/// # Safety
+///
+/// `result` must be null or a live handle from `ts_store_bulk_read_single`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_bulk_result_len(result: *const TsBulkReadHandle) -> i64 {
+    match unsafe { result.as_ref() } {
+        Some(r) => r.items.len() as i64,
+        None => -1,
+    }
+}
+
+/// Read element `index` out of a bulk-read result handle. The out parameters
+/// match `ts_store_get_single`: the caller owns the `out_resolution` string and
+/// the `out_shape` / `out_data` buffers and must release them with
+/// `ts_string_free`, `ts_buffer_free_i64`, and `ts_buffer_free_u8`. The handle
+/// is not consumed, so an element may be read more than once.
+///
+/// # Safety
+///
+/// `result` must be a live handle from `ts_store_bulk_read_single` and `index`
+/// must be less than its length. Every output pointer must be valid for writing
+/// its indicated value.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_bulk_result_get_single(
+    result: *const TsBulkReadHandle,
+    index: u64,
+    out_initial_ts_unix_ms: *mut i64,
+    out_resolution: *mut *mut c_char,
+    out_dtype: *mut i32,
+    out_shape: *mut *mut i64,
+    out_shape_len: *mut u64,
+    out_data: *mut *mut u8,
+    out_data_byte_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let result = match unsafe { result.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("bulk-read result handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_initial_ts_unix_ms.is_null()
+        || out_resolution.is_null()
+        || out_dtype.is_null()
+        || out_shape.is_null()
+        || out_shape_len.is_null()
+        || out_data.is_null()
+        || out_data_byte_len.is_null()
+    {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let single = match result.items.get(index as usize) {
+        Some(s) => s,
+        None => {
+            set_error("bulk-read index out of bounds");
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    let initial_ms = match datetime_to_unix_ms(single.initial_timestamp) {
+        Some(n) => n,
+        None => {
+            set_error("initial_timestamp out of i64 millisecond range");
+            return TS_ERR_INTEGRITY;
+        }
+    };
+    let resolution_cstr = period_cstr(single.resolution);
+    let dtype = single.data.dtype;
+    // Owned copies so the result handle stays intact for repeated reads.
+    let mut shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
+    let shape_len = shape.len() as u64;
+    let shape_ptr = shape.as_mut_ptr();
+    std::mem::forget(shape);
+    let mut bytes = single.data.bytes.clone();
+    let data_len = bytes.len() as u64;
+    let data_ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    unsafe {
+        *out_initial_ts_unix_ms = initial_ms;
+        *out_resolution = resolution_cstr;
+        *out_dtype = dtype.code();
+        *out_shape = shape_ptr;
+        *out_shape_len = shape_len;
+        *out_data = data_ptr;
+        *out_data_byte_len = data_len;
+    }
+    TS_OK
+}
+
+/// Free a bulk-read result handle created by `ts_store_bulk_read_single`.
+///
+/// # Safety
+///
+/// `result` must be null or a handle returned by `ts_store_bulk_read_single`
+/// that has not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_bulk_result_free(result: *mut TsBulkReadHandle) {
+    if !result.is_null() {
+        drop(unsafe { Box::from_raw(result) });
     }
 }
 

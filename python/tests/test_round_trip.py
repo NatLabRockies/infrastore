@@ -313,6 +313,35 @@ def test_add_time_series_bulk(tmp_path):
         )
 
 
+def test_bulk_read(tmp_path):
+    """bulk_read returns a full series per key, in order, matching get_time_series."""
+    path = tmp_path / "bulkread.nc"
+    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    items = [
+        {
+            "owner_id": i,
+            "owner_type": "Generator",
+            "owner_category": OwnerCategory.Component,
+            "time_series": make_series(length=12, base=float(i * 10)),
+        }
+        for i in range(8)
+    ]
+    keys = store.add_time_series_bulk(items)
+
+    series = store.bulk_read(keys)
+    assert len(series) == 8
+    for i, s in enumerate(series):
+        expected = np.arange(12, dtype=np.float64) + float(i * 10)
+        np.testing.assert_array_equal(np.asarray(s.data), expected)
+        # Same as the per-key read, in order.
+        np.testing.assert_array_equal(
+            np.asarray(s.data), np.asarray(store.get_time_series(keys[i]).data)
+        )
+
+    # Empty input returns an empty list.
+    assert store.bulk_read([]) == []
+
+
 def test_add_time_series_bulk_rolls_back_on_error():
     """A duplicate in the batch rolls back every item."""
     store = TimeSeriesStore.create(in_memory=True)

@@ -774,6 +774,27 @@ fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib
 
 // ---- TimeSeriesStore ------------------------------------------------------
 
+/// Wrap a reconstructed [`core_lib::TimeSeriesData`] in its matching Python class.
+fn time_series_data_to_py(py: Python<'_>, data: core_lib::TimeSeriesData) -> PyResult<Py<PyAny>> {
+    match data {
+        core_lib::TimeSeriesData::SingleTimeSeries(s) => {
+            Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
+        }
+        core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
+            Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
+        }
+        core_lib::TimeSeriesData::Deterministic(d) => {
+            Ok(Py::new(py, PyDeterministic { inner: d })?.into_any())
+        }
+        core_lib::TimeSeriesData::Probabilistic(p) => {
+            Ok(Py::new(py, PyProbabilistic { inner: p })?.into_any())
+        }
+        core_lib::TimeSeriesData::Scenarios(s) => {
+            Ok(Py::new(py, PyScenarios { inner: s })?.into_any())
+        }
+    }
+}
+
 #[pyclass(name = "TimeSeriesStore", module = "time_series_store", unsendable)]
 pub struct PyStore {
     inner: core_lib::Store,
@@ -981,23 +1002,21 @@ impl PyStore {
             .inner
             .get_time_series(&key.inner, time_range)
             .map_err(map_err)?;
-        match data {
-            core_lib::TimeSeriesData::SingleTimeSeries(s) => {
-                Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
-            }
-            core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
-                Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
-            }
-            core_lib::TimeSeriesData::Deterministic(d) => {
-                Ok(Py::new(py, PyDeterministic { inner: d })?.into_any())
-            }
-            core_lib::TimeSeriesData::Probabilistic(p) => {
-                Ok(Py::new(py, PyProbabilistic { inner: p })?.into_any())
-            }
-            core_lib::TimeSeriesData::Scenarios(s) => {
-                Ok(Py::new(py, PyScenarios { inner: s })?.into_any())
-            }
-        }
+        time_series_data_to_py(py, data)
+    }
+
+    /// Read many full series at once, returning a list of typed objects in the
+    /// same order as `keys`. Packed `SingleTimeSeries` are read in one
+    /// decompress-once pass per dataset (the bulk counterpart to
+    /// `get_time_series`); other types reuse the per-key path. No time-range
+    /// slicing — each series is returned in full.
+    fn bulk_read(&self, py: Python<'_>, keys: Vec<PyTimeSeriesKey>) -> PyResult<Vec<Py<PyAny>>> {
+        let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
+        let datas = self.inner.bulk_read(&identities).map_err(map_err)?;
+        datas
+            .into_iter()
+            .map(|d| time_series_data_to_py(py, d))
+            .collect()
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has

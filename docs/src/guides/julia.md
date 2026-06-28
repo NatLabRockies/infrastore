@@ -75,6 +75,14 @@ got = get_time_series(store, key)
 println(got.initial_timestamp, " ", got.resolution)   # resolution comes back as Millisecond
 ```
 
+To read **many whole series at once** — e.g. loading everything for a plot — `bulk_read` takes a
+vector of keys and returns the `SingleTimeSeries` in the same order, reading each packed dataset's
+column span once instead of re-reading every chunk per series:
+
+```julia
+series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}, all SingleTimeSeries
+```
+
 ## Attribute-Based Lookups
 
 Beyond key handles, `TimeSeriesStore.jl` can resolve a series directly from its attributes —

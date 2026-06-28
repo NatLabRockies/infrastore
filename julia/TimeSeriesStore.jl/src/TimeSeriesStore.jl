@@ -8,7 +8,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        Probabilistic, Scenarios, TimeSeriesKey,
        OwnerCategory, Component, SupplementalAttribute,
        add_time_series!, AddBatch, add_time_series_bulk!,
-       get_time_series, get_time_series_keys, key_info, list_keys, list_array_groups,
+       get_time_series, bulk_read, get_time_series_keys, key_info, list_keys, list_array_groups,
        remove_time_series!,
        has_time_series, get_counts, counts_by_type, num_distinct_arrays,
        time_series_counts, list_owner_ids, static_summary, forecast_summary,
@@ -830,6 +830,67 @@ function get_time_series(store::Store, key::TimeSeriesKey)
     resolution = _take_period(out_resolution[])
     assoc = _get_association(store, key)
     return SingleTimeSeries(initial, resolution, data, assoc.name)
+end
+
+"""
+    bulk_read(store, keys) -> Vector{SingleTimeSeries}
+
+Read many full `SingleTimeSeries` at once, returning one per key in order. The
+packed arrays are read in a single decompress-once pass per dataset (the bulk
+counterpart to [`get_time_series`]); it is the efficient way to load many whole
+series for exploration or plotting. Every key must identify a `SingleTimeSeries`.
+"""
+function bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey})
+    n = length(keys)
+    out = Vector{SingleTimeSeries}(undef, n)
+    n == 0 && return out
+
+    key_handles = Ptr{Cvoid}[k.handle for k in keys]
+    out_result = Ref{Ptr{Cvoid}}(C_NULL)
+    code = GC.@preserve keys key_handles ccall(
+        (:ts_store_bulk_read_single, lib_path()), Int32,
+        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Ref{Ptr{Cvoid}}),
+        store.handle, key_handles, UInt64(n), out_result,
+    )
+    _check(code)
+    result = out_result[]
+    try
+        for i in 1:n
+            out_initial = Ref{Int64}(0)
+            out_resolution = Ref{Ptr{Cchar}}(C_NULL)
+            out_dtype = Ref{Int32}(0)
+            out_shape = Ref{Ptr{Int64}}(C_NULL)
+            out_shape_len = Ref{UInt64}(0)
+            out_data = Ref{Ptr{UInt8}}(C_NULL)
+            out_data_len = Ref{UInt64}(0)
+            code = ccall(
+                (:ts_bulk_result_get_single, lib_path()), Int32,
+                (Ptr{Cvoid}, UInt64, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Int32},
+                 Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64}),
+                result, UInt64(i - 1), out_initial, out_resolution, out_dtype,
+                out_shape, out_shape_len, out_data, out_data_len,
+            )
+            _check(code)
+
+            dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
+            ccall((:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64), out_shape[], out_shape_len[])
+            bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+            ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_data_len[])
+
+            T = _julia_dtype(out_dtype[])
+            flat = collect(reinterpret(T, bytes))
+            nd = length(dims)
+            data = nd <= 1 ? flat :
+                   permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+            initial = _from_unix_ms(out_initial[])
+            resolution = _take_period(out_resolution[])
+            assoc = _get_association(store, keys[i])
+            out[i] = SingleTimeSeries(initial, resolution, data, assoc.name)
+        end
+    finally
+        ccall((:ts_bulk_result_free, lib_path()), Cvoid, (Ptr{Cvoid},), result)
+    end
+    return out
 end
 
 function get_time_series(

@@ -45,6 +45,33 @@ using TimeSeriesStore
     @test_throws TimeSeriesStore.NotFoundError get_time_series(store, key)
 end
 
+@testset "bulk_read SingleTimeSeries" begin
+    store = Store(in_memory=true)
+    initial = DateTime(2024, 1, 1)
+    resolution = Hour(1)
+
+    keys = TimeSeriesKey[]
+    for i in 0:4
+        vals = collect((i * 10.0):(i * 10.0 + 11.0))   # length 12, distinct per series
+        ts = SingleTimeSeries(initial, resolution, vals, "load")
+        push!(keys, add_time_series!(store, i + 1, "Generator", Component, ts))
+    end
+
+    series = bulk_read(store, keys)
+    @test length(series) == 5
+    for i in 0:4
+        expected = collect((i * 10.0):(i * 10.0 + 11.0))
+        @test series[i + 1].data == expected
+        @test series[i + 1].name == "load"
+        @test series[i + 1].initial_timestamp == initial
+        # Matches the per-key read, in order.
+        @test series[i + 1].data == get_time_series(store, keys[i + 1]).data
+    end
+
+    # Empty input returns an empty vector without touching the store.
+    @test bulk_read(store, TimeSeriesKey[]) == SingleTimeSeries[]
+end
+
 @testset "non-sequential round-trip" begin
     store = Store(in_memory=true)
     timestamps = [

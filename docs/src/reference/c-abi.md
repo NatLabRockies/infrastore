@@ -417,11 +417,13 @@ entries by slot to also decode each unique window only once.
 
 A batch accumulates add requests client-side (no store I/O); `ts_store_add_batch` commits them all
 in **one** metadata transaction, which is much faster than per-item adds when ingesting many series.
-The `ts_batch_add_*` functions take the same arguments as their `ts_store_add_*` counterparts minus
-the store handle and `out_key`; data buffers are copied into the batch, so they only need to stay
-valid for the call. The submit is all-or-nothing and drains the batch in either case (on error
-nothing was committed and the batch is left empty). On success the caller owns the key-handle array:
-free each key with `ts_key_free`, then the buffer with `ts_keys_buffer_free` (same contract as
+It is also the fast NetCDF write path: same-shaped `SingleTimeSeries` are packed into batch-sized
+datasets so the timestamp-major chunks are filled whole rather than a column at a time. The
+`ts_batch_add_*` functions take the same arguments as their `ts_store_add_*` counterparts minus the
+store handle and `out_key`; data buffers are copied into the batch, so they only need to stay valid
+for the call. The submit is all-or-nothing and drains the batch in either case (on error nothing was
+committed and the batch is left empty). On success the caller owns the key-handle array: free each
+key with `ts_key_free`, then the buffer with `ts_keys_buffer_free` (same contract as
 `ts_store_get_time_series_keys`). The batch handle itself is reusable after submit and must
 eventually be released with `ts_batch_free`.
 
@@ -436,6 +438,29 @@ int32_t ts_batch_add_probabilistic(struct TsBatch *batch, ...);
 
 int32_t ts_store_add_batch(struct TsStore *handle, struct TsBatch *batch,
                            struct TsKey ***out_keys, uint64_t *out_len);
+```
+
+## Bulk Reads
+
+`ts_store_bulk_read_single` reads many full `SingleTimeSeries` in one call, reading each packed
+dataset's column span once instead of re-reading every chunk per series — the efficient way to load
+many whole series (e.g. for exploration or plotting), where a single full-series read otherwise
+touches every chunk under the timestamp-major layout. Every key must identify a `SingleTimeSeries`;
+otherwise the call fails with `TS_ERR_INVALID_PARAMETER`. The results are held in a
+`TsBulkReadHandle` (input order preserved) and read out element-by-element with
+`ts_bulk_result_get_single`, whose out-parameters match `ts_store_get_single` — the caller owns the
+returned resolution string and the shape/data buffers and frees them with `ts_string_free`,
+`ts_buffer_free_i64`, and `ts_buffer_free_u8`. The handle is not consumed by a read (elements may be
+read more than once) and must be released with `ts_bulk_result_free`.
+
+```c
+int32_t ts_store_bulk_read_single(const struct TsStore *handle,
+                                  const struct TsKey *const *keys, uint64_t n,
+                                  struct TsBulkReadHandle **out_result);
+int64_t ts_bulk_result_len(const struct TsBulkReadHandle *result);   /* -1 if null */
+int32_t ts_bulk_result_get_single(const struct TsBulkReadHandle *result, uint64_t index,
+                                  /* same out-params as ts_store_get_single */ ...);
+void    ts_bulk_result_free(struct TsBulkReadHandle *result);
 ```
 
 ## Store-Wide Operations

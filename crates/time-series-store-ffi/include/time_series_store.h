@@ -45,6 +45,13 @@
 typedef struct TsBatch TsBatch;
 
 /**
+ * Owns the results of a `ts_store_bulk_read_single` call: the `SingleTimeSeries`
+ * fetched for a batch of keys, in input order. Elements are read out with
+ * `ts_bulk_result_get_single` and the handle released with `ts_bulk_result_free`.
+ */
+typedef struct TsBulkReadHandle TsBulkReadHandle;
+
+/**
  * Opaque handle wrapping a core `ForecastReader` (one forecast type, per-key
  * windows).
  */
@@ -846,6 +853,68 @@ int32_t ts_store_add_batch(struct TsStore *handle,
                            struct TsBatch *batch,
                            struct TsKey ***out_keys,
                            uint64_t *out_len);
+
+/**
+ * Read many full `SingleTimeSeries` at once. `keys` points to `n` live key
+ * handles; the results are returned through `out_result` as a handle whose
+ * elements line up with `keys` in order. Every key must identify a
+ * `SingleTimeSeries`; a forecast or non-sequential key makes the whole call
+ * fail with `TS_ERR_INVALID_PARAMETER`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `keys` must point to `n` live key
+ * handles created by this library (it may be null only when `n` is 0).
+ * `out_result` must be valid for writing one pointer. On `TS_OK` the returned
+ * handle must be released exactly once with `ts_bulk_result_free`.
+ */
+int32_t ts_store_bulk_read_single(const struct TsStore *handle,
+                                  const struct TsKey *const *keys,
+                                  uint64_t n,
+                                  struct TsBulkReadHandle **out_result);
+
+/**
+ * The number of series held by a bulk-read result handle, or `-1` if `result`
+ * is null.
+ *
+ * # Safety
+ *
+ * `result` must be null or a live handle from `ts_store_bulk_read_single`.
+ */
+int64_t ts_bulk_result_len(const struct TsBulkReadHandle *result);
+
+/**
+ * Read element `index` out of a bulk-read result handle. The out parameters
+ * match `ts_store_get_single`: the caller owns the `out_resolution` string and
+ * the `out_shape` / `out_data` buffers and must release them with
+ * `ts_string_free`, `ts_buffer_free_i64`, and `ts_buffer_free_u8`. The handle
+ * is not consumed, so an element may be read more than once.
+ *
+ * # Safety
+ *
+ * `result` must be a live handle from `ts_store_bulk_read_single` and `index`
+ * must be less than its length. Every output pointer must be valid for writing
+ * its indicated value.
+ */
+int32_t ts_bulk_result_get_single(const struct TsBulkReadHandle *result,
+                                  uint64_t index,
+                                  int64_t *out_initial_ts_unix_ms,
+                                  char **out_resolution,
+                                  int32_t *out_dtype,
+                                  int64_t **out_shape,
+                                  uint64_t *out_shape_len,
+                                  uint8_t **out_data,
+                                  uint64_t *out_data_byte_len);
+
+/**
+ * Free a bulk-read result handle created by `ts_store_bulk_read_single`.
+ *
+ * # Safety
+ *
+ * `result` must be null or a handle returned by `ts_store_bulk_read_single`
+ * that has not already been freed.
+ */
+void ts_bulk_result_free(struct TsBulkReadHandle *result);
 
 /**
  * Derive `DeterministicSingleTimeSeries` forecasts from the stored

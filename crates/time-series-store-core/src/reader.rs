@@ -686,7 +686,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use crate::store::{AddRequest, ListFilter, Store};
+    use crate::store::{ListFilter, Store};
     use crate::types::array::{Dtype, TypedArray};
     use crate::types::metadata::OwnerCategory;
     use crate::types::time_series::{
@@ -1509,8 +1509,11 @@ mod tests {
         }
     }
 
-    /// More than MAX_COLS_PER_DATASET series in one group spill into a second
+    /// More than DEFAULT_COLS_PER_DATASET series in one group spill into a second
     /// packed dataset; the row read must gather across the dataset boundary.
+    /// Single `add_time_series` calls take the per-column path, which packs into a
+    /// shared default-width dataset and spills once full (a managed bulk batch
+    /// would instead size one dataset to the batch).
     #[test]
     fn static_reader_spans_spilled_datasets() {
         let dir = tempfile::tempdir().unwrap();
@@ -1518,28 +1521,22 @@ mod tests {
         let mut store = Store::create(Some(&path), false).unwrap();
         let res = Duration::hours(1);
         let length = 3usize;
-        let n = 1001i64; // > MAX_COLS_PER_DATASET (1000) -> two datasets
-        let items: Vec<AddRequest> = (1..=n)
-            .map(|owner| {
-                let vals = distinct(owner as f64 * 10.0, length);
-                let ts = SingleTimeSeries::new(
-                    t0(),
-                    res,
-                    TypedArray::from_f64(vec![length], &vals),
-                    "v",
-                );
-                AddRequest {
-                    owner_id: owner,
-                    owner_type: "Gen".into(),
-                    owner_category: OwnerCategory::Component,
-                    data: TimeSeriesData::SingleTimeSeries(ts),
-                    features: Default::default(),
-                    units: None,
-                    logical_type: None,
-                }
-            })
-            .collect();
-        store.add_time_series_bulk(items).unwrap();
+        let n = 1001i64; // > DEFAULT_COLS_PER_DATASET (1000) -> two datasets
+        for owner in 1..=n {
+            let vals = distinct(owner as f64 * 10.0, length);
+            let ts =
+                SingleTimeSeries::new(t0(), res, TypedArray::from_f64(vec![length], &vals), "v");
+            store
+                .add_time_series(
+                    owner,
+                    "Gen",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(ts),
+                    Default::default(),
+                    None,
+                )
+                .unwrap();
+        }
 
         let mut reader = store
             .build_static_reader(ListFilter::new().resolution(res))

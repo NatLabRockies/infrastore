@@ -130,8 +130,48 @@ pub trait StorageBackend: Send + Sync {
         packed: bool,
     ) -> Result<bool>;
 
+    /// Insert a block of same-shaped packed arrays in one operation.
+    ///
+    /// `hashes[i]` is the content hash of `arrays[i]`; every array must share one
+    /// `(dtype, element_shape, length)` and the given `resolution` (the caller —
+    /// the buffered bulk-add — guarantees this by grouping). Hashes already
+    /// stored, and duplicates within the block, are written only once (content
+    /// addressing); the returned `Vec<bool>` is aligned to `hashes` and is `true`
+    /// for each input that this call physically wrote (so the caller can stage it
+    /// for rollback).
+    ///
+    /// The default loops [`Self::put_array`] with `packed = true`. The NetCDF
+    /// backend overrides it to create batch-sized datasets and fill whole chunks
+    /// with one timestamp-row write per chunk, avoiding the per-column
+    /// read-modify-write that the timestamp-major chunking imposes on single adds.
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>> {
+        hashes
+            .iter()
+            .zip(arrays)
+            .map(|(hash, data)| self.put_array(hash, data, resolution, true))
+            .collect()
+    }
+
     /// Fetch the full array for `hash`.
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
+
+    /// Read many full arrays at once, returning one [`TypedArray`] per input hash
+    /// in order (duplicate hashes each yield a copy).
+    ///
+    /// The default loops [`Self::get_array`]. The NetCDF backend overrides it to
+    /// read each packed dataset's needed column span in a single hyperslab —
+    /// decompressing each timestamp-major chunk once — then scatter the columns
+    /// out, rather than re-reading every chunk once per series. This is the bulk
+    /// counterpart to the per-timestamp [`Self::read_index_into`]: it amortizes
+    /// the decompression cost of whole-series reads across a batch.
+    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+        hashes.iter().map(|h| self.get_array(h)).collect()
+    }
 
     /// Fetch a slice of the array along axis 0 (the time axis). End is exclusive.
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;

@@ -16,23 +16,25 @@ the authoritative description of both. For the rationale behind the split, see t
 The NetCDF root carries a global attribute:
 
 ```text
-data_format_version = "0.8.0"
+data_format_version = "0.9.0"
 ```
 
 This is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when the NetCDF
 layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md) changes in
-a backward-incompatible way. Readers should check it before trusting a file. (`0.8.0` added the
-forecast `interval` to the association uniqueness key — so two forecasts of one variable that differ
-only by interval are now distinct series — widening both unique indexes (the `NULL`-folding index
-now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made `resolution`/`horizon`/`interval`
-calendar-aware [periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration
-strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset
-names and the SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented
-distinctly from fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so
-the owner identity is the pair `(owner_id, owner_category)`), widening the unique indexes and
-`ix_owner`; `0.5.0` changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.2.0`
-introduced typed, multi-dimensional arrays and the two-mode NetCDF layout below; `0.1.0` stored only
-1-D `f64`.)
+a backward-incompatible way. Readers should check it before trusting a file. (`0.9.0` changed the
+packed-dataset chunking to timestamp-major `(1, cols, *element_shape)` and made the column count
+`cols` per-dataset (sized to the writing batch) instead of a fixed 1,000, optimizing reads across
+series by timestamp and bulk writes; `0.8.0` added the forecast `interval` to the association
+uniqueness key — so two forecasts of one variable that differ only by interval are now distinct
+series — widening both unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well
+as `resolution`); `0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
+[periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration strings (e.g.
+`PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
+SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
+fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so the owner identity
+is the pair `(owner_id, owner_category)`), widening the unique indexes and `ix_owner`; `0.5.0`
+changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.2.0` introduced typed,
+multi-dimensional arrays and the two-mode NetCDF layout below; `0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -56,11 +58,11 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.nc
-├── attribute  data_format_version = "0.8.0"
+├── attribute  data_format_version = "0.9.0"
 └── group      time_series/
     └── group  single/
-        ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, 1000, *element_shape)
-        ├── var  sts_{dtype}_{shape}_{length}_{res}_h    str  (1000,)    # per-column hex hashes
+        ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, cols, *element_shape)
+        ├── var  sts_{dtype}_{shape}_{length}_{res}_h    str  (cols,)     # per-column hex hashes
         ├── var  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
         ├── var  arr_{hex_hash}                          standalone array  [length, *element_shape]
         └── ...
@@ -81,17 +83,24 @@ dataset:
 | `{res}`    | Resolution as an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`; no `_`) |
 | `__{n}`    | Spill suffix; absent for the first dataset, `__1`, `__2`, … after |
 
-The dataset shape is `(length, 1000, *element_shape)` (`MAX_COLS_PER_DATASET = 1000` columns) and
-chunking is `(length, 1, *element_shape)`, so each column (one complete series) occupies exactly one
-HDF5 chunk. Data variables use zlib level 3 with shuffle.
+The dataset shape is `(length, cols, *element_shape)` and chunking is `(1, cols, *element_shape)`,
+so one HDF5 chunk holds a single timestamp across every column — making a read across series by
+timestamp one chunk, and a buffered bulk write fill whole chunks. `cols` is chosen per dataset: a
+managed bulk write sizes it to the batch, while an incremental one-at-a-time write path uses a
+default width (`DEFAULT_COLS_PER_DATASET = 1000`). In both cases `cols` is capped so one chunk stays
+within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
+Data variables use zlib level 3 with shuffle.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
 - **Hash companion variable.** Each packed dataset has a sibling **string** variable `{dataset}_h`
-  of shape `(1000,)`. Slot `i` holds the lowercase hex SHA-256 (64 chars) of column `i`, or an empty
+  of shape `(cols,)`. Slot `i` holds the lowercase hex SHA-256 (64 chars) of column `i`, or an empty
   string if the column is free. This is the on-disk index: on open, the backend scans every `…_h`,
-  decodes the non-empty hashes, and rebuilds its `hash → (dataset, column)` map.
-- **Spill.** When all 1,000 columns of a family are occupied, the next write creates a spill dataset
-  `…__1`, then `…__2`, and so on.
+  decodes the non-empty hashes, and rebuilds its `hash → (dataset, column)` map. (The backend also
+  recovers each dataset's `cols` from its column dimension length, so per-dataset widths
+  round-trip.)
+- **Spill.** When a family's current dataset is full — a batch exceeds the column cap, or
+  incremental writes fill a default-width dataset — the next write creates a spill dataset `…__1`,
+  then `…__2`, and so on.
 
 ### Standalone mode
 
