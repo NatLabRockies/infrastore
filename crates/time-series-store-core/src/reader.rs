@@ -30,6 +30,8 @@
 //! [`StaticReader::groups`] to read the bytes. This keeps the type free of
 //! self-referential borrows, which matters for the FFI handle.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
@@ -290,6 +292,11 @@ pub struct ForecastReader {
     resolution: Period,
     interval: Period,
     count: usize,
+    /// Deduplicated physical reads, one per unique `(array, read plan)`.
+    /// [`Store::forecast_read`] fills these — one backend read each.
+    slots: Vec<WindowSlot>,
+    /// Per-key entries; each indexes into `slots`. Multiple entries may share a
+    /// slot when their forecasts reference the same array and read plan.
     entries: Vec<ForecastEntry>,
     last_read: Option<DateTime<Utc>>,
 }
@@ -298,7 +305,11 @@ pub struct ForecastReader {
 /// standalone array along its count axis; a `DeterministicSingleTimeSeries`
 /// gathers a contiguous run from the packed underlying `SingleTimeSeries`, so
 /// both yield an identical `[H, *E]` window.
-#[derive(Debug, Clone, Copy)]
+///
+/// `(hash, WindowRead)` is the dedup key for [`WindowSlot`]s: two forecasts that
+/// reference the same array *and* slice it the same way read byte-identical
+/// windows, so they share one physical read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum WindowRead {
     /// Dense forecast: slice the standalone array at the window index along
     /// `count_axis` (1 for Deterministic, 2 for Probabilistic/Scenarios).
@@ -311,29 +322,30 @@ pub(crate) enum WindowRead {
     },
 }
 
-/// One forecast's window slot. After a read, [`Self::window`] holds the
-/// row-major, little-endian bytes of a single window and [`Self::window_shape`]
-/// its shape: `[H, *E]` (Deterministic / DeterministicSingleTimeSeries),
-/// `[P, H, *E]` (Probabilistic), `[scenarios, H, *E]` (Scenarios).
+/// One deduplicated physical window read. After a read, [`Self::window`] holds
+/// the row-major, little-endian bytes of a single window and
+/// [`Self::window_shape`] its shape: `[H, *E]` (Deterministic /
+/// DeterministicSingleTimeSeries), `[P, H, *E]` (Probabilistic),
+/// `[scenarios, H, *E]` (Scenarios).
+///
+/// Every [`ForecastEntry`] whose array and read plan match shares one slot, so
+/// [`Store::forecast_read`] reads each slot once regardless of how many
+/// components reference it — the forecast analog of a packed static column read
+/// once and gathered into many owners.
 #[derive(Debug)]
-pub struct ForecastEntry {
-    key: TimeSeriesKey,
+pub struct WindowSlot {
     hash: [u8; 32],
     dtype: Dtype,
     /// Shape of a single window.
     window_shape: Vec<usize>,
-    /// How to read this entry's window from storage.
+    /// How to read this slot's window from storage.
     read: WindowRead,
     /// Reused output buffer: `product(window_shape) * dtype.size()` bytes.
     buf: Vec<u8>,
     filled: bool,
 }
 
-impl ForecastEntry {
-    pub fn key(&self) -> &TimeSeriesKey {
-        &self.key
-    }
-
+impl WindowSlot {
     pub fn dtype(&self) -> Dtype {
         self.dtype
     }
@@ -348,7 +360,7 @@ impl ForecastEntry {
         if self.filled { &self.buf } else { &[] }
     }
 
-    /// Drive a backend window read into this entry's reusable buffer. The closure
+    /// Drive a backend window read into this slot's reusable buffer. The closure
     /// receives the read descriptor, the array hash, and the buffer to fill;
     /// splitting the borrow across fields avoids aliasing.
     pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
@@ -358,6 +370,28 @@ impl ForecastEntry {
         read(&self.read, &self.hash, &mut self.buf)?;
         self.filled = true;
         Ok(())
+    }
+}
+
+/// One forecast's identity, mapped to the [`WindowSlot`] that supplies its
+/// window. Many entries can reference the same slot when they share an array and
+/// read plan; reach the window bytes via [`ForecastReader::entry_slot`].
+#[derive(Debug)]
+pub struct ForecastEntry {
+    key: TimeSeriesKey,
+    /// Index into [`ForecastReader::slots`].
+    slot: usize,
+}
+
+impl ForecastEntry {
+    pub fn key(&self) -> &TimeSeriesKey {
+        &self.key
+    }
+
+    /// Index of the [`WindowSlot`] backing this entry. Entries that share an
+    /// array and read plan return the same index.
+    pub fn slot(&self) -> usize {
+        self.slot
     }
 }
 
@@ -387,8 +421,21 @@ impl ForecastReader {
         &self.entries
     }
 
-    pub(crate) fn entries_mut(&mut self) -> &mut [ForecastEntry] {
-        &mut self.entries
+    /// The deduplicated window slots — [`Store::forecast_read`] performs exactly
+    /// one backend read per slot per timestamp. `slots().len()` is the per-read
+    /// I/O count regardless of how many entries reference each slot.
+    pub fn slots(&self) -> &[WindowSlot] {
+        &self.slots
+    }
+
+    pub(crate) fn slots_mut(&mut self) -> &mut [WindowSlot] {
+        &mut self.slots
+    }
+
+    /// The [`WindowSlot`] backing entry `i`. Panics if `i >= entries().len()`;
+    /// callers taking an external index should bounds-check `entries()` first.
+    pub fn entry_slot(&self, i: usize) -> &WindowSlot {
+        &self.slots[self.entries[i].slot]
     }
 
     pub(crate) fn mark_read(&mut self, at: DateTime<Utc>) {
@@ -413,6 +460,7 @@ impl ForecastReader {
         resolution: Period,
         interval: Period,
         count: usize,
+        slots: Vec<WindowSlot>,
         entries: Vec<ForecastEntry>,
     ) -> Self {
         Self {
@@ -421,6 +469,7 @@ impl ForecastReader {
             resolution,
             interval,
             count,
+            slots,
             entries,
             last_read: None,
         }
@@ -555,6 +604,10 @@ pub(crate) fn build_forecast_entries(
 
     let timeline = forecast_timeline(&items[0].0)?;
     let (_, _, _, count) = timeline;
+    let mut slots: Vec<WindowSlot> = Vec::new();
+    // Dedup key: forecasts sharing an array *and* read plan read identical
+    // windows, so they collapse to one slot (one backend read per timestamp).
+    let mut slot_of: HashMap<([u8; 32], WindowRead), usize> = HashMap::new();
     let mut entries = Vec::with_capacity(items.len());
     for (m, shape) in items {
         if !type_accepted(reported, m.time_series_type) {
@@ -573,24 +626,31 @@ pub(crate) fn build_forecast_entries(
                 m.name, m.owner_id, tl, timeline
             )));
         }
+        // Validate every row's layout, even ones that land on an existing slot.
         let (window_shape, read) = entry_layout(&m, &shape, count)?;
-        let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
-        let mut buf = vec![0u8; bytes];
-        buf.clear();
+        let slot = *slot_of.entry((m.data_hash, read)).or_insert_with(|| {
+            let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
+            let mut buf = vec![0u8; bytes];
+            buf.clear();
+            slots.push(WindowSlot {
+                hash: m.data_hash,
+                dtype: m.dtype,
+                window_shape: window_shape.clone(),
+                read,
+                buf,
+                filled: false,
+            });
+            slots.len() - 1
+        });
         entries.push(ForecastEntry {
             key: TimeSeriesKey::from_metadata(&m)?,
-            hash: m.data_hash,
-            dtype: m.dtype,
-            window_shape,
-            read,
-            buf,
-            filled: false,
+            slot,
         });
     }
 
     let (initial, resolution, interval, count) = timeline;
     Ok(ForecastReader::from_parts(
-        reported, initial, resolution, interval, count, entries,
+        reported, initial, resolution, interval, count, slots, entries,
     ))
 }
 
@@ -869,8 +929,8 @@ mod tests {
 
     // ---- ForecastReader ---------------------------------------------------
 
-    fn f64_window(e: &ForecastEntry) -> Vec<f64> {
-        e.window()
+    fn f64_window(s: &WindowSlot) -> Vec<f64> {
+        s.window()
             .chunks_exact(8)
             .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
             .collect()
@@ -953,10 +1013,17 @@ mod tests {
             let at = t0() + Duration::hours(k as i64);
             disk.forecast_read(&mut rd, at).unwrap();
             mem.forecast_read(&mut rm, at).unwrap();
-            for (ed, em) in rd.entries().iter().zip(rm.entries()) {
-                assert_eq!(ed.key(), em.key());
-                assert_eq!(ed.window_shape(), em.window_shape());
-                assert_eq!(ed.window(), em.window(), "mismatch at window {k}");
+            for i in 0..rd.entries().len() {
+                assert_eq!(rd.entries()[i].key(), rm.entries()[i].key());
+                assert_eq!(
+                    rd.entry_slot(i).window_shape(),
+                    rm.entry_slot(i).window_shape()
+                );
+                assert_eq!(
+                    rd.entry_slot(i).window(),
+                    rm.entry_slot(i).window(),
+                    "mismatch at window {k}"
+                );
             }
         }
 
@@ -964,15 +1031,62 @@ mod tests {
         disk.forecast_read(&mut rd, t0() + Duration::hours(1))
             .unwrap();
         // Entry 0: scalar, owner 1 -> window k=1 = [value(1,0), value(1,1)] = [10, 11].
-        let e0 = &rd.entries()[0];
-        assert_eq!(e0.key().owner_id(), 1);
-        assert_eq!(e0.window_shape(), &[2]); // [H]
-        assert_eq!(f64_window(e0), vec![10.0, 11.0]);
+        let s0 = rd.entry_slot(0);
+        assert_eq!(rd.entries()[0].key().owner_id(), 1);
+        assert_eq!(s0.window_shape(), &[2]); // [H]
+        assert_eq!(f64_window(s0), vec![10.0, 11.0]);
         // Entry 1: shaped, owner 2 -> window k=1, shape [H, E] = [2, 2].
-        let e1 = &rd.entries()[1];
-        assert_eq!(e1.key().owner_id(), 2);
-        assert_eq!(e1.window_shape(), &[2, 2]);
-        assert_eq!(f64_window(e1), vec![110.0, 111.0, 210.0, 211.0]);
+        let s1 = rd.entry_slot(1);
+        assert_eq!(rd.entries()[1].key().owner_id(), 2);
+        assert_eq!(s1.window_shape(), &[2, 2]);
+        assert_eq!(f64_window(s1), vec![110.0, 111.0, 210.0, 211.0]);
+    }
+
+    /// Components sharing one forecast array dedup to a single [`WindowSlot`], so
+    /// a timestamp read hits the backend once no matter how many components
+    /// reference it — while each component still resolves to its own (identical)
+    /// window. This is the forecast analog of the static packed-column read.
+    #[test]
+    fn shared_forecast_reads_once_per_timestamp() {
+        // Scalar forecast H=2, count=3; row-major [s, k], value = k*10 + s.
+        let scalar = [0.0, 10.0, 20.0, 1.0, 11.0, 21.0];
+        // A distinct array (offset by 5) for the non-shared owner.
+        let other = [5.0, 15.0, 25.0, 6.0, 16.0, 26.0];
+
+        let mut store = Store::create(None, true).unwrap();
+        // Owners 1..=3 add byte-identical data (content-addressed -> one array);
+        // owner 4 is distinct.
+        add_det(&mut store, 1, "gen", 2, 3, vec![], &scalar);
+        add_det(&mut store, 2, "gen", 2, 3, vec![], &scalar);
+        add_det(&mut store, 3, "gen", 2, 3, vec![], &scalar);
+        add_det(&mut store, 4, "gen", 2, 3, vec![], &other);
+
+        let mut reader = store.build_forecast_reader(forecast_filter()).unwrap();
+        // Four components, two unique arrays: four entries, two physical reads.
+        assert_eq!(reader.entries().len(), 4);
+        assert_eq!(
+            reader.slots().len(),
+            2,
+            "shared forecast collapses to one slot per unique array"
+        );
+
+        store
+            .forecast_read(&mut reader, t0() + Duration::hours(1))
+            .unwrap();
+
+        // Entries 0..=2 (owners 1-3) share one slot and identical window bytes.
+        let shared_slot = reader.entries()[0].slot();
+        let shared_window = reader.entry_slot(0).window().to_vec();
+        for i in 0..3 {
+            assert_eq!(reader.entries()[i].slot(), shared_slot);
+            assert_eq!(reader.entry_slot(i).window(), shared_window.as_slice());
+        }
+        // Window k=1 of the shared array = [value(0,1), value(1,1)] = [10, 11].
+        assert_eq!(f64_window(reader.entry_slot(0)), vec![10.0, 11.0]);
+
+        // Owner 4 is a distinct slot with its own data (window k=1 = [15, 16]).
+        assert_ne!(reader.entries()[3].slot(), shared_slot);
+        assert_eq!(f64_window(reader.entry_slot(3)), vec![15.0, 16.0]);
     }
 
     #[test]
@@ -1074,8 +1188,8 @@ mod tests {
             let at = t0() + Duration::hours(k as i64);
             disk.forecast_read(&mut rd, at).unwrap();
             mem.forecast_read(&mut rm, at).unwrap();
-            let dst = &rd.entries()[0];
-            let det_entry = &rd.entries()[1];
+            let dst = rd.entry_slot(0);
+            let det_entry = rd.entry_slot(1);
             // DST read identically to Deterministic: same shape and bytes.
             assert_eq!(dst.window_shape(), &[2]);
             assert_eq!(dst.window_shape(), det_entry.window_shape());
@@ -1087,8 +1201,8 @@ mod tests {
             // Concrete expectation: window k = [sts[k], sts[k+1]].
             assert_eq!(f64_window(dst), vec![sts[k as usize], sts[k as usize + 1]]);
             // NetCDF (packed underlying hyperslab) == in-memory default.
-            assert_eq!(dst.window(), rm.entries()[0].window());
-            assert_eq!(det_entry.window(), rm.entries()[1].window());
+            assert_eq!(dst.window(), rm.entry_slot(0).window());
+            assert_eq!(det_entry.window(), rm.entry_slot(1).window());
         }
     }
 
@@ -1379,15 +1493,16 @@ mod tests {
             for w in 0..count {
                 let t_w = t0() + ivl * (w as i32);
                 store.forecast_read(&mut reader, t_w).unwrap();
-                for e in reader.entries() {
+                for i in 0..reader.entries().len() {
+                    let key = reader.entries()[i].key();
                     let window = store
-                        .get_time_series(e.key().identity(), Some((t_w, t_w + ivl)))
+                        .get_time_series(key.identity(), Some((t_w, t_w + ivl)))
                         .unwrap();
                     assert_eq!(
-                        e.window(),
+                        reader.entry_slot(i).window(),
                         forecast_bytes(&window).as_slice(),
                         "type {ts_type:?} owner {} window {w}",
-                        e.key().owner_id()
+                        key.owner_id()
                     );
                 }
             }

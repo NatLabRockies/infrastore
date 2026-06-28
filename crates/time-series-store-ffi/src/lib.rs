@@ -4938,6 +4938,72 @@ pub unsafe extern "C" fn ts_forecast_reader_num_entries(
     TS_OK
 }
 
+/// Number of deduplicated window slots: the count of physical backend reads per
+/// [`ts_forecast_reader_read`]. Entries that share an array and read plan
+/// (e.g. components referencing one shared forecast) collapse to one slot.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_n` must be valid for
+/// writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_num_slots(
+    reader: *const TsForecastReaderHandle,
+    out_n: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_n.is_null() {
+        set_error("out_n is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    unsafe { *out_n = reader.inner.slots().len() as u64 };
+    TS_OK
+}
+
+/// The 0-based slot index backing entry `entry_idx`. Entries sharing an array
+/// and read plan return the same slot, letting a caller group components that
+/// resolve to one window and materialize it once.
+///
+/// # Safety
+///
+/// `reader` must be a live forecast-reader handle. `out_slot` must be valid for
+/// writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_forecast_reader_entry_slot(
+    reader: *const TsForecastReaderHandle,
+    entry_idx: u64,
+    out_slot: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return TS_ERR_NULL_POINTER;
+        }
+    };
+    if out_slot.is_null() {
+        set_error("out_slot is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let entry = match reader.inner.entries().get(entry_idx as usize) {
+        Some(e) => e,
+        None => {
+            set_error(format!("entry index {entry_idx} out of bounds"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    unsafe { *out_slot = entry.slot() as u64 };
+    TS_OK
+}
+
 /// Read entry `entry_idx`'s layout: its dtype code and window shape. The shape
 /// follows the probe-then-fetch convention (call with `shape_buf` null /
 /// `shape_cap` 0 to learn `out_shape_len`).
@@ -4968,16 +5034,14 @@ pub unsafe extern "C" fn ts_forecast_reader_entry_info(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let entry = match reader.inner.entries().get(entry_idx as usize) {
-        Some(e) => e,
-        None => {
-            set_error(format!("entry index {entry_idx} out of bounds"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let shape: Vec<i64> = entry.window_shape().iter().map(|&d| d as i64).collect();
+    if entry_idx as usize >= reader.inner.entries().len() {
+        set_error(format!("entry index {entry_idx} out of bounds"));
+        return TS_ERR_INVALID_PARAMETER;
+    }
+    let slot = reader.inner.entry_slot(entry_idx as usize);
+    let shape: Vec<i64> = slot.window_shape().iter().map(|&d| d as i64).collect();
     unsafe {
-        *out_dtype = entry.dtype().code();
+        *out_dtype = slot.dtype().code();
         write_i64_slice_out(&shape, shape_buf, shape_cap, out_shape_len);
     }
     TS_OK
@@ -5089,14 +5153,11 @@ pub unsafe extern "C" fn ts_forecast_reader_entry_values(
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
-    let entry = match reader.inner.entries().get(entry_idx as usize) {
-        Some(e) => e,
-        None => {
-            set_error(format!("entry index {entry_idx} out of bounds"));
-            return TS_ERR_INVALID_PARAMETER;
-        }
-    };
-    let bytes = entry.window();
+    if entry_idx as usize >= reader.inner.entries().len() {
+        set_error(format!("entry index {entry_idx} out of bounds"));
+        return TS_ERR_INVALID_PARAMETER;
+    }
+    let bytes = reader.inner.entry_slot(entry_idx as usize).window();
     unsafe {
         *out_ptr = bytes.as_ptr();
         *out_byte_len = bytes.len() as u64;

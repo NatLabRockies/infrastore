@@ -969,6 +969,39 @@ end
     end
 end
 
+@testset "ForecastReader: shared forecast reads once per timestamp" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2031, 5, 1)
+    res = Hour(1)
+    H, count = 2, 3
+    shared = Float64[s * 10 + k for s in 0:(H - 1), k in 1:count]
+    other = shared .+ 100.0
+    # Owners 1-3 add byte-identical data (content-addressed -> one array);
+    # owner 4 is distinct.
+    for owner in (1, 2, 3)
+        add_time_series!(store, owner, "Gen", Component,
+                         Deterministic(t0, res, Hour(H), res, count, shared, "pf"))
+    end
+    add_time_series!(store, 4, "Gen", Component,
+                     Deterministic(t0, res, Hour(H), res, count, other, "pf"))
+
+    r = build_forecast_reader(store, Deterministic; resolution=res)
+    ents = forecast_entries(r)
+    # Four components, two unique arrays: four entries, two physical reads.
+    @test length(ents) == 4
+    @test forecast_num_slots(r) == 2
+    # Owners 1-3 share one slot; owner 4 is its own.
+    @test ents[1].slot == ents[2].slot == ents[3].slot
+    @test ents[4].slot != ents[1].slot
+
+    for k in 0:(count - 1)
+        forecast_read!(r, t0 + Hour(k))
+        @test forecast_values(r, 1) == forecast_values(r, 2) == forecast_values(r, 3)
+        @test forecast_values(r, 1) == shared[:, k + 1]
+        @test forecast_values(r, 4) == other[:, k + 1]
+    end
+end
+
 @testset "Reader reshape matches get_time_series (Julia oracle)" begin
     store = Store(in_memory=true)
     t0 = DateTime(2032, 1, 1)

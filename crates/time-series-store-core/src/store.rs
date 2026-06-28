@@ -945,8 +945,11 @@ impl Store {
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
         let window = reader.window_index(at)?;
-        for entry in reader.entries_mut() {
-            entry.fill(|read, hash, out| match *read {
+        // One read per *slot*: forecasts that share an array and read plan
+        // (e.g. components referencing one shared forecast) collapse to a single
+        // slot at build time, so the backend is hit once for all of them.
+        for slot in reader.slots_mut() {
+            slot.fill(|read, hash, out| match *read {
                 WindowRead::Dense { count_axis } => {
                     self.backend.read_window_into(hash, count_axis, window, out)
                 }

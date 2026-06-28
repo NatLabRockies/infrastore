@@ -21,7 +21,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        StaticReader, build_static_reader, static_grid, static_groups,
        static_read!, static_values,
        ForecastReader, build_forecast_reader, forecast_timeline, forecast_entries,
-       forecast_read!, forecast_values,
+       forecast_num_slots, forecast_read!, forecast_values,
        init_logging
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
@@ -2720,14 +2720,19 @@ end
 # ---- ForecastReader -------------------------------------------------------
 
 """
-One forecast's window slot in a [`ForecastReader`]. `key` identifies the
-forecast; `window_shape` is the shape of a single window (`[H, *E]`,
-`[P, H, *E]`, or `[scenarios, H, *E]`).
+One forecast's entry in a [`ForecastReader`]. `key` identifies the forecast;
+`window_shape` is the shape of a single window (`[H, *E]`, `[P, H, *E]`, or
+`[scenarios, H, *E]`). `slot` is the 0-based index of the deduplicated window
+read backing this entry — entries that share an array and read plan (e.g.
+components referencing one shared forecast) report the same `slot`, so the
+`.nc` data is read once per timestamp and a caller can group by `slot` to
+materialize each unique window only once.
 """
 struct ForecastEntry
     dtype        :: DataType
     window_shape :: Vector{Int}
     key          :: TimeSeriesKey
+    slot         :: Int
 end
 
 """
@@ -2771,7 +2776,11 @@ function _forecast_entry_layout(handle::Ptr{Cvoid}, ei::Integer)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     _check(ccall((:ts_forecast_reader_entry_key, lib_path()), Int32,
                  (Ptr{Cvoid}, UInt64, Ref{Ptr{Cvoid}}), handle, UInt64(ei), out_key))
-    return ForecastEntry(_julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]))
+    out_slot = Ref{UInt64}(0)
+    _check(ccall((:ts_forecast_reader_entry_slot, lib_path()), Int32,
+                 (Ptr{Cvoid}, UInt64, Ref{UInt64}), handle, UInt64(ei), out_slot))
+    return ForecastEntry(_julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]),
+                         Int(out_slot[]))
 end
 
 """
@@ -2837,9 +2846,25 @@ end
 """
     forecast_entries(reader) -> Vector{ForecastEntry}
 
-The reader's per-key window entries (resolved once at build time).
+The reader's per-key window entries (resolved once at build time). Each entry's
+`slot` field identifies its deduplicated window read; entries sharing a `slot`
+read the same `.nc` data once per timestamp.
 """
 forecast_entries(reader::ForecastReader) = reader.entries
+
+"""
+    forecast_num_slots(reader) -> Int
+
+The number of deduplicated window slots — i.e. the count of physical `.nc` reads
+[`forecast_read!`] performs per timestamp. Entries that share an array and read
+plan collapse to one slot, so this is `≤ length(forecast_entries(reader))`.
+"""
+function forecast_num_slots(reader::ForecastReader)
+    out_n = Ref{UInt64}(0)
+    _check(ccall((:ts_forecast_reader_num_slots, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{UInt64}), reader.handle, out_n))
+    return Int(out_n[])
+end
 
 """
     forecast_read!(reader, t::DateTime) -> reader

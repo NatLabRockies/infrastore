@@ -1540,6 +1540,32 @@ int32_t ts_forecast_reader_num_entries(const struct TsForecastReaderHandle *read
                                        uint64_t *out_n);
 
 /**
+ * Number of deduplicated window slots: the count of physical backend reads per
+ * [`ts_forecast_reader_read`]. Entries that share an array and read plan
+ * (e.g. components referencing one shared forecast) collapse to one slot.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_n` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_forecast_reader_num_slots(const struct TsForecastReaderHandle *reader, uint64_t *out_n);
+
+/**
+ * The 0-based slot index backing entry `entry_idx`. Entries sharing an array
+ * and read plan return the same slot, letting a caller group components that
+ * resolve to one window and materialize it once.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_slot` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_forecast_reader_entry_slot(const struct TsForecastReaderHandle *reader,
+                                      uint64_t entry_idx,
+                                      uint64_t *out_slot);
+
+/**
  * Read entry `entry_idx`'s layout: its dtype code and window shape. The shape
  * follows the probe-then-fetch convention (call with `shape_buf` null /
  * `shape_cap` 0 to learn `out_shape_len`).
