@@ -6,12 +6,19 @@ The public surface of `time-series-store-core`. Import paths below are relative 
 use time_series_store_core::{
     create_store, open_store, Store, TimeSeriesKey,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
-    TimeSeriesData, TimeSeriesType,
+    TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
     TimeSeriesCounts, ForecastParameters, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
 ```
+
+All time spans in this API — resolutions, horizons, and intervals — are the crate's
+[`Period`](#period), a calendar-aware span. Builders and constructors take `impl Into<Period>`, so
+you can pass a fixed `chrono::Duration` (e.g. `Duration::hours(1)`, via `From<Duration>`) or a
+calendar span (`Period::months(n)`, for the monthly/annual resolutions a fixed `Duration` cannot
+represent). Values read back — struct fields, `get_resolutions`, and the reader accessors — are
+always `Period`. Instants (`DateTime<Utc>`) remain chrono types.
 
 ## Constructors
 
@@ -75,8 +82,8 @@ impl Store {
 
     pub fn transform_single_time_series(
         &mut self,
-        horizon: Duration,
-        interval: Duration,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
     ) -> Result<usize>;
 
     pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()>;
@@ -102,7 +109,7 @@ impl Store {
     pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata>;
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
-    pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Duration>>;
+    pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>>;
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts>;
     pub fn get_forecast_parameters(&self) -> Result<ForecastParameters>;
 
@@ -257,7 +264,7 @@ pub struct TimeSeriesKey {
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,
     pub name: String,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub features: Features,
 }
 ```
@@ -269,13 +276,15 @@ The unique handle for a series; see [Data Model](../explanation/data-model.md#ke
 ```rust
 pub struct SingleTimeSeries {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
+    pub resolution: Period,
     pub length: usize,
     pub data: TypedArray,
 }
 
 impl SingleTimeSeries {
-    pub fn new(initial_timestamp: DateTime<Utc>, resolution: Duration, data: TypedArray) -> Self;
+    pub fn new(
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>, data: TypedArray,
+    ) -> Self;
 }
 ```
 
@@ -307,6 +316,34 @@ impl TypedArray {
 `Dtype::code()` / `Dtype::from_code(i32)` and `Dtype::as_str()` / `Dtype::parse(&str)` convert to
 and from the stable integer codes and string names used by the bindings and the on-disk format.
 
+### `Period`
+
+The calendar-aware time span used for every resolution, horizon, and interval. A `Period` is either
+a **fixed** span (a `chrono::Duration` — hours, minutes, days, weeks) or a **calendar** span (a
+count of months, so `Quarter = 3`, `Year = 12`), letting the store represent monthly/annual grids a
+fixed `Duration` cannot.
+
+```rust
+pub enum Period {
+    Fixed(Duration),   // a fixed chrono::Duration
+    Months(i32),       // n calendar months
+}
+
+impl Period {
+    pub fn fixed(d: Duration) -> Self;     // also: From<Duration> for Period
+    pub fn months(n: i32) -> Self;
+    pub fn is_irregular(&self) -> bool;    // true for Months
+    pub fn is_positive(&self) -> bool;
+    pub fn add_to(&self, dt: DateTime<Utc>, k: i64) -> Option<DateTime<Utc>>;  // calendar-aware
+}
+```
+
+Because `Period: From<Duration>`, anywhere the API takes `impl Into<Period>` you may pass a
+`chrono::Duration` directly (e.g. `Duration::hours(1)`); use `Period::months(n)` for calendar spans.
+Two periods of different kinds (one `Fixed`, one `Months`) are never equal, even if a particular
+month happens to span the same wall-clock time. See the [data model](../explanation/data-model.md)
+for how resolution drives the storage grid.
+
 ### `NonSequentialTimeSeries`
 
 ```rust
@@ -324,17 +361,17 @@ pub struct NonSequentialTimeSeries {
 ```rust
 pub struct Deterministic {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub data: TypedArray,   // shape [H, count, *E]
 }
 
 impl Deterministic {
     pub fn new(
-        initial_timestamp: DateTime<Utc>, resolution: Duration,
-        horizon: Duration, interval: Duration, count: usize, data: TypedArray,
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize, data: TypedArray,
     ) -> Result<Self, String>;
 }
 ```
@@ -346,9 +383,9 @@ impl Deterministic {
 ```rust
 pub struct Probabilistic {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub percentiles: Vec<f64>,
     pub data: TypedArray,   // shape [num_percentiles, H, count, *E]
@@ -356,8 +393,8 @@ pub struct Probabilistic {
 
 impl Probabilistic {
     pub fn new(
-        initial_timestamp: DateTime<Utc>, resolution: Duration,
-        horizon: Duration, interval: Duration, count: usize,
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
         percentiles: Vec<f64>, data: TypedArray,
     ) -> Result<Self, String>;
 }
@@ -370,9 +407,9 @@ impl Probabilistic {
 ```rust
 pub struct Scenarios {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub scenario_count: usize,
     pub data: TypedArray,   // shape [scenario_count, H, count, *E]
@@ -380,8 +417,8 @@ pub struct Scenarios {
 
 impl Scenarios {
     pub fn new(
-        initial_timestamp: DateTime<Utc>, resolution: Duration,
-        horizon: Duration, interval: Duration, count: usize,
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
         scenario_count: usize, data: TypedArray,
     ) -> Result<Self, String>;
 }
@@ -502,7 +539,8 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `units`,
 `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`, and `logical_type: Option<String>`.
+`element_shape: Vec<usize>`, and `logical_type: Option<String>`. The span fields (`resolution`,
+`horizon`, `interval`) are `Option<Period>`.
 
 ### `ListFilter`
 
@@ -534,8 +572,9 @@ pub struct TimeSeriesCounts {
 pub struct CompactionReport { pub slots_reclaimed: usize, pub datasets_dropped: usize }
 pub struct IntegrityReport { pub errors: Vec<String> }  // .ok() == errors.is_empty()
 pub struct ForecastParameters {
-    pub horizon: Option<Duration>, pub interval: Option<Duration>,
-    pub count: Option<usize>, pub resolution: Option<Duration>,
+    pub horizon: Option<Period>, pub interval: Option<Period>,
+    pub count: Option<usize>, pub resolution: Option<Period>,
+    pub initial_timestamp: Option<DateTime<Utc>>,
 }
 ```
 
