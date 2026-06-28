@@ -15,6 +15,7 @@ flowchart TB
         SRV["time-series-store-server<br/>gRPC server + Rust client"]
     end
 
+    PYMOD["time_series_store<br/>(Python module)"]
     JL["TimeSeriesStore.jl<br/>(Julia package)"]
     PROTO["time-series-store-proto<br/>protobuf + tonic"]
 
@@ -33,6 +34,7 @@ flowchart TB
     PY --> STORE
     FFI --> STORE
     SRV --> STORE
+    PYMOD -->|"import"| PY
     JL -->|"ccall"| FFI
     SRV --> PROTO
 
@@ -42,6 +44,7 @@ flowchart TB
     style NC fill:#1e7e34,color:#fff
     style MEM fill:#1e7e34,color:#fff
     style PY fill:#17a2b8,color:#fff
+    style PYMOD fill:#17a2b8,color:#fff
     style FFI fill:#9558b2,color:#fff
     style JL fill:#9558b2,color:#fff
     style SRV fill:#ffc107,color:#000
@@ -54,6 +57,7 @@ flowchart TB
 | `time-series-store-proto`  | The `.proto` service compiled with `tonic`; shared message types       |
 | `time-series-store-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient` |
 | `time-series-store-py`     | PyO3 classes exposing `Store` as the `time_series_store` module        |
+| `time_series_store`        | The importable Python module — user-facing surface of the PyO3 wheel   |
 | `time-series-store-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`           |
 | `TimeSeriesStore.jl`       | A Julia package that `ccall`s into the FFI cdylib                      |
 

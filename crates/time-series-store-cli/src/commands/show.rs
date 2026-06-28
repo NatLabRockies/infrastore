@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use chrono::Duration;
 use serde_json::{Map, Value, json};
 use time_series_store_core::{
     Dtype, FeatureValue, Features, TimeSeriesData, TimeSeriesMetadata, TypedArray,
@@ -63,7 +62,7 @@ fn list_row(m: &TimeSeriesMetadata) -> Vec<String> {
         m.name.clone(),
         m.dtype.as_str().to_string(),
         m.resolution
-            .map(parse::format_duration)
+            .map(parse::format_period)
             .unwrap_or_else(|| "-".to_string()),
         m.length
             .map(|l| l.to_string())
@@ -82,7 +81,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert("dtype".into(), json!(m.dtype.as_str()));
     obj.insert(
         "resolution".into(),
-        json!(m.resolution.map(parse::format_duration)),
+        json!(m.resolution.map(parse::format_period)),
     );
     obj.insert("length".into(), json!(m.length));
     obj.insert("units".into(), json!(m.units));
@@ -109,11 +108,18 @@ pub fn get(
         TimeSeriesData::SingleTimeSeries(s) => {
             let ts: Vec<String> = (0..s.length)
                 .map(|i| {
-                    (s.initial_timestamp
-                        + Duration::milliseconds(s.resolution.num_milliseconds() * i as i64))
-                    .to_rfc3339()
+                    s.resolution
+                        .add_to(s.initial_timestamp, i as i64)
+                        .map(|t| t.to_rfc3339())
+                        .ok_or_else(|| {
+                            format!(
+                                "timestamp overflow at grid index {i} (initial {}, \
+                                 resolution {})",
+                                s.initial_timestamp, s.resolution
+                            )
+                        })
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
             render_sequential(&meta, &ts, &s.data, format, limit, full, false)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
@@ -142,7 +148,7 @@ pub fn info(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
     fields.push(("dtype".into(), arr.dtype.as_str().into()));
     fields.push(("shape".into(), format!("{:?}", arr.shape)));
     if let Some(r) = meta.resolution {
-        fields.push(("resolution".into(), parse::format_duration(r)));
+        fields.push(("resolution".into(), parse::format_period(r)));
     }
     if let Some(t) = meta.initial_timestamp {
         fields.push(("initial_timestamp".into(), t.to_rfc3339()));
@@ -151,10 +157,10 @@ pub fn info(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
         fields.push(("length".into(), l.to_string()));
     }
     if let Some(h) = meta.horizon {
-        fields.push(("horizon".into(), parse::format_duration(h)));
+        fields.push(("horizon".into(), parse::format_period(h)));
     }
     if let Some(iv) = meta.interval {
-        fields.push(("interval".into(), parse::format_duration(iv)));
+        fields.push(("interval".into(), parse::format_period(iv)));
     }
     if let Some(c) = meta.count {
         fields.push(("count".into(), c.to_string()));
@@ -354,16 +360,16 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
         obj.insert("units".into(), json!(u));
     }
     if let Some(r) = meta.resolution {
-        obj.insert("resolution".into(), json!(parse::format_duration(r)));
+        obj.insert("resolution".into(), json!(parse::format_period(r)));
     }
     if let Some(t) = meta.initial_timestamp {
         obj.insert("initial_timestamp".into(), json!(t.to_rfc3339()));
     }
     if let Some(h) = meta.horizon {
-        obj.insert("horizon".into(), json!(parse::format_duration(h)));
+        obj.insert("horizon".into(), json!(parse::format_period(h)));
     }
     if let Some(iv) = meta.interval {
-        obj.insert("interval".into(), json!(parse::format_duration(iv)));
+        obj.insert("interval".into(), json!(parse::format_period(iv)));
     }
     if let Some(c) = meta.count {
         obj.insert("count".into(), json!(c));

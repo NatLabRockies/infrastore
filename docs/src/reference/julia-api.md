@@ -9,14 +9,18 @@ using TimeSeriesStore
 ```
 
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, `TimeSeriesKey`, `OwnerCategory`,
-`Component`, `SupplementalAttribute`, `add_time_series!`, `AddBatch`, `add_time_series_bulk!`,
-`get_time_series`, `get_time_series_keys`, `key_info`, `remove_time_series!`, `has_time_series`,
-`get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
-`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
-`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
-`get_array_by_hash`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
-`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`.
+`DeterministicSingleTimeSeries`, `AbstractDeterministic`, `Probabilistic`, `Scenarios`,
+`TimeSeriesKey`, `OwnerCategory`, `Component`, `SupplementalAttribute`, `add_time_series!`,
+`AddBatch`, `add_time_series_bulk!`, `get_time_series`, `get_time_series_keys`, `key_info`,
+`list_keys`, `list_array_groups`, `remove_time_series!`, `has_time_series`, `get_counts`,
+`counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`, `static_summary`,
+`forecast_summary`, `get_forecast_parameters`, `check_static_consistency`, `get_resolutions`,
+`get_compression`, `verify_integrity`, `compact!`, `get_metadata`, `get_forecast_metadata`,
+`get_array_by_hash`, `count_array_references`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
+`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`, `StaticReader`,
+`build_static_reader`, `static_grid`, `static_groups`, `static_read!`, `static_values`,
+`ForecastReader`, `build_forecast_reader`, `forecast_timeline`, `forecast_entries`,
+`forecast_num_slots`, `forecast_read!`, `forecast_values`, `init_logging`.
 
 ## Constructors
 
@@ -94,6 +98,10 @@ end
 # read back as a Deterministic. Surfaces as a key's time_series_type.
 abstract type DeterministicSingleTimeSeries end
 
+# Supertype of Deterministic and DeterministicSingleTimeSeries. Pass it as the
+# reader/filter type to match both at once (see build_forecast_reader).
+abstract type AbstractDeterministic end
+
 mutable struct Store
     handle :: Ptr{Cvoid}
 end
@@ -152,6 +160,9 @@ values (`Int`, `Float64`, `Bool`, `String`). Pass the type as the first argument
 plus optional `resolution` / `features` keywords (attribute-based, the same addressing used by
 `get_metadata` / `has_time_series` / `remove_time_series!`). Both forms return the same struct. The
 bare `get_time_series(store, key)` remains a convenience alias for `SingleTimeSeries`.
+
+To read every series' value at one timestamp in a loop (the simulation pattern), use a
+[`StaticReader`](#staticreader) rather than calling `get_time_series` per series.
 
 ## Bulk Adds
 
@@ -314,6 +325,105 @@ key or attributes) — which likewise returns a `Deterministic`.
 Alternatively, use `get_metadata` to obtain the `data_hash`, then `get_array_by_hash` for the raw
 flattened array.
 
+For the per-timestamp simulation access pattern (walk the timeline, read every series at each
+instant) prefer a reader — see [Readers](#readers-per-timestamp-iteration) below.
+
+## Readers (per-timestamp iteration)
+
+`get_time_series` returns a whole series or forecast struct. For the simulation access pattern —
+_walk every timestamp and, at each, read the value of every series_ — use a **reader** instead. A
+reader is built once over a filter, pins one resolution, and reuses output buffers that each read
+overwrites in place, so a tight loop allocates almost nothing. There are two: `StaticReader` for
+`SingleTimeSeries`, and `ForecastReader` for forecasts. Both follow the same lifecycle: build →
+inspect the layout once → `*_read!(t)` in a loop → pull values per group/entry.
+
+### StaticReader
+
+Reads the value of every matching `SingleTimeSeries` at one timestamp. Results are **columnar**:
+series are partitioned into `(dtype, element_shape)` groups, and each group's values come back as
+one dense `(num_columns, element_dims...)` array.
+
+```julia
+build_static_reader(store; resolution::Period, owner_id=nothing,
+                    owner_category=nothing, name=nothing, features=Dict()) -> StaticReader
+
+static_grid(reader)   -> NamedTuple  # (initial_timestamp::DateTime, resolution::Period, length::Int)
+static_groups(reader) -> Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_read!(reader, t::DateTime) -> reader   # fills buffers; errors if t is off the grid
+static_values(reader, group_index::Integer) -> Array
+       # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
+```
+
+All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
+and errors on divergence, so there is no presence mask — every column has a value at every valid
+timestamp.
+
+```julia
+reader = build_static_reader(store; resolution = Hour(1))
+grid = static_grid(reader)
+for k in 0:(grid.length - 1)
+    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+    for (gi, g) in enumerate(static_groups(reader))
+        vals = static_values(reader, gi)   # column j ↔ g.keys[j]
+    end
+end
+```
+
+### ForecastReader
+
+Reads the forecast _window_ at one timestamp for every matching forecast of one type. The build
+filter must name a forecast type and pin a resolution; a `Deterministic` reader is abstract and also
+includes `DeterministicSingleTimeSeries` (read into identical `[H, *E]` windows). All matched
+forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
+
+```julia
+build_forecast_reader(store, time_series_type::Type; resolution::Period,
+                      owner_id=nothing, owner_category=nothing, name=nothing,
+                      features=Dict()) -> ForecastReader
+
+forecast_timeline(reader)  -> NamedTuple
+       # (initial_timestamp::DateTime, resolution::Period, interval::Period, count::Int)
+forecast_entries(reader)   -> Vector{ForecastEntry}  # each: .dtype, .window_shape, .key, .slot
+forecast_num_slots(reader) -> Int                    # physical reads per timestamp (see below)
+forecast_read!(reader, t::DateTime) -> reader        # fills buffers; errors if t is off the timeline
+forecast_values(reader, entry_index::Integer) -> Array  # window of size .window_shape
+```
+
+Valid read timestamps are `initial_timestamp + k·interval` for `k in 0:count-1` (each names the
+window forecast _from_ that instant). A window's shape is `[H, *E]` for `Deterministic` /
+`DeterministicSingleTimeSeries`, `[num_percentiles, H, *E]` for `Probabilistic`, and
+`[scenario_count, H, *E]` for `Scenarios`.
+
+```julia
+reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
+tl = forecast_timeline(reader)
+for k in 0:(tl.count - 1)
+    forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
+    for (i, e) in enumerate(forecast_entries(reader))
+        window = forecast_values(reader, i)   # shape e.window_shape, for e.key's owner
+    end
+end
+```
+
+#### Window-read deduplication
+
+Forecasts that reference the **same backing array and read plan** — deduplicated identical data, or
+several `DeterministicSingleTimeSeries` over one `SingleTimeSeries` — collapse to a single _window
+slot_. `forecast_read!` performs one backend (`.nc`) read per slot, not per entry, so a forecast
+shared by N owners is read once per timestamp. `forecast_num_slots(reader)` is that physical read
+count (`≤ length(forecast_entries(reader))`), and every `ForecastEntry.slot` (0-based) identifies
+the slot backing that entry; entries that share data report the same `slot`. Group entries by `slot`
+to also materialize each unique window only once on the Julia side:
+
+```julia
+forecast_read!(reader, t)
+windows = Dict{Int, Any}()
+for (i, e) in enumerate(forecast_entries(reader))
+    window = get!(() -> forecast_values(reader, i), windows, e.slot)   # materialize once per slot
+    # apply `window` to e.key's owner
+end
+```
+
 ## Store-Wide Operations
 
 ```julia
@@ -322,6 +432,10 @@ counts_by_type(store) -> Vector{NamedTuple}   # (time_series_type, count) per st
 num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays count once
 time_series_counts(store) -> NamedTuple   # distinct owners per category + distinct arrays per kind
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
+list_array_groups(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+                  name=nothing, resolution=nothing, features=Dict()) -> Vector{NamedTuple}
+                                  # list_keys rows + `data_hash`; group by it to find shared arrays
+count_array_references(store, data_hash::Vector{UInt8}) -> NamedTuple  # (sts, dst) refs to a 32-byte hash
 static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
 forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
@@ -344,6 +458,21 @@ close!(store) -> Nothing
 `length`, `horizon`, `interval`, `count`, `features`). It accepts `owner_id` and `owner_category` as
 independent filters to scope the listing. Physical storage detail (`data_hash`, `logical_type`,
 `percentiles`) is not on a key — read it via `get_metadata` / `get_forecast_metadata`.
+
+`list_array_groups` takes the same filters and returns the same row fields as `list_keys`, but each
+row additionally carries `data_hash` — the **64-character lowercase hex** content hash of the array
+the row resolves to (note this is a hex `String`, whereas `get_metadata` returns the hash as a
+32-byte `Vector{UInt8}`). Rows that share a stored array share their `data_hash`: both deduplicated
+identical arrays and a `SingleTimeSeries` together with any `DeterministicSingleTimeSeries` derived
+from it. **Group rows by `data_hash` to discover which time series share their underlying data** —
+the foundation for reading a shared series once (see
+[Window-read deduplication](#window-read-deduplication)). It is one catalog query (the hash is read
+off each metadata row); there are no per-row `get_metadata` round-trips.
+
+`count_array_references(store, data_hash)` returns `(; sts, dst)` — how many `SingleTimeSeries` and
+`DeterministicSingleTimeSeries` associations reference the given 32-byte hash, across all owners.
+Because a DST shares its backing `SingleTimeSeries` array, a caller uses these counts to decide
+whether removing a `SingleTimeSeries` would orphan a derived DST.
 
 ## Errors
 

@@ -1,13 +1,15 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use super::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
+use super::period::Period;
 use super::time_series::TimeSeriesType;
 use crate::error::{Result, TimeSeriesError};
 
 /// The identifying tuple shared by every [`TimeSeriesKey`] variant. This — and
 /// only this — determines key equality, and is what the catalog looks up: it
 /// matches the metadata uniqueness constraint
-/// `(owner_id, owner_category, time_series_type, name, resolution, features)`.
+/// `(owner_id, owner_category, time_series_type, name, resolution, interval,
+/// features)`.
 ///
 /// Owner identity is the pair `(owner_id, owner_category)`: component and
 /// supplemental-attribute id streams are independent, so the category
@@ -16,13 +18,19 @@ use crate::error::{Result, TimeSeriesError};
 /// `resolution` is `Option` because the catalog column is nullable
 /// (`NonSequentialTimeSeries` has no resolution); the per-variant constructors
 /// of [`TimeSeriesKey`] enforce which series types may leave it unset.
+///
+/// `interval` is part of the identity (matching InfrastructureSystems.jl): two
+/// forecasts of one variable at the same resolution but different intervals are
+/// distinct series. It is `Some` for every forecast type and `None` for the
+/// static types, which never carry an interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyIdentity {
     pub owner_id: i64,
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,
     pub name: String,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
+    pub interval: Option<Period>,
     pub features: Features,
 }
 
@@ -48,12 +56,15 @@ pub struct NonSequentialTimeSeriesKey {
 /// Identifying key plus the descriptive snapshot for a forecast
 /// (`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, or
 /// `Scenarios`). The resolution is always present.
+///
+/// `interval` is part of the identity, so it lives in [`KeyIdentity`] rather
+/// than as a descriptive field here; read it via [`Self::interval`]. `horizon`
+/// and `count`, by contrast, are descriptive and excluded from equality.
 #[derive(Debug, Clone)]
 pub struct ForecastTimeSeriesKey {
     pub identity: KeyIdentity,
     pub initial_timestamp: DateTime<Utc>,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub horizon: Period,
     pub count: usize,
 }
 
@@ -79,7 +90,7 @@ impl SingleTimeSeriesKey {
         owner_id: i64,
         owner_category: OwnerCategory,
         name: String,
-        resolution: Duration,
+        resolution: impl Into<Period>,
         features: Features,
         initial_timestamp: DateTime<Utc>,
         length: usize,
@@ -90,7 +101,8 @@ impl SingleTimeSeriesKey {
                 owner_category,
                 time_series_type: TimeSeriesType::SingleTimeSeries,
                 name,
-                resolution: Some(resolution),
+                resolution: Some(resolution.into()),
+                interval: None,
                 features,
             },
             initial_timestamp,
@@ -116,6 +128,7 @@ impl NonSequentialTimeSeriesKey {
                 time_series_type: TimeSeriesType::NonSequentialTimeSeries,
                 name,
                 resolution: None,
+                interval: None,
                 features,
             },
             length,
@@ -132,11 +145,11 @@ impl ForecastTimeSeriesKey {
         owner_category: OwnerCategory,
         time_series_type: TimeSeriesType,
         name: String,
-        resolution: Duration,
+        resolution: impl Into<Period>,
         features: Features,
         initial_timestamp: DateTime<Utc>,
-        horizon: Duration,
-        interval: Duration,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         count: usize,
     ) -> Self {
         Self {
@@ -145,14 +158,23 @@ impl ForecastTimeSeriesKey {
                 owner_category,
                 time_series_type,
                 name,
-                resolution: Some(resolution),
+                resolution: Some(resolution.into()),
+                interval: Some(interval.into()),
                 features,
             },
             initial_timestamp,
-            horizon,
-            interval,
+            horizon: horizon.into(),
             count,
         }
+    }
+
+    /// The forecast window interval. Always present for a forecast key (it is
+    /// part of the identity); panics only if a key was hand-built with a `None`
+    /// interval, which the constructors never do.
+    pub fn interval(&self) -> Period {
+        self.identity
+            .interval
+            .expect("forecast key identity always carries an interval")
     }
 }
 
@@ -183,8 +205,14 @@ impl TimeSeriesKey {
         &self.identity().name
     }
 
-    pub fn resolution(&self) -> Option<Duration> {
+    pub fn resolution(&self) -> Option<Period> {
         self.identity().resolution
+    }
+
+    /// The forecast interval, part of the identity. `Some` for forecast keys,
+    /// `None` for static (`SingleTimeSeries`/`NonSequentialTimeSeries`) keys.
+    pub fn interval(&self) -> Option<Period> {
+        self.identity().interval
     }
 
     pub fn features(&self) -> &Features {

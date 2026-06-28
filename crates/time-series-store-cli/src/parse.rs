@@ -2,7 +2,32 @@
 //! owner categories, time-series-type names, and `key=value` features.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use time_series_store_core::{Dtype, FeatureValue, OwnerCategory, TimeSeriesType};
+use time_series_store_core::{Dtype, FeatureValue, OwnerCategory, Period, TimeSeriesType};
+
+/// Parse a period: an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`) for calendar or
+/// fixed periods, or the legacy human form (`1h`, `15min`, `7d`) which is always
+/// a fixed-span [`Period::Fixed`].
+pub fn parse_period(s: &str) -> Result<Period, String> {
+    let s = s.trim();
+    // ISO-8601 duration designators are uppercase `P`; the legacy human form
+    // (`1h`, `7d`) never starts with `p`, so only `P` routes to the ISO parser.
+    if s.starts_with('P') {
+        Period::from_iso8601(s).map_err(|e| e.to_string())
+    } else {
+        Ok(Period::Fixed(parse_duration(s)?))
+    }
+}
+
+/// Render a [`Period`] as its canonical ISO-8601 duration string.
+pub fn format_period(p: Period) -> String {
+    p.to_iso8601()
+}
+
+/// `H = horizon / resolution` for periods, requiring an exact positive integer
+/// (and matching calendar/fixed kinds).
+pub fn period_horizon_steps(horizon: Period, resolution: Period) -> Result<usize, String> {
+    resolution.divide_into(&horizon).map_err(|e| e.to_string())
+}
 
 /// Parse a human duration such as `1h`, `15min`, `500ms`, `7d`, or a bare
 /// integer (interpreted as milliseconds). Supported units: `ms|s|min|h|d`.
@@ -28,45 +53,6 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
             ));
         }
     })
-}
-
-/// Render a `Duration` back to a compact human string, choosing the largest
-/// unit that divides it evenly.
-pub fn format_duration(d: Duration) -> String {
-    let ms = d.num_milliseconds();
-    if ms == 0 {
-        return "0ms".to_string();
-    }
-    for (unit_ms, suffix) in [
-        (86_400_000, "d"),
-        (3_600_000, "h"),
-        (60_000, "min"),
-        (1_000, "s"),
-    ] {
-        if ms % unit_ms == 0 {
-            return format!("{}{suffix}", ms / unit_ms);
-        }
-    }
-    format!("{ms}ms")
-}
-
-/// Compute the per-window horizon length `H = horizon / resolution`, requiring
-/// an exact, positive integer division (matching the core forecast contract).
-pub fn horizon_steps(horizon: Duration, resolution: Duration) -> Result<usize, String> {
-    let h = horizon.num_milliseconds();
-    let r = resolution.num_milliseconds();
-    if r <= 0 {
-        return Err("resolution must be positive".to_string());
-    }
-    if h <= 0 {
-        return Err("horizon must be positive".to_string());
-    }
-    if h % r != 0 {
-        return Err(format!(
-            "horizon ({h} ms) is not evenly divisible by resolution ({r} ms)"
-        ));
-    }
-    Ok((h / r) as usize)
 }
 
 /// Parse an RFC3339 timestamp, or a bare integer of epoch milliseconds.
@@ -198,9 +184,24 @@ mod tests {
         );
         assert_eq!(parse_duration("7d").unwrap(), Duration::days(7));
         assert_eq!(parse_duration("250").unwrap(), Duration::milliseconds(250));
-        assert_eq!(format_duration(Duration::hours(1)), "1h");
-        assert_eq!(format_duration(Duration::minutes(90)), "90min");
-        assert_eq!(format_duration(Duration::milliseconds(1500)), "1500ms");
+    }
+
+    #[test]
+    fn periods_round_trip() {
+        use time_series_store_core::Period;
+        assert_eq!(
+            parse_period("1h").unwrap(),
+            Period::Fixed(Duration::hours(1))
+        );
+        assert_eq!(
+            parse_period("PT1H").unwrap(),
+            Period::Fixed(Duration::hours(1))
+        );
+        assert_eq!(parse_period("P1M").unwrap(), Period::Months(1));
+        assert_eq!(parse_period("P1Y").unwrap(), Period::Months(12));
+        assert_eq!(format_period(Period::Fixed(Duration::hours(1))), "PT1H");
+        assert_eq!(format_period(Period::Months(1)), "P1M");
+        assert_eq!(format_period(Period::Months(12)), "P1Y");
     }
 
     #[test]

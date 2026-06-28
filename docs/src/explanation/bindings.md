@@ -71,6 +71,11 @@ The conventions that shape the Julia API:
   `Scenarios` structs passed to the generic `add_time_series!`, type-dispatched
   `get_time_series(Type, …)` getters, and `transform_single_time_series!`, so all four forecast
   types are usable from Julia.
+- **Bulk reads use a result handle.** `bulk_read` reads many full `SingleTimeSeries` at once: the
+  FFI fetches them in one decompress-once pass per dataset into a `TsBulkReadHandle`
+  (`ts_store_bulk_read_single`), and Julia reads each element out, then frees the handle. Python's
+  `store.bulk_read` exposes the same operation directly. Managed bulk _writes_ already take the fast
+  block-write path through the existing batch / `add_time_series_bulk` APIs.
 
 `TimeSeriesStore.jl` loads the cdylib from the path in the `TIME_SERIES_STORE_LIB` environment
 variable. See the [Julia guide](../guides/julia.md), the [C ABI reference](../reference/c-abi.md),

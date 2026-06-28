@@ -181,10 +181,10 @@ impl Descriptor {
             }
             TimeSeriesType::Deterministic => {
                 let (initial, resolution) = self.regular_params()?;
-                let horizon = self.duration_field("horizon")?;
-                let interval = self.duration_field("interval")?;
+                let horizon = self.period_field("horizon")?;
+                let interval = self.period_field("interval")?;
                 let count = self.usize_field("count", self.count)?;
-                let h = parse::horizon_steps(horizon, resolution)?;
+                let h = parse::period_horizon_steps(horizon, resolution)?;
                 let shape = with_elem(vec![h, count], elem);
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
                 let det = Deterministic::new(
@@ -194,14 +194,14 @@ impl Descriptor {
             }
             TimeSeriesType::Probabilistic => {
                 let (initial, resolution) = self.regular_params()?;
-                let horizon = self.duration_field("horizon")?;
-                let interval = self.duration_field("interval")?;
+                let horizon = self.period_field("horizon")?;
+                let interval = self.period_field("interval")?;
                 let count = self.usize_field("count", self.count)?;
                 let percentiles = self
                     .percentiles
                     .clone()
                     .ok_or_else(|| "Probabilistic requires `percentiles`".to_string())?;
-                let h = parse::horizon_steps(horizon, resolution)?;
+                let h = parse::period_horizon_steps(horizon, resolution)?;
                 let shape = with_elem(vec![percentiles.len(), h, count], elem);
                 let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
                 let prob = Probabilistic::new(
@@ -218,10 +218,10 @@ impl Descriptor {
             }
             TimeSeriesType::Scenarios => {
                 let (initial, resolution) = self.regular_params()?;
-                let horizon = self.duration_field("horizon")?;
-                let interval = self.duration_field("interval")?;
+                let horizon = self.period_field("horizon")?;
+                let interval = self.period_field("interval")?;
                 let count = self.usize_field("count", self.count)?;
-                let h = parse::horizon_steps(horizon, resolution)?;
+                let h = parse::period_horizon_steps(horizon, resolution)?;
                 let denom = h * count * per_step;
                 let scenario_count = match self.scenario_count {
                     Some(s) => s,
@@ -257,17 +257,25 @@ impl Descriptor {
         }
     }
 
-    fn regular_params(&self) -> Result<(chrono::DateTime<chrono::Utc>, chrono::Duration), String> {
+    fn regular_params(
+        &self,
+    ) -> Result<
+        (
+            chrono::DateTime<chrono::Utc>,
+            time_series_store_core::Period,
+        ),
+        String,
+    > {
         let initial = self
             .initial_timestamp
             .as_ref()
             .ok_or_else(|| format!("series '{}' requires `initial_timestamp`", self.name))?;
         let initial = parse::parse_timestamp(initial)?;
-        let resolution = self.duration_field("resolution")?;
+        let resolution = self.period_field("resolution")?;
         Ok((initial, resolution))
     }
 
-    fn duration_field(&self, field: &str) -> Result<chrono::Duration, String> {
+    fn period_field(&self, field: &str) -> Result<time_series_store_core::Period, String> {
         let raw = match field {
             "resolution" => &self.resolution,
             "horizon" => &self.horizon,
@@ -277,7 +285,7 @@ impl Descriptor {
         let raw = raw
             .as_ref()
             .ok_or_else(|| format!("series '{}' requires `{field}`", self.name))?;
-        parse::parse_duration(raw)
+        parse::parse_period(raw)
     }
 
     fn usize_field(&self, field: &str, value: Option<usize>) -> Result<usize, String> {

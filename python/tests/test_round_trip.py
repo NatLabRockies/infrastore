@@ -222,8 +222,9 @@ def test_counts_and_resolutions():
     assert counts["static_time_series"] == 3
     assert counts["components_with_time_series"] == 3
 
+    # Resolutions are returned as canonical ISO-8601 duration strings.
     resolutions = store.get_resolutions()
-    assert resolutions == [timedelta(minutes=15), timedelta(hours=1), timedelta(hours=4)]
+    assert sorted(resolutions) == ["PT15M", "PT1H", "PT4H"]
 
 
 def test_numpy_array_received_as_ndarray():
@@ -310,6 +311,35 @@ def test_add_time_series_bulk(tmp_path):
         np.testing.assert_array_equal(
             np.asarray(got.data), np.arange(24, dtype=np.float64) + float(i)
         )
+
+
+def test_bulk_read(tmp_path):
+    """bulk_read returns a full series per key, in order, matching get_time_series."""
+    path = tmp_path / "bulkread.nc"
+    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    items = [
+        {
+            "owner_id": i,
+            "owner_type": "Generator",
+            "owner_category": OwnerCategory.Component,
+            "time_series": make_series(length=12, base=float(i * 10)),
+        }
+        for i in range(8)
+    ]
+    keys = store.add_time_series_bulk(items)
+
+    series = store.bulk_read(keys)
+    assert len(series) == 8
+    for i, s in enumerate(series):
+        expected = np.arange(12, dtype=np.float64) + float(i * 10)
+        np.testing.assert_array_equal(np.asarray(s.data), expected)
+        # Same as the per-key read, in order.
+        np.testing.assert_array_equal(
+            np.asarray(s.data), np.asarray(store.get_time_series(keys[i]).data)
+        )
+
+    # Empty input returns an empty list.
+    assert store.bulk_read([]) == []
 
 
 def test_add_time_series_bulk_rolls_back_on_error():

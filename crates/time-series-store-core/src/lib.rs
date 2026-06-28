@@ -5,6 +5,7 @@
 pub mod error;
 pub mod hash;
 pub mod metadata;
+pub mod reader;
 pub mod storage;
 pub mod store;
 pub mod types;
@@ -12,9 +13,11 @@ pub mod version;
 
 pub use error::{Result, TimeSeriesError};
 pub use metadata::{ForecastSummaryRow, StaticSummaryRow};
+pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
 pub use store::{
-    AddRequest, ForecastParameters, ListFilter, Store, TimeSeriesCounts, TimeSeriesCountsDetailed,
+    AddRequest, BulkAdd, ForecastParameters, ListFilter, Store, TimeSeriesCounts,
+    TimeSeriesCountsDetailed,
 };
 pub use types::{
     array::{Dtype, TypedArray},
@@ -23,6 +26,7 @@ pub use types::{
         TimeSeriesKey,
     },
     metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
+    period::Period,
     time_series::{
         Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
         SingleTimeSeries, TimeSeriesData, TimeSeriesType,

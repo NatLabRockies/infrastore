@@ -7,7 +7,8 @@
 use std::ops::Range;
 
 use crate::error::{Result, TimeSeriesError};
-use crate::types::array::TypedArray;
+use crate::types::array::{Dtype, TypedArray};
+use crate::types::period::Period;
 
 pub mod memory;
 pub mod netcdf;
@@ -116,7 +117,7 @@ pub trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
     /// data is reused for content addressing) and `false` is returned; a write
     /// of new content returns `true`. The array's dtype + shape travel with it;
-    /// `resolution_ms` keys the packed storage pool.
+    /// `resolution` keys the packed storage pool.
     ///
     /// `packed = true` column-packs the array with other same-shaped arrays (for
     /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
@@ -125,15 +126,120 @@ pub trait StorageBackend: Send + Sync {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution_ms: i64,
+        resolution: Period,
         packed: bool,
     ) -> Result<bool>;
+
+    /// Insert a block of same-shaped packed arrays in one operation.
+    ///
+    /// `hashes[i]` is the content hash of `arrays[i]`; every array must share one
+    /// `(dtype, element_shape, length)` and the given `resolution` (the caller —
+    /// the buffered bulk-add — guarantees this by grouping). Hashes already
+    /// stored, and duplicates within the block, are written only once (content
+    /// addressing); the returned `Vec<bool>` is aligned to `hashes` and is `true`
+    /// for each input that this call physically wrote (so the caller can stage it
+    /// for rollback).
+    ///
+    /// The default loops [`Self::put_array`] with `packed = true`. The NetCDF
+    /// backend overrides it to create batch-sized datasets and fill whole chunks
+    /// with one timestamp-row write per chunk, avoiding the per-column
+    /// read-modify-write that the timestamp-major chunking imposes on single adds.
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>> {
+        hashes
+            .iter()
+            .zip(arrays)
+            .map(|(hash, data)| self.put_array(hash, data, resolution, true))
+            .collect()
+    }
 
     /// Fetch the full array for `hash`.
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
+    /// Read many full arrays at once, returning one [`TypedArray`] per input hash
+    /// in order (duplicate hashes each yield a copy).
+    ///
+    /// The default loops [`Self::get_array`]. The NetCDF backend overrides it to
+    /// read each packed dataset's needed column span in a single hyperslab —
+    /// decompressing each timestamp-major chunk once — then scatter the columns
+    /// out, rather than re-reading every chunk once per series. This is the bulk
+    /// counterpart to the per-timestamp [`Self::read_index_into`]: it amortizes
+    /// the decompression cost of whole-series reads across a batch.
+    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+        hashes.iter().map(|h| self.get_array(h)).collect()
+    }
+
     /// Fetch a slice of the array along axis 0 (the time axis). End is exclusive.
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
+
+    /// Read the value at a single time `index` for a set of co-located arrays,
+    /// appending the result to `out` in `hashes` order.
+    ///
+    /// All `hashes` must share one `(dtype, element_shape)`; the caller (the
+    /// timestamp reader) guarantees this by grouping. `out` is cleared first and
+    /// then filled with `hashes.len() * element_count * dtype.size()` bytes laid
+    /// out row-major as `[column, *element_shape]`. Reusing the caller's buffer
+    /// keeps a per-timestamp read loop allocation-free.
+    ///
+    /// The default reads each array's one-step slice individually; the NetCDF
+    /// backend overrides this to read a whole packed-dataset row per hyperslab.
+    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+        out.clear();
+        for hash in hashes {
+            let step = self.get_slice(hash, index..index + 1)?;
+            out.extend_from_slice(&step.bytes);
+        }
+        Ok(())
+    }
+
+    /// The stored `(dtype, shape)` of an array, ideally without reading its data.
+    /// Used by the forecast reader to plan window slicing. The default reads the
+    /// whole array; the NetCDF backend overrides it to inspect dimensions only.
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+        let arr = self.get_array(hash)?;
+        Ok((arr.dtype, arr.shape))
+    }
+
+    /// Read a single forecast window: the `window_index` slice along `count_axis`
+    /// of a standalone array, with that axis removed. `out` is cleared then
+    /// filled with the window's row-major, little-endian bytes. Reusing the
+    /// caller's buffer keeps a per-timestamp forecast loop allocation-free.
+    ///
+    /// The default materializes the whole array and copies out one window; the
+    /// NetCDF backend overrides this to read just the window with a hyperslab.
+    fn read_window_into(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        window_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let arr = self.get_array(hash)?;
+        out.clear();
+        write_window(&arr, count_axis, window_index, out)
+    }
+
+    /// Read `len` consecutive time steps along axis 0 starting at `start`,
+    /// filling `out` (cleared first) with their row-major, little-endian bytes.
+    /// Backs `DeterministicSingleTimeSeries` window reads, which gather a
+    /// contiguous run from the packed underlying `SingleTimeSeries`; on the
+    /// NetCDF backend [`Self::get_slice`] is already a single packed hyperslab.
+    fn read_range_into(
+        &self,
+        hash: &[u8; 32],
+        start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let slice = self.get_slice(hash, start..start + len)?;
+        out.clear();
+        out.extend_from_slice(&slice.bytes);
+        Ok(())
+    }
 
     /// Remove an array. Marks the slot reusable. No-op if `hash` is absent.
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
@@ -156,4 +262,32 @@ pub trait StorageBackend: Send + Sync {
     fn compression(&self) -> Compression {
         Compression::None
     }
+}
+
+/// Append the bytes of one window — the slice at `w` along `count_axis`, with
+/// that axis removed — to `out`. The size-1 axis contributes nothing to the
+/// row-major layout, so the gathered bytes are exactly the window in order.
+/// Shared by the default [`StorageBackend::read_window_into`].
+fn write_window(arr: &TypedArray, count_axis: usize, w: usize, out: &mut Vec<u8>) -> Result<()> {
+    if count_axis >= arr.shape.len() {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "count axis {count_axis} out of bounds for shape {:?}",
+            arr.shape
+        )));
+    }
+    let axis_len = arr.shape[count_axis];
+    if w >= axis_len {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "window index {w} out of bounds for axis length {axis_len}"
+        )));
+    }
+    let outer: usize = arr.shape[..count_axis].iter().product();
+    let inner_bytes: usize =
+        arr.shape[count_axis + 1..].iter().product::<usize>() * arr.dtype.size();
+    out.reserve(outer * inner_bytes);
+    for o in 0..outer {
+        let start = (o * axis_len + w) * inner_bytes;
+        out.extend_from_slice(&arr.bytes[start..start + inner_bytes]);
+    }
+    Ok(())
 }

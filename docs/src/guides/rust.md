@@ -81,6 +81,25 @@ let keys = store.add_time_series_bulk(vec![
 ])?;
 ```
 
+A bulk insert is also the **fast write path**: packed `SingleTimeSeries` are grouped by shape and
+written into batch-sized datasets so the timestamp-major HDF5 chunks are filled whole, rather than a
+slow column-at-a-time write. When you'd rather stream requests instead of building one big `Vec`,
+use a buffered session — it accumulates in memory and writes the same way on `commit`, discarding
+the buffer if dropped without committing:
+
+```rust
+let mut bulk = store.bulk_add();
+for ts in many_series {
+    bulk.add(ts.owner_id, "Generator", OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(ts.data), Features::new(), Some("MW".into()));
+}
+let keys = bulk.commit()?;
+```
+
+Adding series one at a time with `add_time_series` instead packs them incrementally into shared
+default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
+so prefer a bulk insert or session when loading in volume.
+
 ## Read a Series
 
 ```rust
@@ -96,6 +115,17 @@ Slice on the time axis by passing a range; `end` is exclusive and the returned s
 let start = Utc.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).unwrap();
 let end   = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
 let window = store.get_time_series(&key, Some((start, end)))?;
+```
+
+To read **many whole series at once** — say, loading everything for an interactive plot —
+`bulk_read` takes a slice of keys and returns a `TimeSeriesData` per key in order. It reads packed
+`SingleTimeSeries` in one decompress-once pass per dataset, which is much cheaper than a
+`get_time_series` per key (a single full-series read otherwise touches every chunk under the
+timestamp-major layout):
+
+```rust
+let ids: Vec<_> = keys.iter().map(|k| k.identity()).collect();
+let series = store.bulk_read(&ids)?;
 ```
 
 ## Query Metadata

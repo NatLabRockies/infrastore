@@ -44,7 +44,25 @@
  */
 typedef struct TsBatch TsBatch;
 
+/**
+ * Owns the results of a `ts_store_bulk_read_single` call: the `SingleTimeSeries`
+ * fetched for a batch of keys, in input order. Elements are read out with
+ * `ts_bulk_result_get_single` and the handle released with `ts_bulk_result_free`.
+ */
+typedef struct TsBulkReadHandle TsBulkReadHandle;
+
+/**
+ * Opaque handle wrapping a core `ForecastReader` (one forecast type, per-key
+ * windows).
+ */
+typedef struct TsForecastReaderHandle TsForecastReaderHandle;
+
 typedef struct TsKey TsKey;
+
+/**
+ * Opaque handle wrapping a core `StaticReader` (SingleTimeSeries, columnar).
+ */
+typedef struct TsStaticReaderHandle TsStaticReaderHandle;
 
 typedef struct TsStore TsStore;
 
@@ -65,6 +83,16 @@ typedef struct TsStore TsStore;
  * `filter` must be a valid null-terminated UTF-8 string or `NULL`.
  */
 int32_t ts_store_init_logging(const char *filter);
+
+/**
+ * Free a C string returned by this library (e.g. a `*out_resolution`).
+ *
+ * # Safety
+ *
+ * `s` must be null or a pointer returned by this library's owned-string outputs,
+ * freed exactly once.
+ */
+void ts_string_free(char *s);
 
 /**
  * Create a time-series store and return an owning handle through `out`.
@@ -139,7 +167,7 @@ int32_t ts_store_add_single(struct TsStore *handle,
                             int32_t owner_category,
                             const char *name,
                             int64_t initial_ts_unix_ms,
-                            int64_t resolution_ms,
+                            const char *resolution,
                             int32_t dtype,
                             uint64_t ndims,
                             const uint64_t *dims_ptr,
@@ -179,29 +207,44 @@ int32_t ts_store_add_non_sequential(struct TsStore *handle,
                                     struct TsKey **out_key);
 
 /**
- * Fetch a SingleTimeSeries by key.
+ * Fetch a SingleTimeSeries by key in its native dtype and shape.
  *
- * On success, the caller owns the buffer pointed to by `*out_data` and must
- * free it with `ts_buffer_free_f64(*out_data, *out_data_len)`.
+ * `out_dtype` receives the element dtype code (see [`ts_type_from_int`]'s dtype
+ * siblings: f64=0, f32=1, i64=2, i32=3, u64=4, bool=5). `out_shape` /
+ * `out_shape_len` return the full array shape `[length, *element_shape]` (the
+ * first dim is time); `out_data` / `out_data_byte_len` return the raw
+ * little-endian element bytes. The caller owns both buffers and must free
+ * `*out_shape` with `ts_buffer_free_i64` and `*out_data` with
+ * `ts_buffer_free_u8`, each using its returned length.
  *
  * # Safety
  *
  * `handle` and `key` must be live handles created by this library. Every output pointer must be
- * valid for writing its indicated value. The returned data buffer must be released exactly once
- * with `ts_buffer_free_f64` using the returned length.
+ * valid for writing its indicated value. The returned shape and data buffers must each be released
+ * exactly once with the matching free function and returned length.
  */
 int32_t ts_store_get_single(const struct TsStore *handle,
                             const struct TsKey *key,
                             int64_t *out_initial_ts_unix_ms,
-                            int64_t *out_resolution_ms,
-                            double **out_data,
-                            uint64_t *out_data_len);
+                            char **out_resolution,
+                            int32_t *out_dtype,
+                            int64_t **out_shape,
+                            uint64_t *out_shape_len,
+                            uint8_t **out_data,
+                            uint64_t *out_data_byte_len);
 
 /**
  * Fetch a NonSequentialTimeSeries by key.
  *
- * The caller owns both output buffers and must release them with
- * `ts_buffer_free_i64` and `ts_buffer_free_u8`.
+ * `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
+ * N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
+ * and `out_data` carry the row-major element bytes. `out_logical_type` is an optional opaque
+ * element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
+ * `logical_type_cap` bytes; the full length is reported in `out_logical_type_len` so the caller can
+ * probe with a null/zero-capacity buffer first.
+ *
+ * The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
+ * with `ts_buffer_free_i64`, `ts_buffer_free_i64`, and `ts_buffer_free_u8` respectively.
  *
  * # Safety
  *
@@ -214,8 +257,13 @@ int32_t ts_store_get_non_sequential(const struct TsStore *handle,
                                     int64_t **out_timestamps,
                                     uint64_t *out_timestamps_len,
                                     int32_t *out_dtype,
+                                    int64_t **out_shape,
+                                    uint64_t *out_shape_len,
                                     uint8_t **out_data,
-                                    uint64_t *out_data_byte_len);
+                                    uint64_t *out_data_byte_len,
+                                    char *out_logical_type,
+                                    uint64_t logical_type_cap,
+                                    uint64_t *out_logical_type_len);
 
 /**
  * Remove the time series identified by `key`.
@@ -251,11 +299,11 @@ int32_t ts_store_counts(const struct TsStore *handle,
 
 /**
  * Write the store's forecast parameters, optionally restricted to forecasts
- * with `filter_resolution_ms` and/or `filter_interval_ms` (`<= 0` = no filter).
+ * with `filter_resolution` and/or `filter_interval` (empty/null = no filter).
  *
  * `out_present` is set to `true` when a matching forecast exists, `false`
- * otherwise. Each of `out_horizon_ms`, `out_interval_ms`, `out_count`,
- * `out_resolution_ms`, and `out_initial_ms` (the initial timestamp as unix ms)
+ * otherwise. Each of `out_horizon`, `out_interval`, `out_count`,
+ * `out_resolution`, and `out_initial_ms` (the initial timestamp as unix ms)
  * receives the corresponding value, or `-1` when that field is absent
  * (durations, resolution, and counts are always non-negative when present, so
  * `-1` is an unambiguous "unset" sentinel).
@@ -267,13 +315,13 @@ int32_t ts_store_counts(const struct TsStore *handle,
  * must be valid for writing one `i64`.
  */
 int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
-                                         int64_t filter_resolution_ms,
-                                         int64_t filter_interval_ms,
+                                         const char *filter_resolution,
+                                         const char *filter_interval,
                                          bool *out_present,
-                                         int64_t *out_horizon_ms,
-                                         int64_t *out_interval_ms,
+                                         char **out_horizon,
+                                         char **out_interval,
                                          int64_t *out_count,
-                                         int64_t *out_resolution_ms,
+                                         char **out_resolution,
                                          int64_t *out_initial_ms);
 
 /**
@@ -359,7 +407,7 @@ int32_t ts_store_counts_detailed(const struct TsStore *handle,
  * List the distinct owner ids of `owner_category` (`0` = Component, `1` =
  * SupplementalAttribute) that have a time series, as a JSON array of integers.
  * Optionally restricted to one `time_series_type` (`TS_TYPE_*` code, gated by
- * `has_time_series_type`) and/or `resolution_ms` (`<= 0` = no filter).
+ * `has_time_series_type`) and/or `resolution` (empty/null = no filter).
  * Probe-then-fetch (see `ts_store_list_keys`).
  *
  * # Safety
@@ -371,7 +419,7 @@ int32_t ts_store_list_owner_ids(const struct TsStore *handle,
                                 int32_t owner_category,
                                 bool has_time_series_type,
                                 int32_t time_series_type,
-                                int64_t resolution_ms,
+                                const char *resolution,
                                 char *buf,
                                 uint64_t cap,
                                 uint64_t *out_len);
@@ -379,7 +427,7 @@ int32_t ts_store_list_owner_ids(const struct TsStore *handle,
 /**
  * Static-series summary as a JSON array. Each object has `owner_type`,
  * `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
- * `resolution_ms`, `time_step_count`, and `count` (the number of associations in
+ * `resolution`, `time_step_count`, and `count` (the number of associations in
  * the group); fields that do not apply are `null`. Probe-then-fetch.
  *
  * # Safety
@@ -395,7 +443,7 @@ int32_t ts_store_static_summary(const struct TsStore *handle,
 /**
  * Forecast summary as a JSON array. Each object has `owner_type`,
  * `owner_category`, `time_series_type`, `name`, `initial_timestamp_ms`,
- * `resolution_ms`, `horizon_ms`, `interval_ms`, `window_count`, and `count` (the
+ * `resolution`, `horizon`, `interval`, `window_count`, and `count` (the
  * number of associations in the group); fields that do not apply are `null`.
  * Probe-then-fetch.
  *
@@ -474,10 +522,10 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
                               int64_t owner_id,
                               int32_t owner_category,
                               const char *name,
-                              int64_t resolution_ms,
+                              const char *resolution,
                               const char *features_json,
                               int64_t *out_initial_ts_unix_ms,
-                              int64_t *out_resolution_ms,
+                              char **out_resolution,
                               uint64_t *out_length,
                               uint8_t *out_data_hash,
                               int32_t *out_dtype,
@@ -499,7 +547,7 @@ int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               int64_t owner_id,
                               int32_t owner_category,
                               const char *name,
-                              int64_t resolution_ms,
+                              const char *resolution,
                               const char *features_json,
                               bool *out_present);
 
@@ -535,7 +583,7 @@ int32_t ts_store_remove_by_attrs(struct TsStore *handle,
                                  int64_t owner_id,
                                  int32_t owner_category,
                                  const char *name,
-                                 int64_t resolution_ms,
+                                 const char *resolution,
                                  const char *features_json);
 
 /**
@@ -595,9 +643,9 @@ int32_t ts_store_add_forecast(struct TsStore *handle,
                               const char *name,
                               int32_t ts_type,
                               int64_t initial_ts_unix_ms,
-                              int64_t resolution_ms,
-                              int64_t horizon_ms,
-                              int64_t interval_ms,
+                              const char *resolution,
+                              const char *horizon,
+                              const char *interval,
                               uint64_t count,
                               int32_t dtype,
                               uint64_t ndims,
@@ -627,9 +675,9 @@ int32_t ts_store_add_probabilistic(struct TsStore *handle,
                                    int32_t owner_category,
                                    const char *name,
                                    int64_t initial_ts_unix_ms,
-                                   int64_t resolution_ms,
-                                   int64_t horizon_ms,
-                                   int64_t interval_ms,
+                                   const char *resolution,
+                                   const char *horizon,
+                                   const char *interval,
                                    uint64_t count,
                                    const double *percentiles_ptr,
                                    uint64_t percentiles_len,
@@ -682,7 +730,7 @@ int32_t ts_batch_add_single(struct TsBatch *batch,
                             int32_t owner_category,
                             const char *name,
                             int64_t initial_ts_unix_ms,
-                            int64_t resolution_ms,
+                            const char *resolution,
                             int32_t dtype,
                             uint64_t ndims,
                             const uint64_t *dims_ptr,
@@ -739,9 +787,9 @@ int32_t ts_batch_add_forecast(struct TsBatch *batch,
                               const char *name,
                               int32_t ts_type,
                               int64_t initial_ts_unix_ms,
-                              int64_t resolution_ms,
-                              int64_t horizon_ms,
-                              int64_t interval_ms,
+                              const char *resolution,
+                              const char *horizon,
+                              const char *interval,
                               uint64_t count,
                               int32_t dtype,
                               uint64_t ndims,
@@ -770,9 +818,9 @@ int32_t ts_batch_add_probabilistic(struct TsBatch *batch,
                                    int32_t owner_category,
                                    const char *name,
                                    int64_t initial_ts_unix_ms,
-                                   int64_t resolution_ms,
-                                   int64_t horizon_ms,
-                                   int64_t interval_ms,
+                                   const char *resolution,
+                                   const char *horizon,
+                                   const char *interval,
                                    uint64_t count,
                                    const double *percentiles_ptr,
                                    uint64_t percentiles_len,
@@ -807,6 +855,68 @@ int32_t ts_store_add_batch(struct TsStore *handle,
                            uint64_t *out_len);
 
 /**
+ * Read many full `SingleTimeSeries` at once. `keys` points to `n` live key
+ * handles; the results are returned through `out_result` as a handle whose
+ * elements line up with `keys` in order. Every key must identify a
+ * `SingleTimeSeries`; a forecast or non-sequential key makes the whole call
+ * fail with `TS_ERR_INVALID_PARAMETER`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `keys` must point to `n` live key
+ * handles created by this library (it may be null only when `n` is 0).
+ * `out_result` must be valid for writing one pointer. On `TS_OK` the returned
+ * handle must be released exactly once with `ts_bulk_result_free`.
+ */
+int32_t ts_store_bulk_read_single(const struct TsStore *handle,
+                                  const struct TsKey *const *keys,
+                                  uint64_t n,
+                                  struct TsBulkReadHandle **out_result);
+
+/**
+ * The number of series held by a bulk-read result handle, or `-1` if `result`
+ * is null.
+ *
+ * # Safety
+ *
+ * `result` must be null or a live handle from `ts_store_bulk_read_single`.
+ */
+int64_t ts_bulk_result_len(const struct TsBulkReadHandle *result);
+
+/**
+ * Read element `index` out of a bulk-read result handle. The out parameters
+ * match `ts_store_get_single`: the caller owns the `out_resolution` string and
+ * the `out_shape` / `out_data` buffers and must release them with
+ * `ts_string_free`, `ts_buffer_free_i64`, and `ts_buffer_free_u8`. The handle
+ * is not consumed, so an element may be read more than once.
+ *
+ * # Safety
+ *
+ * `result` must be a live handle from `ts_store_bulk_read_single` and `index`
+ * must be less than its length. Every output pointer must be valid for writing
+ * its indicated value.
+ */
+int32_t ts_bulk_result_get_single(const struct TsBulkReadHandle *result,
+                                  uint64_t index,
+                                  int64_t *out_initial_ts_unix_ms,
+                                  char **out_resolution,
+                                  int32_t *out_dtype,
+                                  int64_t **out_shape,
+                                  uint64_t *out_shape_len,
+                                  uint8_t **out_data,
+                                  uint64_t *out_data_byte_len);
+
+/**
+ * Free a bulk-read result handle created by `ts_store_bulk_read_single`.
+ *
+ * # Safety
+ *
+ * `result` must be null or a handle returned by `ts_store_bulk_read_single`
+ * that has not already been freed.
+ */
+void ts_bulk_result_free(struct TsBulkReadHandle *result);
+
+/**
  * Derive `DeterministicSingleTimeSeries` forecasts from the stored
  * `SingleTimeSeries` associations (see `Store::transform_single_time_series`).
  * Writes the number of series transformed to `*out_count`.
@@ -817,10 +927,10 @@ int32_t ts_store_add_batch(struct TsStore *handle,
  * for writing one `u64`.
  */
 int32_t ts_store_transform_single_time_series(struct TsStore *handle,
-                                              int64_t horizon_ms,
-                                              int64_t interval_ms,
+                                              const char *horizon,
+                                              const char *interval,
                                               int32_t owner_category,
-                                              int64_t resolution_ms,
+                                              const char *resolution,
                                               uint64_t *out_count);
 
 /**
@@ -841,12 +951,12 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             int64_t owner_id,
                                             int32_t owner_category,
                                             const char *name,
-                                            int64_t resolution_ms,
+                                            const char *resolution,
                                             const char *features_json,
                                             int64_t *out_initial_ts_unix_ms,
-                                            int64_t *out_resolution_ms,
-                                            int64_t *out_horizon_ms,
-                                            int64_t *out_interval_ms,
+                                            char **out_resolution,
+                                            char **out_horizon,
+                                            char **out_interval,
                                             uint64_t *out_count,
                                             uint64_t *out_length,
                                             uint8_t *out_data_hash,
@@ -862,7 +972,9 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
  *
  * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
  * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
- * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
+ * null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
+ * ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
+ * Scalar output pointers must each be valid for
  * one value and `out_data_hash` must be valid for 32 bytes.
  */
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
@@ -870,12 +982,13 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        int32_t owner_category,
                                        const char *name,
                                        int32_t ts_type,
-                                       int64_t resolution_ms,
+                                       const char *resolution,
+                                       const char *interval,
                                        const char *features_json,
                                        int64_t *out_initial_ts_unix_ms,
-                                       int64_t *out_resolution_ms,
-                                       int64_t *out_horizon_ms,
-                                       int64_t *out_interval_ms,
+                                       char **out_resolution,
+                                       char **out_horizon,
+                                       char **out_interval,
                                        uint64_t *out_count,
                                        uint64_t *out_length,
                                        uint8_t *out_data_hash,
@@ -919,6 +1032,10 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
  * - `owner_id` and `owner_category` (`0` = Component, `1` = SupplementalAttribute)
  *   identify the owner. `name` must point to a valid, null-terminated
  *   UTF-8 string for the duration of the call; `features_json` may be null.
+ * - `resolution` and `interval`, when non-null, must be valid null-terminated
+ *   UTF-8 ISO-8601 durations; either may be null to leave that part of the
+ *   identity unconstrained (the catalog reports an error if the request is
+ *   then ambiguous).
  * - All `out_*` scalar pointers, including `out_matched_type`, must be valid
  *   for writing one value each.
  * - `out_dims` must be valid for writing one pointer; the returned pointer
@@ -938,15 +1055,16 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
                               int32_t owner_category,
                               const char *name,
                               int32_t ts_type,
-                              int64_t resolution_ms,
+                              const char *resolution,
+                              const char *interval,
                               const char *features_json,
                               bool time_range_present,
                               int64_t time_range_start_ms,
                               int64_t time_range_end_ms,
                               int64_t *out_initial_ts_unix_ms,
-                              int64_t *out_resolution_ms,
-                              int64_t *out_horizon_ms,
-                              int64_t *out_interval_ms,
+                              char **out_resolution,
+                              char **out_horizon,
+                              char **out_interval,
                               uint64_t *out_count,
                               uint64_t *out_scenario_count,
                               uint64_t *out_ndims,
@@ -989,9 +1107,9 @@ int32_t ts_store_get_forecast_by_key(const struct TsStore *handle,
                                      int64_t time_range_start_ms,
                                      int64_t time_range_end_ms,
                                      int64_t *out_initial_ts_unix_ms,
-                                     int64_t *out_resolution_ms,
-                                     int64_t *out_horizon_ms,
-                                     int64_t *out_interval_ms,
+                                     char **out_resolution,
+                                     char **out_horizon,
+                                     char **out_interval,
                                      uint64_t *out_count,
                                      uint64_t *out_scenario_count,
                                      uint64_t *out_ndims,
@@ -1011,7 +1129,8 @@ int32_t ts_store_get_forecast_by_key(const struct TsStore *handle,
  * [`ts_store_get_single`], [`ts_store_get_non_sequential`],
  * [`ts_store_get_forecast_by_key`]); it lets an attribute-addressed caller
  * reuse the key-based read path without an `add`/lookup round trip.
- * `resolution_ms <= 0` means "unspecified".
+ * an empty `resolution` means "unspecified"; likewise an empty/null `interval`
+ * leaves the forecast interval (part of the identity) unconstrained.
  *
  * # Safety
  *
@@ -1025,7 +1144,8 @@ int32_t ts_make_key_from_attrs(int64_t owner_id,
                                int32_t owner_category,
                                const char *name,
                                int32_t ts_type,
-                               int64_t resolution_ms,
+                               const char *resolution,
+                               const char *interval,
                                const char *features_json,
                                struct TsKey **out_key);
 
@@ -1061,7 +1181,7 @@ int32_t ts_store_get_time_series_keys(const struct TsStore *handle,
  * - `owner_id` / `owner_category` (`0` = Component, `1` = SupplementalAttribute)
  * - `time_series_type` (the `TS_TYPE_*` code)
  * - `name` (null = no name filter)
- * - `resolution_ms` (`<= 0` = no resolution filter)
+ * - `resolution` (empty/null = no resolution filter)
  * - `features_json` (a JSON object; null or empty = no feature filter; matches as
  *   a subset, i.e. a key whose features include all the given ones)
  *
@@ -1085,11 +1205,42 @@ int32_t ts_store_list_keys(const struct TsStore *handle,
                            bool has_time_series_type,
                            int32_t time_series_type,
                            const char *name,
-                           int64_t resolution_ms,
+                           const char *resolution,
                            const char *features_json,
                            char *buf,
                            uint64_t cap,
                            uint64_t *out_len);
+
+/**
+ * List time series keys, each annotated with the hex content hash of the array
+ * it resolves to, as a JSON array string (see `keys_with_hash_to_json` for the
+ * per-row shape — `keys_to_json`'s shape plus a `data_hash` field). Rows that
+ * share a stored array share their `data_hash`, so a caller can group time
+ * series by their underlying data in one query (no per-row metadata fetch).
+ *
+ * Filters and the probe-then-fetch buffer convention are identical to
+ * `ts_store_list_keys`.
+ *
+ * # Safety
+ *
+ * Identical to `ts_store_list_keys`: `handle` must be a live store handle;
+ * `name` / `features_json` / `resolution` must each be null or a
+ * null-terminated UTF-8 string; `out_len` must be writable; `buf` must be null
+ * or valid for `cap` bytes.
+ */
+int32_t ts_store_list_array_groups(const struct TsStore *handle,
+                                   bool has_owner,
+                                   int64_t owner_id,
+                                   bool has_owner_category,
+                                   int32_t owner_category,
+                                   bool has_time_series_type,
+                                   int32_t time_series_type,
+                                   const char *name,
+                                   const char *resolution,
+                                   const char *features_json,
+                                   char *buf,
+                                   uint64_t cap,
+                                   uint64_t *out_len);
 
 /**
  * Free the key-handle array returned by `ts_store_get_time_series_keys`.
@@ -1123,7 +1274,7 @@ void ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
  * # Safety
  *
  * `key` must be a live key handle created by this library. `out_type`,
- * `out_resolution_ms`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
+ * `out_resolution`, `out_owner_id`, `out_owner_category`, `out_name_len`, and
  * `out_features_len` must each be valid for writing one value. `out_owner_category`
  * receives `0` (Component) or `1` (SupplementalAttribute). `name_buf` /
  * `features_buf` may be null; when non-null they must be valid for writing
@@ -1131,7 +1282,7 @@ void ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
  */
 int32_t ts_key_attributes(const struct TsKey *key,
                           int32_t *out_type,
-                          int64_t *out_resolution_ms,
+                          char **out_resolution,
                           int64_t *out_owner_id,
                           int32_t *out_owner_category,
                           char *name_buf,
@@ -1186,7 +1337,7 @@ int32_t ts_store_has_typed(const struct TsStore *handle,
                            int32_t owner_category,
                            const char *name,
                            int32_t ts_type,
-                           int64_t resolution_ms,
+                           const char *resolution,
                            const char *features_json,
                            bool *out_present);
 
@@ -1204,7 +1355,7 @@ int32_t ts_store_remove_typed(struct TsStore *handle,
                               int32_t owner_category,
                               const char *name,
                               int32_t ts_type,
-                              int64_t resolution_ms,
+                              const char *resolution,
                               const char *features_json);
 
 /**
@@ -1293,5 +1444,272 @@ void ts_buffer_free_i64(int64_t *ptr, uint64_t len);
  * `buf_len` is zero; otherwise it must reference at least `buf_len` writable bytes.
  */
 int32_t ts_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
+
+/**
+ * Build a [`TsStaticReaderHandle`] over the SingleTimeSeries matching the
+ * filter. `resolution` must be a non-empty ISO-8601 period (one resolution per reader); the
+ * matched series must share one grid (`initial_timestamp` + `length`).
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `name` / `features_json` must be null
+ * or valid null-terminated UTF-8. `out_reader` must be valid for writing one
+ * pointer; the returned handle must be freed exactly once with
+ * `ts_static_reader_free`.
+ */
+int32_t ts_store_build_static_reader(const struct TsStore *handle,
+                                     bool has_owner,
+                                     int64_t owner_id,
+                                     bool has_owner_category,
+                                     int32_t owner_category,
+                                     const char *name,
+                                     const char *resolution,
+                                     const char *features_json,
+                                     struct TsStaticReaderHandle **out_reader);
+
+/**
+ * Read the reader's master grid: `initial_timestamp` (unix ms), `resolution`
+ * (an owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
+ * timestamps on the grid.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. Each out pointer must be valid
+ * for writing one value. On success `*out_resolution` is an owned C string the
+ * caller must free exactly once with [`ts_string_free`].
+ */
+int32_t ts_static_reader_grid(const struct TsStaticReaderHandle *reader,
+                              int64_t *out_initial_ms,
+                              char **out_resolution,
+                              uint64_t *out_length);
+
+/**
+ * Number of columnar groups in the reader.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_n` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_static_reader_num_groups(const struct TsStaticReaderHandle *reader, uint64_t *out_n);
+
+/**
+ * Read group `group_idx`'s layout: its dtype code, column count, and per-step
+ * element shape. The shape follows the probe-then-fetch convention: call with
+ * `shape_buf` null / `shape_cap` 0 to learn `out_shape_len`, then call again
+ * with a buffer of at least that many `i64` values. An empty shape (scalar per
+ * step) reports length 0.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_dtype`, `out_num_columns`,
+ * and `out_shape_len` must be valid for writing one value each. When non-null,
+ * `shape_buf` must be valid for writing `shape_cap` `i64` values.
+ */
+int32_t ts_static_reader_group_info(const struct TsStaticReaderHandle *reader,
+                                    uint64_t group_idx,
+                                    int32_t *out_dtype,
+                                    uint64_t *out_num_columns,
+                                    int64_t *shape_buf,
+                                    uint64_t shape_cap,
+                                    uint64_t *out_shape_len);
+
+/**
+ * Return an owned key handle for column `col_idx` of group `group_idx`. The
+ * handle carries the column's identity and must be freed with `ts_key_free`.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_key` must be valid for
+ * writing one pointer.
+ */
+int32_t ts_static_reader_group_key(const struct TsStaticReaderHandle *reader,
+                                   uint64_t group_idx,
+                                   uint64_t col_idx,
+                                   struct TsKey **out_key);
+
+/**
+ * Read the value of every series at `at_unix_ms`, filling the reader's reusable
+ * buffers. After this, `ts_static_reader_group_values` exposes each group's
+ * bytes. Errors if `at_unix_ms` is off the reader's grid.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle and `store` a live store handle.
+ */
+int32_t ts_static_reader_read(struct TsStaticReaderHandle *reader,
+                              const struct TsStore *store,
+                              int64_t at_unix_ms);
+
+/**
+ * Expose group `group_idx`'s value bytes from the most recent read. The pointer
+ * is into reader-owned memory and is valid until the next read on this reader
+ * or until it is freed; do not free it. Before any read the length is 0.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_ptr` and `out_byte_len`
+ * must be valid for writing one value each.
+ */
+int32_t ts_static_reader_group_values(const struct TsStaticReaderHandle *reader,
+                                      uint64_t group_idx,
+                                      const uint8_t **out_ptr,
+                                      uint64_t *out_byte_len);
+
+/**
+ * Free a static-reader handle.
+ *
+ * # Safety
+ *
+ * `reader` must be null or a handle from `ts_store_build_static_reader`, not
+ * previously freed, and unused after this call.
+ */
+void ts_static_reader_free(struct TsStaticReaderHandle *reader);
+
+/**
+ * Build a [`TsForecastReaderHandle`] over the forecasts matching the filter.
+ * `time_series_type` must be a forecast type; a `Deterministic` reader is
+ * abstract and also includes `DeterministicSingleTimeSeries`. `resolution`
+ * must be positive; matched forecasts must share one window timeline.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `name` / `features_json` must be null
+ * or valid null-terminated UTF-8. `out_reader` must be valid for writing one
+ * pointer; free the result with `ts_forecast_reader_free`.
+ */
+int32_t ts_store_build_forecast_reader(const struct TsStore *handle,
+                                       bool has_owner,
+                                       int64_t owner_id,
+                                       bool has_owner_category,
+                                       int32_t owner_category,
+                                       int32_t time_series_type,
+                                       const char *name,
+                                       const char *resolution,
+                                       const char *features_json,
+                                       struct TsForecastReaderHandle **out_reader);
+
+/**
+ * Read the reader's window timeline: `initial_timestamp` (unix ms),
+ * `resolution` and `interval` (each an owned ISO-8601 duration string, e.g.
+ * `PT1H` / `P1M`), and the window count.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. Each out pointer must be
+ * valid for writing one value. On success `*out_resolution` and `*out_interval`
+ * are owned C strings the caller must each free exactly once with
+ * [`ts_string_free`].
+ */
+int32_t ts_forecast_reader_timeline(const struct TsForecastReaderHandle *reader,
+                                    int64_t *out_initial_ms,
+                                    char **out_resolution,
+                                    char **out_interval,
+                                    uint64_t *out_count);
+
+/**
+ * Number of per-key window entries in the reader.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_n` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_forecast_reader_num_entries(const struct TsForecastReaderHandle *reader,
+                                       uint64_t *out_n);
+
+/**
+ * Number of deduplicated window slots: the count of physical backend reads per
+ * [`ts_forecast_reader_read`]. Entries that share an array and read plan
+ * (e.g. components referencing one shared forecast) collapse to one slot.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_n` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_forecast_reader_num_slots(const struct TsForecastReaderHandle *reader, uint64_t *out_n);
+
+/**
+ * The 0-based slot index backing entry `entry_idx`. Entries sharing an array
+ * and read plan return the same slot, letting a caller group components that
+ * resolve to one window and materialize it once.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_slot` must be valid for
+ * writing one `u64`.
+ */
+int32_t ts_forecast_reader_entry_slot(const struct TsForecastReaderHandle *reader,
+                                      uint64_t entry_idx,
+                                      uint64_t *out_slot);
+
+/**
+ * Read entry `entry_idx`'s layout: its dtype code and window shape. The shape
+ * follows the probe-then-fetch convention (call with `shape_buf` null /
+ * `shape_cap` 0 to learn `out_shape_len`).
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_dtype` and
+ * `out_shape_len` must be valid for writing one value each. When non-null,
+ * `shape_buf` must be valid for writing `shape_cap` `i64` values.
+ */
+int32_t ts_forecast_reader_entry_info(const struct TsForecastReaderHandle *reader,
+                                      uint64_t entry_idx,
+                                      int32_t *out_dtype,
+                                      int64_t *shape_buf,
+                                      uint64_t shape_cap,
+                                      uint64_t *out_shape_len);
+
+/**
+ * Return an owned key handle for entry `entry_idx`, freed with `ts_key_free`.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_key` must be valid for
+ * writing one pointer.
+ */
+int32_t ts_forecast_reader_entry_key(const struct TsForecastReaderHandle *reader,
+                                     uint64_t entry_idx,
+                                     struct TsKey **out_key);
+
+/**
+ * Read the forecast window at `at_unix_ms` for every entry, filling the
+ * reader's reusable buffers. Errors if `at_unix_ms` is off the window timeline.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle and `store` a live store
+ * handle.
+ */
+int32_t ts_forecast_reader_read(struct TsForecastReaderHandle *reader,
+                                const struct TsStore *store,
+                                int64_t at_unix_ms);
+
+/**
+ * Expose entry `entry_idx`'s window bytes from the most recent read. The
+ * pointer is into reader-owned memory, valid until the next read or free; do
+ * not free it. Before any read the length is 0.
+ *
+ * # Safety
+ *
+ * `reader` must be a live forecast-reader handle. `out_ptr` and `out_byte_len`
+ * must be valid for writing one value each.
+ */
+int32_t ts_forecast_reader_entry_values(const struct TsForecastReaderHandle *reader,
+                                        uint64_t entry_idx,
+                                        const uint8_t **out_ptr,
+                                        uint64_t *out_byte_len);
+
+/**
+ * Free a forecast-reader handle.
+ *
+ * # Safety
+ *
+ * `reader` must be null or a handle from `ts_store_build_forecast_reader`, not
+ * previously freed, and unused after this call.
+ */
+void ts_forecast_reader_free(struct TsForecastReaderHandle *reader);
 
 #endif  /* TIME_SERIES_STORE_H */

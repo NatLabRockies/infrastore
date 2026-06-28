@@ -264,38 +264,37 @@ fn time_range_slicing_through_netcdf() {
 
 #[test]
 fn spill_into_new_dataset_past_capacity() {
-    use time_series_store_core::AddRequest;
-    use time_series_store_core::storage::netcdf::MAX_COLS_PER_DATASET;
+    use time_series_store_core::storage::netcdf::DEFAULT_COLS_PER_DATASET;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
 
-    // Need MAX + 1 distinct arrays of identical (length, resolution) so they
-    // compete for the same dataset family. To keep the test fast we use small
-    // length=4 and unique data per series.
+    // Need DEFAULT + 1 distinct arrays of identical (length, resolution) so they
+    // compete for the same dataset family. Single `add_time_series` calls take the
+    // per-column path, which packs into a shared default-width dataset and spills
+    // once it fills. (A managed bulk batch would instead create one batch-sized
+    // dataset and not spill.) To keep the test fast we use small length=4.
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
-    let total = MAX_COLS_PER_DATASET + 1;
+    let total = DEFAULT_COLS_PER_DATASET + 1;
 
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
-        let mut bulk = Vec::with_capacity(total);
         for i in 0..total {
             let vals = [i as f64, i as f64 + 1.0, i as f64 + 2.0, i as f64 + 3.0];
             let data = TypedArray::from_f64(vec![4], &vals);
             let s = SingleTimeSeries::new(initial, resolution, data, "load");
-            bulk.push(AddRequest {
-                owner_id: (i + 1) as i64,
-                owner_type: "Generator".into(),
-                owner_category: OwnerCategory::Component,
-                data: TimeSeriesData::SingleTimeSeries(s),
-                features: Features::new(),
-                units: None,
-
-                logical_type: None,
-            });
+            store
+                .add_time_series(
+                    (i + 1) as i64,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(s),
+                    Features::new(),
+                    None,
+                )
+                .unwrap();
         }
-        store.add_time_series_bulk(bulk).unwrap();
         store.flush().unwrap();
     }
 
@@ -328,6 +327,169 @@ fn spill_into_new_dataset_past_capacity() {
         report.errors.len(),
         &report.errors.iter().take(5).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn bulk_add_session_writes_block_and_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bulk.nc");
+
+    // A batch of distinct same-shape series plus one whose content duplicates an
+    // earlier series (different owner) to exercise the block writer's dedup.
+    let n = 50usize;
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut bulk = store.bulk_add();
+        for i in 0..n {
+            bulk.add(
+                (i + 1) as i64,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 12, i as f64 * 10.0)),
+                Features::new(),
+                Some("MW".into()),
+            );
+        }
+        // Duplicate the content of series 0 under a new owner.
+        bulk.add(
+            10_000,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 12, 0.0)),
+            Features::new(),
+            Some("MW".into()),
+        );
+        let keys = bulk.commit().unwrap();
+        assert_eq!(keys.len(), n + 1);
+        store.flush().unwrap();
+    }
+
+    // Reopen and verify every series reads back, including the deduped duplicate.
+    let store = open_store(path.as_path(), true).unwrap();
+    assert_eq!(
+        store.get_time_series_counts().unwrap().static_time_series as usize,
+        n + 1
+    );
+    for i in 0..n {
+        let keys = store
+            .get_time_series_keys((i + 1) as i64, OwnerCategory::Component)
+            .unwrap();
+        let got = store.get_time_series(keys[0].identity(), None).unwrap();
+        let expected: Vec<f64> = (0..12).map(|t| i as f64 * 10.0 + t as f64).collect();
+        assert_eq!(
+            got.as_single().unwrap().data.to_f64_vec().unwrap(),
+            expected
+        );
+    }
+    // The duplicate-content owner reads back the same values as series 0.
+    let dup_keys = store
+        .get_time_series_keys(10_000, OwnerCategory::Component)
+        .unwrap();
+    let dup = store.get_time_series(dup_keys[0].identity(), None).unwrap();
+    let expected0: Vec<f64> = (0..12).map(|t| t as f64).collect();
+    assert_eq!(
+        dup.as_single().unwrap().data.to_f64_vec().unwrap(),
+        expected0
+    );
+
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+#[test]
+fn bulk_add_dropped_without_commit_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("discard.nc");
+
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    {
+        let mut bulk = store.bulk_add();
+        bulk.add(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 12, 1.0)),
+            Features::new(),
+            None,
+        );
+        assert_eq!(bulk.len(), 1);
+        // Dropped here without commit: nothing should be written.
+    }
+    assert_eq!(
+        store.get_time_series_counts().unwrap().static_time_series,
+        0
+    );
+}
+
+#[test]
+fn bulk_read_matches_get_time_series_across_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bulkread.nc");
+    let n = 30usize;
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut bulk = store.bulk_add();
+        // A standalone series first, so the packed fast-path and the standalone
+        // fallback interleave and bulk_read must keep input order.
+        let stamps: Vec<_> = (0..8i64)
+            .map(|j| initial + Duration::hours(j * 2))
+            .collect();
+        let ns_data: Vec<f64> = (0..8).map(|j| 1000.0 + j as f64).collect();
+        let ns =
+            NonSequentialTimeSeries::new(stamps, TypedArray::from_f64(vec![8], &ns_data), "load")
+                .unwrap();
+        bulk.add(
+            0,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(ns),
+            Features::new(),
+            None,
+        );
+        for i in 0..n {
+            bulk.add(
+                (i + 1) as i64,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 16, i as f64)),
+                Features::new(),
+                Some("MW".into()),
+            );
+        }
+        bulk.commit().unwrap();
+        store.flush().unwrap();
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let mut keys = Vec::new();
+    for owner in 0..=(n as i64) {
+        let k = store
+            .get_time_series_keys(owner, OwnerCategory::Component)
+            .unwrap();
+        keys.push(k.into_iter().next().unwrap());
+    }
+    let ids: Vec<_> = keys.iter().map(|k| k.identity()).collect();
+
+    let bulk = store.bulk_read(&ids).unwrap();
+    assert_eq!(bulk.len(), n + 1);
+    // Every bulk result equals the per-key get_time_series result, in order.
+    for (i, data) in bulk.iter().enumerate() {
+        let expected = store.get_time_series(ids[i], None).unwrap();
+        match (data, &expected) {
+            (TimeSeriesData::SingleTimeSeries(got), TimeSeriesData::SingleTimeSeries(want)) => {
+                assert_eq!(got.data, want.data)
+            }
+            (
+                TimeSeriesData::NonSequentialTimeSeries(got),
+                TimeSeriesData::NonSequentialTimeSeries(want),
+            ) => {
+                assert_eq!(got.data, want.data);
+                assert_eq!(got.timestamps, want.timestamps);
+            }
+            other => panic!("type mismatch at {i}: {other:?}"),
+        }
+    }
 }
 
 #[test]

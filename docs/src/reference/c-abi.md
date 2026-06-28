@@ -313,15 +313,117 @@ int32_t ts_store_remove_typed(struct TsStore *handle,
                               int32_t ts_type, int64_t resolution_ms, const char *features_json);
 ```
 
+## Readers
+
+The per-timestamp read path is exposed as two opaque reader handles — `TsStaticReaderHandle` for
+`SingleTimeSeries` and `TsForecastReaderHandle` for forecasts. A reader is built once over a filter
+(the same `has_owner` / `owner_id` / `has_owner_category` / `owner_category` / `name` / `resolution`
+/ `features_json` convention as the attribute-based access, with a forecast reader also taking a
+`ts_type`), then driven per timestamp. The lifecycle is: **build → read the layout once → `*_read`
+in a loop → fetch values per group/entry → free**. Each reader pins one resolution and owns reusable
+buffers that each read overwrites in place.
+
+Ownership rules: the `*_grid` / `*_timeline` resolution/interval out-strings (`char **`) are owned —
+free each with `ts_string_free`. Keys from `*_group_key` / `*_entry_key` are owned `TsKey *` — free
+with `ts_key_free`. The `*_values` buffers (`const uint8_t **`) are **borrowed**: they point into
+reader memory, stay valid only until the next read or `*_free`, and must not be freed. Group/entry
+shapes follow the probe-then-fetch convention — call `*_info` with `shape_buf = NULL` /
+`shape_cap =
+0` to learn `*out_shape_len`, then again with a buffer of that length. `*_read` errors
+(never clamps) if `at_unix_ms` is off the reader's grid/timeline.
+
+### StaticReader
+
+Reads every matching `SingleTimeSeries` at one timestamp, partitioned into `(dtype, element_shape)`
+groups; each group's values are one dense `[num_columns, *element_shape]` little-endian buffer whose
+column `j` is the key from `ts_static_reader_group_key(reader, group_idx, j, …)`.
+
+```c
+int32_t ts_store_build_static_reader(const struct TsStore *handle,
+                                     bool has_owner, int64_t owner_id,
+                                     bool has_owner_category, int32_t owner_category,
+                                     const char *name, const char *resolution,
+                                     const char *features_json,
+                                     struct TsStaticReaderHandle **out_reader);
+
+int32_t ts_static_reader_grid(const struct TsStaticReaderHandle *reader,
+                              int64_t *out_initial_ms, char **out_resolution,  /* free with ts_string_free */
+                              uint64_t *out_length);
+int32_t ts_static_reader_num_groups(const struct TsStaticReaderHandle *reader, uint64_t *out_n);
+int32_t ts_static_reader_group_info(const struct TsStaticReaderHandle *reader, uint64_t group_idx,
+                                    int32_t *out_dtype, uint64_t *out_num_columns,
+                                    int64_t *shape_buf, uint64_t shape_cap, uint64_t *out_shape_len);
+int32_t ts_static_reader_group_key(const struct TsStaticReaderHandle *reader,
+                                   uint64_t group_idx, uint64_t col_idx,
+                                   struct TsKey **out_key);  /* free with ts_key_free */
+int32_t ts_static_reader_read(struct TsStaticReaderHandle *reader,
+                              const struct TsStore *store, int64_t at_unix_ms);
+int32_t ts_static_reader_group_values(const struct TsStaticReaderHandle *reader, uint64_t group_idx,
+                                      const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
+                                      uint64_t *out_byte_len);
+void ts_static_reader_free(struct TsStaticReaderHandle *reader);
+```
+
+All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
+and errors on divergence, so every column has a value at every valid timestamp (no presence mask).
+
+### ForecastReader
+
+Reads the forecast window at one timestamp for every matching forecast of one type. The build
+`ts_type` names the forecast type; a `Deterministic` reader (`2`) is abstract and also includes
+`DeterministicSingleTimeSeries` (`3`), read into identical `[H, *E]` windows. All matched forecasts
+must share one window timeline (`initial_timestamp` + `interval` + `count`). Each entry's window is
+a little-endian buffer of its `*_entry_info` shape.
+
+```c
+int32_t ts_store_build_forecast_reader(const struct TsStore *handle,
+                                       bool has_owner, int64_t owner_id,
+                                       bool has_owner_category, int32_t owner_category,
+                                       int32_t time_series_type,
+                                       const char *name, const char *resolution,
+                                       const char *features_json,
+                                       struct TsForecastReaderHandle **out_reader);
+
+int32_t ts_forecast_reader_timeline(const struct TsForecastReaderHandle *reader,
+                                    int64_t *out_initial_ms,
+                                    char **out_resolution, char **out_interval,  /* free each with ts_string_free */
+                                    uint64_t *out_count);
+int32_t ts_forecast_reader_num_entries(const struct TsForecastReaderHandle *reader, uint64_t *out_n);
+int32_t ts_forecast_reader_num_slots(const struct TsForecastReaderHandle *reader, uint64_t *out_n);
+int32_t ts_forecast_reader_entry_slot(const struct TsForecastReaderHandle *reader,
+                                      uint64_t entry_idx, uint64_t *out_slot);
+int32_t ts_forecast_reader_entry_info(const struct TsForecastReaderHandle *reader, uint64_t entry_idx,
+                                      int32_t *out_dtype,
+                                      int64_t *shape_buf, uint64_t shape_cap, uint64_t *out_shape_len);
+int32_t ts_forecast_reader_entry_key(const struct TsForecastReaderHandle *reader,
+                                     uint64_t entry_idx, struct TsKey **out_key);  /* free with ts_key_free */
+int32_t ts_forecast_reader_read(struct TsForecastReaderHandle *reader,
+                                const struct TsStore *store, int64_t at_unix_ms);
+int32_t ts_forecast_reader_entry_values(const struct TsForecastReaderHandle *reader, uint64_t entry_idx,
+                                        const uint8_t **out_ptr,  /* borrowed; valid until next read/free */
+                                        uint64_t *out_byte_len);
+void ts_forecast_reader_free(struct TsForecastReaderHandle *reader);
+```
+
+**Window-read deduplication.** Forecasts that reference the same backing array and read plan
+(deduplicated identical data, or several `DeterministicSingleTimeSeries` over one
+`SingleTimeSeries`) collapse to a single _window slot_. `ts_forecast_reader_read` performs one
+backend read per slot, not per entry, so a forecast shared by N owners is read once per timestamp.
+`ts_forecast_reader_num_slots` is that physical read count, and `ts_forecast_reader_entry_slot`
+gives the 0-based slot backing each entry (entries that share data report the same slot) — group
+entries by slot to also decode each unique window only once.
+
 ## Bulk Adds
 
 A batch accumulates add requests client-side (no store I/O); `ts_store_add_batch` commits them all
 in **one** metadata transaction, which is much faster than per-item adds when ingesting many series.
-The `ts_batch_add_*` functions take the same arguments as their `ts_store_add_*` counterparts minus
-the store handle and `out_key`; data buffers are copied into the batch, so they only need to stay
-valid for the call. The submit is all-or-nothing and drains the batch in either case (on error
-nothing was committed and the batch is left empty). On success the caller owns the key-handle array:
-free each key with `ts_key_free`, then the buffer with `ts_keys_buffer_free` (same contract as
+It is also the fast NetCDF write path: same-shaped `SingleTimeSeries` are packed into batch-sized
+datasets so the timestamp-major chunks are filled whole rather than a column at a time. The
+`ts_batch_add_*` functions take the same arguments as their `ts_store_add_*` counterparts minus the
+store handle and `out_key`; data buffers are copied into the batch, so they only need to stay valid
+for the call. The submit is all-or-nothing and drains the batch in either case (on error nothing was
+committed and the batch is left empty). On success the caller owns the key-handle array: free each
+key with `ts_key_free`, then the buffer with `ts_keys_buffer_free` (same contract as
 `ts_store_get_time_series_keys`). The batch handle itself is reusable after submit and must
 eventually be released with `ts_batch_free`.
 
@@ -336,6 +438,29 @@ int32_t ts_batch_add_probabilistic(struct TsBatch *batch, ...);
 
 int32_t ts_store_add_batch(struct TsStore *handle, struct TsBatch *batch,
                            struct TsKey ***out_keys, uint64_t *out_len);
+```
+
+## Bulk Reads
+
+`ts_store_bulk_read_single` reads many full `SingleTimeSeries` in one call, reading each packed
+dataset's column span once instead of re-reading every chunk per series — the efficient way to load
+many whole series (e.g. for exploration or plotting), where a single full-series read otherwise
+touches every chunk under the timestamp-major layout. Every key must identify a `SingleTimeSeries`;
+otherwise the call fails with `TS_ERR_INVALID_PARAMETER`. The results are held in a
+`TsBulkReadHandle` (input order preserved) and read out element-by-element with
+`ts_bulk_result_get_single`, whose out-parameters match `ts_store_get_single` — the caller owns the
+returned resolution string and the shape/data buffers and frees them with `ts_string_free`,
+`ts_buffer_free_i64`, and `ts_buffer_free_u8`. The handle is not consumed by a read (elements may be
+read more than once) and must be released with `ts_bulk_result_free`.
+
+```c
+int32_t ts_store_bulk_read_single(const struct TsStore *handle,
+                                  const struct TsKey *const *keys, uint64_t n,
+                                  struct TsBulkReadHandle **out_result);
+int64_t ts_bulk_result_len(const struct TsBulkReadHandle *result);   /* -1 if null */
+int32_t ts_bulk_result_get_single(const struct TsBulkReadHandle *result, uint64_t index,
+                                  /* same out-params as ts_store_get_single */ ...);
+void    ts_bulk_result_free(struct TsBulkReadHandle *result);
 ```
 
 ## Store-Wide Operations

@@ -9,10 +9,10 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     name              TEXT    NOT NULL,
     data_hash         BLOB    NOT NULL,
     initial_timestamp TEXT,
-    resolution_ms     INTEGER,
+    resolution        TEXT,
     length            INTEGER,
-    horizon_ms        INTEGER,
-    interval_ms       INTEGER,
+    horizon           TEXT,
+    interval          TEXT,
     count             INTEGER,
     timestamps_json   TEXT,
     units             TEXT,
@@ -35,32 +35,44 @@ CREATE TABLE IF NOT EXISTS features (
 );
 
 -- The store's uniqueness invariant is
---   (owner_id, owner_category, time_series_type, name, resolution, features).
+--   (owner_id, owner_category, time_series_type, name, resolution, interval,
+--    features).
 -- owner_category is part of the owner identity: component and supplemental-
 -- attribute id streams are independent, so the same owner_id can name a
 -- component and an attribute; the category keeps their associations distinct.
+-- `interval` is part of the identity (matching InfrastructureSystems.jl): two
+-- forecasts of one variable at the same resolution but different intervals
+-- (e.g. a day-ahead and a real-time forecast) are distinct series. It is NULL
+-- for static types (Single/NonSequential), which never carry an interval.
 -- Two indexes are required to enforce and serve it, and BOTH must be kept:
 --
---   * uq_assoc indexes resolution_ms as a plain column. It serves the
+--   * uq_assoc indexes resolution and interval as plain columns. It serves the
 --     equality/IS NULL lookups in get_by_key/list/delete_by_key (an expression
 --     index cannot be used for those), but it does NOT enforce uniqueness when
---     resolution_ms IS NULL, because SQLite treats NULLs as distinct in a
---     UNIQUE index.
---   * uq_assoc_null_resolution closes that gap by COALESCE-ing NULL resolutions
---     to a sentinel, so NULL-resolution types (e.g. NonSequentialTimeSeries)
---     also get the uniqueness guarantee. The sentinel is i64::MIN, which cannot
---     collide with any physically meaningful resolution (~292 million years).
+--     resolution or interval IS NULL, because SQLite treats NULLs as distinct in
+--     a UNIQUE index.
+--   * uq_assoc_coalesced closes that gap by COALESCE-ing NULL resolutions and
+--     intervals to a sentinel, so NULL-resolution/NULL-interval types (e.g.
+--     NonSequentialTimeSeries, and any static series) also get the uniqueness
+--     guarantee. The sentinel is the empty string, which is never a valid
+--     ISO-8601 period and so cannot collide with a real one.
+--
+-- Resolution and interval are stored as ISO-8601 duration strings (e.g. 'PT1H',
+-- 'P1M', 'P1Y') so calendar (irregular) periods are distinguishable from fixed
+-- ones.
 --
 -- Do not "deduplicate" these into one index: dropping uq_assoc loses the query
--- index; dropping uq_assoc_null_resolution loses NULL-resolution uniqueness.
+-- index; dropping uq_assoc_coalesced loses NULL-resolution/NULL-interval
+-- uniqueness.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc ON time_series_associations
-    (owner_id, owner_category, time_series_type, name, resolution_ms, features_hash);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_null_resolution ON time_series_associations
-    (owner_id, owner_category, time_series_type, name, COALESCE(resolution_ms, -9223372036854775808), features_hash);
+    (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_coalesced ON time_series_associations
+    (owner_id, owner_category, time_series_type, name,
+     COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
 
 CREATE INDEX IF NOT EXISTS ix_hash       ON time_series_associations(data_hash);
 CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_id, owner_category);
-CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution_ms);
+CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 "#;

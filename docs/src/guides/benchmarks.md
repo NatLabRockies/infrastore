@@ -98,9 +98,10 @@ The two metrics to watch:
 
 - **Per-step time** for the read benchmark scales linearly with `--count`. If the cost per step is
   much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
-  queries rather than Rust overhead. The packed `SingleTimeSeries` layout gives each series its own
-  HDF5 chunk `(length, 1)`, so reading one series is a single sequential chunk read regardless of
-  how many other series share the dataset.
+  queries rather than Rust overhead. The packed `SingleTimeSeries` layout chunks `(1, cols)` — one
+  timestamp across every column — so reading one timestamp across many series is a single chunk
+  read, while reading one full series touches every chunk band (the slow direction, expected for
+  exploration/plotting rather than hot loops).
 
 ## Tracing spans for deeper diagnosis
 
@@ -126,13 +127,16 @@ The key spans emitted by `time-series-store-core`:
 | `remove_time_series`      | `Store`        | `owner`, `name`                               |
 | `put_array`               | NetCDF backend | `bytes`, `packed`                             |
 | `put_packed`              | NetCDF backend | `bytes`, `resolution_ms`                      |
+| `put_packed_block`        | NetCDF backend | `n` — series written in one batch-sized block |
 | `put_standalone`          | NetCDF backend | `bytes`                                       |
 | `get_array` / `get_slice` | NetCDF backend | `start`, `end` (slice only)                   |
 | `read_locked`             | NetCDF backend | —                                             |
 | `rebuild_index`           | NetCDF backend | — (runs once on `Store::open`)                |
 
-Spans nest: a single `add_time_series_bulk` call will contain one `put_array` span per item, which
-in turn contains a `put_packed` or `put_standalone` span. This makes it straightforward to see
-whether time is spent in metadata insertion, NetCDF I/O, or the `debug_span` overhead itself.
+Spans nest: a single `add_time_series_bulk` call groups packed series by shape and emits one
+`put_packed_block` span per group (filling whole chunks), plus a `put_array` → `put_standalone` span
+per standalone item; a single `add_time_series` call instead emits one `put_array` → `put_packed`
+span. This makes it straightforward to see whether time is spent in metadata insertion, NetCDF I/O,
+or the `debug_span` overhead itself.
 
 The `tss` CLI supports the same `--log-level` flag for diagnosing a live store.

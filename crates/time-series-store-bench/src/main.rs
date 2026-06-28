@@ -254,7 +254,10 @@ fn sts_keys(count: usize) -> Vec<KeyIdentity> {
             owner_category: OwnerCategory::Component,
             time_series_type: TimeSeriesType::SingleTimeSeries,
             name: "active_power".to_string(),
-            resolution: Some(chrono::Duration::hours(1)),
+            resolution: Some(time_series_store_core::Period::Fixed(
+                chrono::Duration::hours(1),
+            )),
+            interval: None,
             features: Features::default(),
         })
         .collect()
@@ -268,7 +271,12 @@ fn det_keys(count: usize) -> Vec<KeyIdentity> {
             owner_category: OwnerCategory::Component,
             time_series_type: TimeSeriesType::Deterministic,
             name: "active_power_forecast".to_string(),
-            resolution: Some(chrono::Duration::hours(1)),
+            resolution: Some(time_series_store_core::Period::Fixed(
+                chrono::Duration::hours(1),
+            )),
+            interval: Some(time_series_store_core::Period::Fixed(
+                chrono::Duration::hours(1),
+            )),
             features: Features::default(),
         })
         .collect()

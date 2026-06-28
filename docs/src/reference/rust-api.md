@@ -6,12 +6,19 @@ The public surface of `time-series-store-core`. Import paths below are relative 
 use time_series_store_core::{
     create_store, open_store, Store, TimeSeriesKey,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
-    TimeSeriesData, TimeSeriesType,
+    TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
     TimeSeriesCounts, ForecastParameters, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
 ```
+
+All time spans in this API — resolutions, horizons, and intervals — are the crate's
+[`Period`](#period), a calendar-aware span. Builders and constructors take `impl Into<Period>`, so
+you can pass a fixed `chrono::Duration` (e.g. `Duration::hours(1)`, via `From<Duration>`) or a
+calendar span (`Period::months(n)`, for the monthly/annual resolutions a fixed `Duration` cannot
+represent). Values read back — struct fields, `get_resolutions`, and the reader accessors — are
+always `Period`. Instants (`DateTime<Utc>`) remain chrono types.
 
 ## Constructors
 
@@ -65,7 +72,15 @@ impl Store {
         units: Option<String>,
     ) -> Result<TimeSeriesKey>;
 
+    // A managed batch: packed series are written into batch-sized datasets that
+    // fill whole HDF5 chunks (the optimized bulk-write path).
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>>;
+
+    // Begin a buffered bulk add. Requests pushed onto the returned guard are
+    // accumulated in memory and written together by `BulkAdd::commit` (same
+    // block-write path as `add_time_series_bulk`); dropping without committing
+    // discards the buffer.
+    pub fn bulk_add(&mut self) -> BulkAdd<'_>;
 
     pub fn get_time_series(
         &self,
@@ -73,10 +88,15 @@ impl Store {
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> Result<TimeSeriesData>;
 
+    // Read many full series at once (no time-range slicing). Packed
+    // `SingleTimeSeries` are read in one decompress-once pass per dataset; other
+    // types reuse the per-key path. Returns a `TimeSeriesData` per key, in order.
+    pub fn bulk_read(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesData>>;
+
     pub fn transform_single_time_series(
         &mut self,
-        horizon: Duration,
-        interval: Duration,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
     ) -> Result<usize>;
 
     pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()>;
@@ -102,9 +122,15 @@ impl Store {
     pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata>;
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
-    pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Duration>>;
+    pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>>;
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts>;
     pub fn get_forecast_parameters(&self) -> Result<ForecastParameters>;
+
+    // Per-timestamp readers (see "Readers" below).
+    pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader>;
+    pub fn static_read(&self, reader: &mut StaticReader, at: DateTime<Utc>) -> Result<()>;
+    pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader>;
+    pub fn forecast_read(&self, reader: &mut ForecastReader, at: DateTime<Utc>) -> Result<()>;
 
     pub fn compact(&mut self) -> Result<CompactionReport>;
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
@@ -187,6 +213,64 @@ the underlying packed array. The low-level pair still works for direct array acc
 [`TimeSeriesMetadata`](#timeseriesmetadata) with `get_metadata` (it carries `horizon`, `interval`,
 `count`, and `percentiles`), then fetch the array with `get_array_by_hash(&meta.data_hash)`.
 
+### Readers
+
+`get_time_series` returns a whole series or forecast. To read **many whole series at once** (e.g.
+exploration or plotting), `bulk_read` takes a slice of keys and reads packed `SingleTimeSeries` in
+one decompress-once pass per dataset — far cheaper than a `get_time_series` per key under the
+timestamp-major chunking, where a single full-series read touches every chunk. For the
+timestamp-oriented access pattern — _walk the timeline and read every series' value at each instant_
+— build a **reader** instead. A reader is built once over a [`ListFilter`](#listfilter), pins one
+resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
+nothing. The reader is a passive plan: it does not borrow the `Store`, so reads go through
+`Store::static_read` / `Store::forecast_read`, which fill the buffers; the caller then walks the
+groups/entries. There are two: [`StaticReader`](#staticreader-and-staticgroup) for
+`SingleTimeSeries` and [`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for
+forecasts.
+
+```rust
+// Static: value of every SingleTimeSeries at one timestamp, columnar.
+let mut reader = store.build_static_reader(ListFilter::new().resolution(res))?;
+for k in 0..reader.length() {
+    let at = reader.initial_timestamp() + /* k · resolution */;
+    store.static_read(&mut reader, at)?;
+    for group in reader.groups() {
+        let bytes = group.values();        // [num_columns, *element_shape], row-major LE
+        // group.keys()[j] identifies column j; group.dtype(), group.element_shape()
+    }
+}
+
+// Forecast: the window at one timestamp for every matching forecast of one type.
+let mut reader = store.build_forecast_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::Deterministic).resolution(res),
+)?;
+for k in 0..reader.count() {
+    let at = reader.initial_timestamp() + /* k · interval */;
+    store.forecast_read(&mut reader, at)?;
+    for entry in reader.entries() {
+        let slot = reader.entry_slot(entry.slot());
+        let bytes = slot.window();         // window of slot.window_shape(), row-major LE
+        // entry.key() identifies the forecast/owner
+    }
+}
+```
+
+`build_static_reader` requires the filter to pin a resolution and that all matched series share one
+grid (`initial_timestamp` + `length`) — validated at build, so there is no presence mask.
+`build_forecast_reader` requires a forecast type and a resolution; a `Deterministic` reader is
+abstract (also matches `DeterministicSingleTimeSeries`), and all matched forecasts must share one
+window timeline (`initial_timestamp` + `interval` + `count`). `static_read` / `forecast_read` error
+(never clamp) if `at` is off the grid/timeline.
+
+**Window-read deduplication.** A `ForecastReader` groups its entries into `WindowSlot`s keyed by
+`(array hash, read plan)`: forecasts that reference the same array and slice it the same way —
+deduplicated identical data, or several `DeterministicSingleTimeSeries` over one `SingleTimeSeries`
+— share one slot. `forecast_read` performs one backend read per **slot**, not per entry, so a
+forecast shared by N owners is read once per timestamp (the forecast analog of `StaticReader`
+reading a packed column once and gathering it to many columns). `reader.slots()` /
+`reader.entry_slot(i)` expose the slots; `entry.slot()` is the slot index backing each entry, equal
+for entries that share data.
+
 ## Types
 
 ### `TimeSeriesKey`
@@ -197,7 +281,7 @@ pub struct TimeSeriesKey {
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,
     pub name: String,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub features: Features,
 }
 ```
@@ -209,13 +293,15 @@ The unique handle for a series; see [Data Model](../explanation/data-model.md#ke
 ```rust
 pub struct SingleTimeSeries {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
+    pub resolution: Period,
     pub length: usize,
     pub data: TypedArray,
 }
 
 impl SingleTimeSeries {
-    pub fn new(initial_timestamp: DateTime<Utc>, resolution: Duration, data: TypedArray) -> Self;
+    pub fn new(
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>, data: TypedArray,
+    ) -> Self;
 }
 ```
 
@@ -247,6 +333,34 @@ impl TypedArray {
 `Dtype::code()` / `Dtype::from_code(i32)` and `Dtype::as_str()` / `Dtype::parse(&str)` convert to
 and from the stable integer codes and string names used by the bindings and the on-disk format.
 
+### `Period`
+
+The calendar-aware time span used for every resolution, horizon, and interval. A `Period` is either
+a **fixed** span (a `chrono::Duration` — hours, minutes, days, weeks) or a **calendar** span (a
+count of months, so `Quarter = 3`, `Year = 12`), letting the store represent monthly/annual grids a
+fixed `Duration` cannot.
+
+```rust
+pub enum Period {
+    Fixed(Duration),   // a fixed chrono::Duration
+    Months(i32),       // n calendar months
+}
+
+impl Period {
+    pub fn fixed(d: Duration) -> Self;     // also: From<Duration> for Period
+    pub fn months(n: i32) -> Self;
+    pub fn is_irregular(&self) -> bool;    // true for Months
+    pub fn is_positive(&self) -> bool;
+    pub fn add_to(&self, dt: DateTime<Utc>, k: i64) -> Option<DateTime<Utc>>;  // calendar-aware
+}
+```
+
+Because `Period: From<Duration>`, anywhere the API takes `impl Into<Period>` you may pass a
+`chrono::Duration` directly (e.g. `Duration::hours(1)`); use `Period::months(n)` for calendar spans.
+Two periods of different kinds (one `Fixed`, one `Months`) are never equal, even if a particular
+month happens to span the same wall-clock time. See the [data model](../explanation/data-model.md)
+for how resolution drives the storage grid.
+
 ### `NonSequentialTimeSeries`
 
 ```rust
@@ -264,17 +378,17 @@ pub struct NonSequentialTimeSeries {
 ```rust
 pub struct Deterministic {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub data: TypedArray,   // shape [H, count, *E]
 }
 
 impl Deterministic {
     pub fn new(
-        initial_timestamp: DateTime<Utc>, resolution: Duration,
-        horizon: Duration, interval: Duration, count: usize, data: TypedArray,
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize, data: TypedArray,
     ) -> Result<Self, String>;
 }
 ```
@@ -286,9 +400,9 @@ impl Deterministic {
 ```rust
 pub struct Probabilistic {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub percentiles: Vec<f64>,
     pub data: TypedArray,   // shape [num_percentiles, H, count, *E]
@@ -296,8 +410,8 @@ pub struct Probabilistic {
 
 impl Probabilistic {
     pub fn new(
-        initial_timestamp: DateTime<Utc>, resolution: Duration,
-        horizon: Duration, interval: Duration, count: usize,
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
         percentiles: Vec<f64>, data: TypedArray,
     ) -> Result<Self, String>;
 }
@@ -310,9 +424,9 @@ impl Probabilistic {
 ```rust
 pub struct Scenarios {
     pub initial_timestamp: DateTime<Utc>,
-    pub resolution: Duration,
-    pub horizon: Duration,
-    pub interval: Duration,
+    pub resolution: Period,
+    pub horizon: Period,
+    pub interval: Period,
     pub count: usize,
     pub scenario_count: usize,
     pub data: TypedArray,   // shape [scenario_count, H, count, *E]
@@ -320,10 +434,64 @@ pub struct Scenarios {
 
 impl Scenarios {
     pub fn new(
-        initial_timestamp: DateTime<Utc>, resolution: Duration,
-        horizon: Duration, interval: Duration, count: usize,
+        initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
+        horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
         scenario_count: usize, data: TypedArray,
     ) -> Result<Self, String>;
+}
+```
+
+### `StaticReader` and `StaticGroup`
+
+The columnar `SingleTimeSeries` reader (see [Readers](#readers)). `Period` is the crate's resolution
+type. `values()` is empty until the first `Store::static_read`.
+
+```rust
+impl StaticReader {
+    pub fn initial_timestamp(&self) -> DateTime<Utc>;
+    pub fn resolution(&self) -> Period;
+    pub fn length(&self) -> usize;            // grid points; valid timestamps initial + k·resolution
+    pub fn groups(&self) -> &[StaticGroup];
+    pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize>;
+}
+
+impl StaticGroup {
+    pub fn dtype(&self) -> Dtype;
+    pub fn element_shape(&self) -> &[usize];  // trailing per-step dims; empty == scalar
+    pub fn keys(&self) -> &[TimeSeriesKey];   // column j identity
+    pub fn num_columns(&self) -> usize;
+    pub fn values(&self) -> &[u8];            // [num_columns, *element_shape], row-major LE
+}
+```
+
+### `ForecastReader`, `WindowSlot`, and `ForecastEntry`
+
+The forecast-window reader (see [Readers](#readers)). Entries are the per-key forecasts; slots are
+the deduplicated physical reads. `WindowSlot::window()` is empty until the first
+`Store::forecast_read`.
+
+```rust
+impl ForecastReader {
+    pub fn time_series_type(&self) -> TimeSeriesType;
+    pub fn initial_timestamp(&self) -> DateTime<Utc>;
+    pub fn resolution(&self) -> Period;
+    pub fn interval(&self) -> Period;
+    pub fn count(&self) -> usize;             // windows; valid timestamps initial + k·interval
+    pub fn entries(&self) -> &[ForecastEntry];
+    pub fn slots(&self) -> &[WindowSlot];     // one backend read each per forecast_read
+    pub fn entry_slot(&self, i: usize) -> &WindowSlot;  // slot backing entry i
+    pub fn window_index(&self, at: DateTime<Utc>) -> Result<usize>;
+}
+
+impl ForecastEntry {
+    pub fn key(&self) -> &TimeSeriesKey;
+    pub fn slot(&self) -> usize;              // index into slots(); equal for entries sharing data
+}
+
+impl WindowSlot {
+    pub fn dtype(&self) -> Dtype;
+    pub fn window_shape(&self) -> &[usize];   // [H,*E] / [P,H,*E] / [scenarios,H,*E]
+    pub fn window(&self) -> &[u8];            // most recent window, row-major LE
 }
 ```
 
@@ -388,7 +556,8 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `units`,
 `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`, and `logical_type: Option<String>`.
+`element_shape: Vec<usize>`, and `logical_type: Option<String>`. The span fields (`resolution`,
+`horizon`, `interval`) are `Option<Period>`.
 
 ### `ListFilter`
 
@@ -420,8 +589,9 @@ pub struct TimeSeriesCounts {
 pub struct CompactionReport { pub slots_reclaimed: usize, pub datasets_dropped: usize }
 pub struct IntegrityReport { pub errors: Vec<String> }  // .ok() == errors.is_empty()
 pub struct ForecastParameters {
-    pub horizon: Option<Duration>, pub interval: Option<Duration>,
-    pub count: Option<usize>, pub resolution: Option<Duration>,
+    pub horizon: Option<Period>, pub interval: Option<Period>,
+    pub count: Option<usize>, pub resolution: Option<Period>,
+    pub initial_timestamp: Option<DateTime<Utc>>,
 }
 ```
 

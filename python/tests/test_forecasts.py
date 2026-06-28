@@ -55,8 +55,8 @@ def test_deterministic_scalar_round_trip():
     got = store.get_time_series(key)
     assert isinstance(got, Deterministic)
     assert got.count == C
-    assert got.horizon == HORIZON_6H
-    assert got.interval == INTERVAL_12H
+    assert got.horizon == "PT6H"
+    assert got.interval == "PT12H"
     assert got.initial_timestamp == T0
     assert got.name == "det_scalar"
     np.testing.assert_array_equal(np.asarray(got.data), data)
@@ -147,8 +147,8 @@ def test_probabilistic_round_trip():
     got = store.get_time_series(key)
     assert isinstance(got, Probabilistic)
     assert got.count == C
-    assert got.horizon == HORIZON_6H
-    assert got.interval == INTERVAL_12H
+    assert got.horizon == "PT6H"
+    assert got.interval == "PT12H"
     assert got.initial_timestamp == T0
     assert got.name == "prob_basic"
     assert got.percentiles == pytest.approx(percentiles)
@@ -205,8 +205,8 @@ def test_scenarios_round_trip():
     assert isinstance(got, Scenarios)
     assert got.count == C
     assert got.scenario_count == S
-    assert got.horizon == HORIZON_6H
-    assert got.interval == INTERVAL_12H
+    assert got.horizon == "PT6H"
+    assert got.interval == "PT12H"
     assert got.initial_timestamp == T0
     assert got.name == "scen_basic"
     arr = np.asarray(got.data)
@@ -338,6 +338,22 @@ def test_end_before_start_raises():
         )
 
 
+def test_start_past_last_window_raises():
+    """A time_range whose aligned start is past the last window raises."""
+    store = TimeSeriesStore.create(in_memory=True)
+    H, C = 6, 4
+    data = np.zeros((H, C), dtype=np.float64)
+    key = store.add_time_series(
+        OWNER_ID, OWNER_TYPE, OWNER_CAT,
+        Deterministic(T0, RES_1H, HORIZON_6H, INTERVAL_12H, C, data, "det_past"),
+    )
+
+    # Windows exist at indices 0..3; index C (one past the last) does not.
+    past_start = T0 + C * INTERVAL_12H
+    with pytest.raises(InvalidParameterError):
+        store.get_time_series(key, time_range=(past_start, past_start + INTERVAL_12H))
+
+
 def test_empty_window_range():
     """A time_range selecting zero windows returns count=0 array."""
     store = TimeSeriesStore.create(in_memory=True)
@@ -374,10 +390,11 @@ def test_get_forecast_parameters():
     )
 
     params = store.get_forecast_parameters()
-    assert params["horizon"] == HORIZON_6H
-    assert params["interval"] == INTERVAL_12H
+    # Periods are returned as canonical ISO-8601 duration strings.
+    assert params["horizon"] == "PT6H"
+    assert params["interval"] == "PT12H"
     assert params["count"] == C
-    assert params["resolution"] == RES_1H
+    assert params["resolution"] == "PT1H"
 
 
 def test_get_forecast_parameters_no_forecasts():

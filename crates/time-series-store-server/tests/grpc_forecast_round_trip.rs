@@ -8,8 +8,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Deterministic, Features, OwnerCategory, Probabilistic, Scenarios, Store, TimeSeriesData,
-    TypedArray, create_store,
+    Deterministic, Features, OwnerCategory, Period, Probabilistic, Scenarios, Store,
+    TimeSeriesData, TypedArray, create_store,
 };
 use time_series_store_server::client::RemoteClient;
 use time_series_store_server::service::TimeSeriesStoreService;
@@ -295,10 +295,10 @@ async fn forecast_parameters_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let params = client.get_forecast_parameters().await.unwrap();
-    assert_eq!(params.horizon, Some(Duration::hours(4)));
-    assert_eq!(params.interval, Some(Duration::hours(2)));
+    assert_eq!(params.horizon, Some(Period::Fixed(Duration::hours(4))));
+    assert_eq!(params.interval, Some(Period::Fixed(Duration::hours(2))));
     assert_eq!(params.count, Some(6));
-    assert_eq!(params.resolution, Some(Duration::hours(1)));
+    assert_eq!(params.resolution, Some(Period::Fixed(Duration::hours(1))));
 }
 
 #[tokio::test]

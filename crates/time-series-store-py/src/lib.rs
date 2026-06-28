@@ -18,7 +18,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyBytes, PyDelta, PyDict, PyFloat, PyInt, PyString};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString};
 use time_series_store_core as core_lib;
 
 // ---- Exceptions -----------------------------------------------------------
@@ -274,16 +274,16 @@ impl PyDeterministic {
     #[allow(clippy::too_many_arguments)]
     fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Bound<'_, PyDelta>,
-        horizon: Bound<'_, PyDelta>,
-        interval: Bound<'_, PyDelta>,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
         count: usize,
         data: &Bound<'_, PyAny>,
         name: String,
     ) -> PyResult<Self> {
-        let resolution = pydelta_to_chrono(&resolution)?;
-        let horizon = pydelta_to_chrono(&horizon)?;
-        let interval = pydelta_to_chrono(&interval)?;
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::Deterministic::new(
             initial_timestamp,
@@ -309,18 +309,18 @@ impl PyDeterministic {
     }
 
     #[getter]
-    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.resolution)
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
     }
 
     #[getter]
-    fn horizon<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.horizon)
+    fn horizon(&self) -> String {
+        self.inner.horizon.to_iso8601()
     }
 
     #[getter]
-    fn interval<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.interval)
+    fn interval(&self) -> String {
+        self.inner.interval.to_iso8601()
     }
 
     #[getter]
@@ -335,13 +335,13 @@ impl PyDeterministic {
 
     fn __repr__(&self) -> String {
         format!(
-            "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, shape={:?})",
+            "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
-            self.inner.horizon.num_seconds(),
-            self.inner.interval.num_seconds(),
-            self.inner.resolution.num_seconds(),
+            self.inner.horizon.to_iso8601(),
+            self.inner.interval.to_iso8601(),
+            self.inner.resolution.to_iso8601(),
             self.inner.data.shape,
         )
     }
@@ -366,17 +366,17 @@ impl PyProbabilistic {
     #[allow(clippy::too_many_arguments)]
     fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Bound<'_, PyDelta>,
-        horizon: Bound<'_, PyDelta>,
-        interval: Bound<'_, PyDelta>,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
         count: usize,
         percentiles: Vec<f64>,
         data: &Bound<'_, PyAny>,
         name: String,
     ) -> PyResult<Self> {
-        let resolution = pydelta_to_chrono(&resolution)?;
-        let horizon = pydelta_to_chrono(&horizon)?;
-        let interval = pydelta_to_chrono(&interval)?;
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let inner = core_lib::Probabilistic::new(
             initial_timestamp,
@@ -403,18 +403,18 @@ impl PyProbabilistic {
     }
 
     #[getter]
-    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.resolution)
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
     }
 
     #[getter]
-    fn horizon<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.horizon)
+    fn horizon(&self) -> String {
+        self.inner.horizon.to_iso8601()
     }
 
     #[getter]
-    fn interval<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.interval)
+    fn interval(&self) -> String {
+        self.inner.interval.to_iso8601()
     }
 
     #[getter]
@@ -434,13 +434,13 @@ impl PyProbabilistic {
 
     fn __repr__(&self) -> String {
         format!(
-            "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, percentiles={:?}, shape={:?})",
+            "Probabilistic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, percentiles={:?}, shape={:?})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
-            self.inner.horizon.num_seconds(),
-            self.inner.interval.num_seconds(),
-            self.inner.resolution.num_seconds(),
+            self.inner.horizon.to_iso8601(),
+            self.inner.interval.to_iso8601(),
+            self.inner.resolution.to_iso8601(),
             self.inner.percentiles,
             self.inner.data.shape,
         )
@@ -467,16 +467,16 @@ impl PyScenarios {
     #[allow(clippy::too_many_arguments)]
     fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Bound<'_, PyDelta>,
-        horizon: Bound<'_, PyDelta>,
-        interval: Bound<'_, PyDelta>,
+        resolution: Bound<'_, PyAny>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
         count: usize,
         data: &Bound<'_, PyAny>,
         name: String,
     ) -> PyResult<Self> {
-        let resolution = pydelta_to_chrono(&resolution)?;
-        let horizon = pydelta_to_chrono(&horizon)?;
-        let interval = pydelta_to_chrono(&interval)?;
+        let resolution = pyany_to_period(&resolution)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
         let typed = typed_array_from_numpy(data)?;
         let scenario_count = *typed.shape.first().ok_or_else(|| {
             InvalidParameterError::new_err("Scenarios: data must have at least one axis")
@@ -506,18 +506,18 @@ impl PyScenarios {
     }
 
     #[getter]
-    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.resolution)
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
     }
 
     #[getter]
-    fn horizon<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.horizon)
+    fn horizon(&self) -> String {
+        self.inner.horizon.to_iso8601()
     }
 
     #[getter]
-    fn interval<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.interval)
+    fn interval(&self) -> String {
+        self.inner.interval.to_iso8601()
     }
 
     #[getter]
@@ -537,13 +537,13 @@ impl PyScenarios {
 
     fn __repr__(&self) -> String {
         format!(
-            "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}s, interval={}s, resolution={}s, scenario_count={}, shape={:?})",
+            "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, scenario_count={}, shape={:?})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.count,
-            self.inner.horizon.num_seconds(),
-            self.inner.interval.num_seconds(),
-            self.inner.resolution.num_seconds(),
+            self.inner.horizon.to_iso8601(),
+            self.inner.interval.to_iso8601(),
+            self.inner.resolution.to_iso8601(),
             self.inner.scenario_count,
             self.inner.data.shape,
         )
@@ -569,11 +569,11 @@ impl PySingleTimeSeries {
     #[pyo3(signature = (initial_timestamp, resolution, data, name))]
     fn new(
         initial_timestamp: DateTime<Utc>,
-        resolution: Bound<'_, PyDelta>,
+        resolution: Bound<'_, PyAny>,
         data: &Bound<'_, PyAny>,
         name: String,
     ) -> PyResult<Self> {
-        let resolution = pydelta_to_chrono(&resolution)?;
+        let resolution = pyany_to_period(&resolution)?;
         let typed = typed_array_from_numpy(data)?;
         Ok(Self {
             inner: core_lib::SingleTimeSeries::new(initial_timestamp, resolution, typed, name),
@@ -596,8 +596,8 @@ impl PySingleTimeSeries {
     }
 
     #[getter]
-    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDelta>> {
-        chrono_to_pydelta(py, self.inner.resolution)
+    fn resolution(&self) -> String {
+        self.inner.resolution.to_iso8601()
     }
 
     #[getter]
@@ -611,7 +611,7 @@ impl PySingleTimeSeries {
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.length,
-            self.inner.resolution.num_seconds(),
+            self.inner.resolution.to_iso8601(),
             self.inner.data.shape,
         )
     }
@@ -706,11 +706,13 @@ impl PyTimeSeriesKey {
     }
 
     #[getter]
-    fn resolution<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDelta>>> {
-        match self.inner.resolution {
-            Some(d) => Ok(Some(chrono_to_pydelta(py, d)?)),
-            None => Ok(None),
-        }
+    fn resolution(&self) -> Option<String> {
+        self.inner.resolution.map(|p| p.to_iso8601())
+    }
+
+    #[getter]
+    fn interval(&self) -> Option<String> {
+        self.inner.interval.map(|p| p.to_iso8601())
     }
 
     #[getter]
@@ -771,6 +773,27 @@ fn extract_time_series_data(time_series: &Bound<'_, PyAny>) -> PyResult<core_lib
 }
 
 // ---- TimeSeriesStore ------------------------------------------------------
+
+/// Wrap a reconstructed [`core_lib::TimeSeriesData`] in its matching Python class.
+fn time_series_data_to_py(py: Python<'_>, data: core_lib::TimeSeriesData) -> PyResult<Py<PyAny>> {
+    match data {
+        core_lib::TimeSeriesData::SingleTimeSeries(s) => {
+            Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
+        }
+        core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
+            Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
+        }
+        core_lib::TimeSeriesData::Deterministic(d) => {
+            Ok(Py::new(py, PyDeterministic { inner: d })?.into_any())
+        }
+        core_lib::TimeSeriesData::Probabilistic(p) => {
+            Ok(Py::new(py, PyProbabilistic { inner: p })?.into_any())
+        }
+        core_lib::TimeSeriesData::Scenarios(s) => {
+            Ok(Py::new(py, PyScenarios { inner: s })?.into_any())
+        }
+    }
+}
 
 #[pyclass(name = "TimeSeriesStore", module = "time_series_store", unsendable)]
 pub struct PyStore {
@@ -918,11 +941,11 @@ impl PyStore {
     /// series' length. Returns the number of series transformed.
     fn transform_single_time_series(
         &mut self,
-        horizon: Bound<'_, PyDelta>,
-        interval: Bound<'_, PyDelta>,
+        horizon: Bound<'_, PyAny>,
+        interval: Bound<'_, PyAny>,
     ) -> PyResult<usize> {
-        let horizon = pydelta_to_chrono(&horizon)?;
-        let interval = pydelta_to_chrono(&interval)?;
+        let horizon = pyany_to_period(&horizon)?;
+        let interval = pyany_to_period(&interval)?;
         self.inner
             .transform_single_time_series(horizon, interval, None, None)
             .map_err(map_err)
@@ -979,23 +1002,21 @@ impl PyStore {
             .inner
             .get_time_series(&key.inner, time_range)
             .map_err(map_err)?;
-        match data {
-            core_lib::TimeSeriesData::SingleTimeSeries(s) => {
-                Ok(Py::new(py, PySingleTimeSeries { inner: s })?.into_any())
-            }
-            core_lib::TimeSeriesData::NonSequentialTimeSeries(s) => {
-                Ok(Py::new(py, PyNonSequentialTimeSeries { inner: s })?.into_any())
-            }
-            core_lib::TimeSeriesData::Deterministic(d) => {
-                Ok(Py::new(py, PyDeterministic { inner: d })?.into_any())
-            }
-            core_lib::TimeSeriesData::Probabilistic(p) => {
-                Ok(Py::new(py, PyProbabilistic { inner: p })?.into_any())
-            }
-            core_lib::TimeSeriesData::Scenarios(s) => {
-                Ok(Py::new(py, PyScenarios { inner: s })?.into_any())
-            }
-        }
+        time_series_data_to_py(py, data)
+    }
+
+    /// Read many full series at once, returning a list of typed objects in the
+    /// same order as `keys`. Packed `SingleTimeSeries` are read in one
+    /// decompress-once pass per dataset (the bulk counterpart to
+    /// `get_time_series`); other types reuse the per-key path. No time-range
+    /// slicing — each series is returned in full.
+    fn bulk_read(&self, py: Python<'_>, keys: Vec<PyTimeSeriesKey>) -> PyResult<Vec<Py<PyAny>>> {
+        let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
+        let datas = self.inner.bulk_read(&identities).map_err(map_err)?;
+        datas
+            .into_iter()
+            .map(|d| time_series_data_to_py(py, d))
+            .collect()
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
@@ -1014,7 +1035,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
-        resolution: Option<Bound<'_, PyDelta>>,
+        resolution: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let mut filter = core_lib::ListFilter::new();
@@ -1034,7 +1055,7 @@ impl PyStore {
             filter = filter.name(n);
         }
         if let Some(r) = resolution {
-            filter = filter.resolution(pydelta_to_chrono(&r)?);
+            filter = filter.resolution(pyany_to_period(&r)?);
         }
         if let Some(f) = features {
             filter = filter.features(features_from_dict(Some(f))?);
@@ -1050,7 +1071,7 @@ impl PyStore {
             d.set_item("name", &m.name)?;
             d.set_item("data_hash", core_lib::hash::hash_hex(&m.data_hash))?;
             d.set_item("length", m.length)?;
-            d.set_item("resolution_seconds", m.resolution.map(|r| r.num_seconds()))?;
+            d.set_item("resolution", m.resolution.map(|p| p.to_iso8601()))?;
             d.set_item(
                 "timestamps",
                 m.timestamps.as_ref().map(|timestamps| {
@@ -1092,16 +1113,15 @@ impl PyStore {
         &self,
         py: Python<'_>,
         time_series_type: Option<PyTimeSeriesType>,
-    ) -> PyResult<Vec<Py<PyDelta>>> {
-        let durations = self
+    ) -> PyResult<Vec<String>> {
+        let _ = py;
+        Ok(self
             .inner
             .get_resolutions(time_series_type.map(Into::into))
-            .map_err(map_err)?;
-        let mut out = Vec::with_capacity(durations.len());
-        for d in durations {
-            out.push(chrono_to_pydelta(py, d)?.unbind());
-        }
-        Ok(out)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|p| p.to_iso8601())
+            .collect())
     }
 
     /// Return the store's forecast parameters as a dict with keys `horizon`,
@@ -1113,16 +1133,11 @@ impl PyStore {
             .get_forecast_parameters(None, None)
             .map_err(map_err)?;
         let d = PyDict::new(py);
-        let dur = |py: Python<'py>, v: Option<chrono::Duration>| -> PyResult<Option<Py<PyDelta>>> {
-            match v {
-                Some(v) => Ok(Some(chrono_to_pydelta(py, v)?.unbind())),
-                None => Ok(None),
-            }
-        };
-        d.set_item("horizon", dur(py, p.horizon)?)?;
-        d.set_item("interval", dur(py, p.interval)?)?;
+        let iso = |v: Option<core_lib::Period>| v.map(|p| p.to_iso8601());
+        d.set_item("horizon", iso(p.horizon))?;
+        d.set_item("interval", iso(p.interval))?;
         d.set_item("count", p.count)?;
-        d.set_item("resolution", dur(py, p.resolution)?)?;
+        d.set_item("resolution", iso(p.resolution))?;
         Ok(d)
     }
 
@@ -1176,16 +1191,22 @@ impl PyStore {
     }
 }
 
-// ---- chrono ↔ pydelta helpers ---------------------------------------------
+// ---- period helpers -------------------------------------------------------
 
-fn pydelta_to_chrono(delta: &Bound<'_, PyDelta>) -> PyResult<chrono::Duration> {
-    // pyo3's `chrono` feature already implements TryFrom for Duration.
-    delta.extract::<chrono::Duration>()
-}
-
-fn chrono_to_pydelta<'py>(py: Python<'py>, d: chrono::Duration) -> PyResult<Bound<'py, PyDelta>> {
-    use pyo3::IntoPyObject;
-    d.into_pyobject(py)
+/// Accept a period as either a `datetime.timedelta` (fixed span) or an ISO-8601
+/// duration `str` (e.g. "PT1H", "P1M", "P1Y"); the latter is required for
+/// calendar (irregular) periods.
+fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
+    if let Ok(s) = v.extract::<String>() {
+        core_lib::Period::from_iso8601(&s)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    } else if let Ok(d) = v.extract::<chrono::Duration>() {
+        Ok(core_lib::Period::Fixed(d))
+    } else {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "period must be a datetime.timedelta or an ISO-8601 duration string",
+        ))
+    }
 }
 
 #[allow(dead_code)]

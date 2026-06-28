@@ -1,21 +1,22 @@
 //! High-level `Store` composing the storage backend and metadata store.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-use chrono::Duration;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
+use crate::reader::{ForecastReader, StaticReader, WindowRead};
 use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
 };
-use crate::types::array::TypedArray;
+use crate::types::array::{Dtype, TypedArray};
 use crate::types::key::{
     ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
     TimeSeriesKey,
 };
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
+use crate::types::period::Period;
 use crate::types::time_series::{
     Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
     TimeSeriesData, TimeSeriesType, compute_h,
@@ -28,7 +29,8 @@ pub struct ListFilter {
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
+    pub interval: Option<Period>,
     pub features: Option<Features>,
 }
 
@@ -56,8 +58,12 @@ impl ListFilter {
         self.name = Some(n.into());
         self
     }
-    pub fn resolution(mut self, r: Duration) -> Self {
-        self.resolution = Some(r);
+    pub fn resolution(mut self, r: impl Into<Period>) -> Self {
+        self.resolution = Some(r.into());
+        self
+    }
+    pub fn interval(mut self, i: impl Into<Period>) -> Self {
+        self.interval = Some(i.into());
         self
     }
     pub fn features(mut self, f: Features) -> Self {
@@ -75,6 +81,7 @@ impl From<ListFilter> for MetadataFilter {
             time_series_type: value.time_series_type,
             name: value.name,
             resolution: value.resolution,
+            interval: value.interval,
             features: value.features,
             features_hash: None,
         }
@@ -114,10 +121,10 @@ pub struct TimeSeriesCountsDetailed {
 
 #[derive(Debug, Default, Clone)]
 pub struct ForecastParameters {
-    pub horizon: Option<Duration>,
-    pub interval: Option<Duration>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
     pub count: Option<usize>,
-    pub resolution: Option<Duration>,
+    pub resolution: Option<Period>,
     pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -210,7 +217,7 @@ impl Store {
         features: Features,
         units: Option<String>,
     ) -> Result<TimeSeriesKey> {
-        self.add_time_series_bulk(vec![AddRequest {
+        self.add_per_column(vec![AddRequest {
             owner_id,
             owner_type: owner_type.to_string(),
             owner_category,
@@ -222,10 +229,26 @@ impl Store {
         .map(|mut keys| keys.remove(0))
     }
 
-    /// Bulk insert. All-or-nothing: any error rolls back every association
-    /// and array put performed in this call.
+    /// Bulk insert. All-or-nothing: any error rolls back every association and
+    /// array put performed in this call.
+    ///
+    /// This is a managed batch, so it takes the block-write path
+    /// ([`Self::bulk_add`] internals): packed series are packed into batch-sized
+    /// datasets that fill whole chunks. A one-at-a-time un-managed loop should use
+    /// [`Self::add_time_series`], which packs incrementally into shared datasets.
     #[tracing::instrument(skip(self, items), fields(count = items.len()))]
     pub fn add_time_series_bulk(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+        self.flush_bulk_add(items)
+    }
+
+    /// Per-column insert used by single [`Self::add_time_series`] calls: each
+    /// packed array is dropped into the first free slot of a shared, default-width
+    /// dataset (created on demand, spilling once full). This keeps incremental
+    /// un-managed adds space-efficient and still grouped for read-by-timestamp,
+    /// at the cost of a per-column read-modify-write under the timestamp-major
+    /// chunking. All-or-nothing, like [`Self::add_time_series_bulk`].
+    #[tracing::instrument(skip(self, items), fields(count = items.len()))]
+    fn add_per_column(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
@@ -236,175 +259,14 @@ impl Store {
         let mut keys = Vec::with_capacity(items.len());
 
         for item in &items {
-            let (hash, resolution_ms, packed, meta, key) = match &item.data {
-                TimeSeriesData::SingleTimeSeries(single) => {
-                    let hash = array_hash(&single.data);
-                    (
-                        hash,
-                        single.resolution.num_milliseconds(),
-                        true,
-                        TimeSeriesMetadata {
-                            owner_id: item.owner_id,
-                            owner_type: item.owner_type.clone(),
-                            owner_category: item.owner_category,
-                            time_series_type: TimeSeriesType::SingleTimeSeries,
-                            name: single.name.clone(),
-                            data_hash: hash,
-                            initial_timestamp: Some(single.initial_timestamp),
-                            resolution: Some(single.resolution),
-                            length: Some(single.length),
-                            horizon: None,
-                            interval: None,
-                            count: None,
-                            timestamps: None,
-                            features: item.features.clone(),
-                            units: item.units.clone(),
-                            percentiles: None,
-                            dtype: single.data.dtype,
-                            element_shape: single.data.element_shape().to_vec(),
-                            logical_type: item.logical_type.clone(),
-                        },
-                        TimeSeriesKey::Single(SingleTimeSeriesKey::new(
-                            item.owner_id,
-                            item.owner_category,
-                            single.name.clone(),
-                            single.resolution,
-                            item.features.clone(),
-                            single.initial_timestamp,
-                            single.length,
-                        )),
-                    )
-                }
-                TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
-                    validate_non_sequential(non_sequential)?;
-                    let hash = array_hash(&non_sequential.data);
-                    (
-                        hash,
-                        0,
-                        false,
-                        TimeSeriesMetadata {
-                            owner_id: item.owner_id,
-                            owner_type: item.owner_type.clone(),
-                            owner_category: item.owner_category,
-                            time_series_type: TimeSeriesType::NonSequentialTimeSeries,
-                            name: non_sequential.name.clone(),
-                            data_hash: hash,
-                            initial_timestamp: None,
-                            resolution: None,
-                            length: Some(non_sequential.length),
-                            horizon: None,
-                            interval: None,
-                            count: None,
-                            timestamps: Some(non_sequential.timestamps.clone()),
-                            features: item.features.clone(),
-                            units: item.units.clone(),
-                            percentiles: None,
-                            dtype: non_sequential.data.dtype,
-                            element_shape: non_sequential.data.element_shape().to_vec(),
-                            logical_type: item.logical_type.clone(),
-                        },
-                        TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
-                            item.owner_id,
-                            item.owner_category,
-                            non_sequential.name.clone(),
-                            item.features.clone(),
-                            non_sequential.length,
-                        )),
-                    )
-                }
-                // Dense forecast types are stored as standalone arrays in their
-                // native shape. `DeterministicSingleTimeSeries` is not added
-                // directly; it is derived from a stored `SingleTimeSeries` via
-                // [`Self::transform_single_time_series`].
-                TimeSeriesData::Deterministic(det) => (
-                    array_hash(&det.data),
-                    det.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Deterministic,
-                        &det.name,
-                        det.initial_timestamp,
-                        det.resolution,
-                        det.horizon,
-                        det.interval,
-                        det.count,
-                        &det.data,
-                        None,
-                    ),
-                    forecast_key(
-                        item,
-                        TimeSeriesType::Deterministic,
-                        &det.name,
-                        det.resolution,
-                        det.initial_timestamp,
-                        det.horizon,
-                        det.interval,
-                        det.count,
-                    ),
-                ),
-                TimeSeriesData::Probabilistic(prob) => (
-                    array_hash(&prob.data),
-                    prob.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Probabilistic,
-                        &prob.name,
-                        prob.initial_timestamp,
-                        prob.resolution,
-                        prob.horizon,
-                        prob.interval,
-                        prob.count,
-                        &prob.data,
-                        Some(prob.percentiles.clone()),
-                    ),
-                    forecast_key(
-                        item,
-                        TimeSeriesType::Probabilistic,
-                        &prob.name,
-                        prob.resolution,
-                        prob.initial_timestamp,
-                        prob.horizon,
-                        prob.interval,
-                        prob.count,
-                    ),
-                ),
-                TimeSeriesData::Scenarios(scen) => (
-                    array_hash(&scen.data),
-                    scen.resolution.num_milliseconds(),
-                    false,
-                    forecast_metadata(
-                        item,
-                        TimeSeriesType::Scenarios,
-                        &scen.name,
-                        scen.initial_timestamp,
-                        scen.resolution,
-                        scen.horizon,
-                        scen.interval,
-                        scen.count,
-                        &scen.data,
-                        None,
-                    ),
-                    forecast_key(
-                        item,
-                        TimeSeriesType::Scenarios,
-                        &scen.name,
-                        scen.resolution,
-                        scen.initial_timestamp,
-                        scen.horizon,
-                        scen.interval,
-                        scen.count,
-                    ),
-                ),
-            };
-            let data = match &item.data {
-                TimeSeriesData::SingleTimeSeries(single) => &single.data,
-                TimeSeriesData::NonSequentialTimeSeries(non_sequential) => &non_sequential.data,
-                TimeSeriesData::Deterministic(det) => &det.data,
-                TimeSeriesData::Probabilistic(prob) => &prob.data,
-                TimeSeriesData::Scenarios(scen) => &scen.data,
-            };
+            let RequestParts {
+                hash,
+                resolution,
+                packed,
+                meta,
+                key,
+            } = build_request_parts(item)?;
+            let data = request_array(item);
 
             let already_present = self.backend.contains(&hash)?;
             tracing::debug!(
@@ -414,13 +276,13 @@ impl Store {
                 already_present,
                 "backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution_ms, packed)?;
+            self.backend.put_array(&hash, data, resolution, packed)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
 
-            match MetadataStore::insert(&tx, &meta) {
-                Ok(_) => {
+            match insert_association(&tx, &meta) {
+                Ok(()) => {
                     keys.push(key);
                 }
                 Err(e) => {
@@ -438,6 +300,93 @@ impl Store {
         tx.commit()?;
         tracing::debug!(count = keys.len(), "transaction committed");
         Ok(keys)
+    }
+
+    /// Begin a buffered bulk add. Requests pushed onto the returned [`BulkAdd`]
+    /// are accumulated in memory and written together by [`BulkAdd::commit`],
+    /// which packs each shape group into batch-sized datasets so the timestamp-
+    /// major chunks are filled whole rather than one slow column at a time.
+    /// Dropping the guard without committing discards the buffer (writes nothing).
+    pub fn bulk_add(&mut self) -> BulkAdd<'_> {
+        BulkAdd {
+            store: self,
+            items: Vec::new(),
+            committed: false,
+        }
+    }
+
+    /// Flush a buffered bulk add: write every array — packed types as batch-sized
+    /// blocks (one or more datasets per shape group, chunks filled whole),
+    /// standalone types individually — then insert all associations in one
+    /// transaction. All-or-nothing: any metadata error rolls the transaction back
+    /// and removes every array staged in this call.
+    #[tracing::instrument(skip(self, items), fields(count = items.len()))]
+    fn flush_bulk_add(&mut self, items: Vec<AddRequest>) -> Result<Vec<TimeSeriesKey>> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Derive parts (validates + hashes) for every item, aligned to `items`.
+        let parts: Vec<RequestParts> = items
+            .iter()
+            .map(build_request_parts)
+            .collect::<Result<_>>()?;
+        let mut staged_hashes: Vec<[u8; 32]> = Vec::new();
+
+        // Group packed inputs by (dtype, element_shape, length, resolution); each
+        // group is written as one or more batch-sized blocks. Standalone inputs
+        // (irregular series and dense forecasts) keep the per-array path.
+        let mut packed_groups: HashMap<(Dtype, Vec<usize>, usize, Period), Vec<usize>> =
+            HashMap::new();
+        for (i, p) in parts.iter().enumerate() {
+            let array = request_array(&items[i]);
+            if p.packed {
+                packed_groups
+                    .entry((
+                        array.dtype,
+                        array.element_shape().to_vec(),
+                        array.length(),
+                        p.resolution,
+                    ))
+                    .or_default()
+                    .push(i);
+            } else {
+                let already = self.backend.contains(&p.hash)?;
+                self.backend
+                    .put_array(&p.hash, array, p.resolution, false)?;
+                if !already {
+                    staged_hashes.push(p.hash);
+                }
+            }
+        }
+        for (group, idxs) in &packed_groups {
+            let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
+            let arrays: Vec<&TypedArray> = idxs.iter().map(|&i| request_array(&items[i])).collect();
+            let written = self.backend.put_packed_block(&hashes, &arrays, group.3)?;
+            for (j, &i) in idxs.iter().enumerate() {
+                if written[j] {
+                    staged_hashes.push(parts[i].hash);
+                }
+            }
+        }
+
+        // Insert associations in input order; roll the whole batch back on error.
+        let tx = self.metadata.transaction()?;
+        for p in &parts {
+            if let Err(e) = insert_association(&tx, &p.meta) {
+                drop(tx);
+                for staged in &staged_hashes {
+                    let _ = self.backend.remove_array(staged);
+                }
+                return Err(e);
+            }
+        }
+        tx.commit()?;
+        tracing::debug!(count = parts.len(), "bulk-add transaction committed");
+        Ok(parts.into_iter().map(|p| p.key).collect())
     }
 
     #[tracing::instrument(skip(self, key), fields(owner = key.owner_id, name = %key.name))]
@@ -540,32 +489,30 @@ impl Store {
                         if end < start {
                             return Err(TimeSeriesError::InvalidParameter("end < start".into()));
                         }
-                        let resolution_ms = resolution.num_milliseconds();
-                        if resolution_ms <= 0 {
+                        if !resolution.is_positive() {
                             return Err(TimeSeriesError::InvalidParameter(
                                 "resolution must be positive".into(),
                             ));
                         }
-                        let total_ms = (start - initial).num_milliseconds();
-                        let start_idx = (total_ms / resolution_ms).max(0) as usize;
-                        let end_total_ms = (end - initial).num_milliseconds();
-                        // Ceiling division of a non-negative numerator. Written as
-                        // `(n - 1) / d + 1` rather than `(n + d - 1) / d` so a
-                        // far-future `end` (where `end_total_ms` is near `i64::MAX`)
-                        // cannot overflow the addition. Non-positive numerators map
-                        // to index 0.
-                        let end_idx = if end_total_ms <= 0 {
-                            0
-                        } else {
-                            ((end_total_ms - 1) / resolution_ms + 1) as usize
-                        };
-                        let start_idx = start_idx.min(length);
-                        let end_idx = end_idx.min(length).max(start_idx);
+                        // `start` is floored and `end` is ceil-ed onto the
+                        // resolution grid (calendar-aware for monthly periods); the
+                        // bounds need not be grid-aligned.
+                        let start_idx = resolution.floor_steps(initial, start).min(length);
+                        let end_idx = resolution
+                            .ceil_steps(initial, end)
+                            .min(length)
+                            .max(start_idx);
                         let data = self
                             .backend
                             .get_slice(&meta.data_hash, start_idx..end_idx)?;
                         let new_initial =
-                            initial + Duration::milliseconds(start_idx as i64 * resolution_ms);
+                            resolution
+                                .add_to(initial, start_idx as i64)
+                                .ok_or_else(|| {
+                                    TimeSeriesError::IntegrityError(
+                                        "sliced initial overflow".into(),
+                                    )
+                                })?;
                         (data, new_initial, end_idx - start_idx)
                     }
                 };
@@ -726,15 +673,14 @@ impl Store {
                 let interval = required_interval(&meta, "DeterministicSingleTimeSeries")?;
                 let count = required_count(&meta, "DeterministicSingleTimeSeries")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                let interval_ms = interval.num_milliseconds();
-                let res_ms = resolution.num_milliseconds();
-                if interval_ms % res_ms != 0 {
-                    return Err(TimeSeriesError::IntegrityError(format!(
-                        "DeterministicSingleTimeSeries: interval ({interval_ms} ms) \
-                         is not evenly divisible by resolution ({res_ms} ms)"
-                    )));
-                }
-                let interval_steps = (interval_ms / res_ms) as usize;
+                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::IntegrityError(format!(
+                        "DeterministicSingleTimeSeries: interval ({}) is not an integer \
+                         multiple of resolution ({})",
+                        interval.to_iso8601(),
+                        resolution.to_iso8601()
+                    ))
+                })?;
                 let total_len = arr.length();
                 // Validate that all windows fit in the underlying array.
                 let required = (count.saturating_sub(1)) * interval_steps + h;
@@ -811,6 +757,222 @@ impl Store {
             .collect()
     }
 
+    /// Like [`Self::list_keys`], but pairs each key with the 32-byte content hash
+    /// of the array it resolves to. Rows that share a stored array carry the same
+    /// hash, which is what lets a caller group time series by their underlying
+    /// data: deduplicated identical arrays, and a `SingleTimeSeries` together with
+    /// any `DeterministicSingleTimeSeries` derived from it. The hash is read
+    /// straight off each metadata row, so this is still one catalog query.
+    pub fn list_keys_with_hash(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(TimeSeriesKey, [u8; 32])>> {
+        self.metadata
+            .list(&filter.into())?
+            .iter()
+            .map(|m| Ok((TimeSeriesKey::from_metadata(m)?, m.data_hash)))
+            .collect()
+    }
+
+    /// Build a [`StaticReader`] over the `SingleTimeSeries` matching `filter`.
+    ///
+    /// The filter must pin a resolution (one resolution per reader). All matched
+    /// series must share one grid (`initial_timestamp` + `length`); this is
+    /// validated here and errors on divergence, which is what lets the per-read
+    /// path skip presence checks. The reader is then driven with
+    /// [`Self::static_read`]. See [`crate::reader`].
+    pub fn build_static_reader(&self, mut filter: ListFilter) -> Result<StaticReader> {
+        if filter.resolution.is_none() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "build_static_reader requires a resolution filter (one resolution per reader)"
+                    .into(),
+            ));
+        }
+        // SingleTimeSeries-only; accept an explicit matching type, reject others.
+        match filter.time_series_type {
+            None | Some(TimeSeriesType::SingleTimeSeries) => {
+                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
+            }
+            Some(other) => {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "build_static_reader handles SingleTimeSeries only; got {}",
+                    other.as_str()
+                )));
+            }
+        }
+        let rows = self.list_time_series(filter)?;
+        let (initial, resolution, length, groups) = crate::reader::build_groups(rows)?;
+        Ok(StaticReader::from_parts(
+            initial, resolution, length, groups,
+        ))
+    }
+
+    /// Read the value of every series in `reader` at timestamp `at`, filling the
+    /// reader's reusable buffers in place. Afterwards walk
+    /// [`StaticReader::groups`] for the columnar bytes. Errors (never clamps) if
+    /// `at` is off the reader's grid.
+    pub fn static_read(
+        &self,
+        reader: &mut StaticReader,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let index = reader.index_at(at)?;
+        for group in reader.groups_mut() {
+            group.fill(|hashes, out| self.backend.read_index_into(hashes, index, out))?;
+        }
+        reader.mark_read(at);
+        Ok(())
+    }
+
+    /// Build a [`ForecastReader`] over the forecasts matching `filter`.
+    ///
+    /// The filter must name a forecast type and pin a resolution. A
+    /// `Deterministic` reader is **abstract**: it also includes
+    /// `DeterministicSingleTimeSeries`, read into identical `[H, *E]` windows
+    /// (mirroring core's `AbstractDeterministic`). `Probabilistic` and
+    /// `Scenarios` are exact. All matched forecasts must share one window
+    /// timeline (`initial_timestamp` + `interval` + `count`); this is validated
+    /// and errors on divergence. Drive with [`Self::forecast_read`]. See
+    /// [`crate::reader`].
+    pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader> {
+        let reported = match filter.time_series_type {
+            Some(
+                t @ (TimeSeriesType::Deterministic
+                | TimeSeriesType::DeterministicSingleTimeSeries
+                | TimeSeriesType::Probabilistic
+                | TimeSeriesType::Scenarios),
+            ) => t,
+            Some(other) => {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "build_forecast_reader handles forecast types (Deterministic/\
+                     DeterministicSingleTimeSeries/Probabilistic/Scenarios); got {}",
+                    other.as_str()
+                )));
+            }
+            None => {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "build_forecast_reader requires a forecast time_series_type in the filter"
+                        .into(),
+                ));
+            }
+        };
+        if filter.resolution.is_none() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "build_forecast_reader requires a resolution filter (one resolution per reader)"
+                    .into(),
+            ));
+        }
+        // A Deterministic reader is abstract over its concrete storage types.
+        let concrete: Vec<TimeSeriesType> = match reported {
+            TimeSeriesType::Deterministic => vec![
+                TimeSeriesType::Deterministic,
+                TimeSeriesType::DeterministicSingleTimeSeries,
+            ],
+            other => vec![other],
+        };
+        let mut items = Vec::new();
+        for t in concrete {
+            let mut f = filter.clone();
+            f.time_series_type = Some(t);
+            for m in self.list_time_series(f)? {
+                let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
+                items.push((m, shape));
+            }
+        }
+        crate::reader::build_forecast_entries(reported, items)
+    }
+
+    /// Read the forecast window at timestamp `at` for every forecast in `reader`,
+    /// filling the reader's reusable per-entry buffers in place. Afterwards walk
+    /// [`ForecastReader::entries`] for the window bytes. Errors (never clamps) if
+    /// `at` is off the reader's window timeline.
+    pub fn forecast_read(
+        &self,
+        reader: &mut ForecastReader,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        let window = reader.window_index(at)?;
+        // One read per *slot*: forecasts that share an array and read plan
+        // (e.g. components referencing one shared forecast) collapse to a single
+        // slot at build time, so the backend is hit once for all of them.
+        for slot in reader.slots_mut() {
+            slot.fill(|read, hash, out| match *read {
+                WindowRead::Dense { count_axis } => {
+                    self.backend.read_window_into(hash, count_axis, window, out)
+                }
+                WindowRead::Derived {
+                    interval_steps,
+                    horizon_steps,
+                } => {
+                    let start = window * interval_steps;
+                    self.backend
+                        .read_range_into(hash, start, horizon_steps, out)
+                }
+            })?;
+        }
+        reader.mark_read(at);
+        Ok(())
+    }
+
+    /// Read many full series at once, returning a [`TimeSeriesData`] per key in
+    /// order. This is the bulk counterpart to [`Self::get_time_series`] for
+    /// whole-series reads (e.g. exploration or plotting): packed `SingleTimeSeries`
+    /// are read in one decompress-once pass per dataset via
+    /// [`StorageBackend::read_arrays`], rather than re-reading every chunk once per
+    /// series — the read-side complement to the timestamp-major layout, where a
+    /// single full-series read is otherwise the slow direction. Other types are
+    /// standalone arrays with no batching benefit, so they reuse the per-key
+    /// [`Self::get_time_series`] path. No time-range slicing — each series is
+    /// returned in full.
+    #[tracing::instrument(skip(self, keys), fields(count = keys.len()))]
+    pub fn bulk_read(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesData>> {
+        let metas: Vec<TimeSeriesMetadata> = keys
+            .iter()
+            .map(|k| self.metadata.get_by_key(k))
+            .collect::<Result<_>>()?;
+
+        // Batch the packed SingleTimeSeries reads; everything else is standalone
+        // and reuses the per-key reconstruction.
+        let single_hashes: Vec<[u8; 32]> = metas
+            .iter()
+            .filter(|m| m.time_series_type == TimeSeriesType::SingleTimeSeries)
+            .map(|m| m.data_hash)
+            .collect();
+        let mut single_arrays = self.backend.read_arrays(&single_hashes)?.into_iter();
+
+        let mut out = Vec::with_capacity(keys.len());
+        for (meta, key) in metas.iter().zip(keys) {
+            if meta.time_series_type == TimeSeriesType::SingleTimeSeries {
+                let data = single_arrays.next().ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "bulk_read: fewer arrays returned than SingleTimeSeries keys".into(),
+                    )
+                })?;
+                let initial = meta.initial_timestamp.ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(
+                        "SingleTimeSeries missing initial_timestamp".into(),
+                    )
+                })?;
+                let resolution = meta.resolution.ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("SingleTimeSeries missing resolution".into())
+                })?;
+                let length = meta.length.ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
+                })?;
+                out.push(TimeSeriesData::SingleTimeSeries(SingleTimeSeries {
+                    initial_timestamp: initial,
+                    resolution,
+                    length,
+                    data,
+                    name: meta.name.clone(),
+                }));
+            } else {
+                out.push(self.get_time_series(key, None)?);
+            }
+        }
+        Ok(out)
+    }
+
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
@@ -822,51 +984,46 @@ impl Store {
     /// concrete [`TimeSeriesKey`] of the single matching association. The returned
     /// key's `time_series_type` is the concrete type that matched.
     ///
-    /// For a [`RequestedType::Concrete`] request this is the unique-index lookup
-    /// in [`Store::get_metadata`]. For [`RequestedType::AbstractDeterministic`] it
-    /// matches a stored `Deterministic` or `DeterministicSingleTimeSeries`,
-    /// returning whichever exists. This is the authoritative replacement for the
-    /// bindings' former guess-and-retry fallback: the catalog — not the caller —
-    /// decides which concrete type satisfies the request.
+    /// For a [`RequestedType::Concrete`] request the concrete type must match;
+    /// for [`RequestedType::AbstractDeterministic`] a stored `Deterministic` or
+    /// `DeterministicSingleTimeSeries` matches (the two cannot coexist for one
+    /// family, so at most one ever does). This is the authoritative replacement
+    /// for the bindings' former guess-and-retry fallback: the catalog — not the
+    /// caller — decides which concrete type satisfies the request.
+    ///
+    /// `resolution` and `interval` are optional filters on the identity. Leave
+    /// either unset to match across it; supply it to disambiguate when several
+    /// series share the other attributes (e.g. a day-ahead and a real-time
+    /// forecast that differ only by interval).
     ///
     /// Errors:
     /// - [`TimeSeriesError::NotFound`] if nothing matches.
-    /// - [`TimeSeriesError::InvalidParameter`] if an abstract request is
-    ///   ambiguous (both a `Deterministic` and a `DeterministicSingleTimeSeries`
-    ///   share the identity); the caller must then request a concrete type.
+    /// - [`TimeSeriesError::InvalidParameter`] if the request is ambiguous (more
+    ///   than one stored series matches); the caller must then narrow it with a
+    ///   concrete type, a resolution, and/or an interval.
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_forecast_key(
         &self,
         owner_id: i64,
         owner_category: OwnerCategory,
         name: &str,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
+        interval: Option<Period>,
         features: Features,
         requested: crate::types::time_series::RequestedType,
     ) -> Result<TimeSeriesKey> {
-        use crate::types::time_series::RequestedType;
-        // A concrete request maps to exactly one key; reuse the unique-index
-        // lookup so resolution stays cheap and NotFound is reported uniformly.
-        if let RequestedType::Concrete(time_series_type) = requested {
-            let identity = KeyIdentity {
-                owner_id,
-                owner_category,
-                time_series_type,
-                name: name.to_string(),
-                resolution,
-                features,
-            };
-            let meta = self.metadata.get_by_key(&identity)?;
-            return TimeSeriesKey::from_metadata(&meta);
-        }
-
-        // Abstract family: list candidates sharing (owner, name, resolution,
-        // features), then keep those whose concrete type satisfies the family.
+        // List candidates sharing (owner, name, resolution, interval, features),
+        // then keep those whose concrete type satisfies the request. A concrete
+        // request with resolution+interval pinned resolves to one row via the
+        // unique index; looser requests may match several and are reported as
+        // ambiguous rather than silently picking one.
         let f_hash = crate::hash::features_hash(&features);
         let mut matches = self.metadata.list(&MetadataFilter {
             owner_id: Some(owner_id),
             owner_category: Some(owner_category),
             name: Some(name.to_string()),
             resolution,
+            interval,
             features_hash: Some(f_hash),
             ..Default::default()
         })?;
@@ -875,28 +1032,29 @@ impl Store {
             0 => Err(TimeSeriesError::NotFound),
             1 => TimeSeriesKey::from_metadata(&matches.pop().unwrap()),
             _ => {
-                // More than one candidate satisfies the family. This is usually a
-                // Deterministic + DeterministicSingleTimeSeries sharing an identity,
-                // but with `resolution` unset it can also be several forecasts at
-                // different resolutions, so report the actual candidates rather than
+                // More than one candidate matches: with `resolution`/`interval`
+                // unset this can be several forecasts at different resolutions or
+                // intervals, so report the actual candidates rather than
                 // asserting a single shape.
+                let describe = |p: Option<Period>| match p {
+                    Some(p) => p.to_iso8601(),
+                    None => "-".to_string(),
+                };
                 let mut candidates: Vec<String> = matches
                     .iter()
-                    .map(|m| match m.resolution {
-                        Some(r) => {
-                            format!(
-                                "{} at {}ms",
-                                m.time_series_type.as_str(),
-                                r.num_milliseconds()
-                            )
-                        }
-                        None => m.time_series_type.as_str().to_string(),
+                    .map(|m| {
+                        format!(
+                            "{} (resolution={}, interval={})",
+                            m.time_series_type.as_str(),
+                            describe(m.resolution),
+                            describe(m.interval),
+                        )
                     })
                     .collect();
                 candidates.sort();
                 Err(TimeSeriesError::InvalidParameter(format!(
-                    "ambiguous AbstractDeterministic request for '{name}': {} candidates match \
-                     ({}); request a concrete type and/or resolution",
+                    "ambiguous forecast request for '{name}': {} candidates match \
+                     ({}); narrow it with a concrete type, resolution, and/or interval",
                     candidates.len(),
                     candidates.join(", "),
                 )))
@@ -948,14 +1106,15 @@ impl Store {
     /// number of series transformed.
     pub fn transform_single_time_series(
         &mut self,
-        horizon: Duration,
-        interval: Duration,
+        horizon: impl Into<Period>,
+        interval: impl Into<Period>,
         owner_category: Option<OwnerCategory>,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
     ) -> Result<usize> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        let (horizon, interval) = (horizon.into(), interval.into());
         use crate::metadata::MetadataFilter;
         let mut sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
@@ -973,17 +1132,20 @@ impl Store {
             sources.retain(|m| m.resolution == Some(res));
         }
 
-        // Series that already have a DeterministicSingleTimeSeries view are
-        // skipped so the transform is idempotent (e.g. re-deriving one series
-        // when others were transformed earlier, as during a component copy).
-        // The dedup key is the full owner identity (owner_id, owner_category)
-        // plus name/resolution/features.
+        // Series that already have a DeterministicSingleTimeSeries view *at this
+        // interval* are skipped so the transform is idempotent (e.g. re-deriving
+        // one series when others were transformed earlier, as during a component
+        // copy). The dedup key is the full identity: owner_id/owner_category plus
+        // name/resolution/interval/features. Interval is part of the identity, so
+        // re-deriving the same series at a different interval is a distinct view.
+        let interval_iso = interval.to_iso8601();
         #[allow(clippy::type_complexity)]
         let existing_dst: std::collections::HashSet<(
             i64,
             OwnerCategory,
             String,
-            Option<i64>,
+            Option<String>,
+            Option<String>,
             [u8; 32],
         )> = self
             .metadata
@@ -997,7 +1159,37 @@ impl Store {
                     m.owner_id,
                     m.owner_category,
                     m.name.clone(),
-                    m.resolution.map(|r| r.num_milliseconds()),
+                    m.resolution.map(|r| r.to_iso8601()),
+                    m.interval.map(|i| i.to_iso8601()),
+                    crate::hash::features_hash(&m.features),
+                )
+            })
+            .collect();
+
+        // Families that already hold a real `Deterministic` forecast. A DST is a
+        // synthetic view and is mutually exclusive with a `Deterministic` for one
+        // family (owner, name, resolution, features, ignoring interval), so
+        // deriving a DST over such a family is rejected.
+        #[allow(clippy::type_complexity)]
+        let existing_det: std::collections::HashSet<(
+            i64,
+            OwnerCategory,
+            String,
+            Option<String>,
+            [u8; 32],
+        )> = self
+            .metadata
+            .list(&MetadataFilter {
+                time_series_type: Some(TimeSeriesType::Deterministic),
+                ..Default::default()
+            })?
+            .iter()
+            .map(|m| {
+                (
+                    m.owner_id,
+                    m.owner_category,
+                    m.name.clone(),
+                    m.resolution.map(|r| r.to_iso8601()),
                     crate::hash::features_hash(&m.features),
                 )
             })
@@ -1007,12 +1199,31 @@ impl Store {
         // aborts the whole transform before any write.
         let mut new_metas = Vec::with_capacity(sources.len());
         for src in &sources {
+            let src_features_hash = crate::hash::features_hash(&src.features);
+            let src_resolution_iso = src.resolution.map(|r| r.to_iso8601());
+            // Reject deriving a DST over a family that already holds a real
+            // Deterministic forecast (interval-independent).
+            let det_family = (
+                src.owner_id,
+                src.owner_category,
+                src.name.clone(),
+                src_resolution_iso.clone(),
+                src_features_hash,
+            );
+            if existing_det.contains(&det_family) {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot derive DeterministicSingleTimeSeries for '{}': a Deterministic \
+                     forecast of the same series already exists; they are mutually exclusive",
+                    src.name
+                )));
+            }
             let src_key = (
                 src.owner_id,
                 src.owner_category,
                 src.name.clone(),
-                src.resolution.map(|r| r.num_milliseconds()),
-                crate::hash::features_hash(&src.features),
+                src_resolution_iso,
+                Some(interval_iso.clone()),
+                src_features_hash,
             );
             if existing_dst.contains(&src_key) {
                 continue;
@@ -1021,20 +1232,13 @@ impl Store {
             let total_len = src.length.ok_or_else(|| {
                 TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
             })?;
-            let res_ms = resolution.num_milliseconds();
-            let interval_ms = interval.num_milliseconds();
-            if res_ms <= 0 {
-                return Err(TimeSeriesError::InvalidParameter(
-                    "resolution must be positive".into(),
-                ));
-            }
-            if interval_ms <= 0 || interval_ms % res_ms != 0 {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "interval ({interval_ms} ms) must be a positive multiple of \
-                     resolution ({res_ms} ms)"
-                )));
-            }
-            let interval_steps = (interval_ms / res_ms) as usize;
+            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "interval ({}) must be a positive integer multiple of resolution ({})",
+                    interval.to_iso8601(),
+                    resolution.to_iso8601()
+                ))
+            })?;
             let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
             if h == 0 || h > total_len {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -1072,10 +1276,7 @@ impl Store {
         }
     }
 
-    pub fn get_resolutions(
-        &self,
-        time_series_type: Option<TimeSeriesType>,
-    ) -> Result<Vec<Duration>> {
+    pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
@@ -1087,13 +1288,12 @@ impl Store {
     /// If none match, returns [`ForecastParameters::default()`]. When multiple
     /// match, returns the first one found (v0 stores a single coherent forecast
     /// configuration; callers that need per-type parameters should use
-    /// [`Self::list_time_series`] directly). `resolution` is pushed into the
-    /// catalog query; `interval` (not a catalog filter column) is matched on the
-    /// returned rows.
+    /// [`Self::list_time_series`] directly). Both `resolution` and `interval`
+    /// are pushed into the catalog query.
     pub fn get_forecast_parameters(
         &self,
-        resolution: Option<Duration>,
-        interval: Option<Duration>,
+        resolution: Option<Period>,
+        interval: Option<Period>,
     ) -> Result<ForecastParameters> {
         use crate::metadata::MetadataFilter;
         // Check each forecast type in priority order.
@@ -1106,12 +1306,10 @@ impl Store {
             let rows = self.metadata.list(&MetadataFilter {
                 time_series_type: Some(ts_type),
                 resolution,
+                interval,
                 ..Default::default()
             })?;
-            for row in rows {
-                if interval.is_some() && row.interval != interval {
-                    continue;
-                }
+            if let Some(row) = rows.into_iter().next() {
                 return Ok(ForecastParameters {
                     horizon: row.horizon,
                     interval: row.interval,
@@ -1206,7 +1404,7 @@ impl Store {
         &self,
         category: OwnerCategory,
         time_series_type: Option<TimeSeriesType>,
-        resolution: Option<Duration>,
+        resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         self.metadata
             .list_owner_ids(category, time_series_type, resolution)
@@ -1241,6 +1439,309 @@ impl Store {
     }
 }
 
+/// A buffered bulk-add session returned by [`Store::bulk_add`]. Requests are
+/// accumulated in memory via [`Self::push`] / [`Self::add`] and written together
+/// by [`Self::commit`], which packs each shape group into batch-sized datasets
+/// so writes fill whole chunks. Dropping the guard without calling `commit`
+/// discards every buffered request and writes nothing.
+pub struct BulkAdd<'a> {
+    store: &'a mut Store,
+    items: Vec<AddRequest>,
+    committed: bool,
+}
+
+impl BulkAdd<'_> {
+    /// Buffer one prebuilt request. No validation or I/O happens here; both are
+    /// deferred to [`Self::commit`], which is all-or-nothing.
+    pub fn push(&mut self, request: AddRequest) -> &mut Self {
+        self.items.push(request);
+        self
+    }
+
+    /// Buffer one request from its parts (convenience over [`Self::push`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add(
+        &mut self,
+        owner_id: i64,
+        owner_type: &str,
+        owner_category: OwnerCategory,
+        data: TimeSeriesData,
+        features: Features,
+        units: Option<String>,
+    ) -> &mut Self {
+        self.push(AddRequest {
+            owner_id,
+            owner_type: owner_type.to_string(),
+            owner_category,
+            data,
+            features,
+            units,
+            logical_type: None,
+        })
+    }
+
+    /// The number of requests buffered so far.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Whether no requests have been buffered.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Flush the buffer: write all arrays as batch-sized blocks and insert every
+    /// association in one transaction, returning the keys in push order. On any
+    /// error nothing is committed and staged arrays are rolled back.
+    pub fn commit(mut self) -> Result<Vec<TimeSeriesKey>> {
+        self.committed = true;
+        let items = std::mem::take(&mut self.items);
+        self.store.flush_bulk_add(items)
+    }
+}
+
+impl Drop for BulkAdd<'_> {
+    fn drop(&mut self) {
+        if !self.committed && !self.items.is_empty() {
+            tracing::debug!(
+                discarded = self.items.len(),
+                "BulkAdd dropped without commit; buffered requests discarded"
+            );
+        }
+    }
+}
+
+/// The persistence inputs derived from one [`AddRequest`]: the array content
+/// hash, the resolution that keys the packed pool, whether the array is packed
+/// (vs. standalone), the metadata row, and the resulting key. Shared by the
+/// per-item write path ([`Store::add_time_series_bulk`]) and the buffered
+/// block-write path ([`Store::bulk_add`]).
+struct RequestParts {
+    hash: [u8; 32],
+    resolution: Period,
+    packed: bool,
+    meta: TimeSeriesMetadata,
+    key: TimeSeriesKey,
+}
+
+/// Derive the [`RequestParts`] for one request, validating where required
+/// (`NonSequentialTimeSeries` timestamps). `SingleTimeSeries` is packed; every
+/// other type is stored standalone.
+fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
+    let (hash, resolution, packed, meta, key) = match &item.data {
+        TimeSeriesData::SingleTimeSeries(single) => {
+            let hash = array_hash(&single.data);
+            (
+                hash,
+                single.resolution,
+                true,
+                TimeSeriesMetadata {
+                    owner_id: item.owner_id,
+                    owner_type: item.owner_type.clone(),
+                    owner_category: item.owner_category,
+                    time_series_type: TimeSeriesType::SingleTimeSeries,
+                    name: single.name.clone(),
+                    data_hash: hash,
+                    initial_timestamp: Some(single.initial_timestamp),
+                    resolution: Some(single.resolution),
+                    length: Some(single.length),
+                    horizon: None,
+                    interval: None,
+                    count: None,
+                    timestamps: None,
+                    features: item.features.clone(),
+                    units: item.units.clone(),
+                    percentiles: None,
+                    dtype: single.data.dtype,
+                    element_shape: single.data.element_shape().to_vec(),
+                    logical_type: item.logical_type.clone(),
+                },
+                TimeSeriesKey::Single(SingleTimeSeriesKey::new(
+                    item.owner_id,
+                    item.owner_category,
+                    single.name.clone(),
+                    single.resolution,
+                    item.features.clone(),
+                    single.initial_timestamp,
+                    single.length,
+                )),
+            )
+        }
+        TimeSeriesData::NonSequentialTimeSeries(non_sequential) => {
+            validate_non_sequential(non_sequential)?;
+            let hash = array_hash(&non_sequential.data);
+            (
+                hash,
+                // Non-sequential series are stored standalone, so the
+                // resolution (which keys the packed pool) is unused.
+                Period::Months(0),
+                false,
+                TimeSeriesMetadata {
+                    owner_id: item.owner_id,
+                    owner_type: item.owner_type.clone(),
+                    owner_category: item.owner_category,
+                    time_series_type: TimeSeriesType::NonSequentialTimeSeries,
+                    name: non_sequential.name.clone(),
+                    data_hash: hash,
+                    initial_timestamp: None,
+                    resolution: None,
+                    length: Some(non_sequential.length),
+                    horizon: None,
+                    interval: None,
+                    count: None,
+                    timestamps: Some(non_sequential.timestamps.clone()),
+                    features: item.features.clone(),
+                    units: item.units.clone(),
+                    percentiles: None,
+                    dtype: non_sequential.data.dtype,
+                    element_shape: non_sequential.data.element_shape().to_vec(),
+                    logical_type: item.logical_type.clone(),
+                },
+                TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
+                    item.owner_id,
+                    item.owner_category,
+                    non_sequential.name.clone(),
+                    item.features.clone(),
+                    non_sequential.length,
+                )),
+            )
+        }
+        // Dense forecast types are stored as standalone arrays in their
+        // native shape. `DeterministicSingleTimeSeries` is not added
+        // directly; it is derived from a stored `SingleTimeSeries` via
+        // [`Store::transform_single_time_series`].
+        TimeSeriesData::Deterministic(det) => (
+            array_hash(&det.data),
+            det.resolution,
+            false,
+            forecast_metadata(
+                item,
+                TimeSeriesType::Deterministic,
+                &det.name,
+                det.initial_timestamp,
+                det.resolution,
+                det.horizon,
+                det.interval,
+                det.count,
+                &det.data,
+                None,
+            ),
+            forecast_key(
+                item,
+                TimeSeriesType::Deterministic,
+                &det.name,
+                det.resolution,
+                det.initial_timestamp,
+                det.horizon,
+                det.interval,
+                det.count,
+            ),
+        ),
+        TimeSeriesData::Probabilistic(prob) => (
+            array_hash(&prob.data),
+            prob.resolution,
+            false,
+            forecast_metadata(
+                item,
+                TimeSeriesType::Probabilistic,
+                &prob.name,
+                prob.initial_timestamp,
+                prob.resolution,
+                prob.horizon,
+                prob.interval,
+                prob.count,
+                &prob.data,
+                Some(prob.percentiles.clone()),
+            ),
+            forecast_key(
+                item,
+                TimeSeriesType::Probabilistic,
+                &prob.name,
+                prob.resolution,
+                prob.initial_timestamp,
+                prob.horizon,
+                prob.interval,
+                prob.count,
+            ),
+        ),
+        TimeSeriesData::Scenarios(scen) => (
+            array_hash(&scen.data),
+            scen.resolution,
+            false,
+            forecast_metadata(
+                item,
+                TimeSeriesType::Scenarios,
+                &scen.name,
+                scen.initial_timestamp,
+                scen.resolution,
+                scen.horizon,
+                scen.interval,
+                scen.count,
+                &scen.data,
+                None,
+            ),
+            forecast_key(
+                item,
+                TimeSeriesType::Scenarios,
+                &scen.name,
+                scen.resolution,
+                scen.initial_timestamp,
+                scen.horizon,
+                scen.interval,
+                scen.count,
+            ),
+        ),
+    };
+    Ok(RequestParts {
+        hash,
+        resolution,
+        packed,
+        meta,
+        key,
+    })
+}
+
+/// The value array backing a request, regardless of time-series type.
+fn request_array(item: &AddRequest) -> &TypedArray {
+    match &item.data {
+        TimeSeriesData::SingleTimeSeries(single) => &single.data,
+        TimeSeriesData::NonSequentialTimeSeries(non_sequential) => &non_sequential.data,
+        TimeSeriesData::Deterministic(det) => &det.data,
+        TimeSeriesData::Probabilistic(prob) => &prob.data,
+        TimeSeriesData::Scenarios(scen) => &scen.data,
+    }
+}
+
+/// Insert one association, enforcing the Deterministic/DeterministicSingleTimeSeries
+/// mutual exclusion: a DST is a synthetic view of a SingleTimeSeries, so a family
+/// may hold one or the other but never both. A DST is only ever created by
+/// [`Store::transform_single_time_series`], so the only overlap reachable here is
+/// adding a `Deterministic` when a DST already exists.
+fn insert_association(tx: &rusqlite::Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<()> {
+    let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
+        crate::metadata::forecast_family_conflict(
+            tx,
+            meta.owner_id,
+            meta.owner_category,
+            &meta.name,
+            meta.resolution,
+            &crate::hash::features_hash(&meta.features),
+            TimeSeriesType::DeterministicSingleTimeSeries,
+        )
+    } else {
+        Ok(false)
+    };
+    match conflict {
+        Ok(true) => Err(TimeSeriesError::InvalidParameter(format!(
+            "cannot add Deterministic '{}': a DeterministicSingleTimeSeries view of the \
+             same series already exists; they are mutually exclusive",
+            meta.name
+        ))),
+        Ok(false) => MetadataStore::insert(tx, meta).map(|_| ()),
+        Err(e) => Err(e),
+    }
+}
+
 fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {
     if series.timestamps.len() != series.data.length() || series.length != series.data.length() {
         return Err(TimeSeriesError::InvalidParameter(
@@ -1265,9 +1766,9 @@ fn forecast_metadata(
     time_series_type: TimeSeriesType,
     name: &str,
     initial_timestamp: chrono::DateTime<chrono::Utc>,
-    resolution: Duration,
-    horizon: Duration,
-    interval: Duration,
+    resolution: Period,
+    horizon: Period,
+    interval: Period,
     count: usize,
     data: &TypedArray,
     percentiles: Option<Vec<f64>>,
@@ -1302,10 +1803,10 @@ fn forecast_key(
     item: &AddRequest,
     time_series_type: TimeSeriesType,
     name: &str,
-    resolution: Duration,
+    resolution: Period,
     initial_timestamp: chrono::DateTime<chrono::Utc>,
-    horizon: Duration,
-    interval: Duration,
+    horizon: Period,
+    interval: Period,
     count: usize,
 ) -> TimeSeriesKey {
     TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
@@ -1387,45 +1888,61 @@ pub(crate) fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usi
 /// window (`initial_timestamp + k·interval`), `end` is exclusive. Returns
 /// `(w0, w1, first_window_initial_timestamp)`.
 ///
-/// On success, `w0 <= w1 <= count`. Empty selection returns `(0, 0, initial)`.
+/// On success, `w0 <= w1 <= count`. A `start` aligned to the grid but at or
+/// beyond `count` (i.e. past the last stored window) is rejected with
+/// [`TimeSeriesError::InvalidParameter`] rather than returning an empty
+/// selection. A zero-width range (`end == start`) over an in-range `start`
+/// legitimately selects nothing and returns `(0, 0, start)`.
 fn resolve_windows(
     initial: chrono::DateTime<chrono::Utc>,
-    _resolution: Duration,
-    _horizon: Duration,
-    interval: Duration,
+    _resolution: Period,
+    _horizon: Period,
+    interval: Period,
     count: usize,
     time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
 ) -> Result<(usize, usize, chrono::DateTime<chrono::Utc>)> {
+    let window_start = |k: usize| -> Result<chrono::DateTime<chrono::Utc>> {
+        interval
+            .add_to(initial, k as i64)
+            .ok_or_else(|| TimeSeriesError::IntegrityError("window timestamp overflow".into()))
+    };
     match time_range {
         None => Ok((0, count, initial)),
         Some((start, end)) => {
             if end < start {
                 return Err(TimeSeriesError::InvalidParameter("end < start".into()));
             }
-            let interval_ms = interval.num_milliseconds();
-            if interval_ms <= 0 {
+            if !interval.is_positive() {
                 return Err(TimeSeriesError::InvalidParameter(
                     "forecast interval must be positive".into(),
                 ));
             }
-            // Check alignment: (start - initial) must be a non-negative integer
-            // multiple of interval.
-            let offset_ms = (start - initial).num_milliseconds();
-            if offset_ms < 0 || offset_ms % interval_ms != 0 {
-                return Err(TimeSeriesError::InvalidParameter(
+            // `start` must be a window boundary: `initial + k·interval`
+            // (calendar-aware for monthly intervals).
+            let start_k = interval.steps_between(initial, start).map_err(|_| {
+                TimeSeriesError::InvalidParameter(
                     "forecast start_time must align to a window boundary \
                      (initial_timestamp + k·interval)"
                         .into(),
-                ));
+                )
+            })?;
+
+            // A start aligned to the grid but at or beyond the window count
+            // refers to windows that do not exist; reject it rather than
+            // silently returning an empty selection.
+            if start_k >= count {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "forecast start_time is past the last window (resolves to window \
+                     index {start_k}, but only {count} window(s) are stored)"
+                )));
             }
-            let start_k = (offset_ms / interval_ms) as usize;
 
             // Collect all k in [0, count) whose window start is in [start, end).
             let mut w0 = count; // sentinel: no window selected yet
             let mut w1 = 0usize;
             for k in 0..count {
-                let window_start = initial + Duration::milliseconds(k as i64 * interval_ms);
-                if window_start >= start && window_start < end {
+                let ws = window_start(k)?;
+                if ws >= start && ws < end {
                     if w0 == count {
                         w0 = k;
                     }
@@ -1433,15 +1950,12 @@ fn resolve_windows(
                 }
             }
 
-            // Empty selection.
+            // Empty selection: report the initial timestamp at the requested start.
             if w0 == count {
-                // Return initial_timestamp aligned to start (the requested start).
-                let first_ts = initial + Duration::milliseconds(start_k as i64 * interval_ms);
-                return Ok((0, 0, first_ts));
+                return Ok((0, 0, window_start(start_k)?));
             }
 
-            let first_ts = initial + Duration::milliseconds(w0 as i64 * interval_ms);
-            Ok((w0, w1, first_ts))
+            Ok((w0, w1, window_start(w0)?))
         }
     }
 }
@@ -1460,7 +1974,7 @@ fn required_initial(
 fn required_resolution(
     meta: &crate::types::metadata::TimeSeriesMetadata,
     label: &str,
-) -> Result<Duration> {
+) -> Result<Period> {
     meta.resolution
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing resolution")))
 }
@@ -1468,7 +1982,7 @@ fn required_resolution(
 fn required_horizon(
     meta: &crate::types::metadata::TimeSeriesMetadata,
     label: &str,
-) -> Result<Duration> {
+) -> Result<Period> {
     meta.horizon
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing horizon")))
 }
@@ -1476,7 +1990,7 @@ fn required_horizon(
 fn required_interval(
     meta: &crate::types::metadata::TimeSeriesMetadata,
     label: &str,
-) -> Result<Duration> {
+) -> Result<Period> {
     meta.interval
         .ok_or_else(|| TimeSeriesError::IntegrityError(format!("{label} missing interval")))
 }
@@ -1504,4 +2018,74 @@ fn validate_forecast_shape(arr: &TypedArray, expected_prefix: &[usize], label: &
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_windows_tests {
+    use super::*;
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+
+    // A forecast grid of 4 windows spaced 12h apart at hours 0, 12, 24, 36.
+    fn t(h: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(h)
+    }
+
+    fn rw(start_h: i64, end_h: i64) -> Result<(usize, usize, DateTime<Utc>)> {
+        let interval = Period::Fixed(Duration::hours(12));
+        let res = Period::Fixed(Duration::hours(1));
+        let horizon = Period::Fixed(Duration::hours(6));
+        resolve_windows(
+            t(0),
+            res,
+            horizon,
+            interval,
+            4,
+            Some((t(start_h), t(end_h))),
+        )
+    }
+
+    #[test]
+    fn full_and_partial_selection() {
+        let interval = Period::Fixed(Duration::hours(12));
+        let res = Period::Fixed(Duration::hours(1));
+        let horizon = Period::Fixed(Duration::hours(6));
+        // `None` selects every window.
+        assert_eq!(
+            resolve_windows(t(0), res, horizon, interval, 4, None).unwrap(),
+            (0, 4, t(0))
+        );
+        // Middle range [12h, 36h) -> windows 1 and 2.
+        assert_eq!(rw(12, 36).unwrap(), (1, 3, t(12)));
+        // The exact last window (index 3) is in range.
+        assert_eq!(rw(36, 48).unwrap(), (3, 4, t(36)));
+    }
+
+    #[test]
+    fn zero_width_in_range_is_empty() {
+        // An in-range start with `end == start` legitimately selects nothing.
+        assert_eq!(rw(12, 12).unwrap(), (0, 0, t(12)));
+    }
+
+    #[test]
+    fn start_past_last_window_errors() {
+        // Hour 48 resolves to window index 4, but only 4 windows (0..=3) exist.
+        assert!(matches!(
+            rw(48, 60),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+    }
+
+    #[test]
+    fn misaligned_or_reversed_errors() {
+        // 1h off the 12h window grid.
+        assert!(matches!(
+            rw(1, 24),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+        // end < start.
+        assert!(matches!(
+            rw(24, 12),
+            Err(TimeSeriesError::InvalidParameter(_))
+        ));
+    }
 }

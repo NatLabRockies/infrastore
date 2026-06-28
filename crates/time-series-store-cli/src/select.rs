@@ -44,7 +44,7 @@ impl SelectorArgs {
             filter = filter.time_series_type(parse::parse_ts_type(t)?);
         }
         if let Some(r) = &self.resolution {
-            filter = filter.resolution(parse::parse_duration(r)?);
+            filter = filter.resolution(parse::parse_period(r)?);
         }
         if !self.feature.is_empty() {
             let mut features = Features::new();
@@ -82,7 +82,7 @@ impl SelectorArgs {
                         m.time_series_type.as_str(),
                         m.name,
                         m.resolution
-                            .map(parse::format_duration)
+                            .map(parse::format_period)
                             .unwrap_or_else(|| "-".to_string()),
                     ));
                 }
@@ -100,6 +100,7 @@ pub fn key_of(meta: &TimeSeriesMetadata) -> KeyIdentity {
         time_series_type: meta.time_series_type,
         name: meta.name.clone(),
         resolution: meta.resolution,
+        interval: meta.interval,
         features: meta.features.clone(),
     }
 }
