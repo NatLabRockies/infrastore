@@ -249,6 +249,15 @@ impl MetadataStore {
     /// Delete an association by primary-key tuple. Returns the number of rows
     /// deleted (0 if no match) and the data_hashes of the removed rows so the
     /// caller can decide whether to drop the underlying array.
+    ///
+    /// A NULL `interval` in the query matches any interval (rather than only
+    /// rows whose stored interval is NULL). Attribute-based removal does not
+    /// thread an interval — a forecast's interval is derived from its data, not
+    /// supplied by the caller — so a forecast (which always stores a non-null
+    /// interval) would otherwise never match. `time_series_type`, `name`,
+    /// `resolution`, and `features_hash` still pin the row down; to target a
+    /// single interval among otherwise-identical rows, remove by full key
+    /// identity (which carries the exact interval).
     pub fn delete_by_key(tx: &Transaction<'_>, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
@@ -257,7 +266,7 @@ impl MetadataStore {
             "SELECT id, data_hash FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
                AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
-               AND ((?6 IS NULL AND interval IS NULL) OR interval = ?6)
+               AND (?6 IS NULL OR interval = ?6)
                AND features_hash = ?7",
         )?;
         let rows: Vec<(i64, Vec<u8>)> = stmt
