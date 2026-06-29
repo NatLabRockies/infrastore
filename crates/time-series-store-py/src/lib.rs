@@ -1088,6 +1088,70 @@ impl PyStore {
         Ok(out)
     }
 
+    /// Group time series by their underlying stored array. Returns one dict per
+    /// unique content hash, each with `data_hash` (hex str) and `keys` (the list
+    /// of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict
+    /// share one deduplicated array. Accepts the same filters as
+    /// `list_time_series`. Wraps the core `list_keys_with_hash`.
+    #[pyo3(signature = (
+        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, resolution=None, features=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn list_array_groups<'py>(
+        &self,
+        py: Python<'py>,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+        owner_type: Option<String>,
+        time_series_type: Option<PyTimeSeriesType>,
+        name: Option<String>,
+        resolution: Option<Bound<'_, PyAny>>,
+        features: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let mut filter = core_lib::ListFilter::new();
+        if let Some(id) = owner_id {
+            filter = filter.owner_id(id);
+        }
+        if let Some(c) = owner_category {
+            filter = filter.owner_category(c.into());
+        }
+        if let Some(t) = owner_type {
+            filter = filter.owner_type(t);
+        }
+        if let Some(t) = time_series_type {
+            filter = filter.time_series_type(t.into());
+        }
+        if let Some(n) = name {
+            filter = filter.name(n);
+        }
+        if let Some(r) = resolution {
+            filter = filter.resolution(pyany_to_period(&r)?);
+        }
+        if let Some(f) = features {
+            filter = filter.features(features_from_dict(Some(f))?);
+        }
+        let rows = self.inner.list_keys_with_hash(filter).map_err(map_err)?;
+        let mut groups: BTreeMap<[u8; 32], Vec<Py<PyTimeSeriesKey>>> = BTreeMap::new();
+        for (key, hash) in rows {
+            let pk = Py::new(
+                py,
+                PyTimeSeriesKey {
+                    inner: key.identity().clone(),
+                },
+            )?;
+            groups.entry(hash).or_default().push(pk);
+        }
+        let mut out = Vec::with_capacity(groups.len());
+        for (hash, keys) in groups {
+            let d = PyDict::new(py);
+            d.set_item("data_hash", core_lib::hash::hash_hex(&hash))?;
+            d.set_item("keys", keys)?;
+            out.push(d);
+        }
+        Ok(out)
+    }
+
     fn get_time_series_keys(
         &self,
         owner_id: i64,
