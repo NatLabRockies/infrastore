@@ -106,12 +106,12 @@ for m in store.list_time_series(
     owner_category=OwnerCategory.Component,
     time_series_type=TimeSeriesType.SingleTimeSeries,
 ):
-    print(m["name"], m["resolution_seconds"], m["units"], m["features"])
+    print(m["name"], m["resolution"], m["units"], m["features"])
 
 # The owner is the (owner_id, owner_category) pair.
 keys = store.get_time_series_keys(42, OwnerCategory.Component)
 exists = store.has_time_series(key)
-resolutions = store.get_resolutions()          # list[timedelta]
+resolutions = store.get_resolutions()          # list[str] (ISO 8601 durations)
 counts = store.get_time_series_counts()        # dict
 ```
 

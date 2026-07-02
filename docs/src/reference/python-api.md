@@ -108,7 +108,8 @@ def get_time_series_keys(
     owner_category: OwnerCategory,
 ) -> list[TimeSeriesKey]: ...
 def has_time_series(self, key: TimeSeriesKey) -> bool: ...
-def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[timedelta]: ...
+def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[str]: ...
+# resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
 def get_time_series_counts(self) -> dict: ...
 def get_forecast_parameters(self) -> dict: ...
 def get_compression(self) -> dict: ...
@@ -125,16 +126,16 @@ def flush(self) -> None: ...
   `SingleTimeSeries` and returns the count transformed. **`get_time_series`** returns whichever
   matches the stored type.
 - **`list_time_series`** returns a list of dicts, each with the keys: `owner_id`, `owner_type`,
-  `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`,
-  `resolution_seconds`, `timestamps`, `features`, `units`. `timestamps` is a list of RFC 3339
-  strings for non-sequential series and `None` otherwise. The `features` filter is a subset match —
-  rows must contain at least the given pairs.
+  `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`, `resolution`
+  (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`, `features`, `units`.
+  `timestamps` is a list of RFC 3339 strings for non-sequential series and `None` otherwise. The
+  `features` filter is a subset match — rows must contain at least the given pairs.
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
 - **`get_forecast_parameters`** returns
-  `{"horizon": timedelta, "interval": timedelta, "count": int,
-  "resolution": timedelta}`. Every
-  value is `None` when the store holds no forecasts.
+  `{"horizon": str, "interval": str, "count": int, "resolution": str}`, where `horizon`, `interval`,
+  and `resolution` are ISO 8601 duration strings (e.g. `"PT1H"`). Every value is `None` when the
+  store holds no forecasts.
 - **`get_compression`** returns `{"compression": "deflate" | "none", "level": int, "shuffle": bool}`
   — the policy the store was created with (restored from the file on open; `"none"` for in-memory).
 - **`compact`** returns `{"slots_reclaimed": int, "datasets_dropped": int}`.
@@ -152,11 +153,13 @@ SingleTimeSeries(
 )
 ```
 
-Read-only properties: `initial_timestamp -> datetime`, `resolution -> timedelta`, `length -> int`,
-`data -> numpy.ndarray`, `name -> str`. `name` is a required association attribute (the same array
-may be stored under different names). It is read off the object by `add_time_series` and populated
-on `get_time_series`. The array's dtype (one of `float64`, `float32`, `int64`, `int32`, `uint64`,
-`bool`) and per-step element shape are preserved through a round-trip.
+Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 8601 duration, e.g.
+`PT1H`), `length -> int`, `data -> numpy.ndarray`, `name -> str`. The constructor accepts either a
+`timedelta` or an ISO 8601 duration string for `resolution`; the getter always returns the ISO
+string. `name` is a required association attribute (the same array may be stored under different
+names). It is read off the object by `add_time_series` and populated on `get_time_series`. The
+array's dtype (one of `float64`, `float32`, `int64`, `int32`, `uint64`, `bool`) and per-step element
+shape are preserved through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
@@ -182,7 +185,7 @@ key.owner_id          -> int
 key.owner_category    -> OwnerCategory
 key.time_series_type  -> TimeSeriesType
 key.name              -> str
-key.resolution        -> timedelta | None
+key.resolution        -> str | None   # ISO 8601 duration, e.g. "PT1H"
 key.features          -> dict[str, int | float | bool | str]
 ```
 
@@ -242,9 +245,9 @@ Read-only properties:
 
 ```python
 forecast.initial_timestamp -> datetime
-forecast.resolution        -> timedelta
-forecast.horizon           -> timedelta
-forecast.interval          -> timedelta
+forecast.resolution        -> str   # ISO 8601 duration, e.g. "PT1H"
+forecast.horizon           -> str   # ISO 8601 duration
+forecast.interval          -> str   # ISO 8601 duration
 forecast.count             -> int
 forecast.data              -> numpy.ndarray
 forecast.name              -> str

@@ -302,17 +302,20 @@ int32_t ts_store_counts(const struct TsStore *handle,
  * with `filter_resolution` and/or `filter_interval` (empty/null = no filter).
  *
  * `out_present` is set to `true` when a matching forecast exists, `false`
- * otherwise. Each of `out_horizon`, `out_interval`, `out_count`,
- * `out_resolution`, and `out_initial_ms` (the initial timestamp as unix ms)
- * receives the corresponding value, or `-1` when that field is absent
- * (durations, resolution, and counts are always non-negative when present, so
- * `-1` is an unambiguous "unset" sentinel).
+ * otherwise. `out_horizon`, `out_interval`, and `out_resolution` each receive an
+ * owned ISO-8601 duration C string (e.g. `PT1H`), or null when that field is
+ * absent; free each with `ts_string_free`. `out_count` and `out_initial_ms` (the
+ * initial timestamp as unix ms) receive their value, or `-1` when absent (counts
+ * and timestamps are non-negative when present, so `-1` is an unambiguous "unset"
+ * sentinel).
  *
  * # Safety
  *
  * `handle` must be a live store handle; the filter args are plain scalars.
- * `out_present` must be valid for writing one `bool`; every other output pointer
- * must be valid for writing one `i64`.
+ * `out_present` must be valid for writing one `bool`; `out_horizon`,
+ * `out_interval`, and `out_resolution` must each be valid for writing one
+ * `char *`; `out_count` and `out_initial_ms` must each be valid for writing one
+ * `i64`.
  */
 int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
                                          const char *filter_resolution,
@@ -342,8 +345,9 @@ int32_t ts_store_check_static_consistency(const struct TsStore *handle,
                                           int64_t *out_length);
 
 /**
- * List the distinct resolutions present in the store as a JSON array of integer
- * milliseconds (ascending). When `has_time_series_type` is true the listing is
+ * List the distinct resolutions present in the store as a JSON array of
+ * ISO-8601 duration strings (e.g. `["PT1H","P1M"]`, ascending). When
+ * `has_time_series_type` is true the listing is
  * restricted to that `TS_TYPE_*` code; otherwise all types are considered.
  *
  * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
@@ -1259,7 +1263,8 @@ void ts_keys_buffer_free(struct TsKey **ptr, uint64_t len);
 
 /**
  * Read the attributes of a key handle: its time series type code (see
- * `ts_type_from_int`), resolution in milliseconds (`0` when unset), the owner
+ * `ts_type_from_int`), resolution as an owned ISO-8601 duration C string (null
+ * when unset; free with `ts_string_free`), the owner
  * id (an integer), the name string, and the features as a JSON object string
  * (`"{}"` when empty — the same shape the attribute-addressed entry points
  * accept).

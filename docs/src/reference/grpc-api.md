@@ -49,9 +49,10 @@ message TimeSeriesKey {
   int64          owner_id         = 1;
   TimeSeriesType time_series_type = 2;
   string         name             = 3;
-  int64          resolution_ms    = 4;   // 0 = unset
+  string         resolution       = 4;   // ISO-8601 duration; empty = unset
   Features       features         = 5;
   OwnerCategory  owner_category   = 6;   // part of the owner identity / key
+  string         interval         = 7;   // ISO-8601 duration; empty = unset
 }
 
 message TimeSeriesMetadata {
@@ -62,14 +63,18 @@ message TimeSeriesMetadata {
   string          name                      = 5;
   bytes           data_hash                 = 6;   // 32 bytes
   string          initial_timestamp_rfc3339 = 7;
-  int64           resolution_ms             = 8;
+  string          resolution                = 8;   // ISO-8601 duration
   uint64          length                    = 9;
-  int64           horizon_ms                = 10;
-  int64           interval_ms               = 11;
+  string          horizon                   = 10;  // ISO-8601 duration
+  string          interval                  = 11;  // ISO-8601 duration
   uint64          count                     = 12;
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
   string          units                     = 16;
+  int32           dtype                     = 17;  // Dtype code
+  repeated uint64 element_shape             = 18;  // per-step trailing dims
+  string          logical_type              = 19;  // opaque reconstruction tag
+  repeated double percentiles               = 20;  // Probabilistic only
 }
 ```
 
@@ -81,7 +86,7 @@ message ListReq {
   optional string         owner_type       = 2;
   optional TimeSeriesType time_series_type = 3;
   optional string         name             = 4;
-  optional int64          resolution_ms    = 5;
+  optional string         resolution       = 5;   // ISO-8601 duration
   Features                features         = 6;   // subset match
   optional OwnerCategory  owner_category   = 7;
 }
@@ -94,19 +99,28 @@ message GetReq {
 }
 message GetResp {
   string          initial_timestamp_rfc3339 = 1;
-  int64           resolution_ms             = 2;
+  string          resolution                = 2;   // ISO-8601 duration
   uint64          length                    = 3;
   repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
-  repeated double values                    = 5;   // row-major f64
+  reserved 5;                                      // was: repeated double values
   TimeSeriesType  time_series_type          = 6;
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
+  int32           dtype                     = 8;   // Dtype code
+  bytes           value_bytes               = 9;   // raw little-endian, row-major
+  string          logical_type              = 10;
+  // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
+  string          horizon                   = 11;  // ISO-8601 duration
+  string          interval                  = 12;  // ISO-8601 duration
+  uint64          count                     = 13;
+  repeated double percentiles               = 14;  // Probabilistic only
+  uint64          scenario_count            = 15;  // Scenarios only
 }
 
 message KeysReq  { int64 owner_id = 1; OwnerCategory owner_category = 2; }
 message KeysResp { repeated TimeSeriesKey keys = 1; }
 
 message ResolutionsReq  { optional TimeSeriesType time_series_type = 1; }
-message ResolutionsResp { repeated int64 resolution_ms = 1; }
+message ResolutionsResp { repeated string resolution = 1; }   // ISO-8601 durations
 
 message CountsReq  {}
 message CountsResp {
@@ -117,10 +131,10 @@ message CountsResp {
 
 message ForecastParamsReq  {}
 message ForecastParamsResp {
-  optional int64  horizon_ms    = 1;
-  optional int64  interval_ms   = 2;
-  optional uint64 count         = 3;
-  optional int64  resolution_ms = 4;
+  optional string horizon    = 1;   // ISO-8601 duration
+  optional string interval   = 2;   // ISO-8601 duration
+  optional uint64 count      = 3;
+  optional string resolution = 4;   // ISO-8601 duration
 }
 
 message HasReq  { TimeSeriesKey key = 1; }
@@ -132,21 +146,22 @@ message VerifyResp { repeated string errors = 1; }
 
 ## Forecasts Over gRPC
 
-The service is read-only and was not extended for forecast _values_. Forecast associations created
-through the [Rust core](./rust-api.md#forecasts) or [C ABI](./c-abi.md#forecasts) do appear in
-`ListTimeSeries` — `TimeSeriesMetadata` already carries `horizon_ms`, `interval_ms`, and `count`,
-and `GetCounts` includes them in `forecasts`. Two caveats:
+The service is read-only, but its read surface covers dense forecasts. Forecast associations created
+through the [Rust core](./rust-api.md#forecasts) or [C ABI](./c-abi.md#forecasts) appear in
+`ListTimeSeries` — `TimeSeriesMetadata` carries `horizon`, `interval` (ISO-8601 durations), `count`,
+and (for `Probabilistic`) `percentiles` — and `GetCounts` includes them in `forecasts`.
 
-- **`percentiles` is not on the wire.** `Probabilistic` percentiles are dropped in the gRPC
-  conversion, so they are not returned to clients.
-- **`GetTimeSeries` does not fetch forecast values.** It reconstructs `SingleTimeSeries` or
-  `NonSequentialTimeSeries` and returns `InvalidArgument` for forecast types. Non-sequential
-  responses set `time_series_type` and `timestamps_rfc3339`. Read forecast arrays through a local
-  store or the C ABI instead.
-- **Array typing is `f64` over the wire.** The `dtype`, `element_shape`, and `logical_type` fields
-  are not carried in the proto contract — `GetResp.values` are always `f64` (with `shape` giving the
-  dimensions), and `TimeSeriesMetadata` reconstructed from gRPC defaults to `f64` / empty element
-  shape / no `logical_type`.
+`GetTimeSeries` returns forecast values too. For a `Deterministic`, `DeterministicSingleTimeSeries`
+(synthesized into `Deterministic`), `Probabilistic`, or `Scenarios` key it fills the `GetResp` array
+fields (`value_bytes` + `dtype`), the window parameters (`horizon`, `interval`, `count`), and the
+`percentiles` (`Probabilistic`) or `scenario_count` (`Scenarios`); the client reconstructs the
+matching type. Arrays are dtype-generic on the wire — `value_bytes` is the raw little-endian buffer
+and `dtype` names the element type (`f64`/`f32`/`i64`/`i32`/`u64`/`bool`), so non-`f64` arrays
+survive the round trip without coercion. One caveat:
+
+- **`logical_type` is not carried in `GetResp`.** The opaque reconstruction tag is returned by
+  `ListTimeSeries` (on `TimeSeriesMetadata`) but left empty by `GetTimeSeries`, so a value fetched
+  directly by key comes back without it.
 
 ## Authentication
 

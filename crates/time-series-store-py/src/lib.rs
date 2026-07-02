@@ -1021,7 +1021,7 @@ impl PyStore {
 
     /// Return a list of metadata dicts matching the filter. Each dict has
     /// `owner_id`, `owner_type`, `time_series_type`, `name`, `length`,
-    /// `resolution_seconds`, `features`, `units`.
+    /// `resolution` (ISO 8601 duration string, e.g. `PT1H`), `features`, `units`.
     #[pyo3(signature = (
         owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None
@@ -1189,8 +1189,9 @@ impl PyStore {
     }
 
     /// Return the store's forecast parameters as a dict with keys `horizon`,
-    /// `interval` (timedeltas), `count` (int), and `resolution` (timedelta).
-    /// Each value is `None` when the store holds no forecasts.
+    /// `interval` (ISO 8601 duration strings, e.g. `PT1H`), `count` (int), and
+    /// `resolution` (ISO 8601 duration string). Each value is `None` when the
+    /// store holds no forecasts.
     fn get_forecast_parameters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let p = self
             .inner

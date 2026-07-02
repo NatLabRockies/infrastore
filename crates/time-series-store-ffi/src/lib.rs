@@ -994,17 +994,20 @@ pub unsafe extern "C" fn ts_store_counts(
 /// with `filter_resolution` and/or `filter_interval` (empty/null = no filter).
 ///
 /// `out_present` is set to `true` when a matching forecast exists, `false`
-/// otherwise. Each of `out_horizon`, `out_interval`, `out_count`,
-/// `out_resolution`, and `out_initial_ms` (the initial timestamp as unix ms)
-/// receives the corresponding value, or `-1` when that field is absent
-/// (durations, resolution, and counts are always non-negative when present, so
-/// `-1` is an unambiguous "unset" sentinel).
+/// otherwise. `out_horizon`, `out_interval`, and `out_resolution` each receive an
+/// owned ISO-8601 duration C string (e.g. `PT1H`), or null when that field is
+/// absent; free each with `ts_string_free`. `out_count` and `out_initial_ms` (the
+/// initial timestamp as unix ms) receive their value, or `-1` when absent (counts
+/// and timestamps are non-negative when present, so `-1` is an unambiguous "unset"
+/// sentinel).
 ///
 /// # Safety
 ///
 /// `handle` must be a live store handle; the filter args are plain scalars.
-/// `out_present` must be valid for writing one `bool`; every other output pointer
-/// must be valid for writing one `i64`.
+/// `out_present` must be valid for writing one `bool`; `out_horizon`,
+/// `out_interval`, and `out_resolution` must each be valid for writing one
+/// `char *`; `out_count` and `out_initial_ms` must each be valid for writing one
+/// `i64`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_parameters(
@@ -1111,8 +1114,9 @@ pub unsafe extern "C" fn ts_store_check_static_consistency(
     }
 }
 
-/// List the distinct resolutions present in the store as a JSON array of integer
-/// milliseconds (ascending). When `has_time_series_type` is true the listing is
+/// List the distinct resolutions present in the store as a JSON array of
+/// ISO-8601 duration strings (e.g. `["PT1H","P1M"]`, ascending). When
+/// `has_time_series_type` is true the listing is
 /// restricted to that `TS_TYPE_*` code; otherwise all types are considered.
 ///
 /// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
@@ -3783,8 +3787,9 @@ pub unsafe extern "C" fn ts_store_get_time_series_keys(
 /// Encode metadata rows as a JSON array string. Each element carries the
 /// association's owner + addressing fields and the temporal parameters the
 /// binding needs to reconstruct a `TimeSeriesMetadata`. Durations are emitted
-/// as integer milliseconds, `initial_timestamp_ms` as Unix epoch milliseconds,
-/// and `data_hash` as a byte array; absent optionals are `null`.
+/// as ISO-8601 duration strings (e.g. `PT1H`), `initial_timestamp_ms` as Unix
+/// epoch milliseconds, and `data_hash` as a byte array; absent optionals are
+/// `null`.
 // Serialize keys to a JSON array. Each object carries the identity tuple
 // (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
 // `features`) plus the per-variant descriptive snapshot. Physical storage detail
@@ -4120,7 +4125,8 @@ fn features_to_json(features: &core_lib::Features) -> String {
 }
 
 /// Read the attributes of a key handle: its time series type code (see
-/// `ts_type_from_int`), resolution in milliseconds (`0` when unset), the owner
+/// `ts_type_from_int`), resolution as an owned ISO-8601 duration C string (null
+/// when unset; free with `ts_string_free`), the owner
 /// id (an integer), the name string, and the features as a JSON object string
 /// (`"{}"` when empty — the same shape the attribute-addressed entry points
 /// accept).

@@ -628,9 +628,9 @@ pub trait StorageBackend: Send + Sync {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution_seconds: i64,
+        resolution: Period,
         packed: bool,
-    ) -> Result<()>;
+    ) -> Result<bool>;
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
