@@ -53,7 +53,7 @@ store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
 key = add_time_series!(
     store,
-    "42",
+    42,
     "Generator",
     Component,
     ts;

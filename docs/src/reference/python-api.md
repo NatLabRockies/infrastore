@@ -74,7 +74,7 @@ def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
-def transform_single_time_series(self, horizon: timedelta, interval: timedelta) -> int: ...
+def transform_single_time_series(self, horizon: timedelta | str, interval: timedelta | str) -> int: ...
 
 def get_time_series(
     self,
@@ -94,11 +94,22 @@ def clear_time_series(
 def list_time_series(
     self,
     owner_id: int | None = None,
-    owner_type: str | None = None,
     owner_category: OwnerCategory | None = None,
+    owner_type: str | None = None,
     time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
-    resolution: timedelta | None = None,
+    resolution: timedelta | str | None = None,
+    features: dict[str, int | float | bool | str] | None = None,
+) -> list[dict]: ...
+
+def list_array_groups(
+    self,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+    owner_type: str | None = None,
+    time_series_type: TimeSeriesType | None = None,
+    name: str | None = None,
+    resolution: timedelta | str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> list[dict]: ...
 
@@ -130,6 +141,10 @@ def flush(self) -> None: ...
   (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`, `features`, `units`.
   `timestamps` is a list of RFC 3339 strings for non-sequential series and `None` otherwise. The
   `features` filter is a subset match — rows must contain at least the given pairs.
+- **`list_array_groups`** accepts the same filters as `list_time_series` and groups the matching
+  series by their underlying stored array. It returns a list of dicts, each with `data_hash` (hex
+  string) and `keys` (a list of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict
+  share one deduplicated array.
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
 - **`get_forecast_parameters`** returns
@@ -186,6 +201,7 @@ key.owner_category    -> OwnerCategory
 key.time_series_type  -> TimeSeriesType
 key.name              -> str
 key.resolution        -> str | None   # ISO 8601 duration, e.g. "PT1H"
+key.interval          -> str | None   # ISO 8601 duration
 key.features          -> dict[str, int | float | bool | str]
 ```
 
@@ -214,7 +230,7 @@ one from stored `SingleTimeSeries` with [`transform_single_time_series`](#method
 
 ```python
 ts = Deterministic(initial_timestamp, resolution, horizon, interval, count, data, "load_fc")
-key = store.add_time_series("42", "Generator", OwnerCategory.Component, ts, units="MW")
+key = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units="MW")
 ```
 
 `data` is a NumPy array in the canonical shape for the forecast type, where `H` is

@@ -95,8 +95,14 @@ int32_t ts_store_has(const struct TsStore *handle, const struct TsKey *key, bool
 ## NonSequentialTimeSeries
 
 `ts_store_add_non_sequential` takes an explicit `int64_t` Unix-millisecond timestamp array alongside
-the typed data buffer. `ts_store_get_non_sequential` returns owned timestamp and raw-byte buffers
-(free with `ts_buffer_free_i64` and `ts_buffer_free_u8`) plus the dtype code.
+the typed data buffer. `ts_store_get_non_sequential` returns owned timestamp, shape, and raw-byte
+buffers (free with `ts_buffer_free_i64`, `ts_buffer_free_i64`, and `ts_buffer_free_u8`) plus the
+dtype code. The shape is the full `[length, *element_shape]` array shape (the first dim is time, so
+callers can recover an N-dimensional per-step element shape). `out_logical_type` is an optional
+opaque element-typing tag copied into a caller-allocated buffer of `logical_type_cap` bytes, with
+the full length reported in `out_logical_type_len` — probe with a NULL/zero-capacity buffer first,
+then call again with a buffer of that length (as `ts_store_get_single` documents for its shape and
+logical-type outputs).
 
 ```c
 int32_t ts_store_add_non_sequential(struct TsStore *handle,
@@ -112,7 +118,10 @@ int32_t ts_store_add_non_sequential(struct TsStore *handle,
 int32_t ts_store_get_non_sequential(const struct TsStore *handle, const struct TsKey *key,
                                     int64_t **out_timestamps, uint64_t *out_timestamps_len,
                                     int32_t *out_dtype,
-                                    uint8_t **out_data, uint64_t *out_data_byte_len);
+                                    int64_t **out_shape, uint64_t *out_shape_len,  /* ts_buffer_free_i64 */
+                                    uint8_t **out_data, uint64_t *out_data_byte_len,  /* ts_buffer_free_u8 */
+                                    char *out_logical_type, uint64_t logical_type_cap,
+                                    uint64_t *out_logical_type_len);
 ```
 
 ## Attribute-Based Access
@@ -151,6 +160,13 @@ int32_t ts_store_get_array_by_hash(const struct TsStore *handle, const uint8_t *
                                    int32_t *out_dtype,
                                    uint8_t **out_data, uint64_t *out_byte_len); /* ts_buffer_free_u8 */
 
+/* Count SingleTimeSeries (*out_sts) and DeterministicSingleTimeSeries (*out_dst)
+   associations that reference the 32-byte content hash data_hash, across all
+   owners — one catalog query to decide whether removing a SingleTimeSeries would
+   orphan a DST that shares its backing array. */
+int32_t ts_store_count_array_references(const struct TsStore *handle, const uint8_t *data_hash,
+                                        uint64_t *out_sts, uint64_t *out_dst);
+
 /* Build a key handle from attributes for any ts_type, so an attribute-addressed
    caller can reuse the key-based readers (ts_store_get_single,
    ts_store_get_non_sequential, ts_store_get_forecast_by_key). A NULL resolution
@@ -181,6 +197,13 @@ int32_t ts_key_attributes(const struct TsKey *key,
                           int64_t *out_owner_id, int32_t *out_owner_category,
                           char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
                           char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
+
+/* Read an association's name by key, resolved through the stored metadata (the
+   per-association name is not carried on the key itself). name_buf uses the
+   probe-then-fetch convention (like ts_key_attributes): call with name_buf = NULL,
+   name_cap = 0 to learn *out_name_len, then again with a name_len+1-byte buffer. */
+int32_t ts_store_get_association(const struct TsStore *handle, const struct TsKey *key,
+                                 char *name_buf, uint64_t name_cap, uint64_t *out_name_len);
 ```
 
 `ts_store_get_metadata` + `ts_store_get_array_by_hash` is the read path used by bindings that
@@ -533,6 +556,12 @@ int32_t ts_store_flush(struct TsStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */
+/* Reassign every time series owned by old_owner_id (in owner_category) to
+   new_owner_id; *out_updated (when non-NULL) receives the number of associations
+   changed. */
+int32_t ts_store_replace_owner(struct TsStore *handle,
+                               int64_t old_owner_id, int64_t new_owner_id,
+                               int32_t owner_category, uint64_t *out_updated);
 /* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
    storage detail). has_owner / has_owner_category are independent filters; with
    neither set the whole store is listed. Probe-then-fetch: call with buf=NULL,
@@ -540,7 +569,20 @@ int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id,
 int32_t ts_store_list_keys(const struct TsStore *handle,
                            bool has_owner, int64_t owner_id,
                            bool has_owner_category, int32_t owner_category,
+                           bool has_time_series_type, int32_t time_series_type,
+                           const char *name, const char *resolution, const char *features_json,
                            char *buf, uint64_t cap, uint64_t *out_len);
+/* Like ts_store_list_keys, but each row is annotated with the hex content hash of
+   the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
+   that share a stored array share their `data_hash`, so a caller can group time
+   series by their underlying data in one query. Same filters and probe-then-fetch
+   convention as ts_store_list_keys. */
+int32_t ts_store_list_array_groups(const struct TsStore *handle,
+                                   bool has_owner, int64_t owner_id,
+                                   bool has_owner_category, int32_t owner_category,
+                                   bool has_time_series_type, int32_t time_series_type,
+                                   const char *name, const char *resolution, const char *features_json,
+                                   char *buf, uint64_t cap, uint64_t *out_len);
 ```
 
 ## Error Messages

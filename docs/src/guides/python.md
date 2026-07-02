@@ -42,12 +42,13 @@ ts = SingleTimeSeries(
 )
 ```
 
-Use timezone-aware datetimes (UTC is stored). Pass `dtype=np.float64` — the Python binding works in
-`float64`. The array may be multi-dimensional: shape `(length,)` for scalar steps, or
-`(length, k1, …)` to attach a per-step element shape (such as cost-curve coefficients). The required
-`name` is an association attribute carried on the object — the same array can be added under
-different names. Use `NonSequentialTimeSeries(timestamps, data, name)` for explicitly timestamped
-series.
+Use timezone-aware datetimes (UTC is stored). The binding is dtype-generic — it accepts and returns
+NumPy arrays of `float64`, `float32`, `int64`, `int32`, `uint64`, or `bool`, and whatever dtype you
+pass round-trips unchanged. The array may be multi-dimensional: shape `(length,)` for scalar steps,
+or `(length, k1, …)` to attach a per-step element shape (such as cost-curve coefficients). The
+required `name` is an association attribute carried on the object — the same array can be added
+under different names. Use `NonSequentialTimeSeries(timestamps, data, name)` for explicitly
+timestamped series.
 
 ## Add a Series
 

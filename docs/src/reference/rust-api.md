@@ -4,7 +4,7 @@ The public surface of `time-series-store-core`. Import paths below are relative 
 
 ```rust
 use time_series_store_core::{
-    create_store, open_store, Store, TimeSeriesKey,
+    create_store, open_store, Store, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
@@ -66,7 +66,6 @@ impl Store {
         owner_id: i64,
         owner_type: &str,
         owner_category: OwnerCategory,
-        name: &str,
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
@@ -84,7 +83,7 @@ impl Store {
 
     pub fn get_time_series(
         &self,
-        key: &TimeSeriesKey,
+        key: &KeyIdentity,
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> Result<TimeSeriesData>;
 
@@ -97,9 +96,11 @@ impl Store {
         &mut self,
         horizon: impl Into<Period>,
         interval: impl Into<Period>,
+        owner_category: Option<OwnerCategory>,
+        resolution: Option<Period>,
     ) -> Result<usize>;
 
-    pub fn remove_time_series(&mut self, key: &TimeSeriesKey) -> Result<()>;
+    pub fn remove_time_series(&mut self, key: &KeyIdentity) -> Result<()>;
     pub fn clear_time_series(
         &mut self,
         owner: Option<(i64, OwnerCategory)>,
@@ -117,14 +118,18 @@ impl Store {
         owner_id: i64,
         owner_category: OwnerCategory,
     ) -> Result<Vec<TimeSeriesKey>>;
-    pub fn has_time_series(&self, key: &TimeSeriesKey) -> Result<bool>;
+    pub fn has_time_series(&self, key: &KeyIdentity) -> Result<bool>;
 
-    pub fn get_metadata(&self, key: &TimeSeriesKey) -> Result<TimeSeriesMetadata>;
+    pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata>;
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray>;
 
     pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>>;
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts>;
-    pub fn get_forecast_parameters(&self) -> Result<ForecastParameters>;
+    pub fn get_forecast_parameters(
+        &self,
+        resolution: Option<Period>,
+        interval: Option<Period>,
+    ) -> Result<ForecastParameters>;
 
     // Per-timestamp readers (see "Readers" below).
     pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader>;
@@ -149,7 +154,9 @@ impl Store {
 - **`transform_single_time_series`** — Derives a `DeterministicSingleTimeSeries` from every stored
   `SingleTimeSeries`, sharing the underlying array (with `count` derived from the series length),
   and returns the number of series transformed. This is the only way to create a
-  `DeterministicSingleTimeSeries`; it is never added directly.
+  `DeterministicSingleTimeSeries`; it is never added directly. The optional `owner_category` and
+  `resolution` filters restrict the transform to a single owner category and/or resolution, leaving
+  other series untouched.
 - **`add_time_series_bulk`** — All-or-nothing: every array put and association insert in the call
   commits together or rolls back together.
 - **`get_time_series`** — Reconstructs the stored type as a [`TimeSeriesData`](#timeseriesdata)
@@ -182,10 +189,10 @@ shape against the windowing parameters (`horizon`, `interval`, `count`, and for 
 use time_series_store_core::{Deterministic, TimeSeriesData};
 
 let forecast = Deterministic::new(
-    initial_timestamp, resolution, horizon, interval, count, data,
+    initial_timestamp, resolution, horizon, interval, count, data, name,
 )?;
 let key = store.add_time_series(
-    owner_id, owner_type, OwnerCategory::Component, name,
+    owner_id, owner_type, OwnerCategory::Component,
     TimeSeriesData::Deterministic(forecast),
     features, units,
 )?;
@@ -193,9 +200,9 @@ let key = store.add_time_series(
 
 Dense forecast arrays (`Deterministic` / `Probabilistic` / `Scenarios`) are stored as standalone
 NetCDF variables. A `DeterministicSingleTimeSeries` is **not** added directly: call
-`transform_single_time_series(horizon, interval)` to derive one from every stored `SingleTimeSeries`
-(it shares the backing column-packed array, derives `count` from the series length, and dedups
-against that series).
+`transform_single_time_series(horizon, interval, owner_category, resolution)` to derive one from
+every stored `SingleTimeSeries` (it shares the backing column-packed array, derives `count` from the
+series length, and dedups against that series).
 
 Conventional array shapes:
 
@@ -273,20 +280,59 @@ for entries that share data.
 
 ## Types
 
-### `TimeSeriesKey`
+### `TimeSeriesKey` and `KeyIdentity`
+
+`TimeSeriesKey` is an enum: one variant per series family, each pairing the shared identity with a
+per-variant descriptive snapshot (window/shape parameters). Equality is **identity-only** — two keys
+with the same `KeyIdentity` are equal even if their descriptive snapshots differ, so a key stays a
+reliable handle.
 
 ```rust
-pub struct TimeSeriesKey {
+pub enum TimeSeriesKey {
+    Single(SingleTimeSeriesKey),
+    NonSequential(NonSequentialTimeSeriesKey),
+    Forecast(ForecastTimeSeriesKey),
+}
+
+pub struct SingleTimeSeriesKey {
+    pub identity: KeyIdentity,
+    pub initial_timestamp: DateTime<Utc>,
+    pub length: usize,
+}
+
+pub struct NonSequentialTimeSeriesKey {
+    pub identity: KeyIdentity,
+    pub length: usize,
+}
+
+pub struct ForecastTimeSeriesKey {
+    pub identity: KeyIdentity,
+    pub initial_timestamp: DateTime<Utc>,
+    pub horizon: Period,
+    pub count: usize,
+}
+```
+
+`KeyIdentity` is the identifying tuple shared by every variant — and the only thing that determines
+equality and is looked up in the catalog. `interval` is part of the identity (`Some` for every
+forecast type, `None` for the static types); `resolution` is `Option` because
+`NonSequentialTimeSeries` has none.
+
+```rust
+pub struct KeyIdentity {
     pub owner_id: i64,
     pub owner_category: OwnerCategory,
     pub time_series_type: TimeSeriesType,
     pub name: String,
     pub resolution: Option<Period>,
+    pub interval: Option<Period>,
     pub features: Features,
 }
 ```
 
-The unique handle for a series; see [Data Model](../explanation/data-model.md#keys).
+`TimeSeriesKey::identity()` returns `&KeyIdentity`; the lookup methods (`get_time_series`,
+`get_metadata`, `has_time_series`, `remove_time_series`, `bulk_read`) take `&KeyIdentity`. See
+[Data Model](../explanation/data-model.md#keys).
 
 ### `SingleTimeSeries`
 
@@ -296,11 +342,13 @@ pub struct SingleTimeSeries {
     pub resolution: Period,
     pub length: usize,
     pub data: TypedArray,
+    pub name: String,
 }
 
 impl SingleTimeSeries {
     pub fn new(
         initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>, data: TypedArray,
+        name: impl Into<String>,
     ) -> Self;
 }
 ```
@@ -368,6 +416,13 @@ pub struct NonSequentialTimeSeries {
     pub timestamps: Vec<DateTime<Utc>>,
     pub length: usize,
     pub data: TypedArray,
+    pub name: String,
+}
+
+impl NonSequentialTimeSeries {
+    pub fn new(
+        timestamps: Vec<DateTime<Utc>>, data: TypedArray, name: impl Into<String>,
+    ) -> Result<Self, String>;
 }
 ```
 
@@ -383,12 +438,14 @@ pub struct Deterministic {
     pub interval: Period,
     pub count: usize,
     pub data: TypedArray,   // shape [H, count, *E]
+    pub name: String,
 }
 
 impl Deterministic {
     pub fn new(
         initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
         horizon: impl Into<Period>, interval: impl Into<Period>, count: usize, data: TypedArray,
+        name: impl Into<String>,
     ) -> Result<Self, String>;
 }
 ```
@@ -406,13 +463,14 @@ pub struct Probabilistic {
     pub count: usize,
     pub percentiles: Vec<f64>,
     pub data: TypedArray,   // shape [num_percentiles, H, count, *E]
+    pub name: String,
 }
 
 impl Probabilistic {
     pub fn new(
         initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
         horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
-        percentiles: Vec<f64>, data: TypedArray,
+        percentiles: Vec<f64>, data: TypedArray, name: impl Into<String>,
     ) -> Result<Self, String>;
 }
 ```
@@ -430,13 +488,14 @@ pub struct Scenarios {
     pub count: usize,
     pub scenario_count: usize,
     pub data: TypedArray,   // shape [scenario_count, H, count, *E]
+    pub name: String,
 }
 
 impl Scenarios {
     pub fn new(
         initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>,
         horizon: impl Into<Period>, interval: impl Into<Period>, count: usize,
-        scenario_count: usize, data: TypedArray,
+        scenario_count: usize, data: TypedArray, name: impl Into<String>,
     ) -> Result<Self, String>;
 }
 ```
@@ -655,5 +714,5 @@ These define the cross-language content-addressing contract; see
 ## Constants
 
 ```rust
-pub const DATA_FORMAT_VERSION: &str = "0.6.0";
+pub const DATA_FORMAT_VERSION: &str = "0.9.0";
 ```

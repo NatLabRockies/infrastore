@@ -89,6 +89,7 @@ message ListReq {
   optional string         resolution       = 5;   // ISO-8601 duration
   Features                features         = 6;   // subset match
   optional OwnerCategory  owner_category   = 7;
+  optional string         interval         = 8;   // ISO-8601 duration
 }
 message ListResp { repeated TimeSeriesMetadata metadata = 1; }
 

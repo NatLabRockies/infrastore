@@ -563,7 +563,8 @@ end
     get_metadata(store, owner_id, owner_category, name; resolution, features=Dict())
 
 Look up a SingleTimeSeries by attributes and return a named tuple of
-`(initial_timestamp, resolution, length, data_hash)`. `owner_category` is the
+`(initial_timestamp, resolution, length, data_hash, dtype, logical_type)`.
+`owner_category` is the
 owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). `data_hash` is
 the 32-byte content hash as a `Vector{UInt8}`. Throws `NotFoundError` if absent.
 """
@@ -608,12 +609,13 @@ function get_metadata(
 end
 
 """
-    get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, features=Dict())
+    get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval, features=Dict())
 
-Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash)`
+Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, logical_type)`
 for a stored forecast of integer `ts_type` (see the `TS_TYPE_*` constants).
 `owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`).
+`SupplementalAttribute`). The optional `interval` keyword (a `Period`) restricts
+the lookup to a forecast with that interval.
 """
 function get_forecast_metadata(
     store::Store,
@@ -1482,7 +1484,8 @@ end
 Return the store's forecast parameters as a NamedTuple
 `(horizon, interval, count, resolution, initial_timestamp)`, optionally restricted
 to forecasts with the given `resolution` and/or `interval` (`Period`s).
-`horizon`, `interval`, and `resolution` are `Millisecond` periods (or `nothing`);
+`horizon`, `interval`, and `resolution` are `Period`s (`Millisecond` for fixed
+durations) or `nothing`;
 `count` is an `Int` (or `nothing`); `initial_timestamp` is a `DateTime` (or
 `nothing`). Every field is `nothing` when no forecast matches.
 """
@@ -1525,9 +1528,10 @@ function check_static_consistency(store::Store)
 end
 
 """
-    get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}
+    get_resolutions(store; time_series_type=nothing) -> Vector{Period}
 
-Return the distinct resolutions stored, ascending. When `time_series_type` (a
+Return the distinct resolutions stored, in the core's stored (lexical-by-ISO)
+order. When `time_series_type` (a
 `TS_TYPE_*` integer code) is given the result is restricted to that type. This is
 a single catalog query in the core rather than a scan of every association.
 """

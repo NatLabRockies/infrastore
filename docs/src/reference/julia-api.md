@@ -192,8 +192,8 @@ remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
 `owner_category` (`Component` / `SupplementalAttribute`) is required: the owner identity is the pair
 `(owner_id, owner_category)`, so a component and a supplemental attribute may share a numeric
 `owner_id` and remain distinct. `get_metadata` returns
-`(initial_timestamp, resolution, length, data_hash, dtype)`, where `data_hash` is the 32-byte
-content hash. It throws `NotFoundError` if absent.
+`(initial_timestamp, resolution, length, data_hash, dtype, logical_type)`, where `data_hash` is the
+32-byte content hash. It throws `NotFoundError` if absent.
 
 ```julia
 get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -> Vector{T}
@@ -440,7 +440,7 @@ static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `coun
 forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
 check_static_consistency(store) -> Union{Nothing,NamedTuple}  # shared (initial_timestamp, length) of SingleTimeSeries; throws if they disagree
-get_resolutions(store; time_series_type=nothing) -> Vector{Millisecond}  # distinct resolutions, ascending
+get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
@@ -492,13 +492,13 @@ The message text comes from the FFI layer's thread-local error buffer.
 ## Time and Resolution Conversions
 
 - `DateTime` is converted to/from Unix milliseconds at the boundary.
-- `resolution` is passed as a `Period` and converted to milliseconds; reads return resolution as
-  `Millisecond`.
+- `resolution` is passed as a `Period` and converted to an ISO-8601 duration string; reads return
+  resolution as a `Period` (`Millisecond` for fixed durations).
 
 ## Tracing
 
 ```julia
-init_logging(level::AbstractString = "") -> Nothing
+init_logging(level::AbstractString = "") -> Int32  # the FFI status code
 ```
 
 Initialize the Rust tracing subscriber. `level` is an

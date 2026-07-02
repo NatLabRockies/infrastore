@@ -607,7 +607,7 @@ impl PySingleTimeSeries {
 
     fn __repr__(&self) -> String {
         format!(
-            "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}s, shape={:?})",
+            "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}, shape={:?})",
             self.inner.name,
             self.inner.initial_timestamp,
             self.inner.length,

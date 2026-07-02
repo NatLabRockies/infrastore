@@ -52,7 +52,7 @@ the same flags as filters:
 | `--owner-category <C>` | Restrict to `component` or `supplemental_attribute`; omit to match either. |
 | `--name <N>`           | Series name.                                                               |
 | `--type <T>`           | `single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`. |
-| `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`.                                            |
+| `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`, or ISO-8601 like `PT1H`, `P1M`.            |
 | `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 
 If a selector matches more than one series, `tss` errors and lists the candidates so the query can
@@ -64,6 +64,9 @@ both exist.
 
 - **Durations** (`resolution`, `horizon`, `interval`, `--time-range`): an integer plus a unit —
   `ms`, `s`, `min`, `h`, `d` (e.g. `500ms`, `15min`, `24h`, `7d`). A bare integer is milliseconds.
+  `resolution`, `horizon`, and `interval` also accept ISO-8601 duration strings (e.g. `PT1H`, `P1M`,
+  `P1Y`); a calendar grid (monthly/quarterly/annual) can only be expressed this way, since the
+  human-unit form is always a fixed span.
 - **Timestamps** (`initial_timestamp`, non-sequential timestamp column, `--time-range`): RFC3339
   (e.g. `2024-01-01T00:00:00Z`) or a bare integer of epoch milliseconds.
 

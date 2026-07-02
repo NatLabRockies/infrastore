@@ -98,7 +98,7 @@ meta = get_metadata(
     features = Dict("model_year" => 2030),
 )
 # meta :: (initial_timestamp::DateTime, resolution::Millisecond, length::Int,
-#          data_hash::Vector{UInt8}, dtype)
+#          data_hash::Vector{UInt8}, dtype, logical_type)
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 

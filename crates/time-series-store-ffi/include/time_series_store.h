@@ -150,8 +150,8 @@ void ts_store_free(struct TsStore *handle);
 /**
  * Add a SingleTimeSeries to the store.
  *
- * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float, or
- * bool. `logical_type` and `units` are optional.
+ * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
+ * bool, or string. `logical_type` and `units` are optional.
  *
  * # Safety
  *
@@ -511,9 +511,11 @@ int32_t ts_store_flush(struct TsStore *handle);
 
 /**
  * Look up a SingleTimeSeries metadata record by attributes. On success the
- * caller's out-params receive the initial timestamp, resolution, length, and
- * the 32-byte content hash (written into the `out_data_hash` buffer, which
- * must have room for 32 bytes). Returns `TS_ERR_NOT_FOUND` if absent.
+ * caller's out-params receive the initial timestamp, resolution, length, the
+ * 32-byte content hash (written into the `out_data_hash` buffer, which must
+ * have room for 32 bytes), the dtype code (`out_dtype`), and the logical-type
+ * tag via probe-then-fetch (`out_logical_type` / `out_logical_type_len`).
+ * Returns `TS_ERR_NOT_FOUND` if absent.
  *
  * # Safety
  *
