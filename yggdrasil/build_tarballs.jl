@@ -15,11 +15,13 @@ using BinaryBuilder, Pkg
 name = "TimeSeriesStore"
 version = v"0.1.0"
 
-# Pin to a tagged release/commit of the Rust workspace before submitting.
+# Pin to a tagged release/commit of the Rust workspace. NOTE: this commit must be
+# pushed to origin before the Yggdrasil build can fetch it (switch to a release tag
+# for the submission PR).
 sources = [
     GitSource(
         "https://github.com/NatLabRockies/time-series-store.git",
-        "0000000000000000000000000000000000000000",  # TODO: pin commit SHA
+        "fde88b96d1ad53c64f03dba761cc903f75d78d42",
     ),
 ]
 
