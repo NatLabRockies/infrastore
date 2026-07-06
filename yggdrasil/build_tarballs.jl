@@ -35,6 +35,22 @@ export NETCDF_DIR=${prefix}
 export PKG_CONFIG_PATH=${prefix}/lib/pkgconfig:${prefix}/share/pkgconfig
 export RUSTFLAGS="-C link-arg=-L${libdir}"
 
+# Fetch deps so their build scripts can be patched before compiling.
+cargo fetch --target ${rust_target}
+
+# hdf5-metno-sys (via netcdf-sys) probes the HDF5 runtime version by dlopen()ing
+# libhdf5 — impossible when cross-compiling. The header version from HDF5_jll is
+# authoritative, so neutralize the runtime probe.
+for f in $(find "${CARGO_HOME:-$HOME/.cargo}" /opt -type f -path '*hdf5-metno-sys*/build.rs' 2>/dev/null | sort -u); do
+    sed -i 's/[[:space:]]*validate_runtime_version(&config);/ \/\/ skipped: no cross-compile runtime probe/' "$f"
+done
+
+# BinaryBuilder forbids forcing an arch via -march, so sha2's ARMv8-crypto `asm`
+# kernels cannot be assembled here; use the portable SHA-256 (x86_64 still detects
+# SHA-NI at runtime) for the distributed binary.
+sed -i 's/sha2 = { workspace = true, features = \["asm"\] }/sha2 = { workspace = true }/' \
+    crates/time-series-store-core/Cargo.toml
+
 cargo build --release --target ${rust_target} -p time-series-store-ffi
 
 install -Dvm755 "target/${rust_target}/release/libtime_series_store_ffi.${dlext}" \
