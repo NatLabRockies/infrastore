@@ -1437,6 +1437,52 @@ impl Store {
     pub fn flush(&mut self) -> Result<()> {
         self.backend.flush()
     }
+
+    /// Persist this store's data to `path` (the NetCDF arrays) and its companion
+    /// `<path>.sqlite` (the metadata). Works for both on-disk stores (copies the
+    /// two artifacts) and in-memory stores (materializes arrays + metadata to
+    /// disk). Existing target files are overwritten.
+    ///
+    /// Because arrays are content-addressed, copying every array by hash plus the
+    /// full metadata database reproduces all time series — static, forecast, and
+    /// non-sequential — without reconstructing per-type semantics.
+    pub fn persist_to(&mut self, path: &Path) -> Result<()> {
+        self.flush()?;
+        let sqlite_path = catalog_sqlite_path(path);
+
+        if let Some(src) = self.netcdf_path.clone() {
+            if src != path {
+                std::fs::copy(&src, path)?;
+                std::fs::copy(catalog_sqlite_path(&src), &sqlite_path)?;
+            }
+            return Ok(());
+        }
+
+        // In-memory store: materialize arrays and metadata to disk. VACUUM INTO
+        // requires the target sqlite to be absent, so clear both artifacts first.
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&sqlite_path);
+        {
+            let mut nc = NetCdfBackend::create(path, self.compression())?;
+            let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
+                if !seen.insert(hash) {
+                    continue;
+                }
+                let array = self.backend.get_array(&hash)?;
+                // The resolution only groups the on-disk layout; reads locate arrays
+                // by content hash, so the fallback for resolution-less (non-sequential)
+                // series is harmless.
+                let resolution = key
+                    .resolution()
+                    .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
+                nc.put_array(&hash, &array, resolution, true)?;
+            }
+            nc.flush()?;
+        }
+        self.metadata.backup_to(&sqlite_path)?;
+        Ok(())
+    }
 }
 
 /// A buffered bulk-add session returned by [`Store::bulk_add`]. Requests are

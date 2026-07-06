@@ -1599,6 +1599,19 @@ function flush!(store::Store)
 end
 
 """
+    persist!(store, path)
+
+Persist the store to `path` (NetCDF) and `\$path.sqlite` (metadata), materializing
+an in-memory store to disk. Existing target files are overwritten.
+"""
+function persist!(store::Store, path::AbstractString)
+    code = ccall((:ts_store_persist, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring), store.handle, path)
+    _check(code)
+    return nothing
+end
+
+"""
     clear!(store; owner_id=nothing, owner_category=nothing)
 
 Remove all time series (data + metadata) from the store, or only those belonging

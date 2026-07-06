@@ -1584,6 +1584,36 @@ pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
     }
 }
 
+/// Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+/// materializing in-memory stores to disk. Existing target files are overwritten.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle; `path` must be a valid NUL-terminated
+/// UTF-8 C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_persist(
+    handle: *mut TsStoreHandle,
+    path: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let path = match unsafe { cstr_to_str(path) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid path string");
+            return code;
+        }
+    };
+    match store.inner.persist_to(&path) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
 // ---- Attribute-based metadata access --------------------------------------
 //
 // The Julia `RustTimeSeriesStore` works in terms of (owner_id, name,

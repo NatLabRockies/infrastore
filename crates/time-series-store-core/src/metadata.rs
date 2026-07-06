@@ -107,6 +107,15 @@ impl MetadataStore {
         })
     }
 
+    /// Copy the entire metadata database to a new SQLite file at `path`
+    /// (used to materialize an in-memory store to disk). SQLite's `VACUUM INTO`
+    /// creates the target, which must not already exist.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        Ok(())
+    }
+
     pub fn open_path(path: &Path, read_only: bool) -> Result<Self> {
         let conn = if read_only {
             let flags =
