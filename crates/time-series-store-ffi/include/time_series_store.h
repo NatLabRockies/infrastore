@@ -510,6 +510,17 @@ int32_t ts_store_compact(struct TsStore *handle);
 int32_t ts_store_flush(struct TsStore *handle);
 
 /**
+ * Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+ * materializing in-memory stores to disk. Existing target files are overwritten.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; `path` must be a valid NUL-terminated
+ * UTF-8 C string.
+ */
+int32_t ts_store_persist(struct TsStore *handle, const char *path);
+
+/**
  * Look up a SingleTimeSeries metadata record by attributes. On success the
  * caller's out-params receive the initial timestamp, resolution, length, the
  * 32-byte content hash (written into the `out_data_hash` buffer, which must
