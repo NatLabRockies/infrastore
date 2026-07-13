@@ -731,3 +731,144 @@ fn copy_time_series_rejects_a_duplicate_destination() {
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
 }
+
+// ---------------------------------------------------------------------------
+// Content-addressed feature sets
+//
+// Feature rows live in `feature_sets`, keyed by the SHA-256 of the feature map,
+// and are SHARED by every association whose `features_hash` matches. These pin
+// the properties that sharing makes non-obvious: that one association's deletion
+// cannot take another's features with it, and that the now-unreachable sets are
+// reclaimable rather than leaked.
+// ---------------------------------------------------------------------------
+
+/// Deleting one of several associations that share a feature set must not
+/// disturb the survivors' features. Under the old per-association feature rows
+/// with `ON DELETE CASCADE` this was trivially true; with shared rows it is a
+/// real invariant, and a stray cascade would silently blank the survivors.
+#[test]
+fn deleting_one_sharer_leaves_the_others_features_intact() {
+    let mut store = create_store(None, true).unwrap();
+    let features = features_with_year(2030);
+
+    // Three owners, one identical feature set: one stored `feature_sets` group.
+    for owner in 1..=3i64 {
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
+                features.clone(),
+                None,
+            )
+            .unwrap();
+    }
+
+    store
+        .remove_time_series(&KeyIdentity {
+            owner_id: 2,
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "load".to_string(),
+            resolution: Some(Period::from(Duration::hours(1))),
+            interval: None,
+            features: features.clone(),
+        })
+        .unwrap();
+
+    for owner in [1i64, 3] {
+        let keys = store
+            .get_time_series_keys(owner, OwnerCategory::Component)
+            .unwrap();
+        assert_eq!(keys.len(), 1, "owner {owner} should still have its series");
+        assert_eq!(
+            keys[0].features(),
+            &features,
+            "owner {owner} lost its features when a co-sharer was deleted"
+        );
+    }
+}
+
+/// A feature set outlives the last association that referenced it (sets are
+/// shared, so deletion cannot cascade), and `compact` is what reclaims it.
+#[test]
+fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
+    let mut store = create_store(None, true).unwrap();
+    let features = features_with_year(2031);
+    let key = KeyIdentity {
+        owner_id: 1,
+        owner_category: OwnerCategory::Component,
+        time_series_type: TimeSeriesType::SingleTimeSeries,
+        name: "load".to_string(),
+        resolution: Some(Period::from(Duration::hours(1))),
+        interval: None,
+        features: features.clone(),
+    };
+
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
+            features.clone(),
+            None,
+        )
+        .unwrap();
+
+    // Nothing to reclaim while the set is still referenced.
+    assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
+
+    store.remove_time_series(&key).unwrap();
+
+    // The set is now unreachable: one key/value row is swept.
+    let report = store.compact().unwrap();
+    assert_eq!(
+        report.feature_sets_reclaimed, 1,
+        "the orphaned feature set should be reclaimed"
+    );
+    // Idempotent: nothing left to sweep.
+    assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
+}
+
+/// A derived `DeterministicSingleTimeSeries` has the same features as the
+/// `SingleTimeSeries` it came from, so it reuses the stored set and writes no new
+/// feature rows. This is the property that makes `transform_single_time_series`
+/// stop scaling with feature count.
+#[test]
+fn transform_reuses_the_sources_feature_set() {
+    let mut store = create_store(None, true).unwrap();
+    let features = features_with_year(2032);
+
+    for owner in 1..=5i64 {
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
+                features.clone(),
+                None,
+            )
+            .unwrap();
+    }
+    let n = store
+        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
+        .unwrap();
+    assert_eq!(n, 5);
+
+    // Every DST shares its source's set, so no set is orphaned and each derived
+    // series still reads back its features.
+    assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
+    for owner in 1..=5i64 {
+        let keys = store
+            .get_time_series_keys(owner, OwnerCategory::Component)
+            .unwrap();
+        assert_eq!(keys.len(), 2, "owner {owner}: an STS and its derived DST");
+        assert!(
+            keys.iter().all(|k| k.features() == &features),
+            "owner {owner}: a derived DST lost the source's features"
+        );
+    }
+}

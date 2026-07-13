@@ -78,6 +78,7 @@ const TS_ERR_DUPLICATE         = Int32(5)
 const TS_ERR_INTEGRITY         = Int32(6)
 const TS_ERR_READ_ONLY         = Int32(7)
 const TS_ERR_IO                = Int32(8)
+const TS_ERR_INCOMPATIBLE_FORMAT = Int32(9)
 const TS_ERR_INTERNAL          = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -96,6 +97,7 @@ struct DuplicateTimeSeriesError <: TimeSeriesException; msg::String; end
 struct InvalidParameterError    <: TimeSeriesException; msg::String; end
 struct IntegrityError           <: TimeSeriesException; msg::String; end
 struct ReadOnlyStoreError       <: TimeSeriesException; msg::String; end
+struct IncompatibleFormatError  <: TimeSeriesException; msg::String; end
 struct GenericError             <: TimeSeriesException; msg::String; code::Int32; end
 
 Base.showerror(io::IO, e::TimeSeriesException) = print(io, "TimeSeriesStore.", typeof(e).name.name, ": ", e.msg)
@@ -127,6 +129,8 @@ function _check(code::Int32)
         throw(IntegrityError(msg))
     elseif code == TS_ERR_READ_ONLY
         throw(ReadOnlyStoreError(msg))
+    elseif code == TS_ERR_INCOMPATIBLE_FORMAT
+        throw(IncompatibleFormatError(msg))
     else
         throw(GenericError(msg, code))
     end

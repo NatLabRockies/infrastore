@@ -28,6 +28,12 @@
 
 #define TS_ERR_IO 8
 
+/**
+ * The store on disk was written in a different, incompatible on-disk format
+ * than this build reads. There is no in-place upgrade.
+ */
+#define TS_ERR_INCOMPATIBLE_FORMAT 9
+
 #define TS_ERR_INTERNAL 99
 
 /**

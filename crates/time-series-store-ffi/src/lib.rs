@@ -27,6 +27,9 @@ pub const TS_ERR_DUPLICATE: i32 = 5;
 pub const TS_ERR_INTEGRITY: i32 = 6;
 pub const TS_ERR_READ_ONLY: i32 = 7;
 pub const TS_ERR_IO: i32 = 8;
+/// The store on disk was written in a different, incompatible on-disk format
+/// than this build reads. There is no in-place upgrade.
+pub const TS_ERR_INCOMPATIBLE_FORMAT: i32 = 9;
 pub const TS_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -50,6 +53,7 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::IntegrityError(_) => TS_ERR_INTEGRITY,
         E::ReadOnlyStore => TS_ERR_READ_ONLY,
         E::Io(_) => TS_ERR_IO,
+        E::IncompatibleFormat { .. } => TS_ERR_INCOMPATIBLE_FORMAT,
         _ => TS_ERR_INTERNAL,
     };
     set_error(e.to_string());

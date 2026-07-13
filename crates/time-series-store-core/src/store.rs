@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, MetadataFilter, MetadataStore, SeriesFamily, references_to_in_tx,
+    AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, SeriesFamily,
+    references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader, WindowRead};
 use crate::storage::{
@@ -259,6 +260,9 @@ impl Store {
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.transaction()?;
         let mut keys = Vec::with_capacity(items.len());
+        // Feature sets are shared, and a batch typically spans only a handful of
+        // distinct ones; write each once rather than once per item.
+        let mut feature_sets = FeatureSetCache::default();
 
         for item in &items {
             let RequestParts {
@@ -283,7 +287,7 @@ impl Store {
                 staged_hashes.push(hash);
             }
 
-            match insert_association(&tx, &meta) {
+            match insert_association(&tx, &meta, &mut feature_sets) {
                 Ok(()) => {
                     keys.push(key);
                 }
@@ -377,8 +381,9 @@ impl Store {
 
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.transaction()?;
+        let mut feature_sets = FeatureSetCache::default();
         for p in &parts {
-            if let Err(e) = insert_association(&tx, &p.meta) {
+            if let Err(e) = insert_association(&tx, &p.meta, &mut feature_sets) {
                 drop(tx);
                 for staged in &staged_hashes {
                     let _ = self.backend.remove_array(staged);
@@ -1271,8 +1276,13 @@ impl Store {
         }
 
         let tx = self.metadata.transaction()?;
+        // One cache for the whole batch: every derived row shares its source's
+        // feature set, and sources overwhelmingly share sets with each other, so
+        // the feature-set writes collapse to a handful regardless of how many
+        // series are transformed.
+        let mut feature_sets = FeatureSetCache::default();
         for meta in &new_metas {
-            if let Err(e) = MetadataStore::insert(&tx, meta) {
+            if let Err(e) = MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
                 drop(tx);
                 return Err(e);
             }
@@ -1436,11 +1446,18 @@ impl Store {
         self.metadata.forecast_summary()
     }
 
+    /// Reclaim space in both halves of the artifact: reusable packed slots and
+    /// unreachable arrays in the NetCDF file, and feature sets in the SQLite
+    /// catalog that no association references any more.
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        self.backend.compact()
+        let mut report = self.backend.compact()?;
+        let tx = self.metadata.transaction()?;
+        report.feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
+        tx.commit()?;
+        Ok(report)
     }
 
     pub fn verify_integrity(&self) -> Result<IntegrityReport> {
@@ -1776,7 +1793,11 @@ fn request_array(item: &AddRequest) -> &TypedArray {
 /// may hold one or the other but never both. A DST is only ever created by
 /// [`Store::transform_single_time_series`], so the only overlap reachable here is
 /// adding a `Deterministic` when a DST already exists.
-fn insert_association(tx: &rusqlite::Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<()> {
+fn insert_association(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &TimeSeriesMetadata,
+    cache: &mut FeatureSetCache,
+) -> Result<()> {
     let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
         crate::metadata::forecast_family_conflict(
             tx,
@@ -1796,7 +1817,7 @@ fn insert_association(tx: &rusqlite::Transaction<'_>, meta: &TimeSeriesMetadata)
              same series already exists; they are mutually exclusive",
             meta.name
         ))),
-        Ok(false) => MetadataStore::insert(tx, meta).map(|_| ()),
+        Ok(false) => MetadataStore::insert_batched(tx, meta, cache).map(|_| ()),
         Err(e) => Err(e),
     }
 }

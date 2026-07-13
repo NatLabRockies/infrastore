@@ -16,18 +16,27 @@ the authoritative description of both. For the rationale behind the split, see t
 The NetCDF root carries a global attribute:
 
 ```text
-data_format_version = "0.9.0"
+data_format_version = "0.10.0"
 ```
 
 This is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when the NetCDF
 layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md) changes in
-a backward-incompatible way. Readers should check it before trusting a file. (`0.9.0` changed the
-packed-dataset chunking to timestamp-major `(1, cols, *element_shape)` and made the column count
-`cols` per-dataset (sized to the writing batch) instead of a fixed 1,000, optimizing reads across
-series by timestamp and bulk writes; `0.8.0` added the forecast `interval` to the association
-uniqueness key — so two forecasts of one variable that differ only by interval are now distinct
-series — widening both unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well
-as `resolution`); `0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
+a backward-incompatible way.
+
+Opening a store whose recorded version differs from the version this build reads fails with
+`IncompatibleFormat`, naming both versions. Every bump is backward-incompatible by definition, so
+the check is exact equality and there is no in-place upgrade path: regenerate the store with the
+matching build.
+
+(`0.10.0` replaced the per-association `features` table with the content-addressed `feature_sets`
+table below, so a feature map is stored once and shared by every association that uses it — dropping
+the `association_id` foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset
+chunking to timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset
+(sized to the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp
+and bulk writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two
+forecasts of one variable that differ only by interval are now distinct series — widening both
+unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`);
+`0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
 [periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration strings (e.g.
 `PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
 SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
@@ -58,7 +67,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.nc
-├── attribute  data_format_version = "0.9.0"
+├── attribute  data_format_version = "0.10.0"
 └── group      time_series/
     └── group  single/
         ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, cols, *element_shape)
@@ -120,6 +129,10 @@ column packing and no companion hash variable — the variable name carries the 
   dead space (NetCDF cannot delete variables in place).
 - `compact()` reports reclaimable slots but does not physically resize datasets or remove dead
   standalone variables in this release (netcdf-c cannot resize a dimension in place).
+- **Feature sets:** because they are shared, deleting an association never deletes its feature set;
+  removing the last association that referenced one leaves it unreachable. `compact()` deletes
+  unreachable sets and reports the row count as `feature_sets_reclaimed`. This is the one thing
+  compaction physically removes.
 
 ## SQLite Schema
 
@@ -153,21 +166,37 @@ One row per association between an owner and a stored array.
 | `logical_type`      | TEXT    | Opaque binding-owned domain label; `NULL` if unset              |
 | `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                              |
 
-### `features`
+### `feature_sets`
 
 The expanded feature map, one row per key. The typed columns are populated according to
 `value_kind`.
 
-| Column           | Type    | Notes                                                   |
-| ---------------- | ------- | ------------------------------------------------------- |
-| `association_id` | INTEGER | FK → `time_series_associations(id)` `ON DELETE CASCADE` |
-| `key`            | TEXT    | Feature name                                            |
-| `value_kind`     | TEXT    | `CHECK` in (`int`, `float`, `bool`, `str`)              |
-| `value_int`      | INTEGER | Set when `value_kind = 'int'`                           |
-| `value_float`    | REAL    | Set when `value_kind = 'float'`                         |
-| `value_bool`     | INTEGER | 0/1, set when `value_kind = 'bool'`                     |
-| `value_str`      | TEXT    | Set when `value_kind = 'str'`                           |
-|                  |         | `PRIMARY KEY (association_id, key)`                     |
+Feature sets are **content-addressed**, exactly as arrays are: the table is keyed by the SHA-256 of
+the feature map, and one set is stored once and shared by every association whose `features_hash`
+matches. The association row already carries that hash, so no join column is needed. Two
+associations with the same features therefore reference the same rows here — including a
+`DeterministicSingleTimeSeries` and the `SingleTimeSeries` it was derived from, which is why
+[`transform_single_time_series`](../explanation/data-model.md) writes no feature rows at all.
+
+| Column          | Type    | Notes                                      |
+| --------------- | ------- | ------------------------------------------ |
+| `features_hash` | BLOB    | 32-byte SHA-256 of the feature map         |
+| `key`           | TEXT    | Feature name                               |
+| `value_kind`    | TEXT    | `CHECK` in (`int`, `float`, `bool`, `str`) |
+| `value_int`     | INTEGER | Set when `value_kind = 'int'`              |
+| `value_float`   | REAL    | Set when `value_kind = 'float'`            |
+| `value_bool`    | INTEGER | 0/1, set when `value_kind = 'bool'`        |
+| `value_str`     | TEXT    | Set when `value_kind = 'str'`              |
+|                 |         | `PRIMARY KEY (features_hash, key)`         |
+
+An empty feature map stores no rows.
+
+There is deliberately **no foreign key** to `time_series_associations` and **no cascade**: rows here
+are shared, so deleting one association must not delete a set another association still uses.
+Removing the last association that referenced a set instead leaves it unreachable — the same
+deletion semantics as the NetCDF side's unreachable standalone variables. `Store::compact` sweeps
+unreachable sets and reports the count as `feature_sets_reclaimed`; clearing a store drops them all
+outright.
 
 ### `schema_version`
 

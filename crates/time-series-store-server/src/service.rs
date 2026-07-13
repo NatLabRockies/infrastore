@@ -59,6 +59,9 @@ fn map_err(e: TimeSeriesError) -> Status {
         TimeSeriesError::IncompatibleForecast => {
             Status::failed_precondition("incompatible forecast")
         }
+        e @ TimeSeriesError::IncompatibleFormat { .. } => {
+            Status::failed_precondition(e.to_string())
+        }
         TimeSeriesError::Io(e) => Status::internal(format!("io: {e}")),
         TimeSeriesError::Sqlite(e) => Status::internal(format!("sqlite: {e}")),
         TimeSeriesError::Serde(e) => Status::internal(format!("serde: {e}")),

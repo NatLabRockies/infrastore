@@ -645,7 +645,11 @@ pub struct TimeSeriesCounts {
     pub static_time_series: i64,
     pub forecasts: i64,
 }
-pub struct CompactionReport { pub slots_reclaimed: usize, pub datasets_dropped: usize }
+pub struct CompactionReport {
+    pub slots_reclaimed: usize,
+    pub datasets_dropped: usize,
+    pub feature_sets_reclaimed: usize,
+}
 pub struct IntegrityReport { pub errors: Vec<String> }  // .ok() == errors.is_empty()
 pub struct ForecastParameters {
     pub horizon: Option<Period>, pub interval: Option<Period>,
@@ -667,6 +671,9 @@ pub enum TimeSeriesError {
     ReadOnlyStore,
     ConnectionError(String),
     IncompatibleForecast,
+    /// The store on disk was written in a different, incompatible on-disk
+    /// format. There is no in-place upgrade; see the file-format reference.
+    IncompatibleFormat { found: String, expected: &'static str },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Serde(serde_json::Error),
@@ -714,5 +721,5 @@ These define the cross-language content-addressing contract; see
 ## Constants
 
 ```rust
-pub const DATA_FORMAT_VERSION: &str = "0.9.0";
+pub const DATA_FORMAT_VERSION: &str = "0.10.0";
 ```

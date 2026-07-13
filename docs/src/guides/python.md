@@ -124,7 +124,8 @@ store.remove_time_series(key)
 n = store.clear_time_series(42, OwnerCategory.Component)   # all series for one owner; returns count
 store.clear_time_series()                                  # remove everything
 
-report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...}
+report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
+                                   #  "feature_sets_reclaimed": ...}
 errors = store.verify_integrity()   # [] when intact
 ```
 

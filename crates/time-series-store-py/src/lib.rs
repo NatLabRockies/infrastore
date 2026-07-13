@@ -42,6 +42,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
         E::ConnectionError(m) => TimeSeriesError::new_err(format!("connection: {m}")),
         E::IncompatibleForecast => TimeSeriesError::new_err("incompatible forecast"),
+        ref e @ E::IncompatibleFormat { .. } => TimeSeriesError::new_err(e.to_string()),
         E::Io(e) => TimeSeriesError::new_err(format!("io: {e}")),
         E::Sqlite(e) => TimeSeriesError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => TimeSeriesError::new_err(format!("serde: {e}")),
@@ -1244,6 +1245,7 @@ impl PyStore {
         let d = PyDict::new(py);
         d.set_item("slots_reclaimed", r.slots_reclaimed)?;
         d.set_item("datasets_dropped", r.datasets_dropped)?;
+        d.set_item("feature_sets_reclaimed", r.feature_sets_reclaimed)?;
         Ok(d)
     }
 
