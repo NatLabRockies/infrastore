@@ -114,8 +114,11 @@ export HDF5_DIR="$(brew --prefix hdf5)"
 On Linux (Debian/Ubuntu): `sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler` (set
 `HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial` if the build script can't find HDF5).
 
-On Windows, CI installs `netcdf-c:x64-windows` with vcpkg and sets `NETCDF_DIR`, `HDF5_DIR`, and
-`PKG_CONFIG_PATH`. Keep these requirements in mind when changing native dependencies.
+On Windows, CI installs prebuilt `libnetcdf` and `hdf5` from conda-forge and sets `NETCDF_DIR`,
+`HDF5_DIR`, and `PKG_CONFIG_PATH` to the conda prefix's `Library` directory. Do not switch this back
+to `vcpkg install netcdf-c`: vcpkg builds the stack from source, which fetches libaec from
+gitlab.dkrz.de — an unmirrored host that rate-limits CI runners (HTTP 429) and has taken Windows CI
+down for hours at a time. Keep these requirements in mind when changing native dependencies.
 
 The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
 `cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux and Windows those
