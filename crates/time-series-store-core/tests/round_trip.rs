@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
-    open_store,
+    FeatureValue, Features, KeyIdentity, ListFilter, NonSequentialTimeSeries, OwnerCategory,
+    Period, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray,
+    create_store, open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -615,4 +615,119 @@ fn list_keys_with_hash_groups_shared_arrays() {
     assert_eq!(shared.len(), 1);
     shared[0].sort();
     assert_eq!(shared[0], vec![1, 2]);
+}
+
+// ---- copy_time_series -------------------------------------------------------
+
+/// The identity of the single association owned by `owner`.
+fn only_key(store: &time_series_store_core::Store, owner: i64) -> KeyIdentity {
+    let keys = store
+        .get_time_series_keys(owner, OwnerCategory::Component)
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    keys[0].identity().clone()
+}
+
+#[test]
+fn copy_time_series_shares_the_array_and_renames() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    let src = only_key(&store, 1);
+    let copied = store
+        .copy_time_series(&src, 2, "HybridSystem", Some("Generator__load"))
+        .unwrap();
+
+    // The copy is a new association on the new owner under the new name...
+    assert_eq!(copied.identity().owner_id, 2);
+    assert_eq!(copied.identity().name, "Generator__load");
+    // ...and the source is untouched (a copy, not a move).
+    assert!(store.has_time_series(&src).unwrap());
+
+    // No array duplication: both associations point at the same content hash.
+    let src_meta = store.get_metadata(&src).unwrap();
+    let dst_meta = store.get_metadata(copied.identity()).unwrap();
+    assert_eq!(src_meta.data_hash, dst_meta.data_hash);
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+    assert_eq!(dst_meta.owner_type, "HybridSystem");
+}
+
+#[test]
+fn copy_time_series_preserves_deterministic_single_type() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    // Derive the DeterministicSingleTimeSeries view over the stored SingleTimeSeries.
+    store
+        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
+        .unwrap();
+
+    let dst_src = store
+        .get_time_series_keys(1, OwnerCategory::Component)
+        .unwrap()
+        .into_iter()
+        .find(|k| k.identity().time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
+        .expect("transform should have produced a DeterministicSingleTimeSeries");
+
+    let copied = store
+        .copy_time_series(
+            dst_src.identity(),
+            2,
+            "HybridSystem",
+            Some("Generator__load"),
+        )
+        .unwrap();
+
+    // The whole point: the copy stays a DeterministicSingleTimeSeries rather than
+    // being materialized into a dense Deterministic, and still shares the array.
+    let meta = store.get_metadata(copied.identity()).unwrap();
+    assert_eq!(
+        meta.time_series_type,
+        TimeSeriesType::DeterministicSingleTimeSeries
+    );
+    assert_eq!(
+        meta.data_hash,
+        store.get_metadata(dst_src.identity()).unwrap().data_hash
+    );
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+}
+
+#[test]
+fn copy_time_series_rejects_a_duplicate_destination() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    let src = only_key(&store, 1);
+
+    store.copy_time_series(&src, 2, "Generator", None).unwrap();
+    // Copying again onto the same owner+name collides with the first copy.
+    let err = store
+        .copy_time_series(&src, 2, "Generator", None)
+        .unwrap_err();
+    assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
 }

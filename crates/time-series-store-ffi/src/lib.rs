@@ -1592,10 +1592,7 @@ pub unsafe extern "C" fn ts_store_flush(handle: *mut TsStoreHandle) -> i32 {
 /// `handle` must be a live store handle; `path` must be a valid NUL-terminated
 /// UTF-8 C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ts_store_persist(
-    handle: *mut TsStoreHandle,
-    path: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn ts_store_persist(handle: *mut TsStoreHandle, path: *const c_char) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_mut() } {
         Some(s) => s,
@@ -2036,12 +2033,17 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
     }
 }
 
+/// `interval` may be null. It only ever needs to be supplied to disambiguate a name that
+/// carries several forecasts differing solely by interval (as
+/// `transform_single_time_series` with `delete_existing = false` produces); a null leaves
+/// the key's interval unset and matches on the other attributes alone.
 unsafe fn build_typed_key_from_attrs(
     owner_id: i64,
     owner_category: i32,
     name: *const c_char,
     ts_type: i32,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
 ) -> Result<core_lib::KeyIdentity, i32> {
     let time_series_type = match ts_type_from_int(ts_type) {
@@ -2054,6 +2056,7 @@ unsafe fn build_typed_key_from_attrs(
     let mut key =
         unsafe { build_key_from_attrs(owner_id, owner_category, name, resolution, features_json) }?;
     key.time_series_type = time_series_type;
+    key.interval = unsafe { cstr_to_optional_period(interval)? };
     Ok(key)
 }
 
@@ -3054,6 +3057,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     owner_category: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     out_initial_ts_unix_ms: *mut i64,
     out_resolution: *mut *mut c_char,
@@ -3081,6 +3085,7 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
             name,
             4, // Probabilistic
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -3174,6 +3179,7 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
             name,
             ts_type,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -3728,6 +3734,7 @@ pub unsafe extern "C" fn ts_make_key_from_attrs(
             name,
             ts_type,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4312,6 +4319,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
     name: *const c_char,
     ts_type: i32,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     out_present: *mut bool,
 ) -> i32 {
@@ -4330,6 +4338,7 @@ pub unsafe extern "C" fn ts_store_has_typed(
             name,
             ts_type,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4361,6 +4370,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
     name: *const c_char,
     ts_type: i32,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
@@ -4375,6 +4385,7 @@ pub unsafe extern "C" fn ts_store_remove_typed(
             name,
             ts_type,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4383,6 +4394,77 @@ pub unsafe extern "C" fn ts_store_remove_typed(
     };
     match store.inner.remove_time_series(&key) {
         Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Copy the time series identified by the source attributes onto another owner,
+/// optionally under a new name.
+///
+/// Arrays are content-addressed, so only a new association row is written — no
+/// array data is duplicated and the stored time series type is preserved (a
+/// `DeterministicSingleTimeSeries` stays one rather than being materialized into
+/// a dense `Deterministic`). The copy keeps the source's owner category.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. The `owner_id` / `owner_category`
+/// (`0` = Component, `1` = SupplementalAttribute) / `name` / `ts_type` /
+/// `resolution` / `features_json` arguments identify the SOURCE series, exactly as
+/// for `ts_store_remove_typed`. Required strings must be null-terminated UTF-8;
+/// `resolution`, `features_json`, and `new_name` may be null (a null `new_name`
+/// keeps the source name).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn ts_store_copy_time_series(
+    handle: *mut TsStoreHandle,
+    owner_id: i64,
+    owner_category: i32,
+    name: *const c_char,
+    ts_type: i32,
+    resolution: *const c_char,
+    interval: *const c_char,
+    features_json: *const c_char,
+    dst_owner_id: i64,
+    dst_owner_type: *const c_char,
+    new_name: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let key = match unsafe {
+        build_typed_key_from_attrs(
+            owner_id,
+            owner_category,
+            name,
+            ts_type,
+            resolution,
+            interval,
+            features_json,
+        )
+    } {
+        Ok(k) => k,
+        Err(c) => return c,
+    };
+    let dst_type = match unsafe { cstr_to_str(dst_owner_type) } {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let renamed = if new_name.is_null() {
+        None
+    } else {
+        match unsafe { cstr_to_str(new_name) } {
+            Ok(s) => Some(s),
+            Err(c) => return c,
+        }
+    };
+    match store
+        .inner
+        .copy_time_series(&key, dst_owner_id, dst_type, renamed)
+    {
+        Ok(_) => TS_OK,
         Err(e) => map_core_error(e),
     }
 }

@@ -16,7 +16,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
        open_store, flush!, clear!, replace_owner!,
-       transform_single_time_series!, has_typed, remove_typed!,
+       transform_single_time_series!, has_typed, remove_typed!, copy_time_series!,
        close!,
        StaticReader, build_static_reader, static_grid, static_groups,
        static_read!, static_values,
@@ -1787,15 +1787,17 @@ end
 `SupplementalAttribute`)."""
 function has_typed(
     store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
     code = ccall(
         (:ts_store_has_typed, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Ref{Bool}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, features_json, out,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Bool}),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json, out,
     )
     _check(code)
     return out[]
@@ -1805,14 +1807,54 @@ end
 owner's `OwnerCategory` (`Component` or `SupplementalAttribute`)."""
 function remove_typed!(
     store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     code = ccall(
         (:ts_store_remove_typed, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, features_json,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json,
+    )
+    _check(code)
+    return nothing
+end
+
+"""
+    copy_time_series!(store, owner_id, owner_category, name, ts_type,
+                      dst_owner_id, dst_owner_type; new_name=nothing,
+                      resolution=nothing, features=Dict())
+
+Copy the time series identified by the source attributes onto `dst_owner_id`,
+optionally renaming it to `new_name`.
+
+Arrays are content-addressed, so this writes only a new association row against
+the same underlying array: no data is duplicated, and the stored time series type
+is preserved. In particular a `DeterministicSingleTimeSeries` stays one, whereas a
+read-then-write copy through `get_time_series` / `add_time_series!` would
+materialize it into a dense `Deterministic`.
+
+The copy keeps the source's `owner_category`. Throws if the destination already
+holds a matching series.
+"""
+function copy_time_series!(
+    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer,
+    dst_owner_id::Integer, dst_owner_type::AbstractString;
+    new_name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
+    features_json = _features_arg(features)
+    renamed = new_name === nothing ? C_NULL : new_name
+    code = ccall(
+        (:ts_store_copy_time_series, lib_path()), Int32,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Int64, Cstring, Cstring),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type),
+        resolution_iso, interval_iso, features_json, Int64(dst_owner_id), dst_owner_type, renamed,
     )
     _check(code)
     return nothing

@@ -458,6 +458,57 @@ impl Store {
         Ok(updated)
     }
 
+    /// Copy an existing association onto another owner, optionally renaming it.
+    ///
+    /// Arrays are content-addressed, so this writes only a new association row
+    /// pointing at the same `data_hash`: no array data is duplicated. Every
+    /// descriptive column is carried over verbatim — crucially the
+    /// `time_series_type`, so a `DeterministicSingleTimeSeries` stays one instead
+    /// of being materialized into a dense `Deterministic` (which is what a
+    /// read-then-write copy through the bindings would produce).
+    ///
+    /// The copy keeps the source's `owner_category`; `new_name` defaults to the
+    /// source name. Fails with `DuplicateTimeSeries` if the destination already
+    /// holds a series with the same identity.
+    #[tracing::instrument(skip(self, src), fields(owner = src.owner_id, name = %src.name))]
+    pub fn copy_time_series(
+        &mut self,
+        src: &KeyIdentity,
+        dst_owner_id: i64,
+        dst_owner_type: &str,
+        new_name: Option<&str>,
+    ) -> Result<TimeSeriesKey> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+
+        let mut meta = self.metadata.get_by_key(src)?;
+        meta.owner_id = dst_owner_id;
+        meta.owner_type = dst_owner_type.to_string();
+        if let Some(name) = new_name {
+            meta.name = name.to_string();
+        }
+
+        let dst = KeyIdentity {
+            owner_id: meta.owner_id,
+            owner_category: meta.owner_category,
+            time_series_type: meta.time_series_type,
+            name: meta.name.clone(),
+            resolution: meta.resolution,
+            interval: meta.interval,
+            features: meta.features.clone(),
+        };
+        if self.has_time_series(&dst)? {
+            return Err(TimeSeriesError::DuplicateTimeSeries);
+        }
+
+        let tx = self.metadata.transaction()?;
+        MetadataStore::insert(&tx, &meta)?;
+        tx.commit()?;
+
+        TimeSeriesKey::from_metadata(&meta)
+    }
+
     #[tracing::instrument(skip(self, key, time_range), fields(owner = key.owner_id, name = %key.name, has_time_range = time_range.is_some()))]
     pub fn get_time_series(
         &self,

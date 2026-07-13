@@ -1249,7 +1249,8 @@ fn deterministic_and_dst_are_mutually_exclusive() {
         )
         .unwrap_err();
     assert!(
-        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        matches!(&err, TimeSeriesError::InvalidParameter(msg)
+            if msg.contains("cannot add Deterministic")),
         "adding Deterministic over a DST family should error, got {err:?}"
     );
 
@@ -1288,7 +1289,8 @@ fn deterministic_and_dst_are_mutually_exclusive() {
         .transform_single_time_series(horizon, interval, None, None)
         .unwrap_err();
     assert!(
-        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        matches!(&err, TimeSeriesError::InvalidParameter(msg)
+            if msg.contains("cannot derive DeterministicSingleTimeSeries")),
         "deriving a DST over a Deterministic family should error, got {err:?}"
     );
 }
