@@ -32,7 +32,9 @@ export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial
 
 ## Rust Toolchain
 
-The workspace targets **edition 2024** and builds on Rust 1.95 or newer.
+The workspace targets **edition 2024** and declares an MSRV of **Rust 1.94** — that is the oldest
+toolchain it is guaranteed to build on. (`rust-version` in the root `Cargo.toml` is the authority;
+the repo pins no `rust-toolchain` file, and CI builds on stable.)
 
 ```sh
 rustup update stable
@@ -54,14 +56,15 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 
 ## Crates in the Workspace
 
-| Crate                      | What it builds                                          |
-| -------------------------- | ------------------------------------------------------- |
-| `time-series-store-core`   | Types, NetCDF + SQLite storage, hashing, Rust API       |
-| `time-series-store-proto`  | Protobuf service definition + `tonic` codegen           |
-| `time-series-store-server` | gRPC server binary + Rust client                        |
-| `time-series-store-py`     | PyO3 bindings, `abi3-py310` wheel                       |
-| `time-series-store-ffi`    | C ABI cdylib (the foundation of the Julia binding)      |
-| `time-series-store-cli`    | `tss` CLI binary (CSV add/read, inspect on-disk stores) |
+| Crate                      | What it builds                                                |
+| -------------------------- | ------------------------------------------------------------- |
+| `time-series-store-core`   | Types, NetCDF + SQLite storage, hashing, Rust API             |
+| `time-series-store-proto`  | Protobuf service definition + `tonic` codegen                 |
+| `time-series-store-server` | gRPC server binary + Rust client                              |
+| `time-series-store-py`     | PyO3 bindings, `abi3-py310` wheel                             |
+| `time-series-store-ffi`    | C ABI cdylib (the foundation of the Julia binding)            |
+| `time-series-store-cli`    | `tss` CLI binary (CSV add/read, inspect on-disk stores)       |
+| `time-series-store-bench`  | `tss-bench` binary (bulk-ingest + simulation-read benchmarks) |
 
 ## Next Steps
 

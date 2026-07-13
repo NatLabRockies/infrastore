@@ -11,16 +11,17 @@ using TimeSeriesStore
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
 `DeterministicSingleTimeSeries`, `AbstractDeterministic`, `Probabilistic`, `Scenarios`,
 `TimeSeriesKey`, `OwnerCategory`, `Component`, `SupplementalAttribute`, `add_time_series!`,
-`AddBatch`, `add_time_series_bulk!`, `get_time_series`, `get_time_series_keys`, `key_info`,
-`list_keys`, `list_array_groups`, `remove_time_series!`, `has_time_series`, `get_counts`,
-`counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`, `static_summary`,
-`forecast_summary`, `get_forecast_parameters`, `check_static_consistency`, `get_resolutions`,
-`get_compression`, `verify_integrity`, `compact!`, `get_metadata`, `get_forecast_metadata`,
-`get_array_by_hash`, `count_array_references`, `open_store`, `flush!`, `clear!`, `replace_owner!`,
-`transform_single_time_series!`, `has_typed`, `remove_typed!`, `close!`, `StaticReader`,
-`build_static_reader`, `static_grid`, `static_groups`, `static_read!`, `static_values`,
-`ForecastReader`, `build_forecast_reader`, `forecast_timeline`, `forecast_entries`,
-`forecast_num_slots`, `forecast_read!`, `forecast_values`, `init_logging`.
+`AddBatch`, `add_time_series_bulk!`, `get_time_series`, `bulk_read`, `get_time_series_keys`,
+`key_info`, `list_keys`, `list_array_groups`, `remove_time_series!`, `has_time_series`,
+`get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
+`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
+`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
+`get_forecast_metadata`, `get_array_by_hash`, `count_array_references`, `open_store`, `flush!`,
+`clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`,
+`copy_time_series!`, `close!`, `StaticReader`, `build_static_reader`, `static_grid`,
+`static_groups`, `static_read!`, `static_values`, `ForecastReader`, `build_forecast_reader`,
+`forecast_timeline`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_values`,
+`init_logging`.
 
 ## Constructors
 
@@ -43,63 +44,82 @@ The store registers a finalizer; close it eagerly with `close!(store)`.
 
 ## Types
 
-Each struct carries the association `name` (required). Construct with `name` as the positional after
-`data`, and pass `logical_type=` as a keyword — e.g.
+Each struct carries the association `name` (required) and an optional `logical_type`. Every
+constructor takes `name` as the positional after `data` and `logical_type=` as a keyword — e.g.
 `SingleTimeSeries(initial, resolution, data, name; logical_type=nothing)`.
 
+Every data-carrying struct is parameterized `{T,N}` on the element type and dimensionality of its
+value array; `{T,N}` is inferred from `data` by the constructor (an `AbstractArray` argument — a
+view or a range — is normalized to a concrete `Array{T,N}`).
+
 ```julia
-struct SingleTimeSeries
+struct SingleTimeSeries{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
-    data              :: AbstractArray   # any element type; multi-dim allowed
+    data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
     logical_type      :: Union{Nothing,String}
 end
+SingleTimeSeries(initial_timestamp, resolution, data, name; logical_type=nothing)
 
-struct NonSequentialTimeSeries
-    timestamps   :: Vector{DateTime}     # strictly increasing
-    data         :: AbstractArray
+struct NonSequentialTimeSeries{T,N}
+    timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
+    data         :: Array{T,N}
     name         :: String
     logical_type :: Union{Nothing,String}
 end
+NonSequentialTimeSeries(timestamps, data, name; logical_type=nothing)
 
-struct Deterministic
+struct Deterministic{T,N} <: AbstractDeterministic
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
     interval          :: Period
-    count             :: Integer
-    data              :: AbstractArray   # (H, count, element_dims...)
+    count             :: Int
+    data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
+    logical_type      :: Union{Nothing,String}
 end
+Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
+              logical_type=nothing)
 
-struct Probabilistic
+struct Probabilistic{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
     interval          :: Period
-    count             :: Integer
+    count             :: Int
     percentiles       :: Vector{Float64}
-    data              :: AbstractArray   # (num_percentiles, H, count, element_dims...)
+    data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
+    logical_type      :: Union{Nothing,String}
 end
+Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
+              logical_type=nothing)
 
-struct Scenarios
+struct Scenarios{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
     interval          :: Period
-    count             :: Integer
-    data              :: AbstractArray   # (scenario_count, H, count, element_dims...); scenario_count from leading axis
+    count             :: Int
+    scenario_count    :: Int             # set from size(data, 1) by the constructor
+    data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
+    logical_type      :: Union{Nothing,String}
 end
+Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
+          logical_type=nothing)         # note: scenario_count is NOT a constructor argument
 
-# Marker type; never constructed. Derived via transform_single_time_series! and
-# read back as a Deterministic. Surfaces as a key's time_series_type.
-abstract type DeterministicSingleTimeSeries end
+# Marker type; never constructed and with no materialized struct. Derived via
+# transform_single_time_series! and read back as a Deterministic. Surfaces as a
+# key's time_series_type.
+abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
 
-# Supertype of Deterministic and DeterministicSingleTimeSeries. Pass it as the
-# reader/filter type to match both at once (see build_forecast_reader).
+# Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
+# Pass it as the requested type to get_time_series to read whichever of the two
+# is stored (see Reading forecast values). It is NOT a valid build_forecast_reader
+# type — that call takes a concrete forecast type.
 abstract type AbstractDeterministic end
 
 mutable struct Store
@@ -116,11 +136,11 @@ end
 end
 ```
 
-Every struct carries a required `name`, plus an optional `logical_type` — an opaque label the
-binding can use to reconstruct a domain object on read. `add_time_series!` reads `name` off the
-object (it is not a call argument), so the same array can be stored under different names. `data`
-keeps its Julia element type: the binding maps it to a stored dtype (`Float64`, `Float32`, `Int64`,
-`Int32`, `UInt64`, `Bool`) and converts to row-major bytes on the way down.
+`logical_type` is an opaque label the binding can use to reconstruct a domain object on read.
+`add_time_series!` reads `name` off the object (it is not a call argument), so the same array can be
+stored under different names; its `logical_type=` keyword defaults to the object's `logical_type`.
+`data` keeps its Julia element type: the binding maps `T` to a stored dtype (`Float64`, `Float32`,
+`Int64`, `Int32`, `UInt64`, `Bool`) and converts to row-major bytes on the way down.
 
 ## Static Series
 
@@ -163,6 +183,21 @@ bare `get_time_series(store, key)` remains a convenience alias for `SingleTimeSe
 
 To read every series' value at one timestamp in a loop (the simulation pattern), use a
 [`StaticReader`](#staticreader) rather than calling `get_time_series` per series.
+
+### Bulk reads
+
+```julia
+bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey}) -> Vector{SingleTimeSeries}
+```
+
+Reads many whole `SingleTimeSeries` in one call, returning one per key **in the same order**. Each
+packed dataset is read and decompressed once instead of per series, so this is the efficient way to
+load many complete series (exploration, plotting). Every key must identify a `SingleTimeSeries`; an
+empty key vector returns an empty vector without touching the store.
+
+```julia
+series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}
+```
 
 ## Bulk Adds
 
@@ -274,17 +309,49 @@ A `DeterministicSingleTimeSeries` is not added directly. Derive one from every s
 `SingleTimeSeries` (sharing the backing array) with:
 
 ```julia
-transform_single_time_series!(store, horizon::Period, interval::Period) -> Int   # number transformed
+transform_single_time_series!(store, horizon::Period, interval::Period;
+                              owner_category::Union{Nothing,OwnerCategory}=nothing,
+                              resolution::Union{Nothing,Period}=nothing) -> Int  # number transformed
 ```
 
-`has_typed` and `remove_typed!` operate on forecast types by `ts_type` integer code
-(`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`):
+`count` is derived from each series' length. `owner_category` restricts the transform to one owner
+category (both are transformed when it is `nothing`); `resolution` restricts it to the
+`SingleTimeSeries` at that resolution.
+
+`has_typed`, `remove_typed!`, and `copy_time_series!` address a series by its `ts_type` integer code
+(`0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
+`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`):
 
 ```julia
 has_typed(store, owner_id, owner_category, name, ts_type::Integer;
-          resolution=nothing, features=Dict()) -> Bool
+          resolution=nothing, interval=nothing, features=Dict()) -> Bool
 remove_typed!(store, owner_id, owner_category, name, ts_type::Integer;
-              resolution=nothing, features=Dict())
+              resolution=nothing, interval=nothing, features=Dict())
+```
+
+`interval` (a `Period`) pins the forecast interval — the only way to disambiguate two forecasts of
+one owner/name/type that differ solely by interval (e.g. day-ahead vs intra-day). Without it such a
+lookup is ambiguous and errors.
+
+### Copying an association
+
+```julia
+copy_time_series!(store, owner_id, owner_category, name, ts_type::Integer,
+                  dst_owner_id, dst_owner_type::AbstractString;
+                  new_name=nothing, resolution=nothing, interval=nothing,
+                  features=Dict()) -> Nothing
+```
+
+Copies the time series identified by the source attributes onto `dst_owner_id` (of Julia/domain type
+`dst_owner_type`), optionally renaming it to `new_name`. Arrays are content-addressed, so this
+writes only a new association row against the same underlying array: no data is duplicated and the
+stored time series type is preserved — a `DeterministicSingleTimeSeries` stays a DST, whereas a
+read-then-write copy through `get_time_series` / `add_time_series!` would materialize it into a
+dense `Deterministic`. The copy keeps the source's `owner_category`. Throws if the destination
+already holds a matching series.
+
+```julia
+copy_time_series!(store, 42, Component, "load", 0, 43, "Generator")   # SingleTimeSeries → owner 43
 ```
 
 ### Reading forecast values
@@ -295,32 +362,67 @@ native Julia indexing). Pass `time_range = (start::DateTime, end::DateTime)` (ex
 select a window sub-range.
 
 Like the static readers, forecasts support both calling conventions: attribute-based
-(`owner_id, owner_category, name` plus optional `resolution` / `features`) or key-based (the
-`TimeSeriesKey` returned by `add_time_series!`).
+(`owner_id, owner_category, name` plus optional `resolution` / `interval` / `features`) or key-based
+(the `TimeSeriesKey` returned by `add_time_series!`).
 
 ```julia
 get_time_series(Deterministic, store, owner_id, owner_category, name;
-                resolution=nothing, features=Dict(), time_range=nothing) -> Deterministic
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -> Deterministic
 get_time_series(Deterministic, store, key::TimeSeriesKey; time_range=nothing) -> Deterministic
                 # data shape: (H, count, element_dims...)
 
+get_time_series(DeterministicSingleTimeSeries, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -> Deterministic
+get_time_series(DeterministicSingleTimeSeries, store, key::TimeSeriesKey;
+                time_range=nothing) -> Deterministic
+
+get_time_series(AbstractDeterministic, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -> Deterministic
+
 get_time_series(Probabilistic, store, owner_id, owner_category, name;
-                resolution=nothing, features=Dict(), time_range=nothing) -> Probabilistic
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -> Probabilistic
 get_time_series(Probabilistic, store, key::TimeSeriesKey; time_range=nothing) -> Probabilistic
                 # data shape: (num_percentiles, H, count, element_dims...)
 
 get_time_series(Scenarios, store, owner_id, owner_category, name;
-                resolution=nothing, features=Dict(), time_range=nothing) -> Scenarios
+                resolution=nothing, interval=nothing, features=Dict(),
+                time_range=nothing) -> Scenarios
 get_time_series(Scenarios, store, key::TimeSeriesKey; time_range=nothing) -> Scenarios
                 # data shape: (scenario_count, H, count, element_dims...)
 ```
 
-The **attribute-based** `Deterministic` reader also resolves a transformed
-`DeterministicSingleTimeSeries` (synthesized into a `Deterministic`) when no directly-stored
-`Deterministic` matches. The **key-based** readers carry the exact stored type in the key, so there
-is no fallback — a `DeterministicSingleTimeSeries` key reads back as a `Deterministic`. You can also
-request the derived type explicitly — `get_time_series(DeterministicSingleTimeSeries, store, …)` (by
-key or attributes) — which likewise returns a `Deterministic`.
+`interval` (a `Period`) pins the forecast interval; it is the only way to address one of two
+forecasts under the same owner/name/type that differ solely by interval. A read that leaves it
+`nothing` when two such forecasts exist raises `InvalidParameterError`.
+
+#### Concrete types vs. the `AbstractDeterministic` family
+
+The concrete request types match **only themselves**:
+
+- `get_time_series(Deterministic, …)` matches a directly-stored `Deterministic` and does **not**
+  match a `DeterministicSingleTimeSeries` — asking for `Deterministic` when only a transformed DST
+  exists raises `NotFoundError`. There is no fallback.
+- `get_time_series(DeterministicSingleTimeSeries, …)` matches only a transformed DST. Since the type
+  has no materialized struct, it returns a `Deterministic`.
+
+To read whichever of the two is stored under an identity, request the family type
+`AbstractDeterministic` (attribute-based only — a key already names its exact stored type):
+
+```julia
+transform_single_time_series!(store, Hour(4), Hour(2))
+fc = get_time_series(AbstractDeterministic, store, 400, Component, "dst")   # a Deterministic
+```
+
+The Rust core resolves the family in a single call — there is no guess-and-retry. A genuine miss
+raises `NotFoundError`, and an identity matching **both** a `Deterministic` and a
+`DeterministicSingleTimeSeries` is ambiguous and errors (request a concrete type instead).
+
+The **key-based** readers carry the exact stored type in the key, so the question does not arise: a
+`DeterministicSingleTimeSeries` key reads back as a `Deterministic`.
 
 Alternatively, use `get_metadata` to obtain the `data_hash`, then `get_array_by_hash` for the raw
 flattened array.
@@ -375,6 +477,11 @@ Reads the forecast _window_ at one timestamp for every matching forecast of one 
 filter must name a forecast type and pin a resolution; a `Deterministic` reader is abstract and also
 includes `DeterministicSingleTimeSeries` (read into identical `[H, *E]` windows). All matched
 forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
+
+`time_series_type` must be one of the four concrete forecast types — `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios`. Any other type (including
+`AbstractDeterministic`, which is a `get_time_series` request type only) raises
+`InvalidParameterError`; a `Deterministic` reader already covers the family.
 
 ```julia
 build_forecast_reader(store, time_series_type::Type; resolution::Period,
@@ -445,23 +552,39 @@ get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuf
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
 flush!(store) -> Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
-clear!(store) -> Nothing          # remove all series
-clear!(store, owner_id, owner_category::OwnerCategory) -> Nothing
-                                  # remove one owner's series ((owner_id, owner_category) pair)
+clear!(store; owner_id=nothing, owner_category=nothing) -> Nothing
+                                  # both `nothing`: remove every series in the store.
+                                  # Scope to one owner by passing BOTH keywords — they identify the
+                                  # (owner_id, owner_category) pair. `owner_id` without
+                                  # `owner_category` throws ArgumentError.
 replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory) -> Int
                                   # reassign one owner's series to a new id (same category); count moved
 close!(store) -> Nothing
 ```
 
-`list_keys(store; owner_id=nothing, owner_category=nothing)` lists the key of every stored series as
-`NamedTuple`s (identity plus the per-type descriptive snapshot: `initial_timestamp`, `resolution`,
-`length`, `horizon`, `interval`, `count`, `features`). It accepts `owner_id` and `owner_category` as
-independent filters to scope the listing. Physical storage detail (`data_hash`, `logical_type`,
-`percentiles`) is not on a key — read it via `get_metadata` / `get_forecast_metadata`.
+```julia
+list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+          name=nothing, resolution=nothing, features=Dict()) -> Vector{NamedTuple}
+```
 
-`list_array_groups` takes the same filters and returns the same row fields as `list_keys`, but each
-row additionally carries `data_hash` — the **64-character lowercase hex** content hash of the array
-the row resolves to (note this is a hex `String`, whereas `get_metadata` returns the hash as a
+`list_keys` lists the key of every stored series as `NamedTuple`s (identity plus the per-type
+descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
+`features`; fields that do not apply to a key's type are `nothing`). All six filters are optional
+and independent, and combine as a conjunction; with none set the whole store is listed:
+
+- `owner_id`, `owner_category` — scope to one owner.
+- `time_series_type` — a `TS_TYPE_*` **integer code** (`0 = SingleTimeSeries` … `5 = Scenarios`),
+  not a Julia type. (The `time_series_type` field on a returned row _is_ the Julia type.)
+- `name` — exact association name.
+- `resolution` — a `Period`.
+- `features` — match keys whose features include all the given entries (subset match).
+
+Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is not on a key — read it via
+`get_metadata` / `get_forecast_metadata`.
+
+`list_array_groups` takes the same six filters and returns the same row fields as `list_keys`, but
+each row additionally carries `data_hash` — the **64-character lowercase hex** content hash of the
+array the row resolves to (note this is a hex `String`, whereas `get_metadata` returns the hash as a
 32-byte `Vector{UInt8}`). Rows that share a stored array share their `data_hash`: both deduplicated
 identical arrays and a `SingleTimeSeries` together with any `DeterministicSingleTimeSeries` derived
 from it. **Group rows by `data_hash` to discover which time series share their underlying data** —
@@ -485,6 +608,7 @@ All subtype `TimeSeriesException`:
 | `InvalidParameterError`    | `TS_ERR_INVALID_PARAMETER` / `TS_ERR_INVALID_UTF8` / `TS_ERR_NULL_POINTER` |
 | `IntegrityError`           | `TS_ERR_INTEGRITY`                                                         |
 | `ReadOnlyStoreError`       | `TS_ERR_READ_ONLY`                                                         |
+| `IncompatibleFormatError`  | `TS_ERR_INCOMPATIBLE_FORMAT`                                               |
 | `GenericError`             | Any other non-zero code (carries the numeric `code`)                       |
 
 The message text comes from the FFI layer's thread-local error buffer.

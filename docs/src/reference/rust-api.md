@@ -4,13 +4,20 @@ The public surface of `time-series-store-core`. Import paths below are relative 
 
 ```rust
 use time_series_store_core::{
-    create_store, open_store, Store, TimeSeriesKey, KeyIdentity,
+    create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
-    TimeSeriesData, TimeSeriesType, Period,
-    TypedArray, Dtype, OwnerCategory, FeatureValue, Features, ListFilter, AddRequest,
-    TimeSeriesCounts, ForecastParameters, CompactionReport, IntegrityReport,
+    TimeSeriesData, TimeSeriesType, RequestedType, Period,
+    TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
+    ListFilter, AddRequest,
+    StaticReader, StaticGroup, ForecastReader, ForecastEntry, WindowSlot,
+    TimeSeriesCounts, TimeSeriesCountsDetailed, StaticSummaryRow, ForecastSummaryRow,
+    ForecastParameters, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
+
+// Not re-exported at the crate root — reach into the module:
+use time_series_store_core::hash::{array_hash, features_hash, hash_hex};
+use time_series_store_core::storage::StorageBackend;
 ```
 
 All time spans in this API — resolutions, horizons, and intervals — are the crate's
@@ -81,6 +88,15 @@ impl Store {
     // discards the buffer.
     pub fn bulk_add(&mut self) -> BulkAdd<'_>;
 
+    // Copy one association onto another owner (metadata only; the array is shared).
+    pub fn copy_time_series(
+        &mut self,
+        src: &KeyIdentity,
+        dst_owner_id: i64,
+        dst_owner_type: &str,
+        new_name: Option<&str>,   // None keeps the source name
+    ) -> Result<TimeSeriesKey>;
+
     pub fn get_time_series(
         &self,
         key: &KeyIdentity,
@@ -107,12 +123,21 @@ impl Store {
     ) -> Result<usize>;
     pub fn replace_owner(
         &mut self,
-        old_owner_id: i64,
-        new_owner_id: i64,
+        old_owner: i64,
+        new_owner: i64,
         owner_category: OwnerCategory,
     ) -> Result<usize>;
 
     pub fn list_time_series(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>>;
+    // Key-centric listing: the same rows reduced to their keys, dropping storage
+    // detail (`data_hash`, `dtype`, `logical_type`, `percentiles`).
+    pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>>;
+    // …and with each key's array content hash, so callers can group series that
+    // share stored data (dedup'd arrays; an STS and any DST derived from it).
+    pub fn list_keys_with_hash(
+        &self,
+        filter: ListFilter,
+    ) -> Result<Vec<(TimeSeriesKey, [u8; 32])>>;
     pub fn get_time_series_keys(
         &self,
         owner_id: i64,
@@ -120,16 +145,48 @@ impl Store {
     ) -> Result<Vec<TimeSeriesKey>>;
     pub fn has_time_series(&self, key: &KeyIdentity) -> Result<bool>;
 
+    // Resolve a forecast addressed by attributes + a `RequestedType` to the one
+    // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
+    pub fn resolve_forecast_key(
+        &self,
+        owner_id: i64,
+        owner_category: OwnerCategory,
+        name: &str,
+        resolution: Option<Period>,
+        interval: Option<Period>,
+        features: Features,
+        requested: RequestedType,
+    ) -> Result<TimeSeriesKey>;
+
     pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata>;
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray>;
+    // (SingleTimeSeries, DeterministicSingleTimeSeries) associations on one array.
+    pub fn count_array_references(&self, data_hash: &[u8; 32]) -> Result<(usize, usize)>;
 
-    pub fn get_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>>;
+    pub fn get_resolutions(
+        &self,
+        time_series_type: Option<TimeSeriesType>,
+    ) -> Result<Vec<Period>>;
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts>;
     pub fn get_forecast_parameters(
         &self,
         resolution: Option<Period>,
         interval: Option<Period>,
     ) -> Result<ForecastParameters>;
+
+    // Catalog introspection (each one catalog query; see "Introspection" below).
+    pub fn check_static_consistency(&self) -> Result<Option<(DateTime<Utc>, usize)>>;
+    pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>>;
+    pub fn num_distinct_arrays(&self) -> Result<i64>;
+    pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed>;
+    pub fn list_owner_ids(
+        &self,
+        category: OwnerCategory,
+        time_series_type: Option<TimeSeriesType>,
+        resolution: Option<Period>,
+    ) -> Result<Vec<i64>>;
+    pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>>;
+    pub fn forecast_summary(&self) -> Result<Vec<ForecastSummaryRow>>;
 
     // Per-timestamp readers (see "Readers" below).
     pub fn build_static_reader(&self, filter: ListFilter) -> Result<StaticReader>;
@@ -140,8 +197,15 @@ impl Store {
     pub fn compact(&mut self) -> Result<CompactionReport>;
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
     pub fn flush(&mut self) -> Result<()>;
+    // Write the whole store (arrays + catalog) to `path` + `<path>.sqlite`,
+    // overwriting them. Works for on-disk *and* in-memory stores.
+    pub fn persist_to(&mut self, path: &Path) -> Result<()>;
 }
 ```
+
+`Store` is `Send` but **not** `Sync` (the SQLite catalog holds a `rusqlite::Connection`): a store
+can be moved between threads, but sharing one requires external synchronization —
+`Arc<Mutex<Store>>`, serializing reads as well as writes, which is what the gRPC server does.
 
 ### Method notes
 
@@ -169,12 +233,51 @@ impl Store {
 - **`replace_owner`** — Reassigns every series owned by `(old_owner_id, owner_category)` to
   `(new_owner_id, owner_category)`, returning the number of associations updated. The category is
   unchanged by the move and scopes which owner's series are reassigned.
+- **`copy_time_series`** — Copies one association onto `(dst_owner_id, dst_owner_type)`, keeping the
+  source's `owner_category` and every descriptive column — crucially `time_series_type`, so a
+  `DeterministicSingleTimeSeries` stays one rather than being materialized into a dense
+  `Deterministic` (what a read-then-write copy through the bindings would produce). Only a metadata
+  row is written: the array is content-addressed and shared. `new_name = None` keeps the source
+  name. Errors with `DuplicateTimeSeries` if the destination identity already exists.
 - **`get_time_series_keys`** — Lists every key for the owner identified by the
   `(owner_id, owner_category)` pair.
+- **`list_keys` / `list_keys_with_hash`** — The key-centric listing path (what the bindings use).
+  `list_keys_with_hash` pairs each key with its array's content hash in the same single catalog
+  query, so callers can group keys by the data behind them.
+- **`resolve_forecast_key`** — Resolves a forecast addressed by attributes plus a
+  [`RequestedType`](#requestedtype) to the single matching key, whose `time_series_type` is the
+  concrete type that matched. `resolution` and `interval` are optional filters; leave them `None` to
+  match across them. `NotFound` if nothing matches, `InvalidParameter` if more than one does.
 - **`get_metadata` / `get_array_by_hash`** — The low-level pair used by external bindings: resolve a
   key to metadata (including `data_hash`), then read the array directly.
+- **`count_array_references`** — `(sts, dst)` association counts referencing one `data_hash`, so a
+  caller can tell whether removing a `SingleTimeSeries` would orphan a
+  `DeterministicSingleTimeSeries` derived from (and sharing) its array.
 - **`verify_integrity`** — Recomputes each stored array's hash and reports mismatches.
 - **`flush`** — Issues `nc_sync` so the files can be copied for persistence without closing.
+- **`persist_to`** — Writes both halves of the artifact to `path` and `<path>.sqlite`, overwriting
+  existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
+  (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
+  reproduces every series — static, forecast, non-sequential — without per-type reconstruction.
+
+### Introspection
+
+Grouped catalog queries the bindings use instead of listing every association and aggregating in the
+caller. All are read-only and hit SQLite once.
+
+- **`check_static_consistency`** — `Ok(None)` when there are no `SingleTimeSeries`,
+  `Ok(Some((initial_timestamp, length)))` when they all share one grid, and `IntegrityError` when
+  more than one distinct pair exists.
+- **`counts_by_type`** — Association count per [`TimeSeriesType`](#timeseriestype).
+- **`num_distinct_arrays`** — Distinct stored content hashes; series sharing an array count once.
+- **`time_series_counts_detailed`** — [`TimeSeriesCountsDetailed`](#report-and-count-types):
+  distinct owners split by category, and distinct _arrays_ (not associations) split into static vs
+  forecast.
+- **`list_owner_ids`** — Distinct owner ids in one category that have a time series, optionally
+  narrowed by type and/or resolution.
+- **`static_summary` / `forecast_summary`** — One [`StaticSummaryRow`](#report-and-count-types) /
+  [`ForecastSummaryRow`](#report-and-count-types) per distinct owner/name/shape (or window)
+  combination, with the association count. The core groups; the binding formats the table.
 
 ### Forecasts
 
@@ -239,7 +342,8 @@ forecasts.
 // Static: value of every SingleTimeSeries at one timestamp, columnar.
 let mut reader = store.build_static_reader(ListFilter::new().resolution(res))?;
 for k in 0..reader.length() {
-    let at = reader.initial_timestamp() + /* k · resolution */;
+    // Grid point k: initial + k·resolution (calendar-aware, hence `Period::add_to`).
+    let at = reader.resolution().add_to(reader.initial_timestamp(), k as i64).unwrap();
     store.static_read(&mut reader, at)?;
     for group in reader.groups() {
         let bytes = group.values();        // [num_columns, *element_shape], row-major LE
@@ -252,10 +356,12 @@ let mut reader = store.build_forecast_reader(
     ListFilter::new().time_series_type(TimeSeriesType::Deterministic).resolution(res),
 )?;
 for k in 0..reader.count() {
-    let at = reader.initial_timestamp() + /* k · interval */;
+    // Window k: initial + k·interval.
+    let at = reader.interval().add_to(reader.initial_timestamp(), k as i64).unwrap();
     store.forecast_read(&mut reader, at)?;
-    for entry in reader.entries() {
-        let slot = reader.entry_slot(entry.slot());
+    // `entry_slot` takes the *entry* index, not `entry.slot()` (which indexes `slots()`).
+    for (i, entry) in reader.entries().iter().enumerate() {
+        let slot = reader.entry_slot(i);
         let bytes = slot.window();         // window of slot.window_shape(), row-major LE
         // entry.key() identifies the forecast/owner
     }
@@ -275,8 +381,9 @@ deduplicated identical data, or several `DeterministicSingleTimeSeries` over one
 — share one slot. `forecast_read` performs one backend read per **slot**, not per entry, so a
 forecast shared by N owners is read once per timestamp (the forecast analog of `StaticReader`
 reading a packed column once and gathering it to many columns). `reader.slots()` /
-`reader.entry_slot(i)` expose the slots; `entry.slot()` is the slot index backing each entry, equal
-for entries that share data.
+`reader.entry_slot(i)` expose the slots; note that `entry_slot` takes the **entry** index `i` and
+returns the slot backing that entry, while `entry.slot()` is that slot's index into `slots()` (equal
+for entries that share data).
 
 ## Types
 
@@ -399,9 +506,31 @@ impl Period {
     pub fn months(n: i32) -> Self;
     pub fn is_irregular(&self) -> bool;    // true for Months
     pub fn is_positive(&self) -> bool;
-    pub fn add_to(&self, dt: DateTime<Utc>, k: i64) -> Option<DateTime<Utc>>;  // calendar-aware
+    pub fn same_kind(&self, other: &Period) -> bool;  // both Fixed, or both Months
+
+    // Grid arithmetic (calendar-aware for `Months`).
+    pub fn add_to(&self, dt: DateTime<Utc>, k: i64) -> Option<DateTime<Utc>>;
+    // Whole steps from `start` to `at`; errors if `at` is before `start` or off-grid.
+    pub fn steps_between(&self, start: DateTime<Utc>, at: DateTime<Utc>) -> Result<usize>;
+    // Nearest grid step at or below / at or above `at`; clamps to 0, never errors
+    // (used for time-range slicing, where the bounds are arbitrary).
+    pub fn floor_steps(&self, start: DateTime<Utc>, at: DateTime<Utc>) -> usize;
+    pub fn ceil_steps(&self, start: DateTime<Utc>, at: DateTime<Utc>) -> usize;
+    // `other / self` as an exact positive integer (H = horizon / resolution).
+    // Mixing a Fixed and a Months period is an error.
+    pub fn divide_into(&self, other: &Period) -> Result<usize>;
+
+    // The on-disk / on-the-wire encoding: an ISO-8601 duration ("PT1H", "P1M", "P1Y").
+    pub fn to_iso8601(&self) -> String;                 // also the `Display` impl
+    pub fn from_iso8601(s: &str) -> Result<Period>;
 }
 ```
+
+`to_iso8601` / `from_iso8601` are the persistence contract: every resolution, horizon, and interval
+is stored and transmitted as that string. The encoding is a pure function of the value, so equal
+periods always encode identically (which is what the catalog's uniqueness key relies on), and it
+round-trips. Calendar units (`Y`, `M` before the `T`) decode to `Months`; fixed units (`W`, `D`, and
+`H`/`M`/`S` after the `T`) decode to `Fixed`; a string mixing the two is rejected.
 
 Because `Period: From<Duration>`, anywhere the API takes `impl Into<Period>` you may pass a
 `chrono::Duration` directly (e.g. `Duration::hours(1)`); use `Period::months(n)` for calendar spans.
@@ -620,22 +749,81 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 
 ### `ListFilter`
 
-A builder; every field is an optional filter, combined with AND.
+A builder; every field is an optional filter, combined with AND. `ListFilter::new()` and
+`ListFilter::default()` are the same empty filter (matches everything).
 
 ```rust
 ListFilter::new()
     .owner_id(42)
+    .owner_type("Generator")
     .owner_category(OwnerCategory::Component)
     .time_series_type(TimeSeriesType::SingleTimeSeries)
     .name("load")
-    .resolution(Duration::hours(1))
+    .resolution(Duration::hours(1))   // impl Into<Period>
+    .interval(Duration::hours(24))    // impl Into<Period>; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
 ```
 
 ### `AddRequest`
 
-The element type of `add_time_series_bulk`, mirroring the `add_time_series` arguments plus an
-optional `logical_type: Option<String>` (an opaque, binding-owned domain label).
+The element type of `add_time_series_bulk` (and of `BulkAdd::push`), mirroring the `add_time_series`
+arguments plus an optional `logical_type` — an opaque, binding-owned domain label. The series name
+lives on the `TimeSeriesData` object, not here.
+
+```rust
+pub struct AddRequest {
+    pub owner_id: i64,
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub data: TimeSeriesData,
+    pub features: Features,
+    pub units: Option<String>,
+    pub logical_type: Option<String>,
+}
+```
+
+### `BulkAdd`
+
+The buffered bulk-add session returned by [`Store::bulk_add`](#store). Requests accumulate in memory
+— no validation and no I/O until `commit`, which writes every array as a batch-sized block and
+inserts every association in one transaction, all-or-nothing. Dropping the session without
+committing discards the buffer and writes nothing.
+
+```rust
+impl BulkAdd<'_> {
+    pub fn push(&mut self, request: AddRequest) -> &mut Self;   // prebuilt request
+    pub fn add(                                                 // …or from its parts
+        &mut self,
+        owner_id: i64,
+        owner_type: &str,
+        owner_category: OwnerCategory,
+        data: TimeSeriesData,
+        features: Features,
+        units: Option<String>,
+    ) -> &mut Self;                                             // logical_type = None
+    pub fn len(&self) -> usize;          // requests buffered so far
+    pub fn is_empty(&self) -> bool;
+    pub fn commit(self) -> Result<Vec<TimeSeriesKey>>;          // keys in push order
+}
+```
+
+### `RequestedType`
+
+What [`Store::resolve_forecast_key`](#store) is asked to match: one concrete stored type, or the
+abstract "deterministic" family, which a stored `Deterministic` **or**
+`DeterministicSingleTimeSeries` satisfies (the two never coexist for one series, so at most one can
+match).
+
+```rust
+pub enum RequestedType {
+    Concrete(TimeSeriesType),
+    AbstractDeterministic,
+}
+
+impl RequestedType {
+    pub fn matches(self, concrete: TimeSeriesType) -> bool;
+}
+```
 
 ### Report and count types
 
@@ -644,6 +832,39 @@ pub struct TimeSeriesCounts {
     pub components_with_time_series: i64,
     pub static_time_series: i64,
     pub forecasts: i64,
+}
+// Owner- and array-oriented counts (`time_series_counts_detailed`). Unlike
+// `TimeSeriesCounts`, the series counts here are deduplicated by array content
+// and owners are split by category.
+pub struct TimeSeriesCountsDetailed {
+    pub components_with_time_series: i64,
+    pub supplemental_attributes_with_time_series: i64,
+    pub static_time_series_count: i64,
+    pub forecast_count: i64,
+}
+// One grouped row of `static_summary` / `forecast_summary`; `count` is the
+// number of associations in the group.
+pub struct StaticSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub name: String,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub resolution: Option<Period>,
+    pub time_step_count: Option<i64>,
+    pub count: i64,
+}
+pub struct ForecastSummaryRow {
+    pub owner_type: String,
+    pub owner_category: OwnerCategory,
+    pub time_series_type: TimeSeriesType,
+    pub name: String,
+    pub initial_timestamp: Option<DateTime<Utc>>,
+    pub resolution: Option<Period>,
+    pub horizon: Option<Period>,
+    pub interval: Option<Period>,
+    pub window_count: Option<i64>,
+    pub count: i64,
 }
 pub struct CompactionReport {
     pub slots_reclaimed: usize,
@@ -683,13 +904,23 @@ pub enum TimeSeriesError {
 ## `StorageBackend` Trait
 
 The seam between `Store` and array storage. Implemented by `MemoryBackend` and `NetCdfBackend`. You
-rarely call it directly, but it documents the backend contract.
+rarely call it directly, but it documents the backend contract. It is **not** re-exported at the
+crate root — import it (and the backends) from the `storage` module:
+
+```rust
+use time_series_store_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+```
+
+Every method below with a default is a performance override: the default is correct but naive, and
+`NetCdfBackend` implements a faster path (single hyperslab reads, whole-chunk block writes).
 
 ```rust
 pub trait StorageBackend: Send + Sync {
+    // --- required ---
+
     // `packed = true` column-packs same-shaped arrays (SingleTimeSeries / DST);
     // `packed = false` stores a standalone multi-dim variable (NonSequential, dense forecasts).
-    // idempotent on hash
+    // Idempotent on hash: returns `true` only if this call physically wrote new content.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
@@ -698,16 +929,57 @@ pub trait StorageBackend: Send + Sync {
         packed: bool,
     ) -> Result<bool>;
     fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
+    // Slice along axis 0 (the time axis); `range` end is exclusive.
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
-    fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;
+    fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;   // no-op if absent
     fn contains(&self, hash: &[u8; 32]) -> Result<bool>;
     fn compact(&mut self) -> Result<CompactionReport>;
     fn verify(&self) -> Result<IntegrityReport>;
     fn flush(&mut self) -> Result<()>;
+
+    // --- provided (overridden by NetCdfBackend) ---
+
+    // Write a block of same-shaped packed arrays at once (the bulk-add write path).
+    // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>>;
+    // Read many whole arrays at once (`Store::bulk_read`): one decompress pass per dataset.
+    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>>;
+    // One time step across co-located arrays (`StaticReader`); `out` is cleared, then
+    // filled row-major as [column, *element_shape]. Reusing the buffer keeps the loop
+    // allocation-free.
+    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()>;
+    // Stored (dtype, shape), ideally without reading the data.
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)>;
+    // One forecast window: the `window_index` slice along `count_axis`, that axis dropped.
+    fn read_window_into(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        window_index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()>;
+    // `len` consecutive steps from `start` along axis 0 (backs DST window reads).
+    fn read_range_into(
+        &self,
+        hash: &[u8; 32],
+        start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()>;
+    // The compression policy applied to writes; defaults to `Compression::None`
+    // (in-memory backends never compress).
+    fn compression(&self) -> Compression;
 }
 ```
 
 ## Hashing
+
+In the `hash` module (`time_series_store_core::hash`), not at the crate root.
 
 ```rust
 pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes

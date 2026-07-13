@@ -47,11 +47,12 @@ Steps to publish:
 | ------------------------------------------------ | ----------------------------------------- | ------------------------------ |
 | `time-series-store` (import `time_series_store`) | PyO3/maturin wheel exposing the store API | `crates/time-series-store-py/` |
 
+The distribution name (`time-series-store`) and module name (`time_series_store`) are already set in
+`crates/time-series-store-py/pyproject.toml`.
+
 Steps to publish:
 
-1. Set the distribution name `time-series-store` and module `time_series_store` in
-   `crates/time-series-store-py/pyproject.toml` (rename from the current `time_series`).
-2. Build wheels with `maturin` under `cibuildwheel` (abi3, manylinux + macOS + windows), publish to
+1. Build wheels with `maturin` under `cibuildwheel` (abi3, manylinux + macOS + windows), publish to
    PyPI on tagged releases.
 
 ## Versioning

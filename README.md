@@ -2,7 +2,7 @@
 
 Rust library for managing time-series data in power-systems / energy simulations. Persistence is
 split between numerical arrays in NetCDF4 and metadata associations in SQLite. Bindings: native
-Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI).
+Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI), and the `tss` CLI.
 
 Spec:
 [NatLabRockies/time-series-store#1](https://github.com/NatLabRockies/time-series-store/issues/1).
@@ -35,10 +35,11 @@ crates/
   time-series-store-py/      # PyO3 bindings, abi3-py310 wheel
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
   time-series-store-cli/     # `tss` CLI: load CSV + inspect a store on disk
+  time-series-store-bench/   # `tss-bench` binary: ingestion + simulation-read benchmarks
 proto/                       # .proto sources
 julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI (TimeSeriesStore.jl)
 python/tests/                # pytest suite
-examples/                    # Sample server config
+examples/                    # Sample server config, basic_rust.rs, and cli/ sample CSV + descriptor
 ```
 
 ## Prerequisites
@@ -126,7 +127,7 @@ julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.
 using Dates, TimeSeriesStore
 store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
-key = add_time_series!(store, "42", "Generator", Component, ts;
+key = add_time_series!(store, 42, "Generator", Component, ts;
                        features=Dict("model_year" => 2030), units="MW")
 got = get_time_series(store, key)
 @assert got.data == ts.data
@@ -172,7 +173,7 @@ cargo run -p time-series-store-server -- --config my_server.toml
 
 ## Storage format
 
-NetCDF file with attribute `data_format_version = "0.6.0"`. Each packed dataset is named
+NetCDF file with attribute `data_format_version = "0.10.0"`. Each packed dataset is named
 `sts_{dtype}_{shape}_{length}_{resolution}` (per-timestep reads across all components are
 contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash for each column; an
 empty string marks a free slot. Standalone arrays are stored as `arr_{hex_hash}`.
@@ -192,4 +193,4 @@ Metadata lives in a catalog SQLite file at `<path>.sqlite`. Two artifacts ship t
 ## Status
 
 - Covered by Rust, Python, and Julia test suites across the core, bindings, and round trips.
-- Workspace clippy-clean on edition 2024 (Rust 1.95).
+- Workspace clippy-clean on edition 2024; MSRV 1.94.

@@ -36,8 +36,10 @@ impl Interceptor for ApiKeyInterceptor {
     }
 }
 
-/// Constant-time comparison: every configured key is checked, regardless of
-/// where a match falls. Avoids early-exit timing leaks.
+/// Compares against every configured key regardless of where a match falls, so
+/// there is no early-exit timing leak across keys. The comparison is only
+/// constant-time among keys of the same length as `supplied`: a length mismatch
+/// is rejected before the XOR loop, which leaks the supplied key's length.
 fn any_match(keys: &[String], supplied: &str) -> bool {
     let supplied = supplied.as_bytes();
     let mut found = false;

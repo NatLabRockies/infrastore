@@ -18,15 +18,22 @@ cargo build -p time-series-store-ffi --release
 
 ## 2. Point Julia at the Library
 
-`TimeSeriesStore.jl` reads the library path from the `TIME_SERIES_STORE_LIB` environment variable at
-first use:
+`TimeSeriesStore.jl` resolves the cdylib at first use, in this order:
+
+1. The `TIME_SERIES_STORE_LIB` environment variable — the development override, pointing at a build
+   from step 1.
+2. The `TimeSeriesStore_jll` binary package, if it is installed in the active environment.
+
+For a development build, export the variable (add it to your shell profile to make it permanent):
 
 ```sh
 export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
 ```
 
-If the variable is unset, `using TimeSeriesStore` works but the first store operation errors with a
-message telling you to set it. Add the export to your shell profile to make it permanent.
+`using TimeSeriesStore` always works; the resolution happens on the first call that reaches the
+native library. If neither source yields a path, that call errors (see
+[Troubleshooting](#troubleshooting)). With `TimeSeriesStore_jll` installed you can skip the export
+entirely — set `TIME_SERIES_STORE_LIB` only when you want your local build to win over the JLL.
 
 ## 3. Instantiate and Test the Package
 
@@ -68,8 +75,10 @@ println("ok")
 
 ## Troubleshooting
 
-- **`TIME_SERIES_STORE_LIB env var must point to ...`** — Export the variable (step 2) before the
-  first store call, in the same shell that launched Julia.
+- **`Could not locate libtime_series_store_ffi. Set the TIME_SERIES_STORE_LIB environment variable to
+  a built cdylib, or install TimeSeriesStore_jll.`**
+  — Neither resolution path produced a library. Export the variable (step 2) before the first store
+  call, in the same shell that launched Julia, or add `TimeSeriesStore_jll` to the environment.
 - **`could not load library`** — Check the path exists and has the right extension for your OS
   (`.dylib` on macOS, `.so` on Linux, `.dll` on Windows), and that you built with `--release` if
   your variable points at `target/release`.

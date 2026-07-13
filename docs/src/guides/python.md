@@ -12,8 +12,10 @@ import numpy as np
 from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
-The module exposes `TimeSeriesStore`, `SingleTimeSeries`, `TimeSeriesKey`, the `TimeSeriesType` and
-`OwnerCategory` enums, and an exception hierarchy rooted at `TimeSeriesError`.
+The module exposes `TimeSeriesStore`; the static series classes `SingleTimeSeries` and
+`NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
+`TimeSeriesKey`; the `TimeSeriesType` and `OwnerCategory` enums; the `init_tracing` function; and an
+exception hierarchy rooted at `TimeSeriesError`.
 
 ## Open or Create a Store
 
@@ -30,8 +32,9 @@ store = TimeSeriesStore.open("system.nc", read_only=True)
 
 ## Build a Series
 
-`SingleTimeSeries` takes a timezone-aware `datetime`, a `timedelta` resolution, and a NumPy
-`float64` array:
+`SingleTimeSeries` takes a timezone-aware `datetime`, a resolution (a `timedelta` or an ISO 8601
+duration string such as `"PT1H"` — the string form is required for calendar periods like `"P1M"`),
+and a NumPy array:
 
 ```python
 ts = SingleTimeSeries(
@@ -65,8 +68,9 @@ key = store.add_time_series(
 
 `features` is a plain dict whose values are `int`, `float`, `bool`, or `str`. Adding a series whose
 [key](../explanation/data-model.md#keys) already exists raises `DuplicateTimeSeriesError`. The
-returned `key` exposes `owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`, and
-`features` as read-only properties.
+returned `key` exposes `owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
+`interval`, and `features` as read-only properties (`resolution` and `interval` are ISO 8601
+duration strings or `None`).
 
 ## Read a Series
 
@@ -124,6 +128,9 @@ store.remove_time_series(key)
 n = store.clear_time_series(42, OwnerCategory.Component)   # all series for one owner; returns count
 store.clear_time_series()                                  # remove everything
 
+# Reassign every series from one owner to another; returns the number moved.
+moved = store.replace_owner(42, 43, OwnerCategory.Component)
+
 report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
                                    #  "feature_sets_reclaimed": ...}
 errors = store.verify_integrity()   # [] when intact
@@ -139,7 +146,7 @@ Keep the two files together — the `.nc` and `.nc.sqlite` pair is a single logi
 
 ## Error Handling
 
-All exceptions inherit from `TimeSeriesError`, so you can catch broadly or narrowly:
+The store's own exceptions inherit from `TimeSeriesError`, so you can catch broadly or narrowly:
 
 ```python
 from time_series_store import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
@@ -151,6 +158,11 @@ except DuplicateTimeSeriesError:
 except TimeSeriesError as e:
     ...                       # anything else from the store
 ```
+
+Argument parsing is the exception to that rule: a period argument (`resolution`, `horizon`,
+`interval`) that is a malformed ISO 8601 duration string raises a plain `ValueError`, and one that
+is neither a `timedelta` nor a `str` raises a plain `TypeError`. Neither is a `TimeSeriesError`, so
+`except TimeSeriesError` will not catch them.
 
 One gotcha: because Python's `bool` is a subclass of `int`, the binding deliberately checks `bool`
 first, so `True`/`False` feature values are stored as booleans (not as `1`/`0` integers).

@@ -1759,14 +1759,16 @@ function _add_dense_forecast!(
 end
 
 """
-    transform_single_time_series!(store, horizon, interval; owner_category=nothing) -> Int
+    transform_single_time_series!(store, horizon, interval; owner_category=nothing,
+                                  resolution=nothing) -> Int
 
 Derive `DeterministicSingleTimeSeries` forecasts from the stored `SingleTimeSeries`
 associations (mirrors InfrastructureSystems.jl's `transform_single_time_series!`):
 each is re-described as a DST sharing the same underlying array; `count` is derived
 from each series' length. When `owner_category` is given (`Component` or
 `SupplementalAttribute`) only series of that owner category are transformed;
-otherwise every category is. Returns the number of series transformed.
+otherwise every category is. When `resolution` is given only series at that
+resolution are transformed. Returns the number of series transformed.
 """
 function transform_single_time_series!(
     store::Store, horizon::Period, interval::Period;
@@ -2546,9 +2548,10 @@ end
 # Counterparts to the attribute-addressed forecast readers above, keyed by a
 # `TimeSeriesKey` handle (returned by `add_time_series!`). The time series type
 # comes from the key; the `::Type{...}` argument selects how the result is
-# decoded and which struct is returned. Unlike the attribute-based `Deterministic`
-# reader there is no `DeterministicSingleTimeSeries` fallback — the key already
-# names the exact stored type (a DST key reads back as a `Deterministic`).
+# decoded and which struct is returned. The key already names the exact stored
+# type, so no type resolution happens here (a DST key reads back as a
+# `Deterministic`). The attribute-based readers have no DST fallback either:
+# use `get_time_series(AbstractDeterministic, ...)` to match either concrete type.
 
 """
     get_time_series(Deterministic, store, key; time_range)

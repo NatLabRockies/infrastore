@@ -11,13 +11,24 @@ SQLite. It exposes multiple bindings over a shared core:
   filesystem access)
 - **Python** — `time-series-store-py` via PyO3 (abi3-py310 wheel)
 - **Julia** — `time-series-store-ffi` C ABI cdylib, wrapped by `julia/TimeSeriesStore.jl`
+- **CLI** — `time-series-store-cli` (`tss` binary): loads time series from CSV + a descriptor JSON
+  and inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no
+  gRPC). Output mirrors the `../torc` CLI's global `-f/--format table|json|csv`.
 
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
-end-to-end across Rust, gRPC, Python, and Julia. `Deterministic`, `DeterministicSingleTimeSeries`,
-`Probabilistic`, and `Scenarios` are implemented in the Rust core and C ABI, but are not yet fully
-wrapped by Python, Julia, or gRPC. Arrays are dtype-generic and may have multidimensional
-per-timestep values. Auth is `none` (default) or `api_key` via the `x-api-key` header. See
-`README.md` and `docs/src/explanation/data-model.md` for the authoritative feature matrix.
+end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
+`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, and `Scenarios` support reading
+values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
+`Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
+matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
+`ts_store_add_forecast` / `ts_store_add_probabilistic` as low-level transport);
+`DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
+`transform_single_time_series` rather than added directly. The gRPC service is read-only — every RPC
+it defines is a read — so no time-series type can be written over it. Arrays are dtype-generic
+(`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every binding, including Python) and may have
+multidimensional per-timestep values. Auth is `none` (default) or `api_key` via the `x-api-key`
+header. See `README.md` and `docs/src/explanation/data-model.md` for the authoritative feature
+matrix.
 
 ## Code Quality Requirements
 
@@ -35,8 +46,10 @@ cargo deny check --config deny.toml                     # Dependency policy
 
 - **Rust code**: Must compile without clippy warnings. Use
   `cargo clippy --workspace --all-targets --all-features -- -D warnings` to verify.
-- **Toolchain**: The workspace uses Rust edition 2024 and declares an MSRV of Rust 1.95.0. Do not
-  use APIs requiring a newer compiler without intentionally updating `rust-version` and CI.
+- **Toolchain**: The workspace uses Rust edition 2024 and declares an MSRV of Rust 1.94 (see
+  `rust-version` in the root `Cargo.toml`, which is the sole authority — there is no
+  `rust-toolchain` file). Do not use APIs requiring a newer compiler without intentionally updating
+  `rust-version` and CI.
 - **Pre-commit**: `cargo-husky` installs `.cargo-husky/hooks/pre-commit`, which runs rustfmt,
   Clippy, dprint, and shellcheck when available. Do not bypass a failing hook. Tests and
   `cargo-deny` are still required before committing.
@@ -53,19 +66,23 @@ For detailed style guidelines, see `docs/style-guide.md`.
 ```
 crates/
   time-series-store-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
-    src/types/               #   key.rs, metadata.rs, time_series.rs
+    src/types/               #   array.rs (TypedArray/Dtype), key.rs, metadata.rs, period.rs,
+                             #   time_series.rs
     src/storage/             #   memory.rs, netcdf.rs (storage backends)
     src/metadata/            #   schema.rs (SQLite catalog schema)
     src/store.rs             #   Store: the top-level public API
+    src/reader.rs            #   StaticReader / ForecastReader: columnar bulk-read surface
     src/hash.rs              #   SHA-256 column hashing
   time-series-store-proto/   # Protobuf service definition + tonic codegen, conversions
   time-series-store-server/  # gRPC server binary (src/bin/server.rs) + Rust client
   time-series-store-py/      # PyO3 bindings
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
+  time-series-store-cli/     # `tss` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
+  time-series-store-bench/   # `tss-bench` binary: bulk-ingest + simulation-read benchmarks
 proto/                       # .proto sources
 julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite
-examples/                    # Sample server config + basic_rust.rs example
+examples/                    # Sample server config, basic_rust.rs, and cli/ (sample CSV + descriptor)
 .github/workflows/           # Cross-platform tests, linting, security, wheel builds
 ```
 

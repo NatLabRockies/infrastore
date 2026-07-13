@@ -37,18 +37,19 @@ consumer.
 
 ## Status Codes
 
-| Macro                      | Value | Meaning                         |
-| -------------------------- | ----- | ------------------------------- |
-| `TS_OK`                    | 0     | Success                         |
-| `TS_ERR_NULL_POINTER`      | 1     | A required pointer was `NULL`   |
-| `TS_ERR_INVALID_UTF8`      | 2     | A string argument was not UTF-8 |
-| `TS_ERR_INVALID_PARAMETER` | 3     | A bad argument value            |
-| `TS_ERR_NOT_FOUND`         | 4     | No matching series / array      |
-| `TS_ERR_DUPLICATE`         | 5     | Key already exists              |
-| `TS_ERR_INTEGRITY`         | 6     | On-disk inconsistency           |
-| `TS_ERR_READ_ONLY`         | 7     | Write on a read-only store      |
-| `TS_ERR_IO`                | 8     | I/O failure                     |
-| `TS_ERR_INTERNAL`          | 99    | Unexpected internal error       |
+| Macro                        | Value | Meaning                                                                                                                        |
+| ---------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `TS_OK`                      | 0     | Success                                                                                                                        |
+| `TS_ERR_NULL_POINTER`        | 1     | A required pointer was `NULL`                                                                                                  |
+| `TS_ERR_INVALID_UTF8`        | 2     | A string argument was not UTF-8                                                                                                |
+| `TS_ERR_INVALID_PARAMETER`   | 3     | A bad argument value                                                                                                           |
+| `TS_ERR_NOT_FOUND`           | 4     | No matching series / array                                                                                                     |
+| `TS_ERR_DUPLICATE`           | 5     | Key already exists                                                                                                             |
+| `TS_ERR_INTEGRITY`           | 6     | On-disk inconsistency                                                                                                          |
+| `TS_ERR_READ_ONLY`           | 7     | Write on a read-only store                                                                                                     |
+| `TS_ERR_IO`                  | 8     | I/O failure                                                                                                                    |
+| `TS_ERR_INCOMPATIBLE_FORMAT` | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade. |
+| `TS_ERR_INTERNAL`            | 99    | Unexpected internal error                                                                                                      |
 
 ## Lifecycle
 
@@ -60,6 +61,8 @@ int32_t ts_store_create_with_compression(const char *path, bool in_memory, uint8
 int32_t ts_store_open(const char *path, bool read_only, struct TsStore **out);
 void    ts_store_free(struct TsStore *handle);
 void    ts_key_free(struct TsKey *key);
+/* Frees any owned `char *` this library returns (resolutions, horizons, intervals, …). */
+void    ts_string_free(char *s);
 void    ts_buffer_free_f64(double *ptr, uint64_t len);
 void    ts_buffer_free_u8(uint8_t *ptr, uint64_t len);
 void    ts_buffer_free_i64(int64_t *ptr, uint64_t len);
@@ -218,7 +221,8 @@ features, and addressing so the caller can pick the matching key-based reader.
 
 The forecast types are created and read through the C ABI. `ts_type` is the `TimeSeriesType`
 discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
-`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. Forecast values are
+`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios` — plus one request-only
+sentinel, `TS_TYPE_ABSTRACT_DETERMINISTIC` (`100`), described below. Forecast values are
 dtype-generic raw little-endian byte buffers with explicit dimensions — the same `dtype`, `ndims`,
 `dims_ptr`, `data_ptr`, `data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
@@ -268,21 +272,41 @@ int32_t ts_store_transform_single_time_series(struct TsStore *handle,
                                               uint64_t *out_count);
 ```
 
-`ts_store_get_forecast` is the forecast read function: it resolves a `Deterministic`,
-`Probabilistic`, or `Scenarios` forecast by attributes (DST is synthesized into `Deterministic`) and
+`ts_store_get_forecast` is the forecast read function: it resolves a forecast by attributes and
 returns the decoded data buffer, its out-dimensions, the metadata, and — for `Probabilistic` — the
-percentile vector. When `time_range_present` is `true`, only the windows whose start timestamp falls
-in `[time_range_start_ms, time_range_end_ms)` are returned; pass `false` to retrieve all windows.
-The caller owns the returned buffers: free `*out_data` with `ts_buffer_free_u8`, `*out_dims` with
+percentile vector. A stored `DeterministicSingleTimeSeries` is synthesized into `Deterministic`
+_values_ (its dense windows are materialized from the backing `SingleTimeSeries`), but it remains a
+distinct stored type for addressing purposes.
+
+Its `ts_type` argument is a **read request**, not merely a stored-type filter:
+
+- A concrete code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`,
+  `5 = Scenarios`) matches **only** that exact stored type. Passing `2` does _not_ find a stored
+  `DeterministicSingleTimeSeries`, and passing `3` does not find a stored `Deterministic`. The
+  non-forecast codes `0` and `1` are rejected with `TS_ERR_INVALID_PARAMETER`.
+- `TS_TYPE_ABSTRACT_DETERMINISTIC` (`100`) is a request-only sentinel — never a stored type — for
+  the `AbstractDeterministic` family: it matches a stored `Deterministic` **or** a
+  `DeterministicSingleTimeSeries`. This is the only way to address a deterministic forecast whose
+  concrete type the caller does not know in advance. The catalog resolves the family authoritatively
+  (no client-side guess-and-retry) and reports the concrete type that matched through
+  `*out_matched_type`. If both concrete types share the identity the request is ambiguous and
+  returns `TS_ERR_INVALID_PARAMETER`; a genuine miss returns the usual not-found error.
+
+`*out_matched_type` always receives the **concrete** `TimeSeriesType` that was matched — so a stored
+`DeterministicSingleTimeSeries` reports `3`, never `2`, and the `100` sentinel is never returned.
+
+When `time_range_present` is `true`, only the windows whose start timestamp falls in
+`[time_range_start_ms, time_range_end_ms)` are returned; pass `false` to retrieve all windows. The
+caller owns the returned buffers: free `*out_data` with `ts_buffer_free_u8`, `*out_dims` with
 `ts_buffer_free_u64`, `*out_percentiles` (non-NULL only for `Probabilistic`) with
 `ts_buffer_free_f64`, and each of the `*out_resolution` / `*out_horizon` / `*out_interval` ISO-8601
-strings with `ts_string_free`. `*out_matched_type` receives the resolved `TimeSeriesType` (a
-`DeterministicSingleTimeSeries` match reports `Deterministic`).
+strings with `ts_string_free`.
 
 ```c
 int32_t ts_store_get_forecast(const struct TsStore *handle,
                               int64_t owner_id, int32_t owner_category,
-                              const char *name, int32_t ts_type,
+                              const char *name,
+                              int32_t ts_type,  /* 2..5, or TS_TYPE_ABSTRACT_DETERMINISTIC (100) */
                               const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
                               const char *features_json,
                               bool time_range_present,
@@ -294,14 +318,16 @@ int32_t ts_store_get_forecast(const struct TsStore *handle,
                               int32_t *out_dtype,
                               uint8_t **out_data, uint64_t *out_data_byte_len, /* ts_buffer_free_u8 */
                               double **out_percentiles, uint64_t *out_percentiles_len, /* ts_buffer_free_f64 */
-                              int32_t *out_matched_type);  /* resolved TimeSeriesType (DST→Deterministic) */
+                              int32_t *out_matched_type);  /* concrete matched TimeSeriesType */
 ```
 
 `ts_store_get_forecast_by_key` is the key-based counterpart: it takes a `TsKey` handle (the type
 comes from the key) instead of the `owner_id, name, ts_type, resolution, interval, features_json`
 arguments, and produces identical outputs with the same buffer-ownership rules. Because the key
-names the exact stored type there is no DST→`Deterministic` fallback (a
-`DeterministicSingleTimeSeries` key still decodes as a `Deterministic`).
+already names the concrete stored type there is no family to resolve: `*out_matched_type` is simply
+the key's type (a `DeterministicSingleTimeSeries` key reports `3`, though its values are decoded
+into a dense `Deterministic` window array). There is no key-level equivalent of the `100` sentinel —
+use `ts_store_get_forecast` for a family request.
 
 ```c
 int32_t ts_store_get_forecast_by_key(const struct TsStore *handle, const struct TsKey *key,
@@ -335,23 +361,48 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        uint64_t *out_logical_type_len);
 
 int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
-                                             int64_t owner_id, int32_t owner_category,
-                                             const char *name,
-                                             const char *resolution, const char *features_json,
-                                             int64_t *out_initial_ts_unix_ms,
-                                             char **out_resolution, char **out_horizon,
-                                             char **out_interval,  /* ISO-8601; ts_string_free */
-                                             uint64_t *out_count,
-                                             uint64_t *out_length, uint8_t *out_data_hash,
-                                             double **out_percentiles, uint64_t *out_percentiles_len);
+                                            int64_t owner_id, int32_t owner_category,
+                                            const char *name,
+                                            const char *resolution, const char *interval,  /* ISO-8601 filters */
+                                            const char *features_json,
+                                            int64_t *out_initial_ts_unix_ms,
+                                            char **out_resolution, char **out_horizon,
+                                            char **out_interval,  /* ISO-8601; ts_string_free */
+                                            uint64_t *out_count,
+                                            uint64_t *out_length, uint8_t *out_data_hash,
+                                            double **out_percentiles, uint64_t *out_percentiles_len);
 
 int32_t ts_store_has_typed(const struct TsStore *handle,
                            int64_t owner_id, int32_t owner_category, const char *name,
-                           int32_t ts_type, const char *resolution, const char *features_json,
+                           int32_t ts_type,
+                           const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                           const char *features_json,
                            bool *out_present);
 int32_t ts_store_remove_typed(struct TsStore *handle,
                               int64_t owner_id, int32_t owner_category, const char *name,
-                              int32_t ts_type, const char *resolution, const char *features_json);
+                              int32_t ts_type,
+                              const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                              const char *features_json);
+```
+
+`ts_store_copy_time_series` copies one association onto another owner (optionally under a new name).
+Arrays are content-addressed, so only a new association row is written — no array data is
+duplicated, and the stored type is preserved (a `DeterministicSingleTimeSeries` stays one rather
+than being materialized into a dense `Deterministic`). The copy keeps the source's owner category.
+The leading `owner_id` / `owner_category` / `name` / `ts_type` / `resolution` / `interval` /
+`features_json` arguments identify the **source** series, exactly as for `ts_store_remove_typed`; a
+`NULL` `new_name` keeps the source name.
+
+```c
+int32_t ts_store_copy_time_series(struct TsStore *handle,
+                                  /* source series: */
+                                  int64_t owner_id, int32_t owner_category, const char *name,
+                                  int32_t ts_type,
+                                  const char *resolution, const char *interval,  /* ISO-8601; NULL = unset */
+                                  const char *features_json,
+                                  /* destination: */
+                                  int64_t dst_owner_id, const char *dst_owner_type,
+                                  const char *new_name);  /* NULL = keep the source name */
 ```
 
 ## Readers
@@ -412,9 +463,11 @@ and errors on divergence, so every column has a value at every valid timestamp (
 
 Reads the forecast window at one timestamp for every matching forecast of one type. The build
 `ts_type` names the forecast type; a `Deterministic` reader (`2`) is abstract and also includes
-`DeterministicSingleTimeSeries` (`3`), read into identical `[H, *E]` windows. All matched forecasts
-must share one window timeline (`initial_timestamp` + `interval` + `count`). Each entry's window is
-a little-endian buffer of its `*_entry_info` shape.
+`DeterministicSingleTimeSeries` (`3`), read into identical `[H, *E]` windows. (Note the asymmetry
+with `ts_store_get_forecast`, where `2` matches only a stored `Deterministic` and the family request
+must be spelled `TS_TYPE_ABSTRACT_DETERMINISTIC`; the reader build takes no such sentinel.) All
+matched forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`). Each
+entry's window is a little-endian buffer of its `*_entry_info` shape.
 
 ```c
 int32_t ts_store_build_forecast_reader(const struct TsStore *handle,
@@ -553,6 +606,9 @@ int32_t ts_store_get_compression(const struct TsStore *handle, uint8_t *out_kind
 int32_t ts_store_verify(const struct TsStore *handle, uint64_t *out_error_count);
 int32_t ts_store_compact(struct TsStore *handle);
 int32_t ts_store_flush(struct TsStore *handle);
+/* Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+   materializing an in-memory store to disk. Existing target files are overwritten. */
+int32_t ts_store_persist(struct TsStore *handle, const char *path);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t ts_store_clear(struct TsStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */

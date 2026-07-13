@@ -71,9 +71,10 @@ print("ok")
   `pip install`-ed the wheel into the interpreter you are running.
 - **HDF5 not found during build** — Set `HDF5_DIR` (see
   [Install](./install.md#1-install-system-libraries)).
-- **`InvalidParameterError` on add** — In Python, pass a `float64` NumPy array (any shape), and make
-  feature values `int`/`float`/`bool`/`str`. Timestamps for a `NonSequentialTimeSeries` must be
-  strictly increasing.
+- **`InvalidParameterError` on add** — In Python, pass a NumPy array (any shape) whose dtype is one
+  of `float64`, `float32`, `int64`, `int32`, `uint64`, or `bool`; any other dtype (e.g. `complex128`
+  or a string dtype) raises. Feature values must be `int`/`float`/`bool`/`str`. Timestamps for a
+  `NonSequentialTimeSeries` must be strictly increasing.
 
 ## Next
 

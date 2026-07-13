@@ -48,14 +48,29 @@ bytes for each entry. Because the map is always sorted, insertion order does not
 {"scenario": 1, "model_year": 2030}
 ```
 
-The features hash is stored in the `features_hash` column and is part of the metadata uniqueness
-index — it is how the database distinguishes two otherwise-identical associations that differ only
-in their features.
+The features hash does double duty in the catalog:
+
+- **It identifies the association.** It is stored in the `features_hash` column and is part of the
+  metadata uniqueness index — it is how the database distinguishes two otherwise-identical
+  associations that differ only in their features.
+- **It _is_ the key of the feature set.** The `feature_sets` table is keyed by
+  `(features_hash, key)`, so a feature map is content-addressed exactly as an array is: stored
+  **once** and shared by every association whose hash matches. The association row already carries
+  that hash, so no join column, foreign key, or association id is needed. An empty map stores no
+  rows at all.
+
+Sharing is not a rare case, it is the common one. Thousands of components typically carry the same
+feature set (often the empty one, or a single scenario tag), and it collapses to one copy. The
+sharpest example is a `DeterministicSingleTimeSeries`: it is a view over the `SingleTimeSeries` it
+was derived from and has exactly the same features, so `transform_single_time_series` writes
+**zero** feature rows — it reuses the set the source series already stored, just as it reuses the
+source's array.
 
 ## Deduplication on Write
 
-When you add a series, `Store` hashes the array and asks the backend whether that hash is already
-present:
+Both hashes deduplicate, by the same mechanism, on the same write.
+
+**The array.** `Store` hashes the array and asks the backend whether that hash is already present:
 
 - **Present** → the existing array is reused; no new array bytes are written. Only a new metadata
   association row is inserted.
@@ -64,9 +79,16 @@ present:
   companion hash variable; a standalone array (`NonSequentialTimeSeries`, dense forecasts) becomes a
   new `arr_{hash}` variable.
 
-So storage cost scales with the number of _distinct_ arrays, while metadata cost scales with the
-number of _associations_. A profile shared by a thousand generators costs one array and a thousand
-small rows.
+**The feature set.** The association insert (`MetadataStore::insert_batched`) writes the feature set
+under its hash with an `INSERT OR IGNORE`, so a set some other association already stored is a no-op
+— equal hash implies equal set, so an ignored conflict cannot hide a _different_ set behind the same
+hash. Within one batch a `FeatureSetCache` remembers the sets already written, so a bulk add issues
+one write per _distinct_ set rather than a no-op statement per row per feature. This is what keeps a
+transform flat in feature count instead of linear in it.
+
+So storage cost scales with the number of _distinct_ arrays and _distinct_ feature sets, while
+metadata cost scales with the number of _associations_. A profile shared by a thousand generators
+costs one array, one feature set, and a thousand small rows.
 
 ## Deletion is Reference-Counted
 
@@ -79,6 +101,27 @@ Because arrays are shared, deleting an association cannot blindly delete its arr
 3. Only frees the NetCDF column for hashes whose reference count has dropped to zero.
 
 This keeps shared arrays alive until the last referencing key is gone.
+
+### Feature sets are the deliberate exception
+
+Feature sets are shared by the same mechanism but are **not** reference-counted, and the symmetry
+stops there. Counting references on every delete would make deletion pay for a scan the array side
+already pays for, to reclaim a handful of tiny rows; the schema instead accepts unreachable rows and
+sweeps them in bulk. Concretely:
+
+- **No foreign key, no `ON DELETE CASCADE`.** A cascade would be actively wrong: rows are shared, so
+  deleting one association must not delete a set another association still uses.
+- **Deleting the last user leaves the set unreachable**, rather than deleting it — the same
+  end-state as the NetCDF side's dead standalone variables, which also linger.
+- **`Store::compact` sweeps them.** It deletes every feature set no association references any more
+  and reports the row count as `feature_sets_reclaimed`. This is the one thing compaction physically
+  removes.
+- **Clearing the whole store drops them all outright**, since a cleared store orphans every set by
+  construction and may never see a compaction.
+
+The practical consequence: an unreachable feature set is never _read_ (every lookup goes through an
+association's `features_hash`), so it costs bytes, not correctness — and a re-added association with
+the same features silently adopts the row that was still sitting there.
 
 ## Discovering Shared Series
 
@@ -109,11 +152,16 @@ how InfrastructureSystems.jl backs its own `get_shared_time_series` and forecast
 
 ## Stability is a Contract
 
-These hashes are part of the on-disk format. The `hash_golden` integration test pins the SHA-256 of
-representative inputs; any change to the hashing domain that perturbs those values is a
-format-breaking change and must bump
+These hashes are part of the on-disk format. Any change to a hashing domain above that perturbs a
+stored hash is a format-breaking change and must bump
 [`DATA_FORMAT_VERSION`](../reference/file-format.md#format-version). Treat the hashing rules above
 as fixed, not as an implementation detail.
+
+The `golden_hash_pin` integration test guards the array domain by pinning the exact SHA-256 of one
+fixed input (an `f64` array of `[0, 1, 2, 3]`). That is a tripwire, not a proof: it covers a single
+dtype, shape, and value set, and it does not pin `features_hash` at all. A change to the hashing
+rules can therefore break the format without breaking that test — the reasoning above, not the test,
+is the contract.
 
 ## Integrity Verification
 

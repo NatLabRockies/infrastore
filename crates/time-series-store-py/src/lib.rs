@@ -1021,8 +1021,10 @@ impl PyStore {
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
-    /// `owner_id`, `owner_type`, `time_series_type`, `name`, `length`,
-    /// `resolution` (ISO 8601 duration string, e.g. `PT1H`), `features`, `units`.
+    /// `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+    /// `data_hash` (hex string), `length`, `resolution` (ISO 8601 duration
+    /// string, e.g. `PT1H`, or `None`), `timestamps` (list of RFC 3339 strings
+    /// for non-sequential series, `None` otherwise), `features`, `units`.
     #[pyo3(signature = (
         owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None

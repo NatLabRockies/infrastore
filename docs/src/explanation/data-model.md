@@ -32,14 +32,20 @@ forecasts are written through the generic `add_time_series` across the Rust core
 functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
 `transform_single_time_series` (gRPC stays read-only):
 
-| Type                            | Where implemented | Description                                         |
-| ------------------------------- | ----------------- | --------------------------------------------------- |
-| `SingleTimeSeries`              | All interfaces    | One array sampled at a fixed resolution             |
-| `NonSequentialTimeSeries`       | All interfaces    | Values at explicit, irregular timestamps            |
-| `Deterministic`                 | All interfaces    | Forecast: a `(horizon × count)` window matrix       |
-| `DeterministicSingleTimeSeries` | All interfaces    | Forecast view over an underlying `SingleTimeSeries` |
-| `Probabilistic`                 | All interfaces    | Forecast with percentile bands                      |
-| `Scenarios`                     | All interfaces    | Forecast with discrete scenarios                    |
+| Type                            | Write path                                | Description                                         |
+| ------------------------------- | ----------------------------------------- | --------------------------------------------------- |
+| `SingleTimeSeries`              | `add_time_series`                         | One array sampled at a fixed resolution             |
+| `NonSequentialTimeSeries`       | `add_time_series`                         | Values at explicit, irregular timestamps            |
+| `Deterministic`                 | `add_time_series`                         | Forecast: a `(horizon × count)` window matrix       |
+| `DeterministicSingleTimeSeries` | derived by `transform_single_time_series` | Forecast view over an underlying `SingleTimeSeries` |
+| `Probabilistic`                 | `add_time_series`                         | Forecast with percentile bands                      |
+| `Scenarios`                     | `add_time_series`                         | Forecast with discrete scenarios                    |
+
+All six types can be **read** from every interface: the Rust core, the C ABI, Python, Julia, the
+`tss` CLI, and the gRPC server. The **write** paths in the table are available in the Rust core, the
+C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no interface
+adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by transforming a
+stored `SingleTimeSeries`.
 
 Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
