@@ -1295,6 +1295,98 @@ fn deterministic_and_dst_are_mutually_exclusive() {
     );
 }
 
+/// The `owner_category` and `resolution` arguments select which SingleTimeSeries
+/// are transformed. Both are applied as SQL predicates, so this pins that the
+/// narrowing still matches (and only matches) the intended rows, and that the
+/// transform is idempotent: a second identical call derives nothing new.
+#[test]
+fn transform_honors_owner_category_and_resolution_filters() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let hourly = Duration::hours(1);
+    let daily = Duration::days(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+
+    let mut store = create_store(None, true).unwrap();
+    let vals = f64_arr(vec![8], &dst_source_vals());
+    let add_sts = |store: &mut Store, owner: i64, cat: OwnerCategory, res: Duration| {
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                cat,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    res,
+                    vals.clone(),
+                    "load",
+                )),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+    };
+    // Three sources: an hourly component, a daily component, and an hourly
+    // supplemental attribute. Only the first matches the filters below.
+    add_sts(&mut store, 1, OwnerCategory::Component, hourly);
+    add_sts(&mut store, 2, OwnerCategory::Component, daily);
+    add_sts(&mut store, 3, OwnerCategory::SupplementalAttribute, hourly);
+
+    let n = store
+        .transform_single_time_series(
+            horizon,
+            interval,
+            Some(OwnerCategory::Component),
+            Some(hourly.into()),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "only the hourly component should transform; the daily component and the \
+         supplemental attribute are excluded by the filters"
+    );
+
+    // Idempotent: the one derived DST is recognized and not re-derived.
+    let again = store
+        .transform_single_time_series(
+            horizon,
+            interval,
+            Some(OwnerCategory::Component),
+            Some(hourly.into()),
+        )
+        .unwrap();
+    assert_eq!(
+        again, 0,
+        "re-running the same transform should derive nothing"
+    );
+
+    // Widening to the other category picks up the attribute, and leaves the
+    // already-transformed component alone.
+    let attrs = store
+        .transform_single_time_series(
+            horizon,
+            interval,
+            Some(OwnerCategory::SupplementalAttribute),
+            Some(hourly.into()),
+        )
+        .unwrap();
+    assert_eq!(
+        attrs, 1,
+        "the supplemental attribute should transform on its own pass"
+    );
+
+    // The daily source was never touched by any of the above.
+    let daily_keys = store
+        .get_time_series_keys(2, OwnerCategory::Component)
+        .unwrap();
+    assert!(
+        daily_keys
+            .iter()
+            .all(|k| k.time_series_type() != TimeSeriesType::DeterministicSingleTimeSeries),
+        "the daily component must not have been transformed, got {daily_keys:?}"
+    );
+}
+
 #[test]
 fn count_array_references_counts_sts_and_dst() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

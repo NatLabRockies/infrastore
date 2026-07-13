@@ -5,6 +5,7 @@
 
 pub mod schema;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -97,6 +98,89 @@ pub struct MetadataFilter {
     pub features_hash: Option<[u8; 32]>,
 }
 
+/// The full identity of one stored association: everything the uniqueness
+/// invariant keys on. Periods stay in their catalog ISO-8601 encoding — this is
+/// an equality/hash token, never a value to compute with.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AssociationIdentity {
+    pub owner_id: i64,
+    pub owner_category: OwnerCategory,
+    pub name: String,
+    pub resolution: Option<String>,
+    pub interval: Option<String>,
+    pub features_hash: [u8; 32],
+}
+
+/// An association identity with the interval projected away: the "family" of
+/// series that describe one variable of one owner at one resolution, across all
+/// forecast intervals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SeriesFamily {
+    pub owner_id: i64,
+    pub owner_category: OwnerCategory,
+    pub name: String,
+    pub resolution: Option<String>,
+    pub features_hash: [u8; 32],
+}
+
+impl From<AssociationIdentity> for SeriesFamily {
+    fn from(id: AssociationIdentity) -> Self {
+        Self {
+            owner_id: id.owner_id,
+            owner_category: id.owner_category,
+            name: id.name,
+            resolution: id.resolution,
+            features_hash: id.features_hash,
+        }
+    }
+}
+
+impl MetadataFilter {
+    /// Render the filter as a `WHERE` clause plus its bound parameters, so the
+    /// same predicate can be reused across the row query and the batched
+    /// features query without building the SQL twice.
+    ///
+    /// `features` is not represented here: it is a subset match applied
+    /// in memory after hydration, not a SQL predicate.
+    fn to_sql(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut sql = String::from("WHERE 1=1");
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(owner_id) = self.owner_id {
+            sql.push_str(" AND owner_id = ?");
+            params_vec.push(Box::new(owner_id));
+        }
+        if let Some(owner_category) = self.owner_category {
+            sql.push_str(" AND owner_category = ?");
+            params_vec.push(Box::new(owner_category.as_str().to_string()));
+        }
+        if let Some(ref owner_type) = self.owner_type {
+            sql.push_str(" AND owner_type = ?");
+            params_vec.push(Box::new(owner_type.clone()));
+        }
+        if let Some(ts_type) = self.time_series_type {
+            sql.push_str(" AND time_series_type = ?");
+            params_vec.push(Box::new(ts_type.as_str().to_string()));
+        }
+        if let Some(ref name) = self.name {
+            sql.push_str(" AND name = ?");
+            params_vec.push(Box::new(name.clone()));
+        }
+        if let Some(resolution) = self.resolution {
+            sql.push_str(" AND resolution = ?");
+            params_vec.push(Box::new(period_to_iso(resolution)));
+        }
+        if let Some(interval) = self.interval {
+            sql.push_str(" AND interval = ?");
+            params_vec.push(Box::new(period_to_iso(interval)));
+        }
+        if let Some(ref f_hash) = self.features_hash {
+            sql.push_str(" AND features_hash = ?");
+            params_vec.push(Box::new(f_hash.to_vec()));
+        }
+        (sql, params_vec)
+    }
+}
+
 impl MetadataStore {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
@@ -141,6 +225,12 @@ impl MetadataStore {
         // contract) and can prevent a read-only connection from opening the
         // database in some deployments. That trade-off deserves its own change.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // `prepare_cached` keys on SQL text, and `MetadataFilter` renders a
+        // distinct statement per combination of set predicates (times two, since
+        // `list` issues a row query and a features query). rusqlite's default
+        // cache holds 16, which a mixed workload can thrash past, silently
+        // re-parsing on every call. Room for the realistic shapes is cheap.
+        conn.set_prepared_statement_cache_capacity(64);
         // Try to apply schema; on a read-only connection this no-ops because
         // CREATE TABLE IF NOT EXISTS against an empty read-only DB would error,
         // so we only run it when writes are possible.
@@ -378,63 +468,50 @@ impl MetadataStore {
     }
 
     pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
-        // Build a SELECT with the always-on columns; layer on optional WHERE
-        // clauses using sqlite's parameter binding.
-        let mut sql = String::from(
-            "SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
-                    data_hash, initial_timestamp, resolution, length, horizon,
-                    interval, count, timestamps_json, units, percentiles_json,
-                    dtype, element_shape, logical_type
-             FROM time_series_associations WHERE 1=1",
-        );
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(owner_id) = filter.owner_id {
-            sql.push_str(" AND owner_id = ?");
-            params_vec.push(Box::new(owner_id));
-        }
-        if let Some(owner_category) = filter.owner_category {
-            sql.push_str(" AND owner_category = ?");
-            params_vec.push(Box::new(owner_category.as_str().to_string()));
-        }
-        if let Some(ref owner_type) = filter.owner_type {
-            sql.push_str(" AND owner_type = ?");
-            params_vec.push(Box::new(owner_type.clone()));
-        }
-        if let Some(ts_type) = filter.time_series_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(ts_type.as_str().to_string()));
-        }
-        if let Some(ref name) = filter.name {
-            sql.push_str(" AND name = ?");
-            params_vec.push(Box::new(name.clone()));
-        }
-        if let Some(resolution) = filter.resolution {
-            sql.push_str(" AND resolution = ?");
-            params_vec.push(Box::new(period_to_iso(resolution)));
-        }
-        if let Some(interval) = filter.interval {
-            sql.push_str(" AND interval = ?");
-            params_vec.push(Box::new(period_to_iso(interval)));
-        }
-        if let Some(ref f_hash) = filter.features_hash {
-            sql.push_str(" AND features_hash = ?");
-            params_vec.push(Box::new(f_hash.to_vec()));
-        }
-
+        let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
             .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
             .collect();
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let sql = format!(
+            "SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
+                    data_hash, initial_timestamp, resolution, length, horizon,
+                    interval, count, timestamps_json, units, percentiles_json,
+                    dtype, element_shape, logical_type
+             FROM time_series_associations {where_clause}"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let rows: Vec<(i64, MetaRow)> = stmt
             .query_map(param_refs.as_slice(), parse_meta_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // Hydrate features for each candidate.
+        // Hydrate every matched row's features in one query rather than one per
+        // row: re-running the same predicate as a subquery keeps this to two
+        // statements regardless of match count, and sidesteps SQLite's bound-
+        // parameter ceiling that an `id IN (...)` list would hit on a large
+        // store. Rows with no features simply get no group here.
+        let feat_sql = format!(
+            "SELECT f.association_id, f.key, f.value_kind, f.value_int, f.value_float,
+                    f.value_bool, f.value_str
+             FROM features f
+             WHERE f.association_id IN
+                   (SELECT id FROM time_series_associations {where_clause})"
+        );
+        let mut feat_stmt = self.conn.prepare_cached(&feat_sql)?;
+        let mut grouped: HashMap<i64, Features> = HashMap::new();
+        let mut feat_rows = feat_stmt.query(param_refs.as_slice())?;
+        while let Some(row) = feat_rows.next()? {
+            let id: i64 = row.get(0)?;
+            let (key, value) = parse_feature_row(row)?;
+            // `Features` is a BTreeMap, so it orders keys itself; the query does
+            // not need an ORDER BY.
+            grouped.entry(id).or_default().insert(key, value);
+        }
+
         let mut out = Vec::with_capacity(rows.len());
         for (id, partial) in rows {
-            let features = self.fetch_features(id)?;
+            let features = grouped.remove(&id).unwrap_or_default();
             // Optional features-subset filter, in-memory.
             if let Some(ref required) = filter.features
                 && !is_subset(required, &features)
@@ -444,6 +521,48 @@ impl MetadataStore {
             out.push(partial.into_metadata(features));
         }
         Ok(out)
+    }
+
+    /// The identity of every association of `ts_type`, read straight from the
+    /// associations table with no feature hydration.
+    ///
+    /// `features_hash` is a stored column, so a caller that only needs to test
+    /// identity ("does this series already exist?") can skip both the features
+    /// join and the SHA-256 recomputation that [`Self::list`] would do.
+    pub fn list_identities(&self, ts_type: TimeSeriesType) -> Result<Vec<AssociationIdentity>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT owner_id, owner_category, name, resolution, interval, features_hash
+             FROM time_series_associations WHERE time_series_type = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![ts_type.as_str()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(owner_id, cat, name, resolution, interval, hash_blob)| {
+                Ok(AssociationIdentity {
+                    owner_id,
+                    owner_category: OwnerCategory::parse(&cat).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("unknown owner_category: {cat}"))
+                    })?,
+                    name,
+                    resolution,
+                    interval,
+                    features_hash: hash_blob.as_slice().try_into().map_err(|_| {
+                        TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
+                    })?,
+                })
+            })
+            .collect()
     }
 
     pub fn list_keys_for_owner(
@@ -757,37 +876,31 @@ impl MetadataStore {
     pub fn has_match(&self, filter: &MetadataFilter) -> Result<bool> {
         Ok(!self.list(filter)?.is_empty())
     }
+}
 
-    fn fetch_features(&self, association_id: i64) -> Result<Features> {
-        let mut stmt = self.conn.prepare(
-            "SELECT key, value_kind, value_int, value_float, value_bool, value_str
-             FROM features WHERE association_id = ?1 ORDER BY key",
-        )?;
-        let rows = stmt
-            .query_map(params![association_id], |row| {
-                let key: String = row.get(0)?;
-                let kind: String = row.get(1)?;
-                let value = match kind.as_str() {
-                    "int" => FeatureValue::Int(row.get::<_, i64>(2)?),
-                    "float" => FeatureValue::Float(row.get::<_, f64>(3)?),
-                    "bool" => FeatureValue::Bool(row.get::<_, i64>(4)? != 0),
-                    "str" => FeatureValue::Str(row.get::<_, String>(5)?),
-                    _ => {
-                        return Err(rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("unknown feature kind: {kind}"),
-                            )),
-                        ));
-                    }
-                };
-                Ok((key, value))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows.into_iter().collect())
-    }
+/// Parse one `features` row into its key/value pair. The row must select
+/// `key, value_kind, value_int, value_float, value_bool, value_str` starting at
+/// the column after `association_id`.
+fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, FeatureValue)> {
+    let key: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let value = match kind.as_str() {
+        "int" => FeatureValue::Int(row.get::<_, i64>(3)?),
+        "float" => FeatureValue::Float(row.get::<_, f64>(4)?),
+        "bool" => FeatureValue::Bool(row.get::<_, i64>(5)? != 0),
+        "str" => FeatureValue::Str(row.get::<_, String>(6)?),
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown feature kind: {kind}"),
+                )),
+            ));
+        }
+    };
+    Ok((key, value))
 }
 
 /// Canonical ISO-8601 encoding of a period for storage in the catalog.

@@ -1,11 +1,13 @@
 //! High-level `Store` composing the storage backend and metadata store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
-use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
+use crate::metadata::{
+    AssociationIdentity, MetadataFilter, MetadataStore, SeriesFamily, references_to_in_tx,
+};
 use crate::reader::{ForecastReader, StaticReader, WindowRead};
 use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
@@ -1166,22 +1168,16 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let (horizon, interval) = (horizon.into(), interval.into());
-        use crate::metadata::MetadataFilter;
-        let mut sources = self.metadata.list(&MetadataFilter {
+        // Push the owner-category and resolution restrictions into SQL rather
+        // than listing every SingleTimeSeries and discarding the misses: a store
+        // whose components are transformed one resolution at a time should not
+        // pay to hydrate the other resolutions' features on every call.
+        let sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
+            owner_category,
+            resolution,
             ..Default::default()
         })?;
-        // Restrict the transform to one owner category (e.g. only components,
-        // leaving supplemental-attribute series untouched) when requested.
-        if let Some(cat) = owner_category {
-            sources.retain(|m| m.owner_category == cat);
-        }
-        // Restrict the transform to a single resolution when requested, so series
-        // of other resolutions (which may be incompatible with the interval) are
-        // left untouched.
-        if let Some(res) = resolution {
-            sources.retain(|m| m.resolution == Some(res));
-        }
 
         // Series that already have a DeterministicSingleTimeSeries view *at this
         // interval* are skipped so the transform is idempotent (e.g. re-deriving
@@ -1189,61 +1185,27 @@ impl Store {
         // copy). The dedup key is the full identity: owner_id/owner_category plus
         // name/resolution/interval/features. Interval is part of the identity, so
         // re-deriving the same series at a different interval is a distinct view.
+        //
+        // Both dedup sets are read via `list_identities`, which returns the
+        // stored `features_hash` column directly: the identity test needs the
+        // hash, not the features themselves, so this skips hydrating (and
+        // re-hashing) the features of every forecast already in the store.
         let interval_iso = interval.to_iso8601();
-        #[allow(clippy::type_complexity)]
-        let existing_dst: std::collections::HashSet<(
-            i64,
-            OwnerCategory,
-            String,
-            Option<String>,
-            Option<String>,
-            [u8; 32],
-        )> = self
+        let existing_dst: HashSet<AssociationIdentity> = self
             .metadata
-            .list(&MetadataFilter {
-                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
-                ..Default::default()
-            })?
-            .iter()
-            .map(|m| {
-                (
-                    m.owner_id,
-                    m.owner_category,
-                    m.name.clone(),
-                    m.resolution.map(|r| r.to_iso8601()),
-                    m.interval.map(|i| i.to_iso8601()),
-                    crate::hash::features_hash(&m.features),
-                )
-            })
+            .list_identities(TimeSeriesType::DeterministicSingleTimeSeries)?
+            .into_iter()
             .collect();
 
         // Families that already hold a real `Deterministic` forecast. A DST is a
         // synthetic view and is mutually exclusive with a `Deterministic` for one
         // family (owner, name, resolution, features, ignoring interval), so
         // deriving a DST over such a family is rejected.
-        #[allow(clippy::type_complexity)]
-        let existing_det: std::collections::HashSet<(
-            i64,
-            OwnerCategory,
-            String,
-            Option<String>,
-            [u8; 32],
-        )> = self
+        let existing_det: HashSet<SeriesFamily> = self
             .metadata
-            .list(&MetadataFilter {
-                time_series_type: Some(TimeSeriesType::Deterministic),
-                ..Default::default()
-            })?
-            .iter()
-            .map(|m| {
-                (
-                    m.owner_id,
-                    m.owner_category,
-                    m.name.clone(),
-                    m.resolution.map(|r| r.to_iso8601()),
-                    crate::hash::features_hash(&m.features),
-                )
-            })
+            .list_identities(TimeSeriesType::Deterministic)?
+            .into_iter()
+            .map(SeriesFamily::from)
             .collect();
 
         // Build every DST metadata row up front so a single ineligible series
@@ -1254,13 +1216,13 @@ impl Store {
             let src_resolution_iso = src.resolution.map(|r| r.to_iso8601());
             // Reject deriving a DST over a family that already holds a real
             // Deterministic forecast (interval-independent).
-            let det_family = (
-                src.owner_id,
-                src.owner_category,
-                src.name.clone(),
-                src_resolution_iso.clone(),
-                src_features_hash,
-            );
+            let det_family = SeriesFamily {
+                owner_id: src.owner_id,
+                owner_category: src.owner_category,
+                name: src.name.clone(),
+                resolution: src_resolution_iso.clone(),
+                features_hash: src_features_hash,
+            };
             if existing_det.contains(&det_family) {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "cannot derive DeterministicSingleTimeSeries for '{}': a Deterministic \
@@ -1268,14 +1230,14 @@ impl Store {
                     src.name
                 )));
             }
-            let src_key = (
-                src.owner_id,
-                src.owner_category,
-                src.name.clone(),
-                src_resolution_iso,
-                Some(interval_iso.clone()),
-                src_features_hash,
-            );
+            let src_key = AssociationIdentity {
+                owner_id: src.owner_id,
+                owner_category: src.owner_category,
+                name: src.name.clone(),
+                resolution: src_resolution_iso,
+                interval: Some(interval_iso.clone()),
+                features_hash: src_features_hash,
+            };
             if existing_dst.contains(&src_key) {
                 continue;
             }
