@@ -364,7 +364,7 @@ fn spill_into_new_dataset_past_capacity() {
         report.ok(),
         "errors after spill: {} (showing up to 5: {:?})",
         report.errors.len(),
-        &report.errors.iter().take(5).collect::<Vec<_>>()
+        report.errors.iter().take(5).collect::<Vec<_>>()
     );
 }
 
