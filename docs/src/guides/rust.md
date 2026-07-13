@@ -9,7 +9,7 @@ The crate is part of this workspace. From another crate in the workspace:
 
 ```toml
 [dependencies]
-time-series-store-core = { path = "crates/time-series-store-core" }
+time-series-store-core = { path = "../time-series-store-core" }
 chrono = "0.4"
 ```
 
@@ -44,7 +44,8 @@ use time_series_store_core::{
 let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 let values: Vec<f64> = (0..24).map(|i| 100.0 + i as f64).collect();
 let data = TypedArray::from_f64(vec![24], &values);   // shape [length]; or [length, k1, ...]
-let ts = SingleTimeSeries::new(initial, Duration::hours(1), data);
+// The name is part of the series object, not an argument to `add_time_series`.
+let ts = SingleTimeSeries::new(initial, Duration::hours(1), data, "load");
 
 let mut features = Features::new();
 features.insert("model_year".into(), FeatureValue::Int(2030));
@@ -53,7 +54,6 @@ let key = store.add_time_series(
     42,                                     // owner_id
     "Generator",                            // owner_type
     OwnerCategory::Component,
-    "load",                                 // name
     TimeSeriesData::SingleTimeSeries(ts),
     features,
     Some("MW".into()),                      // units
@@ -73,10 +73,15 @@ batch atomically — any error rolls back every array and association in the cal
 use time_series_store_core::AddRequest;
 
 let keys = store.add_time_series_bulk(vec![
-    AddRequest { owner_id: 42, owner_type: "Generator".into(),
-        owner_category: OwnerCategory::Component, name: "load".into(),
-        data: TimeSeriesData::SingleTimeSeries(ts_a), features: Features::new(),
-        units: Some("MW".into()) },
+    AddRequest {
+        owner_id: 42,
+        owner_type: "Generator".into(),
+        owner_category: OwnerCategory::Component,
+        data: TimeSeriesData::SingleTimeSeries(ts_a),   // the series carries its own name
+        features: Features::new(),
+        units: Some("MW".into()),
+        logical_type: None,                             // opaque domain label, binding-owned
+    },
     // ...
 ])?;
 ```
@@ -89,12 +94,18 @@ the buffer if dropped without committing:
 
 ```rust
 let mut bulk = store.bulk_add();
-for ts in many_series {
-    bulk.add(ts.owner_id, "Generator", OwnerCategory::Component,
-        TimeSeriesData::SingleTimeSeries(ts.data), Features::new(), Some("MW".into()));
+for (owner_id, ts) in many_series {
+    // `add` builds the AddRequest from its parts (logical_type = None);
+    // `push` takes a prebuilt AddRequest when you need to set logical_type.
+    bulk.add(owner_id, "Generator", OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(ts), Features::new(), Some("MW".into()));
 }
-let keys = bulk.commit()?;
+println!("staging {} series", bulk.len());   // also: bulk.is_empty()
+let keys = bulk.commit()?;                    // consumes the session; keys in push order
 ```
+
+[`BulkAdd`](../reference/rust-api.md#bulkadd) buffers requests in memory and does no validation or
+I/O until `commit`, which is all-or-nothing. Dropping the session without committing writes nothing.
 
 Adding series one at a time with `add_time_series` instead packs them incrementally into shared
 default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
@@ -102,9 +113,13 @@ so prefer a bulk insert or session when loading in volume.
 
 ## Read a Series
 
+Every lookup method (`get_time_series`, `get_metadata`, `has_time_series`, `remove_time_series`,
+`bulk_read`) takes a `&KeyIdentity` — the identifying tuple inside a key. Call
+`TimeSeriesKey::identity()` to get it:
+
 ```rust
-let data = store.get_time_series(&key, None)?;
-let single = data.as_single().expect("v0 stores SingleTimeSeries");
+let data = store.get_time_series(key.identity(), None)?;
+let single = data.as_single().expect("this key names a SingleTimeSeries");
 println!("{} values starting {}", single.length, single.initial_timestamp);
 ```
 
@@ -114,7 +129,7 @@ Slice on the time axis by passing a range; `end` is exclusive and the returned s
 ```rust
 let start = Utc.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).unwrap();
 let end   = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
-let window = store.get_time_series(&key, Some((start, end)))?;
+let window = store.get_time_series(key.identity(), Some((start, end)))?;
 ```
 
 To read **many whole series at once** — say, loading everything for an interactive plot —
@@ -150,9 +165,19 @@ for m in &metas {
 // All keys for one owner, an existence check, distinct resolutions, counts.
 // The owner is the (owner_id, owner_category) pair.
 let keys = store.get_time_series_keys(42, OwnerCategory::Component)?;
-let present = store.has_time_series(&key)?;
+let present = store.has_time_series(key.identity())?;
 let resolutions = store.get_resolutions(Some(TimeSeriesType::SingleTimeSeries))?;
 let counts = store.get_time_series_counts()?;
+```
+
+`list_keys(filter)` is the key-centric counterpart of `list_time_series`, and
+`list_keys_with_hash(filter)` pairs each key with the 32-byte content hash of the array it resolves
+to, so you can group series that share stored data:
+
+```rust
+for (key, hash) in store.list_keys_with_hash(ListFilter::new().owner_id(42))? {
+    println!("{} -> {}", key.identity().name, time_series_store_core::hash::hash_hex(&hash));
+}
 ```
 
 ### The low-level read path
@@ -161,7 +186,7 @@ To read values without reconstructing a full `SingleTimeSeries` — for example 
 another store that holds its own keys — resolve metadata and fetch the array by hash:
 
 ```rust
-let meta = store.get_metadata(&key)?;
+let meta = store.get_metadata(key.identity())?;
 let array = store.get_array_by_hash(&meta.data_hash)?;
 ```
 
@@ -173,23 +198,27 @@ Dense forecasts are written through the generic `add_time_series` by wrapping a 
 conventional shapes per type); the store content-addresses it and records the windowing parameters:
 
 ```rust
-use time_series_store_core::{Deterministic, TimeSeriesData, TypedArray};
+use time_series_store_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
 
 // A Deterministic forecast: a [H, count, *E] array (here scalar steps, so [H, count]).
 let (horizon_count, count) = (24, 7);
 let values: Vec<f64> = vec![0.0; horizon_count * count];   // row-major, shape (horizon_count, count)
 let data = TypedArray::from_f64(vec![horizon_count, count], &values);
 
+// `new` returns Result<_, String>; map it if your function returns TimeSeriesError.
 let forecast = Deterministic::new(
     initial, Duration::hours(1),      // initial_timestamp, resolution
     Duration::hours(24),              // horizon
     Duration::hours(24),              // interval
     count,
     data,
+    "load_forecast",                  // name
 ).map_err(TimeSeriesError::InvalidParameter)?;
 
 let key = store.add_time_series(
-    "42", "Generator", OwnerCategory::Component, "load_forecast",
+    42,                               // owner_id (i64)
+    "Generator",
+    OwnerCategory::Component,
     TimeSeriesData::Deterministic(forecast),
     Features::new(),
     Some("MW".into()),                // units
@@ -202,10 +231,16 @@ same way.
 
 A `DeterministicSingleTimeSeries` is not added directly. Call `transform_single_time_series` to
 derive one from every stored `SingleTimeSeries` (it shares the backing array and derives `count`
-from the series length); it returns the number of series transformed:
+from the series length); it returns the number of series transformed. The trailing `owner_category`
+and `resolution` arguments are optional filters that restrict which series are transformed:
 
 ```rust
-let n = store.transform_single_time_series(Duration::hours(24), Duration::hours(24))?;
+let n = store.transform_single_time_series(
+    Duration::hours(24),                 // horizon
+    Duration::hours(24),                 // interval
+    Some(OwnerCategory::Component),      // owner_category filter (None = every category)
+    Some(Duration::hours(1).into()),     // resolution filter (Option<Period>; None = every one)
+)?;
 ```
 
 `get_time_series` reconstructs forecasts too, returning a `TimeSeriesData::Deterministic`,
@@ -214,7 +249,7 @@ let n = store.transform_single_time_series(Duration::hours(24), Duration::hours(
 `as_scenarios` accessors:
 
 ```rust
-if let Some(d) = store.get_time_series(&key, None)?.as_deterministic() {
+if let Some(d) = store.get_time_series(key.identity(), None)?.as_deterministic() {
     // d.data is the TypedArray; d.horizon, d.interval, d.count carry the forecast parameters
 }
 ```
@@ -225,15 +260,52 @@ in its stored shape (`to_f64_vec` returns a `Result<_, String>`, so map the erro
 returns `TimeSeriesError`):
 
 ```rust
-let meta = store.get_metadata(&key)?;
+let meta = store.get_metadata(key.identity())?;
 let arr = store.get_array_by_hash(&meta.data_hash)?;   // arr.shape == [horizon_count, count]
 let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 ```
 
-## Remove and Maintain
+When a forecast is addressed by its attributes rather than by a key you already hold, use
+`resolve_forecast_key`: it resolves
+`(owner_id, owner_category, name, resolution, interval,
+features)` plus a `RequestedType` to the
+single matching key, erroring with `NotFound` if nothing matches and `InvalidParameter` if the
+request is ambiguous. `RequestedType::AbstractDeterministic` matches a stored `Deterministic` _or_ a
+`DeterministicSingleTimeSeries`, so callers need not know which one is stored:
 
 ```rust
-store.remove_time_series(&key)?;       // one series
+use time_series_store_core::RequestedType;
+
+let key = store.resolve_forecast_key(
+    42,
+    OwnerCategory::Component,
+    "load_forecast",
+    None,                                  // resolution: Option<Period> (None = any)
+    None,                                  // interval: Option<Period> (None = any)
+    Features::new(),
+    RequestedType::AbstractDeterministic,
+)?;
+```
+
+## Copy, Remove, and Maintain
+
+`copy_time_series` re-points an existing association at another owner, optionally renaming it. It
+writes a metadata row only — arrays are content-addressed, so no data is duplicated — and it
+preserves the source's `time_series_type` (a `DeterministicSingleTimeSeries` stays one instead of
+being materialized into a dense `Deterministic`, which is what a read-then-write copy would
+produce):
+
+```rust
+let copied = store.copy_time_series(
+    key.identity(),
+    99,                    // dst_owner_id
+    "Generator",           // dst_owner_type
+    Some("load_copy"),     // new_name; None keeps the source name
+)?;
+```
+
+```rust
+store.remove_time_series(key.identity())?;   // one series
 // The owner is the (owner_id, owner_category) pair.
 store.clear_time_series(Some((42, OwnerCategory::Component)))?;  // all series for an owner
 store.clear_time_series(None)?;        // everything
@@ -244,7 +316,9 @@ assert!(integrity.errors.is_empty());
 ```
 
 Removal is [reference-counted](../explanation/content-addressing.md#deletion-is-reference-counted):
-a shared array survives until its last referencing key is gone.
+a shared array survives until its last referencing key is gone. `count_array_references(&hash)`
+returns the `(SingleTimeSeries, DeterministicSingleTimeSeries)` association counts on one array,
+which is how you tell whether removing a `SingleTimeSeries` would orphan a forecast derived from it.
 
 ## Persist to Disk
 
@@ -252,6 +326,17 @@ The NetCDF backend buffers writes. Call `flush` before copying the files for bac
 
 ```rust
 store.flush()?;   // nc_sync; afterwards system.nc + system.nc.sqlite can be copied as a pair
+```
+
+`persist_to` writes the whole store to a new path — both halves of the artifact, `path` and
+`<path>.sqlite`, overwriting anything already there. It works for an on-disk store (it flushes and
+copies the pair) _and_ for an in-memory store, which is how you materialize a scratch store built
+with `create_store(None, true)`:
+
+```rust
+let mut store = create_store(None, true)?;   // in-memory
+// ... add series ...
+store.persist_to(Path::new("system.nc"))?;   // writes system.nc + system.nc.sqlite
 ```
 
 Always keep the `.nc` and `.nc.sqlite` files together — neither is usable alone.
@@ -263,7 +348,7 @@ Every fallible method returns `Result<T, TimeSeriesError>`. Match on the variant
 ```rust
 use time_series_store_core::TimeSeriesError;
 
-match store.get_time_series(&key, None) {
+match store.get_time_series(key.identity(), None) {
     Ok(data) => { /* ... */ }
     Err(TimeSeriesError::NotFound) => { /* missing */ }
     Err(TimeSeriesError::ReadOnlyStore) => unreachable!("this is a read"),
@@ -273,7 +358,10 @@ match store.get_time_series(&key, None) {
 
 ## Threading
 
-`Store` is `Send + Sync`-friendly: the NetCDF backend guards its handle with a `Mutex`. Share a
-store across threads behind your own `Arc<Mutex<Store>>` if you need `&mut` write access from
-several threads; concurrent reads are fine. The library does not coordinate multiple _processes_
-writing the same files.
+`Store` is `Send` but **not** `Sync`: the SQLite catalog holds a `rusqlite::Connection`, which is
+not shareable across threads. A store can therefore be _moved_ into another thread, but it cannot be
+shared by reference — not even for concurrent reads.
+
+To use one store from several threads, wrap it in external synchronization and serialize every
+access, reads included: `Arc<Mutex<Store>>` (this is exactly what the gRPC server does). The library
+does not coordinate multiple _processes_ writing the same files either.

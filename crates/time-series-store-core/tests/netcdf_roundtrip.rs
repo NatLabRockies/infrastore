@@ -7,7 +7,8 @@
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
     Compression, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TypedArray, create_store, create_store_with_compression, open_store,
+    TimeSeriesData, TimeSeriesError, TypedArray, create_store, create_store_with_compression,
+    open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -54,6 +55,44 @@ fn persistent_round_trip() {
         (0..24).map(|i| 100.0 + i as f64).collect::<Vec<_>>()
     );
 
+    let report = store.verify_integrity().unwrap();
+    assert!(report.ok(), "integrity errors: {:?}", report.errors);
+}
+
+/// An in-memory store must be persistable to disk: `persist_to` materializes its
+/// arrays + metadata, and the reopened store reads the same data back.
+#[test]
+fn in_memory_persist_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+
+    {
+        let mut store = create_store(None, true).unwrap(); // in-memory
+        let s = series(2024, 24, 100.0);
+        store
+            .add_time_series(
+                42,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(s),
+                Features::new(),
+                Some("MW".into()),
+            )
+            .unwrap();
+        store.persist_to(&path).unwrap();
+        // in-memory store dropped; only the persisted files remain
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let keys = store
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    let got = store.get_time_series(keys[0].identity(), None).unwrap();
+    assert_eq!(
+        got.as_single().unwrap().data.to_f64_vec().unwrap(),
+        (0..24).map(|i| 100.0 + i as f64).collect::<Vec<_>>()
+    );
     let report = store.verify_integrity().unwrap();
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }
@@ -325,7 +364,7 @@ fn spill_into_new_dataset_past_capacity() {
         report.ok(),
         "errors after spill: {} (showing up to 5: {:?})",
         report.errors.len(),
-        &report.errors.iter().take(5).collect::<Vec<_>>()
+        report.errors.iter().take(5).collect::<Vec<_>>()
     );
 }
 
@@ -668,4 +707,46 @@ fn non_sequential_persistent_round_trip() {
     assert_eq!(irregular.timestamps, timestamps);
     assert_eq!(irregular.data, data);
     assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// A store written in an older on-disk format is rejected on open with a clear
+/// diagnostic, rather than being misread. `DATA_FORMAT_VERSION` is bumped only
+/// for backward-incompatible changes, so any mismatch means this build cannot
+/// read the file — there is no in-place upgrade.
+#[test]
+fn opening_a_store_from_an_older_format_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    // Backdate the recorded format version in place, simulating a store written
+    // by an older build.
+    {
+        let mut f = netcdf::append(&path).unwrap();
+        f.add_attribute("data_format_version", "0.9.0").unwrap();
+    }
+
+    let Err(err) = open_store(path.as_path(), true) else {
+        panic!("expected an older-format store to be rejected");
+    };
+    match err {
+        TimeSeriesError::IncompatibleFormat { found, expected } => {
+            assert_eq!(found, "0.9.0");
+            assert_eq!(expected, time_series_store_core::DATA_FORMAT_VERSION);
+        }
+        other => panic!("expected IncompatibleFormat, got {other:?}"),
+    }
 }

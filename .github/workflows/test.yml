@@ -2,9 +2,9 @@ name: Test
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
 
 jobs:
   test:
@@ -40,16 +40,24 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install hdf5 netcdf
 
+      # Use conda-forge's prebuilt libnetcdf rather than `vcpkg install
+      # netcdf-c`. vcpkg builds the stack from source, which fetches libaec from
+      # gitlab.dkrz.de -- an unmirrored host that rate-limits (HTTP 429) CI
+      # runners and has taken Windows CI down for hours at a time. conda-forge
+      # ships binaries, so nothing is compiled and no third-party host is hit.
+      # Miniconda is preinstalled on windows-latest ($CONDA).
       - name: Install native dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          vcpkg install netcdf-c:x64-windows
-          $prefix = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows"
-          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $env:Path = "$env:CONDA;$env:CONDA\Scripts;$env:Path"
+          conda create -y -p "$env:RUNNER_TEMP\netcdf" -c conda-forge libnetcdf hdf5
+          # conda lays Windows headers/libs/DLLs out under <prefix>\Library.
+          $prefix = "$env:RUNNER_TEMP\netcdf\Library"
           "NETCDF_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "HDF5_DIR=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "PKG_CONFIG_PATH=$prefix\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # netcdf.dll / hdf5.dll must be on PATH for the test binaries to run.
           "$prefix\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Cache Cargo

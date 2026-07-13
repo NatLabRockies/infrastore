@@ -142,17 +142,40 @@ got_by_key = get_time_series(Deterministic, store, key)
 `Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)`
 carries the percentile vector, and
 `Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)` takes
-`scenario_count` from `data`'s leading axis. Read the corresponding type back with
-`get_time_series(Probabilistic, …)` / `get_time_series(Scenarios, …)`; requesting `Deterministic`
-also returns a transformed `DeterministicSingleTimeSeries` (synthesized).
+`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a
+`logical_type=` keyword. Read the corresponding type back with `get_time_series(Probabilistic, …)` /
+`get_time_series(Scenarios, …)`.
 
-A `DeterministicSingleTimeSeries` is not added directly — derive one from every stored
-`SingleTimeSeries` with `transform_single_time_series!(store, horizon::Period, interval::Period)`,
-which returns the number transformed:
+If two forecasts of one owner/name/type differ only by `interval` (say day-ahead and intra-day),
+pass `interval=` to pin the one you want; without it the read is ambiguous and throws
+`InvalidParameterError`:
+
+```julia
+got = get_time_series(Deterministic, store, 42, Component, "load_fc";
+                      resolution = Hour(1), interval = Hour(6))
+```
+
+A `DeterministicSingleTimeSeries` is not added directly — derive one from the stored
+`SingleTimeSeries` with `transform_single_time_series!`, which returns the number transformed. It
+optionally restricts the transform to one `owner_category` and/or one `resolution`:
 
 ```julia
 n = transform_single_time_series!(store, Hour(24), Hour(24))
+n = transform_single_time_series!(store, Hour(24), Hour(24);
+                                  owner_category = Component, resolution = Hour(1))
 ```
+
+Requesting the concrete `Deterministic` type does **not** match a transformed
+`DeterministicSingleTimeSeries` — that read throws `NotFoundError`. To read whichever of the two is
+stored under an identity, request the family type `AbstractDeterministic` (it returns a
+`Deterministic`, since a DST has no materialized struct):
+
+```julia
+fc = get_time_series(AbstractDeterministic, store, 42, Component, "load")
+```
+
+A genuine miss still throws `NotFoundError`, and an identity that holds both concrete types is
+ambiguous and errors — request a concrete type then.
 
 `transform_single_time_series!` returns no keys, so to read a derived forecast by key, enumerate the
 owner's keys with `get_time_series_keys(store, owner_id, owner_category)` (the owner is the
@@ -167,8 +190,16 @@ for k in get_time_series_keys(store, 42, Component)
 end
 ```
 
-`has_typed` and `remove_typed!` operate on forecast types by `ts_type`. The low-level
-`get_metadata` + `get_array_by_hash` path is still available for raw access. See the
+`has_typed`, `remove_typed!`, and `copy_time_series!` address a series by its `ts_type` integer code
+(and take the same `resolution` / `interval` / `features` keywords). `copy_time_series!` re-points a
+stored series at another owner without duplicating data — it writes one association row against the
+same content-addressed array, preserving the stored type (a DST stays a DST):
+
+```julia
+copy_time_series!(store, 42, Component, "load", 0, 43, "Generator")   # ts_type 0 = SingleTimeSeries
+```
+
+The low-level `get_metadata` + `get_array_by_hash` path is still available for raw access. See the
 [Julia API reference](../reference/julia-api.md#forecasts).
 
 ## Per-Timestamp Reads (Simulation Loop)
@@ -266,8 +297,9 @@ end
 
 The available types are `TimeSeriesStore.NotFoundError`, `TimeSeriesStore.DuplicateTimeSeriesError`,
 `TimeSeriesStore.InvalidParameterError`, `TimeSeriesStore.IntegrityError`,
-`TimeSeriesStore.ReadOnlyStoreError`, and `TimeSeriesStore.GenericError` (which carries the raw FFI
-status `code`).
+`TimeSeriesStore.ReadOnlyStoreError`, `TimeSeriesStore.IncompatibleFormatError` (the on-disk store
+was written by an incompatible data format version), and `TimeSeriesStore.GenericError` (which
+carries the raw FFI status `code`).
 
 ## InfrastructureSystems.jl Integration Notes
 

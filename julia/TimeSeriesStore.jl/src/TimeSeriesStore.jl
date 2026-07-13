@@ -16,7 +16,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        verify_integrity, compact!,
        get_metadata, get_forecast_metadata, get_array_by_hash, count_array_references,
        open_store, flush!, clear!, replace_owner!,
-       transform_single_time_series!, has_typed, remove_typed!,
+       transform_single_time_series!, has_typed, remove_typed!, copy_time_series!,
        close!,
        StaticReader, build_static_reader, static_grid, static_groups,
        static_read!, static_values,
@@ -78,6 +78,7 @@ const TS_ERR_DUPLICATE         = Int32(5)
 const TS_ERR_INTEGRITY         = Int32(6)
 const TS_ERR_READ_ONLY         = Int32(7)
 const TS_ERR_IO                = Int32(8)
+const TS_ERR_INCOMPATIBLE_FORMAT = Int32(9)
 const TS_ERR_INTERNAL          = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -96,6 +97,7 @@ struct DuplicateTimeSeriesError <: TimeSeriesException; msg::String; end
 struct InvalidParameterError    <: TimeSeriesException; msg::String; end
 struct IntegrityError           <: TimeSeriesException; msg::String; end
 struct ReadOnlyStoreError       <: TimeSeriesException; msg::String; end
+struct IncompatibleFormatError  <: TimeSeriesException; msg::String; end
 struct GenericError             <: TimeSeriesException; msg::String; code::Int32; end
 
 Base.showerror(io::IO, e::TimeSeriesException) = print(io, "TimeSeriesStore.", typeof(e).name.name, ": ", e.msg)
@@ -127,6 +129,8 @@ function _check(code::Int32)
         throw(IntegrityError(msg))
     elseif code == TS_ERR_READ_ONLY
         throw(ReadOnlyStoreError(msg))
+    elseif code == TS_ERR_INCOMPATIBLE_FORMAT
+        throw(IncompatibleFormatError(msg))
     else
         throw(GenericError(msg, code))
     end
@@ -1599,6 +1603,19 @@ function flush!(store::Store)
 end
 
 """
+    persist!(store, path)
+
+Persist the store to `path` (NetCDF) and `\$path.sqlite` (metadata), materializing
+an in-memory store to disk. Existing target files are overwritten.
+"""
+function persist!(store::Store, path::AbstractString)
+    code = ccall((:ts_store_persist, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring), store.handle, path)
+    _check(code)
+    return nothing
+end
+
+"""
     clear!(store; owner_id=nothing, owner_category=nothing)
 
 Remove all time series (data + metadata) from the store, or only those belonging
@@ -1742,14 +1759,16 @@ function _add_dense_forecast!(
 end
 
 """
-    transform_single_time_series!(store, horizon, interval; owner_category=nothing) -> Int
+    transform_single_time_series!(store, horizon, interval; owner_category=nothing,
+                                  resolution=nothing) -> Int
 
 Derive `DeterministicSingleTimeSeries` forecasts from the stored `SingleTimeSeries`
 associations (mirrors InfrastructureSystems.jl's `transform_single_time_series!`):
 each is re-described as a DST sharing the same underlying array; `count` is derived
 from each series' length. When `owner_category` is given (`Component` or
 `SupplementalAttribute`) only series of that owner category are transformed;
-otherwise every category is. Returns the number of series transformed.
+otherwise every category is. When `resolution` is given only series at that
+resolution are transformed. Returns the number of series transformed.
 """
 function transform_single_time_series!(
     store::Store, horizon::Period, interval::Period;
@@ -1774,15 +1793,17 @@ end
 `SupplementalAttribute`)."""
 function has_typed(
     store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
     code = ccall(
         (:ts_store_has_typed, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Ref{Bool}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, features_json, out,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Bool}),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json, out,
     )
     _check(code)
     return out[]
@@ -1792,14 +1813,54 @@ end
 owner's `OwnerCategory` (`Component` or `SupplementalAttribute`)."""
 function remove_typed!(
     store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     code = ccall(
         (:ts_store_remove_typed, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, features_json,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json,
+    )
+    _check(code)
+    return nothing
+end
+
+"""
+    copy_time_series!(store, owner_id, owner_category, name, ts_type,
+                      dst_owner_id, dst_owner_type; new_name=nothing,
+                      resolution=nothing, features=Dict())
+
+Copy the time series identified by the source attributes onto `dst_owner_id`,
+optionally renaming it to `new_name`.
+
+Arrays are content-addressed, so this writes only a new association row against
+the same underlying array: no data is duplicated, and the stored time series type
+is preserved. In particular a `DeterministicSingleTimeSeries` stays one, whereas a
+read-then-write copy through `get_time_series` / `add_time_series!` would
+materialize it into a dense `Deterministic`.
+
+The copy keeps the source's `owner_category`. Throws if the destination already
+holds a matching series.
+"""
+function copy_time_series!(
+    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer,
+    dst_owner_id::Integer, dst_owner_type::AbstractString;
+    new_name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    resolution_iso = _period_to_cstr(resolution)
+    interval_iso = _period_to_cstr(interval)
+    features_json = _features_arg(features)
+    renamed = new_name === nothing ? C_NULL : new_name
+    code = ccall(
+        (:ts_store_copy_time_series, lib_path()), Int32,
+        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Int64, Cstring, Cstring),
+        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type),
+        resolution_iso, interval_iso, features_json, Int64(dst_owner_id), dst_owner_type, renamed,
     )
     _check(code)
     return nothing
@@ -2487,9 +2548,10 @@ end
 # Counterparts to the attribute-addressed forecast readers above, keyed by a
 # `TimeSeriesKey` handle (returned by `add_time_series!`). The time series type
 # comes from the key; the `::Type{...}` argument selects how the result is
-# decoded and which struct is returned. Unlike the attribute-based `Deterministic`
-# reader there is no `DeterministicSingleTimeSeries` fallback — the key already
-# names the exact stored type (a DST key reads back as a `Deterministic`).
+# decoded and which struct is returned. The key already names the exact stored
+# type, so no type resolution happens here (a DST key reads back as a
+# `Deterministic`). The attribute-based readers have no DST fallback either:
+# use `get_time_series(AbstractDeterministic, ...)` to match either concrete type.
 
 """
     get_time_series(Deterministic, store, key; time_range)

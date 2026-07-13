@@ -82,6 +82,13 @@ def get_time_series(
     time_range: tuple[datetime, datetime] | None = None,
 ) -> SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios: ...
 
+def bulk_read(
+    self,
+    keys: list[TimeSeriesKey],
+) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
+# Reads each key's series in full — no time-range slicing. Results are returned in
+# the same order as `keys`; an empty list of keys returns an empty list.
+
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
 def clear_time_series(
     self,
@@ -90,6 +97,15 @@ def clear_time_series(
 ) -> int: ...
 # Pass both owner_id and owner_category to clear one owner's series (the owner is
 # the (owner_id, owner_category) pair); pass neither to clear the whole store.
+
+def replace_owner(
+    self,
+    old_owner: int,
+    new_owner: int,
+    owner_category: OwnerCategory,
+) -> int: ...
+# Reassign every series owned by (old_owner, owner_category) to
+# (new_owner, owner_category). Returns the number of associations moved.
 
 def list_time_series(
     self,
@@ -136,6 +152,10 @@ def flush(self) -> None: ...
   **`transform_single_time_series`** derives a `DeterministicSingleTimeSeries` from every stored
   `SingleTimeSeries` and returns the count transformed. **`get_time_series`** returns whichever
   matches the stored type.
+- **`bulk_read`** returns one typed object per key, in the same order as `keys` (an empty key list
+  returns an empty list). It is the bulk counterpart to `get_time_series`: packed `SingleTimeSeries`
+  are read in one decompress-once pass per dataset instead of one read per key. It does not slice —
+  every series comes back in full; use `get_time_series(key, time_range=...)` for a window.
 - **`list_time_series`** returns a list of dicts, each with the keys: `owner_id`, `owner_type`,
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`, `resolution`
   (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`, `features`, `units`.
@@ -153,7 +173,11 @@ def flush(self) -> None: ...
   store holds no forecasts.
 - **`get_compression`** returns `{"compression": "deflate" | "none", "level": int, "shuffle": bool}`
   — the policy the store was created with (restored from the file on open; `"none"` for in-memory).
-- **`compact`** returns `{"slots_reclaimed": int, "datasets_dropped": int}`.
+- **`compact`** returns
+  `{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed":
+  int}`.
+  `feature_sets_reclaimed` counts content-addressed feature rows that no association referenced any
+  more; see the [file format](file-format.md#feature_sets).
 - **`verify_integrity`** returns a list of error strings; an empty list means the store is intact.
 - **`get_time_series`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive.
 
@@ -192,8 +216,8 @@ non-sequential key.
 
 ## `TimeSeriesKey`
 
-Returned by `add_time_series` and `get_time_series_keys`; not constructed directly. Read-only
-properties:
+Returned by `add_time_series`, `add_time_series_bulk`, and `get_time_series_keys`, and in the `keys`
+list of every `list_array_groups` row; not constructed directly. Read-only properties:
 
 ```python
 key.owner_id          -> int
@@ -234,8 +258,10 @@ key = store.add_time_series(42, "Generator", OwnerCategory.Component, ts, units=
 ```
 
 `data` is a NumPy array in the canonical shape for the forecast type, where `H` is
-`horizon / resolution`. Every forecast also takes a required `name` (after `data`), exposed as a
-read-only property:
+`horizon / resolution`. As with `SingleTimeSeries`, every period argument (`resolution`, `horizon`,
+`interval`) accepts either a `timedelta` or an ISO 8601 duration string — the string form is
+required for calendar periods such as `"P1M"` — and the getters always return the ISO string. Every
+forecast also takes a required `name` (after `data`), exposed as a read-only property:
 
 | Type            | `data` shape                       | extra constructor arg                 |
 | --------------- | ---------------------------------- | ------------------------------------- |
@@ -248,9 +274,9 @@ read-only property:
 ```python
 Deterministic(
     initial_timestamp: datetime,
-    resolution: timedelta,
-    horizon: timedelta,
-    interval: timedelta,
+    resolution: timedelta | str,
+    horizon: timedelta | str,
+    interval: timedelta | str,
     count: int,
     data: numpy.ndarray,
     name: str,
@@ -274,9 +300,9 @@ forecast.name              -> str
 ```python
 Probabilistic(
     initial_timestamp: datetime,
-    resolution: timedelta,
-    horizon: timedelta,
-    interval: timedelta,
+    resolution: timedelta | str,
+    horizon: timedelta | str,
+    interval: timedelta | str,
     count: int,
     percentiles: list[float],
     data: numpy.ndarray,
@@ -295,9 +321,9 @@ forecast.percentiles -> list[float]
 ```python
 Scenarios(
     initial_timestamp: datetime,
-    resolution: timedelta,
-    horizon: timedelta,
-    interval: timedelta,
+    resolution: timedelta | str,
+    horizon: timedelta | str,
+    interval: timedelta | str,
     count: int,
     data: numpy.ndarray,   # leading axis is scenario_count
     name: str,
@@ -321,6 +347,10 @@ All inherit from `TimeSeriesError`:
 | `InvalidParameterError`    | Bad arguments (e.g. bad feature type, bad timestamps) |
 | `IntegrityError`           | On-disk inconsistency detected                        |
 | `ReadOnlyStoreError`       | A write on a read-only store                          |
+
+Not every failure is a `TimeSeriesError`: a period argument (`resolution`, `horizon`, `interval`)
+that is a malformed ISO 8601 duration string raises a plain `ValueError`, and one that is neither a
+`timedelta` nor a `str` raises a plain `TypeError`. `except TimeSeriesError` will not catch either.
 
 Feature-value typing note: because `bool` is a subtype of `int` in Python, the binding checks `bool`
 first, so `True`/`False` features are stored as booleans, not integers.

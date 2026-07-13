@@ -17,7 +17,7 @@ Arrays and metadata pull in opposite directions:
 
 | Concern        | Arrays                                            | Metadata                                  |
 | -------------- | ------------------------------------------------- | ----------------------------------------- |
-| Size           | Large (thousands of values each)                  | Small (a row plus a few feature rows)     |
+| Size           | Large (thousands of values each)                  | Small (a row plus a shared feature set)   |
 | Access pattern | Bulk read by content                              | Filtered queries by owner, name, features |
 | Mutation       | Immutable; whole-array add/delete, dedup-on-write | Insert / delete with constraints          |
 | Best tool      | NetCDF4 (chunked, compressed HDF5)                | SQLite (indexes, transactions)            |
@@ -43,14 +43,14 @@ uses a default width of 1,000:
 
 ```mermaid
 flowchart TB
-    subgraph ds["dataset&nbsp;sts_f64_s_8760_3600&nbsp;&nbsp;shape&nbsp;(8760,&nbsp;cols)"]
+    subgraph ds["dataset&nbsp;sts_f64_s_8760_PT1H&nbsp;&nbsp;shape&nbsp;(8760,&nbsp;cols)"]
         direction LR
         C0["col 0<br/>series A"]
         C1["col 1<br/>series B"]
         C2["col 2<br/>(free)"]
         CN["col cols-1<br/>(free)"]
     end
-    H["companion sts_f64_s_8760_3600_h<br/>cols hash strings"]
+    H["companion sts_f64_s_8760_PT1H_h<br/>cols hash strings"]
     C0 -.hash.-> H
     C1 -.hash.-> H
 
@@ -90,15 +90,22 @@ same physical shape — the type, timestamps, and windowing parameters all live 
 
 ## The Metadata Side: SQLite
 
-The catalog holds two tables:
+The catalog holds three tables:
 
 - **`time_series_associations`** — one row per
-  `(owner_id, owner_category, name, resolution, features)` association, including the `data_hash`
-  that links it to a packed column or standalone variable, the array typing (`dtype`,
-  `element_shape`, `logical_type`), plus temporal fields, forecast parameters (`horizon`,
-  `interval`, `count`, `percentiles`), and units.
-- **`features`** — the expanded key/value pairs for each association, one row per feature, typed by
-  a `value_kind` discriminator.
+  `(owner_id, owner_category, time_series_type, name, resolution, interval, features)` association,
+  including the `data_hash` that links it to a packed column or standalone variable, the array
+  typing (`dtype`, `element_shape`, `logical_type`), plus temporal fields, forecast parameters
+  (`horizon`, `interval`, `count`, `percentiles`), units, and the `features_hash`.
+- **`feature_sets`** — the expanded key/value pairs of a feature map, one row per key, typed by a
+  `value_kind` discriminator. The table is **content-addressed**, exactly as arrays are: its primary
+  key is `(features_hash, key)` — the same hash the association row already carries, so no join
+  column is needed. A feature set is therefore stored **once and shared** by every association whose
+  hash matches, not copied per association; an empty map stores no rows at all. Because the rows are
+  shared, there is deliberately no foreign key to `time_series_associations` and no
+  `ON DELETE CASCADE` (see [Compaction](#compaction) below).
+- **`schema_version`** — a single `version` column holding the catalog schema version (currently
+  `1`).
 
 A unique index over
 `(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)` enforces
@@ -146,7 +153,9 @@ sequenceDiagram
 
 On delete, the order reverses and is reference-counted: the association rows are removed inside a
 transaction, then an array column is only zeroed/freed if no remaining association references that
-hash. This is what lets two keys [share one array](./content-addressing.md) safely.
+hash. This is what lets two keys [share one array](./content-addressing.md) safely. Feature sets are
+shared too, but they are **not** reference-counted — deleting an association never deletes its
+feature set; the set is left unreachable for a later `compact()` to sweep.
 
 ## Persistence and Copying
 
@@ -156,7 +165,20 @@ without closing the handle. The two files must always be kept together — neith
 
 ## Compaction
 
-Deleting a series frees its column slot but does not shrink the NetCDF dataset. The freed slot is
-transparently reused by the next compatible write (`first_free`). `compact()` reports how many slots
-are reclaimable; v0 does not physically shrink datasets, because netcdf-c cannot resize a dimension
-in place — that is a follow-up. See [`compact`](../reference/rust-api.md#store).
+`compact()` reclaims space in both halves of the artifact, and the two halves behave differently.
+
+**On the array side, compaction reports rather than reclaims.** Deleting a series frees its column
+slot but does not shrink the NetCDF dataset. The freed slot is transparently reused by the next
+compatible write (`first_free`), and a deleted standalone variable lingers as dead space.
+`compact()` reports how many slots are reclaimable (`slots_reclaimed`); v0 does not physically
+shrink datasets or drop dead variables, because netcdf-c cannot resize a dimension in place — that
+is a follow-up.
+
+**On the catalog side, compaction physically deletes.** Because feature sets are shared, deleting an
+association cannot cascade into them: removing the last association that referenced a set leaves it
+unreachable, mirroring the NetCDF side's unreachable standalone variables. `compact()` sweeps those
+rows and reports the count as `feature_sets_reclaimed` — the one thing compaction actually removes.
+(Clearing the whole store is the exception that needs no sweep: it orphans every set by
+construction, so it drops them all outright.)
+
+See [`compact`](../reference/rust-api.md#store).

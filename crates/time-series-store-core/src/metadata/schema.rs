@@ -23,15 +23,31 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     features_hash     BLOB    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS features (
-    association_id    INTEGER NOT NULL REFERENCES time_series_associations(id) ON DELETE CASCADE,
+-- Feature sets are content-addressed by the SHA-256 of the feature map, exactly
+-- as arrays are content-addressed by the hash of their bytes. A feature set is
+-- stored ONCE and shared by every association whose `features_hash` matches; the
+-- association table carries that hash already, so no join column is needed.
+--
+-- This is what keeps a derived view cheap: a DeterministicSingleTimeSeries has
+-- the same features as the SingleTimeSeries it is derived from, so
+-- `transform_single_time_series` writes no feature rows at all. It also collapses
+-- the common real-world case where thousands of components share one feature set
+-- (often the empty set, or a single scenario tag).
+--
+-- There is deliberately NO foreign key to time_series_associations and NO
+-- cascade: rows here are shared, so deleting one association must not delete a
+-- set another association still uses. Deleting the last user of a set instead
+-- leaves it unreachable, mirroring the NetCDF side's unreachable standalone
+-- variables. `Store::compact` sweeps unreachable sets.
+CREATE TABLE IF NOT EXISTS feature_sets (
+    features_hash     BLOB    NOT NULL,
     key               TEXT    NOT NULL,
     value_kind        TEXT    NOT NULL CHECK(value_kind IN ('int','float','bool','str')),
     value_int         INTEGER,
     value_float       REAL,
     value_bool        INTEGER,
     value_str         TEXT,
-    PRIMARY KEY (association_id, key)
+    PRIMARY KEY (features_hash, key)
 );
 
 -- The store's uniqueness invariant is

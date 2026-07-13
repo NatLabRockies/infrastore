@@ -52,13 +52,23 @@ The whole section is optional; omitting it defaults to `method = "none"`.
 | `method` | string          | `"none"` | `"none"` or `"api_key"` (`oauth` reserved)            |
 | `keys`   | array of string | `[]`     | Accepted API keys; required when `method = "api_key"` |
 
-Validation runs at startup, so misconfiguration fails loudly rather than at the first request:
+Validation runs at startup, so a bad `[authentication]` section fails loudly rather than at the
+first request:
 
 - `method = "api_key"` with an empty `keys` list is rejected.
 - An unknown `method` value is rejected.
 
+That validation covers the values, not the key names. `ServerConfig` does not reject unknown fields,
+so a **misspelled TOML key is silently ignored** and the default (or a missing-field parse error,
+for a required key) applies instead. A server that starts with `[authenticaton]` (sic) is running
+with `method = "none"` — check the startup logs and confirm the effective settings rather than
+assuming a typo would have been caught.
+
 When `method = "api_key"`, each request must carry a matching value in the `x-api-key` metadata
-header; keys are compared in constant time.
+header. Keys are compared without early-exit — every configured key of the same length as the
+supplied one is checked, so timing does not reveal which key matched or how far a wrong key got. The
+supplied key's length is not blinded: keys of a different length are rejected before the byte-wise
+compare, treating length as non-secret.
 
 ## Startup Behavior
 

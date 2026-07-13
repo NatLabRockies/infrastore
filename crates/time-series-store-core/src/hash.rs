@@ -1,9 +1,10 @@
 //! Canonical SHA-256 hashing for arrays and feature maps.
 //!
-//! Stability of these hashes is part of the public on-disk contract. The
-//! `hash_golden` integration test pins the SHA-256 of representative inputs;
-//! any change here that perturbs those values is a format-breaking change and
-//! must bump [`crate::DATA_FORMAT_VERSION`].
+//! Stability of these hashes is part of the public on-disk contract. Any change
+//! here that perturbs a stored hash is a format-breaking change and must bump
+//! [`crate::DATA_FORMAT_VERSION`]. The `golden_hash_pin` integration test pins
+//! the SHA-256 of one fixed array as a tripwire; it does not cover every dtype,
+//! shape, or the feature-map domain, so it is not a substitute for that rule.
 
 use sha2::{Digest, Sha256};
 

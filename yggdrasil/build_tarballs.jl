@@ -15,11 +15,13 @@ using BinaryBuilder, Pkg
 name = "TimeSeriesStore"
 version = v"0.1.0"
 
-# Pin to a tagged release/commit of the Rust workspace before submitting.
+# Pin to a tagged release/commit of the Rust workspace. NOTE: this commit must be
+# pushed to origin before the Yggdrasil build can fetch it (switch to a release tag
+# for the submission PR).
 sources = [
     GitSource(
         "https://github.com/NatLabRockies/time-series-store.git",
-        "0000000000000000000000000000000000000000",  # TODO: pin commit SHA
+        "fde88b96d1ad53c64f03dba761cc903f75d78d42",
     ),
 ]
 
@@ -32,6 +34,22 @@ export HDF5_DIR=${prefix}
 export NETCDF_DIR=${prefix}
 export PKG_CONFIG_PATH=${prefix}/lib/pkgconfig:${prefix}/share/pkgconfig
 export RUSTFLAGS="-C link-arg=-L${libdir}"
+
+# Fetch deps so their build scripts can be patched before compiling.
+cargo fetch --target ${rust_target}
+
+# hdf5-metno-sys (via netcdf-sys) probes the HDF5 runtime version by dlopen()ing
+# libhdf5 — impossible when cross-compiling. The header version from HDF5_jll is
+# authoritative, so neutralize the runtime probe.
+for f in $(find "${CARGO_HOME:-$HOME/.cargo}" /opt -type f -path '*hdf5-metno-sys*/build.rs' 2>/dev/null | sort -u); do
+    sed -i 's/[[:space:]]*validate_runtime_version(&config);/ \/\/ skipped: no cross-compile runtime probe/' "$f"
+done
+
+# BinaryBuilder forbids forcing an arch via -march, so sha2's ARMv8-crypto `asm`
+# kernels cannot be assembled here; use the portable SHA-256 (x86_64 still detects
+# SHA-NI at runtime) for the distributed binary.
+sed -i 's/sha2 = { workspace = true, features = \["asm"\] }/sha2 = { workspace = true }/' \
+    crates/time-series-store-core/Cargo.toml
 
 cargo build --release --target ${rust_target} -p time-series-store-ffi
 

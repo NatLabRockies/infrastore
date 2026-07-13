@@ -8,12 +8,15 @@ All changes should pass the standard workspace checks before being committed:
 
 ```sh
 cargo fmt --all -- --check                              # Rust formatting
-cargo clippy --workspace --all-targets -- -D warnings   # Rust linting
-cargo test --workspace                                  # Rust tests
+cargo clippy --workspace --all-targets --all-features -- -D warnings   # Rust linting
+cargo test --workspace --all-features                   # Rust tests
+dprint check                                            # Markdown formatting
+cargo deny check --config deny.toml                     # Dependency policy
 ```
 
-The workspace targets **edition 2024** (Rust 1.95+). Markdown in `docs/` is wrapped at 100
-characters.
+The workspace targets **edition 2024** and declares an MSRV of **Rust 1.94** (`rust-version` in the
+root `Cargo.toml` is the authority; there is no `rust-toolchain` file). Markdown in `docs/` is
+wrapped at 100 characters — `dprint fmt` does it for you.
 
 ## Testing Across Bindings
 

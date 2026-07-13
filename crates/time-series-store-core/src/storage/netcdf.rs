@@ -307,6 +307,22 @@ impl NetCdfBackend {
 
     pub fn open(path: &Path) -> Result<Self> {
         let file = netcdf::append(path).map_err(map_nc)?;
+        // Refuse a store written in a different on-disk format. `DATA_FORMAT_VERSION`
+        // is bumped only for backward-incompatible changes, so any mismatch means
+        // this build cannot read the file correctly — exact equality is the test.
+        // Failing here yields a clear diagnostic instead of a downstream surprise
+        // (a missing SQLite table, or worse, a plausible-but-wrong read).
+        let found = match file.attribute("data_format_version").map(|a| a.value()) {
+            Some(Ok(netcdf::AttributeValue::Str(s))) => s,
+            // Predates the attribute entirely, so certainly not the current format.
+            _ => "unspecified".to_string(),
+        };
+        if found != DATA_FORMAT_VERSION {
+            return Err(TimeSeriesError::IncompatibleFormat {
+                found,
+                expected: DATA_FORMAT_VERSION,
+            });
+        }
         // Restore the compression policy the store was created with so that
         // appended arrays reuse the same filter. Legacy stores without the
         // attribute fall back to the historical default.
@@ -1289,6 +1305,9 @@ impl StorageBackend for NetCdfBackend {
         Ok(CompactionReport {
             slots_reclaimed: reclaimed,
             datasets_dropped: 0,
+            // The catalog is not the backend's to sweep; `Store::compact` fills
+            // this in after the array side is done.
+            feature_sets_reclaimed: 0,
         })
     }
 

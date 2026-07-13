@@ -28,6 +28,12 @@
 
 #define TS_ERR_IO 8
 
+/**
+ * The store on disk was written in a different, incompatible on-disk format
+ * than this build reads. There is no in-place upgrade.
+ */
+#define TS_ERR_INCOMPATIBLE_FORMAT 9
+
 #define TS_ERR_INTERNAL 99
 
 /**
@@ -510,6 +516,17 @@ int32_t ts_store_compact(struct TsStore *handle);
 int32_t ts_store_flush(struct TsStore *handle);
 
 /**
+ * Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+ * materializing in-memory stores to disk. Existing target files are overwritten.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle; `path` must be a valid NUL-terminated
+ * UTF-8 C string.
+ */
+int32_t ts_store_persist(struct TsStore *handle, const char *path);
+
+/**
  * Look up a SingleTimeSeries metadata record by attributes. On success the
  * caller's out-params receive the initial timestamp, resolution, length, the
  * 32-byte content hash (written into the `out_data_hash` buffer, which must
@@ -958,6 +975,7 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             int32_t owner_category,
                                             const char *name,
                                             const char *resolution,
+                                            const char *interval,
                                             const char *features_json,
                                             int64_t *out_initial_ts_unix_ms,
                                             char **out_resolution,
@@ -1345,6 +1363,7 @@ int32_t ts_store_has_typed(const struct TsStore *handle,
                            const char *name,
                            int32_t ts_type,
                            const char *resolution,
+                           const char *interval,
                            const char *features_json,
                            bool *out_present);
 
@@ -1363,7 +1382,38 @@ int32_t ts_store_remove_typed(struct TsStore *handle,
                               const char *name,
                               int32_t ts_type,
                               const char *resolution,
+                              const char *interval,
                               const char *features_json);
+
+/**
+ * Copy the time series identified by the source attributes onto another owner,
+ * optionally under a new name.
+ *
+ * Arrays are content-addressed, so only a new association row is written — no
+ * array data is duplicated and the stored time series type is preserved (a
+ * `DeterministicSingleTimeSeries` stays one rather than being materialized into
+ * a dense `Deterministic`). The copy keeps the source's owner category.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. The `owner_id` / `owner_category`
+ * (`0` = Component, `1` = SupplementalAttribute) / `name` / `ts_type` /
+ * `resolution` / `features_json` arguments identify the SOURCE series, exactly as
+ * for `ts_store_remove_typed`. Required strings must be null-terminated UTF-8;
+ * `resolution`, `features_json`, and `new_name` may be null (a null `new_name`
+ * keeps the source name).
+ */
+int32_t ts_store_copy_time_series(struct TsStore *handle,
+                                  int64_t owner_id,
+                                  int32_t owner_category,
+                                  const char *name,
+                                  int32_t ts_type,
+                                  const char *resolution,
+                                  const char *interval,
+                                  const char *features_json,
+                                  int64_t dst_owner_id,
+                                  const char *dst_owner_type,
+                                  const char *new_name);
 
 /**
  * Remove all time series, or all for a single owner when `has_owner` is true.

@@ -9,7 +9,7 @@ shortest path to a working round-trip. For Python or Julia, see the
 ```rust
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    create_store, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
+    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,31 +22,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A TypedArray carries the element dtype and shape [length, ...].
     let values: Vec<f64> = (0..24).map(|i| 100.0 + i as f64).collect();
     let data = TypedArray::from_f64(vec![24], &values);
-    let ts = SingleTimeSeries::new(initial, resolution, data);
+    // The name lives on the series object, not on `add_time_series`.
+    let ts = SingleTimeSeries::new(initial, resolution, data, "load");
 
-    // The owner is identified by an integer id (i64) plus a category. Features
-    // and units are optional.
+    // The owner is identified by an integer id (i64), an owner type, and a
+    // category. Features and units are optional.
     let key = store.add_time_series(
-        42,                                         // owner_id
-        "Generator",                                // owner_type
+        42,                                     // owner_id
+        "Generator",                            // owner_type
         OwnerCategory::Component,
-        "load",                                     // name
         TimeSeriesData::SingleTimeSeries(ts),
-        Features::new(),                            // no features
-        Some("MW".into()),                          // units
+        Features::new(),                        // no features
+        Some("MW".into()),                      // units
     )?;
 
-    let got = store.get_time_series(&key, None)?;
+    // Lookups take the key's `KeyIdentity`, not the key itself.
+    let got = store.get_time_series(key.identity(), None)?;
     let single = got.as_single().unwrap();
     println!(
-        "round-tripped {} values @ {} starting {}",
+        "round-tripped {} values @ {} resolution starting {}",
         single.length, single.resolution, single.initial_timestamp
     );
     Ok(())
 }
 ```
 
-This is the `examples/basic_rust.rs` program. Run it with:
+This is the `examples/basic_rust.rs` program (comments added here). Run it with:
 
 ```sh
 cargo run --manifest-path crates/time-series-store-core/Cargo.toml --example basic
@@ -58,11 +59,13 @@ cargo run --manifest-path crates/time-series-store-core/Cargo.toml --example bas
    in-memory SQLite metadata database.
 2. **`add_time_series`** hashed the array, wrote it to the backend (deduplicating on the hash), and
    recorded a metadata association keyed by
-   `(owner_id, owner_category, type, name, resolution, features)`. It returned a
+   `(owner_id, owner_category, type, name, resolution, interval, features)`. It returned a
    [`TimeSeriesKey`](../reference/rust-api.md#timeserieskey) that can re-find the series.
-3. **`get_time_series(&key, None)`** looked up the association, read the array back by its content
-   hash, and reconstructed a `SingleTimeSeries`. Passing `Some((start, end))` instead of `None`
-   slices the series on the time axis.
+3. **`get_time_series(key.identity(), None)`** looked up the association, read the array back by its
+   content hash, and reconstructed a `SingleTimeSeries`. Lookup methods take a
+   [`&KeyIdentity`](../reference/rust-api.md#timeserieskey-and-keyidentity) — the identifying tuple
+   inside the key — which `TimeSeriesKey::identity()` hands back. Passing `Some((start, end))`
+   instead of `None` slices the series on the time axis.
 
 ## Writing to Disk
 

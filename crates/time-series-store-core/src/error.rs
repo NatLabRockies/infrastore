@@ -16,6 +16,15 @@ pub enum TimeSeriesError {
     #[error("integrity check failed: {0}")]
     IntegrityError(String),
 
+    #[error(
+        "store was written in on-disk format {found}, but this build reads {expected}; \
+         the formats are incompatible and no in-place upgrade is available"
+    )]
+    IncompatibleFormat {
+        found: String,
+        expected: &'static str,
+    },
+
     #[error("store is read-only")]
     ReadOnlyStore,
 

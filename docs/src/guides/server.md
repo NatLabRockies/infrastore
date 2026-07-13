@@ -69,7 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Available methods: `connect`, `from_channel`, `list_time_series`, `get_time_series`,
-`get_time_series_keys`, `get_resolutions`, `get_counts`, `has_time_series`, `verify_integrity`.
+`get_time_series_keys`, `get_resolutions`, `get_counts`, `get_forecast_parameters`,
+`has_time_series`, `verify_integrity`.
 
 ## Authentication
 
@@ -82,8 +83,11 @@ keys = ["replace-me-with-a-secret-1", "replace-me-with-a-secret-2"]
 ```
 
 `method = "api_key"` with an empty `keys` list is rejected at startup. Clients must then send the
-key in the **`x-api-key`** metadata header; the server compares it in constant time and rejects a
-missing or wrong key with `Unauthenticated` before the RPC runs.
+key in the **`x-api-key`** metadata header; a missing or wrong key is rejected with
+`Unauthenticated` before the RPC runs. The comparison against the configured keys does not
+early-exit — every key of the same length as the supplied one is checked — so _which_ key matched is
+not leaked by timing. The supplied key's length is not blinded; keys of a different length are
+rejected without a byte-wise compare, on the assumption that length is not secret.
 
 `RemoteClient::connect` does not attach auth metadata, so against an authenticated server use the
 generated client with an interceptor that injects the header:

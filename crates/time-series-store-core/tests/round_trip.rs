@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    FeatureValue, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, Period,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
-    open_store,
+    FeatureValue, Features, KeyIdentity, ListFilter, NonSequentialTimeSeries, OwnerCategory,
+    Period, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray,
+    create_store, open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -615,4 +615,260 @@ fn list_keys_with_hash_groups_shared_arrays() {
     assert_eq!(shared.len(), 1);
     shared[0].sort();
     assert_eq!(shared[0], vec![1, 2]);
+}
+
+// ---- copy_time_series -------------------------------------------------------
+
+/// The identity of the single association owned by `owner`.
+fn only_key(store: &time_series_store_core::Store, owner: i64) -> KeyIdentity {
+    let keys = store
+        .get_time_series_keys(owner, OwnerCategory::Component)
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    keys[0].identity().clone()
+}
+
+#[test]
+fn copy_time_series_shares_the_array_and_renames() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    let src = only_key(&store, 1);
+    let copied = store
+        .copy_time_series(&src, 2, "HybridSystem", Some("Generator__load"))
+        .unwrap();
+
+    // The copy is a new association on the new owner under the new name...
+    assert_eq!(copied.identity().owner_id, 2);
+    assert_eq!(copied.identity().name, "Generator__load");
+    // ...and the source is untouched (a copy, not a move).
+    assert!(store.has_time_series(&src).unwrap());
+
+    // No array duplication: both associations point at the same content hash.
+    let src_meta = store.get_metadata(&src).unwrap();
+    let dst_meta = store.get_metadata(copied.identity()).unwrap();
+    assert_eq!(src_meta.data_hash, dst_meta.data_hash);
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+    assert_eq!(dst_meta.owner_type, "HybridSystem");
+}
+
+#[test]
+fn copy_time_series_preserves_deterministic_single_type() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    // Derive the DeterministicSingleTimeSeries view over the stored SingleTimeSeries.
+    store
+        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
+        .unwrap();
+
+    let dst_src = store
+        .get_time_series_keys(1, OwnerCategory::Component)
+        .unwrap()
+        .into_iter()
+        .find(|k| k.identity().time_series_type == TimeSeriesType::DeterministicSingleTimeSeries)
+        .expect("transform should have produced a DeterministicSingleTimeSeries");
+
+    let copied = store
+        .copy_time_series(
+            dst_src.identity(),
+            2,
+            "HybridSystem",
+            Some("Generator__load"),
+        )
+        .unwrap();
+
+    // The whole point: the copy stays a DeterministicSingleTimeSeries rather than
+    // being materialized into a dense Deterministic, and still shares the array.
+    let meta = store.get_metadata(copied.identity()).unwrap();
+    assert_eq!(
+        meta.time_series_type,
+        TimeSeriesType::DeterministicSingleTimeSeries
+    );
+    assert_eq!(
+        meta.data_hash,
+        store.get_metadata(dst_src.identity()).unwrap().data_hash
+    );
+    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+}
+
+#[test]
+fn copy_time_series_rejects_a_duplicate_destination() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    let src = only_key(&store, 1);
+
+    store.copy_time_series(&src, 2, "Generator", None).unwrap();
+    // Copying again onto the same owner+name collides with the first copy.
+    let err = store
+        .copy_time_series(&src, 2, "Generator", None)
+        .unwrap_err();
+    assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
+}
+
+// ---------------------------------------------------------------------------
+// Content-addressed feature sets
+//
+// Feature rows live in `feature_sets`, keyed by the SHA-256 of the feature map,
+// and are SHARED by every association whose `features_hash` matches. These pin
+// the properties that sharing makes non-obvious: that one association's deletion
+// cannot take another's features with it, and that the now-unreachable sets are
+// reclaimable rather than leaked.
+// ---------------------------------------------------------------------------
+
+/// Deleting one of several associations that share a feature set must not
+/// disturb the survivors' features. Under the old per-association feature rows
+/// with `ON DELETE CASCADE` this was trivially true; with shared rows it is a
+/// real invariant, and a stray cascade would silently blank the survivors.
+#[test]
+fn deleting_one_sharer_leaves_the_others_features_intact() {
+    let mut store = create_store(None, true).unwrap();
+    let features = features_with_year(2030);
+
+    // Three owners, one identical feature set: one stored `feature_sets` group.
+    for owner in 1..=3i64 {
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
+                features.clone(),
+                None,
+            )
+            .unwrap();
+    }
+
+    store
+        .remove_time_series(&KeyIdentity {
+            owner_id: 2,
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "load".to_string(),
+            resolution: Some(Period::from(Duration::hours(1))),
+            interval: None,
+            features: features.clone(),
+        })
+        .unwrap();
+
+    for owner in [1i64, 3] {
+        let keys = store
+            .get_time_series_keys(owner, OwnerCategory::Component)
+            .unwrap();
+        assert_eq!(keys.len(), 1, "owner {owner} should still have its series");
+        assert_eq!(
+            keys[0].features(),
+            &features,
+            "owner {owner} lost its features when a co-sharer was deleted"
+        );
+    }
+}
+
+/// A feature set outlives the last association that referenced it (sets are
+/// shared, so deletion cannot cascade), and `compact` is what reclaims it.
+#[test]
+fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
+    let mut store = create_store(None, true).unwrap();
+    let features = features_with_year(2031);
+    let key = KeyIdentity {
+        owner_id: 1,
+        owner_category: OwnerCategory::Component,
+        time_series_type: TimeSeriesType::SingleTimeSeries,
+        name: "load".to_string(),
+        resolution: Some(Period::from(Duration::hours(1))),
+        interval: None,
+        features: features.clone(),
+    };
+
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
+            features.clone(),
+            None,
+        )
+        .unwrap();
+
+    // Nothing to reclaim while the set is still referenced.
+    assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
+
+    store.remove_time_series(&key).unwrap();
+
+    // The set is now unreachable: one key/value row is swept.
+    let report = store.compact().unwrap();
+    assert_eq!(
+        report.feature_sets_reclaimed, 1,
+        "the orphaned feature set should be reclaimed"
+    );
+    // Idempotent: nothing left to sweep.
+    assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
+}
+
+/// A derived `DeterministicSingleTimeSeries` has the same features as the
+/// `SingleTimeSeries` it came from, so it reuses the stored set and writes no new
+/// feature rows. This is the property that makes `transform_single_time_series`
+/// stop scaling with feature count.
+#[test]
+fn transform_reuses_the_sources_feature_set() {
+    let mut store = create_store(None, true).unwrap();
+    let features = features_with_year(2032);
+
+    for owner in 1..=5i64 {
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
+                features.clone(),
+                None,
+            )
+            .unwrap();
+    }
+    let n = store
+        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
+        .unwrap();
+    assert_eq!(n, 5);
+
+    // Every DST shares its source's set, so no set is orphaned and each derived
+    // series still reads back its features.
+    assert_eq!(store.compact().unwrap().feature_sets_reclaimed, 0);
+    for owner in 1..=5i64 {
+        let keys = store
+            .get_time_series_keys(owner, OwnerCategory::Component)
+            .unwrap();
+        assert_eq!(keys.len(), 2, "owner {owner}: an STS and its derived DST");
+        assert!(
+            keys.iter().all(|k| k.features() == &features),
+            "owner {owner}: a derived DST lost the source's features"
+        );
+    }
 }

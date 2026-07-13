@@ -95,6 +95,12 @@ impl Compression {
 pub struct CompactionReport {
     pub slots_reclaimed: usize,
     pub datasets_dropped: usize,
+    /// Content-addressed feature sets in the SQLite catalog that no association
+    /// referenced any more, and were deleted. Feature sets are shared, so
+    /// removing an association cannot cascade-delete them; they accumulate as
+    /// unreachable rows until a compaction sweeps them, exactly as deleted
+    /// arrays leave unreachable NetCDF variables behind.
+    pub feature_sets_reclaimed: usize,
 }
 
 #[derive(Debug, Default, Clone)]

@@ -48,8 +48,10 @@ cargo deny check --config deny.toml                     # Dependency policy
 
 - **Rust code**: Must compile without clippy warnings. Use
   `cargo clippy --workspace --all-targets --all-features -- -D warnings` to verify.
-- **Toolchain**: The workspace uses Rust edition 2024 and declares an MSRV of Rust 1.95.0. Do not
-  use APIs requiring a newer compiler without intentionally updating `rust-version` and CI.
+- **Toolchain**: The workspace uses Rust edition 2024 and declares an MSRV of Rust 1.94 (see
+  `rust-version` in the root `Cargo.toml`, which is the sole authority — there is no
+  `rust-toolchain` file). Do not use APIs requiring a newer compiler without intentionally updating
+  `rust-version` and CI.
 - **Pre-commit**: `cargo-husky` installs `.cargo-husky/hooks/pre-commit`, which runs rustfmt,
   Clippy, dprint, and shellcheck when available. Do not bypass a failing hook. Tests and
   `cargo-deny` are still required before committing.
@@ -66,20 +68,23 @@ For detailed style guidelines, see `docs/style-guide.md`.
 ```
 crates/
   time-series-store-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
-    src/types/               #   key.rs, metadata.rs, time_series.rs
+    src/types/               #   array.rs (TypedArray/Dtype), key.rs, metadata.rs, period.rs,
+                             #   time_series.rs
     src/storage/             #   memory.rs, netcdf.rs (storage backends)
     src/metadata/            #   schema.rs (SQLite catalog schema)
     src/store.rs             #   Store: the top-level public API
+    src/reader.rs            #   StaticReader / ForecastReader: columnar bulk-read surface
     src/hash.rs              #   SHA-256 column hashing
   time-series-store-proto/   # Protobuf service definition + tonic codegen, conversions
   time-series-store-server/  # gRPC server binary (src/bin/server.rs) + Rust client
   time-series-store-py/      # PyO3 bindings
   time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
   time-series-store-cli/     # `tss` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
+  time-series-store-bench/   # `tss-bench` binary: bulk-ingest + simulation-read benchmarks
 proto/                       # .proto sources
 julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite
-examples/                    # Sample server config + basic_rust.rs example
+examples/                    # Sample server config, basic_rust.rs, and cli/ (sample CSV + descriptor)
 .github/workflows/           # Cross-platform tests, linting, security, wheel builds
 ```
 
@@ -109,8 +114,11 @@ export HDF5_DIR="$(brew --prefix hdf5)"
 On Linux (Debian/Ubuntu): `sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler` (set
 `HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial` if the build script can't find HDF5).
 
-On Windows, CI installs `netcdf-c:x64-windows` with vcpkg and sets `NETCDF_DIR`, `HDF5_DIR`, and
-`PKG_CONFIG_PATH`. Keep these requirements in mind when changing native dependencies.
+On Windows, CI installs prebuilt `libnetcdf` and `hdf5` from conda-forge and sets `NETCDF_DIR`,
+`HDF5_DIR`, and `PKG_CONFIG_PATH` to the conda prefix's `Library` directory. Do not switch this back
+to `vcpkg install netcdf-c`: vcpkg builds the stack from source, which fetches libaec from
+gitlab.dkrz.de — an unmirrored host that rate-limits CI runners (HTTP 429) and has taken Windows CI
+down for hours at a time. Keep these requirements in mind when changing native dependencies.
 
 The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
 `cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux and Windows those

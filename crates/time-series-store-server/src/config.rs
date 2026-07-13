@@ -24,16 +24,29 @@ pub struct DataSection {
     pub files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthSection {
     /// "none" | "api_key". `oauth` is reserved for a later milestone.
     #[serde(default = "default_auth_method")]
     pub method: String,
 
-    /// API keys accepted when `method = "api_key"`. Compared in constant time
-    /// against the request's `x-api-key` header.
+    /// API keys accepted when `method = "api_key"`. Checked against the
+    /// request's `x-api-key` header without early-exit across keys; see
+    /// `auth::any_match` for the exact timing guarantee.
     #[serde(default)]
     pub keys: Vec<String>,
+}
+
+/// Must agree with `default_auth_method`: `#[serde(default)]` on
+/// `ServerConfig::authentication` builds the section from `Default`, so an
+/// omitted `[authentication]` table has to land on a *valid* method.
+impl Default for AuthSection {
+    fn default() -> Self {
+        Self {
+            method: default_auth_method(),
+            keys: Vec::new(),
+        }
+    }
 }
 
 fn default_auth_method() -> String {
@@ -75,4 +88,39 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     Parse(#[from] toml::de::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = r#"
+[server]
+host = "127.0.0.1"
+port = 50051
+
+[data]
+files = ["store.nc"]
+"#;
+
+    #[test]
+    fn omitted_authentication_section_defaults_to_none() {
+        let cfg: ServerConfig = toml::from_str(BASE).unwrap();
+        assert_eq!(cfg.authentication.method, "none");
+        cfg.authentication.validate().unwrap();
+    }
+
+    #[test]
+    fn authentication_section_without_method_defaults_to_none() {
+        let cfg: ServerConfig = toml::from_str(&format!("{BASE}\n[authentication]\n")).unwrap();
+        assert_eq!(cfg.authentication.method, "none");
+        cfg.authentication.validate().unwrap();
+    }
+
+    #[test]
+    fn api_key_without_keys_is_rejected() {
+        let cfg: ServerConfig =
+            toml::from_str(&format!("{BASE}\n[authentication]\nmethod = \"api_key\"\n")).unwrap();
+        assert!(cfg.authentication.validate().is_err());
+    }
 }

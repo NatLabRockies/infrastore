@@ -1,9 +1,9 @@
 # Architecture
 
 time-series-store is a Rust workspace with one core library and a ring of interface crates around
-it. Every interface — native Rust, Python, Julia, and the gRPC server — ultimately drives the same
-`Store` type in `time-series-store-core`, and every interface reads and writes the same on-disk
-format.
+it. Every interface — native Rust, Python, Julia, the `tss` CLI, and the gRPC server — ultimately
+drives the same `Store` type in `time-series-store-core`, and every interface reads and writes the
+same on-disk format.
 
 ## Crate Layout
 
@@ -13,6 +13,7 @@ flowchart TB
         PY["time-series-store-py<br/>PyO3 wheel"]
         FFI["time-series-store-ffi<br/>C ABI cdylib"]
         SRV["time-series-store-server<br/>gRPC server + Rust client"]
+        CLI["time-series-store-cli<br/>tss binary"]
     end
 
     PYMOD["time_series_store<br/>(Python module)"]
@@ -34,6 +35,7 @@ flowchart TB
     PY --> STORE
     FFI --> STORE
     SRV --> STORE
+    CLI --> STORE
     PYMOD -->|"import"| PY
     JL -->|"ccall"| FFI
     SRV --> PROTO
@@ -49,17 +51,20 @@ flowchart TB
     style JL fill:#9558b2,color:#fff
     style SRV fill:#ffc107,color:#000
     style PROTO fill:#ffc107,color:#000
+    style CLI fill:#fd7e14,color:#fff
 ```
 
-| Crate / package            | Role                                                                   |
-| -------------------------- | ---------------------------------------------------------------------- |
-| `time-series-store-core`   | The whole engine: types, storage backends, hashing, the `Store` API    |
-| `time-series-store-proto`  | The `.proto` service compiled with `tonic`; shared message types       |
-| `time-series-store-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient` |
-| `time-series-store-py`     | PyO3 classes exposing `Store` as the `time_series_store` module        |
-| `time_series_store`        | The importable Python module — user-facing surface of the PyO3 wheel   |
-| `time-series-store-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`           |
-| `TimeSeriesStore.jl`       | A Julia package that `ccall`s into the FFI cdylib                      |
+| Crate / package            | Role                                                                    |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `time-series-store-core`   | The whole engine: types, storage backends, hashing, the `Store` API     |
+| `time-series-store-proto`  | The `.proto` service compiled with `tonic`; shared message types        |
+| `time-series-store-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`  |
+| `time-series-store-py`     | PyO3 classes exposing `Store` as the `time_series_store` module         |
+| `time_series_store`        | The importable Python module — user-facing surface of the PyO3 wheel    |
+| `time-series-store-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`            |
+| `TimeSeriesStore.jl`       | A Julia package that `ccall`s into the FFI cdylib                       |
+| `time-series-store-cli`    | The `tss` binary: read+write access to an on-disk store from a terminal |
+| `time-series-store-bench`  | The `tss-bench` binary: ingestion and simulation-read benchmarks        |
 
 ## The Core: `Store`
 
@@ -133,8 +138,13 @@ existence checks, integrity). It never writes. See [Language Bindings](./binding
 
 ## Concurrency
 
-Within a process, `NetCdfBackend` guards its NetCDF handle with a `Mutex`, so the backend is
-`Send +
-Sync` and a `Store` can be shared across threads. The metadata `MetadataStore` wraps a single
-SQLite connection and uses transactions for atomic multi-row writes. The library does not coordinate
+Within a process, `NetCdfBackend` guards its NetCDF handle with a `Mutex`, so the storage backend
+itself is `Send + Sync`. The `Store` as a whole, however, is **`Send` but not `Sync`**: its
+`MetadataStore` wraps a single `rusqlite::Connection`, which is internally a `RefCell` and therefore
+cannot be shared between threads. In practice this means a `Store` can be **moved** to another
+thread, but sharing one across threads requires external synchronization — the gRPC server holds its
+store as an `Arc<Mutex<Store>>`, and the PyO3 binding marks the class `unsendable` so a Python
+`TimeSeriesStore` stays on the thread that created it.
+
+`MetadataStore` uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.

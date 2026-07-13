@@ -51,7 +51,13 @@ value
 100.0
 101.5
 103.0
+104.2
+102.8
+101.0
 ```
+
+The descriptor rejects unknown keys, so a typo (`resolutionn`) is a hard error rather than a
+silently ignored setting.
 
 ## 3. Add It to a Store
 
@@ -60,39 +66,82 @@ tss --store demo.nc add --descriptor load.json
 ```
 
 The store (`demo.nc` and its `demo.nc.sqlite` catalog) is created on first `add`. A descriptor may
-also be a JSON array of objects to add many series in one transaction.
+also be a JSON array of objects to add many series in one transaction. `--csv` overrides the
+descriptor's `csv` path, but only for a single-series descriptor: with an array of two or more
+objects it errors (`--csv cannot be used with an array descriptor`).
 
 ## 4. Read It Back
 
 `tss` follows the same output convention as the sibling `torc` CLI: a global `-f/--format` with
-`table` (default), `json`, and `csv`.
+`table` (default), `json`, and `csv`. Only the read commands (`list`, `get`, `info`) honor it;
+`add`, `remove`, `transform`, and `template` accept the flag but ignore it and print plain text.
 
 ```sh
 tss --store demo.nc list                                       # what's in the store
 tss --store demo.nc get  --owner-id 42 --name load             # pretty table
 tss --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable CSV
-tss --store demo.nc -f json info --owner-id 42 --name load     # metadata + min/max/mean
+tss --store demo.nc -f json info --owner-id 42 --name load     # metadata + stats
 ```
 
+`info` reports metadata plus stats over the values: `min`/`max`/`mean` for numeric dtypes, or
+`true_count`/`false_count` when `dtype` is `bool`, and always `num_elements`.
+
 `get`/`info`/`remove` select a single series with `--owner-id`, `--owner-category`, `--name`,
-`--type`, `--resolution`, and repeated `--feature key=value`; if more than one series matches, `tss`
-lists the candidates so you can narrow the query. The owner is the `(owner_id, owner_category)`
-pair, so a component and a supplemental attribute may share a numeric id — add `--owner-category`
-(`component` / `supplemental_attribute`) to disambiguate. Large series truncate in `table` output —
-pass `--limit N` or `--full`.
+`--type`, `--resolution`, and repeated `--feature key=value` (`--feature` is the only repeatable
+one); if more than one series matches, `tss` lists the candidates so you can narrow the query. The
+owner is the `(owner_id, owner_category)` pair, so a component and a supplemental attribute may
+share a numeric id — add `--owner-category` (`component` / `supplemental_attribute`) to
+disambiguate. Large series truncate in `table` output — pass `--limit N` or `--full`.
+
+`--time-range START..END` on `get` takes two _timestamps_ (RFC3339 or epoch-ms), not a duration:
+
+```sh
+tss --store demo.nc get --owner-id 42 --name load \
+  --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
+```
+
+Beware that inputs and outputs are spelled differently. You type the short, lowercase forms
+(`--type single`, `--owner-category component`), but `list`/`get`/`info` print the canonical
+CamelCase names (`SingleTimeSeries`, `Component`). Both spellings are accepted as input, so
+`-f json list` output can be fed back into a selector unchanged; just don't expect the rendered
+value to string-match what you typed.
 
 ## 5. Forecasts
 
 All five writable types work (`single`, `non_sequential`, `deterministic`, `probabilistic`,
-`scenarios`). Forecast values are laid out as a flat, row-major stream whose count must equal the
-product of the type's shape (e.g. `[H, count, *element_shape]` for `deterministic`, where
-`H = horizon / resolution`). `tss template deterministic` documents the layout. Use `-f csv` or
-`-f json` to read them back at full fidelity.
+`scenarios`). `tss template deterministic` prints a descriptor to edit, but it is plain JSON and
+says nothing about the data layout, so here is the rule:
 
-`DeterministicSingleTimeSeries` is not added from CSV — store a `SingleTimeSeries`, then derive it:
+Forecast CSVs are a flat, **row-major** stream of values with no structure of their own. The count
+must equal the product of the type's shape:
+
+| Type            | Shape                             |
+| --------------- | --------------------------------- |
+| `deterministic` | `[H, count, *element_shape]`      |
+| `probabilistic` | `[num_percentiles, H, count, *E]` |
+| `scenarios`     | `[scenario_count, H, count, *E]`  |
+
+`H = horizon / resolution` — with the template's `"horizon": "24h"`, `"resolution": "1h"`, and
+`"count": 7`, a scalar `deterministic` needs exactly `24 * 7 = 168` values (plus the header row that
+`has_header: true` skips). Use `-f csv` or `-f json` to read them back at full fidelity;
+`get -f csv` emits a `value` header row and one value per line, which is exactly what `add` consumes
+again.
+
+`DeterministicSingleTimeSeries` is not added from CSV — store a `SingleTimeSeries`, then derive it.
+`transform` takes **no selector**: it rewrites _every_ `SingleTimeSeries` in the store. `--horizon`
+must fit inside each one (`horizon / resolution` steps must not exceed its `length`), so with the
+6-row hourly `load` above, a 24-hour horizon fails and a 3-hour one works:
 
 ```sh
-tss --store demo.nc transform --horizon 24h --interval 1h
+tss --store demo.nc transform --horizon 3h --interval 1h
+```
+
+The derived series keeps the source's owner, name, and resolution, so `load` now matches two entries
+and a bare selector becomes ambiguous. Disambiguate with `--type`:
+
+```sh
+tss --store demo.nc get --owner-id 42 --name load --type single
+tss --store demo.nc get --owner-id 42 --name load --type deterministic_single
 ```
 
 ## Notes

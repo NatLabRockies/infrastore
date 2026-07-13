@@ -13,28 +13,46 @@ the authoritative description of both. For the rationale behind the split, see t
 
 ## Format Version
 
-The NetCDF root carries a global attribute:
+The NetCDF root carries two global attributes:
 
 ```text
-data_format_version = "0.9.0"
+data_format_version = "0.10.0"
+compression         = "deflate:3:shuffle"
 ```
 
-This is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when the NetCDF
-layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md) changes in
-a backward-incompatible way. Readers should check it before trusting a file. (`0.9.0` changed the
-packed-dataset chunking to timestamp-major `(1, cols, *element_shape)` and made the column count
-`cols` per-dataset (sized to the writing batch) instead of a fixed 1,000, optimizing reads across
-series by timestamp and bulk writes; `0.8.0` added the forecast `interval` to the association
-uniqueness key — so two forecasts of one variable that differ only by interval are now distinct
-series — widening both unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well
-as `resolution`); `0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
+`data_format_version` is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when
+the NetCDF layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md)
+changes in a backward-incompatible way.
+
+`compression` records the filter policy the store was created with, so that appends made after
+reopening reuse the same filter. It is **not** part of the compatibility contract — see
+[Compression](#compression) below.
+
+Opening a store whose recorded version differs from the version this build reads fails with
+`IncompatibleFormat`, naming both versions. Every bump is backward-incompatible by definition, so
+the check is exact equality and there is no in-place upgrade path: regenerate the store with the
+matching build.
+
+(`0.10.0` replaced the per-association `features` table with the content-addressed `feature_sets`
+table below, so a feature map is stored once and shared by every association that uses it — dropping
+the `association_id` foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset
+chunking to timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset
+(sized to the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp
+and bulk writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two
+forecasts of one variable that differ only by interval are now distinct series — widening both
+unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`);
+`0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
 [periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration strings (e.g.
 `PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
 SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
 fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so the owner identity
 is the pair `(owner_id, owner_category)`), widening the unique indexes and `ix_owner`; `0.5.0`
-changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.2.0` introduced typed,
-multi-dimensional arrays and the two-mode NetCDF layout below; `0.1.0` stored only 1-D `f64`.)
+changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the
+Rust port of InfrastructureSystems.jl shipped with — the version that introduced
+`DATA_FORMAT_VERSION` itself; `0.3.0` switched the time unit from nanoseconds to milliseconds,
+renaming the SQLite `*_ns` columns to `*_ms` and encoding the packed dataset name's `{res}` field in
+milliseconds instead of whole seconds; `0.2.0` introduced typed, multi-dimensional arrays and the
+two-mode NetCDF layout below; `0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -58,7 +76,8 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.nc
-├── attribute  data_format_version = "0.9.0"
+├── attribute  data_format_version = "0.10.0"
+├── attribute  compression         = "deflate:3:shuffle"
 └── group      time_series/
     └── group  single/
         ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, cols, *element_shape)
@@ -67,6 +86,20 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
         ├── var  arr_{hex_hash}                          standalone array  [length, *element_shape]
         └── ...
 ```
+
+Every dimension is private to the variable that owns it and is named after that variable, so
+`ncdump -h` shows one set of dimensions per dataset:
+
+- A packed dataset `{dataset}` is dimensioned `({dataset}_t, {dataset}_c, {dataset}_e0, …)`:
+  `{dataset}_t` = `length` (the time axis), `{dataset}_c` = `cols` (the column axis), and one
+  `{dataset}_e{i}` per trailing axis, sized `element_shape[i]`. A scalar-per-step dataset has no
+  `_e{i}` dimensions.
+- Its hash companion `{dataset}_h` is dimensioned on `{dataset}_c` alone — one hash slot per column.
+- A standalone array `arr_{hex_hash}` is dimensioned `arr_{hex_hash}_d{i}`, one per axis of its full
+  shape `[length, *element_shape]`.
+
+`{dataset}_c` is load-bearing, not decorative: on open the backend recovers each packed dataset's
+column count from the length of its second dimension, which is how per-dataset widths round-trip.
 
 ### Packed mode
 
@@ -89,7 +122,6 @@ timestamp one chunk, and a buffered bulk write fill whole chunks. `cols` is chos
 managed bulk write sizes it to the batch, while an incremental one-at-a-time write path uses a
 default width (`DEFAULT_COLS_PER_DATASET = 1000`). In both cases `cols` is capped so one chunk stays
 within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spills across datasets.
-Data variables use zlib level 3 with shuffle.
 
 - **Rows are timesteps, columns are series.** Column `i` holds one complete series.
 - **Hash companion variable.** Each packed dataset has a sibling **string** variable `{dataset}_h`
@@ -112,14 +144,38 @@ column packing and no companion hash variable — the variable name carries the 
 `NonSequentialTimeSeries` stores its explicit, strictly-increasing timestamps in the association's
 `timestamps_json` metadata field, not in the array.
 
+### Compression
+
+Compression is chosen at store creation and applies to every data variable, packed and standalone
+alike (the `…_h` hash variables are strings and are not compressed). The **default** is DEFLATE
+(zlib) level 3 with the byte-shuffle filter; the level (0–9) and shuffle can be changed, or
+compression turned off entirely. The choice is persisted in the `compression` global attribute and
+restored when the store is reopened, so later appends reuse the same filter:
+
+| Attribute value             | Meaning                                    |
+| --------------------------- | ------------------------------------------ |
+| `none`                      | No compression filter                      |
+| `deflate:{level}:shuffle`   | DEFLATE at `level` (0–9), byte-shuffle on  |
+| `deflate:{level}:noshuffle` | DEFLATE at `level` (0–9), byte-shuffle off |
+
+An absent or unparseable attribute falls back to the default (`deflate:3:shuffle`), which is what
+such a file was written with. Compression is a storage detail only: arrays decode transparently
+regardless of the filter, so stores written with different settings stay mutually readable and
+`data_format_version` is unaffected by the choice.
+
 ### Deletion and compaction
 
-- **Packed:** deletion writes an empty string to the column's hash slot; the slot becomes reusable
-  by the next compatible write. The dataset does not shrink.
+- **Packed:** deletion writes an empty string to the column's hash slot and zero-fills the column's
+  data, so no stale values are readable through a reused slot. The slot becomes reusable by the next
+  compatible write. The dataset does not shrink.
 - **Standalone:** deletion drops the array from the in-memory index; the NetCDF variable lingers as
   dead space (NetCDF cannot delete variables in place).
 - `compact()` reports reclaimable slots but does not physically resize datasets or remove dead
   standalone variables in this release (netcdf-c cannot resize a dimension in place).
+- **Feature sets:** because they are shared, deleting an association never deletes its feature set;
+  removing the last association that referenced one leaves it unreachable. `compact()` deletes
+  unreachable sets and reports the row count as `feature_sets_reclaimed`. This is the one thing
+  compaction physically removes.
 
 ## SQLite Schema
 
@@ -153,25 +209,48 @@ One row per association between an owner and a stored array.
 | `logical_type`      | TEXT    | Opaque binding-owned domain label; `NULL` if unset              |
 | `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                              |
 
-### `features`
+### `feature_sets`
 
 The expanded feature map, one row per key. The typed columns are populated according to
 `value_kind`.
 
-| Column           | Type    | Notes                                                   |
-| ---------------- | ------- | ------------------------------------------------------- |
-| `association_id` | INTEGER | FK → `time_series_associations(id)` `ON DELETE CASCADE` |
-| `key`            | TEXT    | Feature name                                            |
-| `value_kind`     | TEXT    | `CHECK` in (`int`, `float`, `bool`, `str`)              |
-| `value_int`      | INTEGER | Set when `value_kind = 'int'`                           |
-| `value_float`    | REAL    | Set when `value_kind = 'float'`                         |
-| `value_bool`     | INTEGER | 0/1, set when `value_kind = 'bool'`                     |
-| `value_str`      | TEXT    | Set when `value_kind = 'str'`                           |
-|                  |         | `PRIMARY KEY (association_id, key)`                     |
+Feature sets are **content-addressed**, exactly as arrays are: the table is keyed by the SHA-256 of
+the feature map, and one set is stored once and shared by every association whose `features_hash`
+matches. The association row already carries that hash, so no join column is needed. Two
+associations with the same features therefore reference the same rows here — including a
+`DeterministicSingleTimeSeries` and the `SingleTimeSeries` it was derived from, which is why
+[`transform_single_time_series`](../explanation/data-model.md) writes no feature rows at all.
+
+| Column          | Type    | Notes                                      |
+| --------------- | ------- | ------------------------------------------ |
+| `features_hash` | BLOB    | 32-byte SHA-256 of the feature map         |
+| `key`           | TEXT    | Feature name                               |
+| `value_kind`    | TEXT    | `CHECK` in (`int`, `float`, `bool`, `str`) |
+| `value_int`     | INTEGER | Set when `value_kind = 'int'`              |
+| `value_float`   | REAL    | Set when `value_kind = 'float'`            |
+| `value_bool`    | INTEGER | 0/1, set when `value_kind = 'bool'`        |
+| `value_str`     | TEXT    | Set when `value_kind = 'str'`              |
+|                 |         | `PRIMARY KEY (features_hash, key)`         |
+
+An empty feature map stores no rows.
+
+There is deliberately **no foreign key** to `time_series_associations` and **no cascade**: rows here
+are shared, so deleting one association must not delete a set another association still uses.
+Removing the last association that referenced a set instead leaves it unreachable — the same
+deletion semantics as the NetCDF side's unreachable standalone variables. `Store::compact` sweeps
+unreachable sets and reports the count as `feature_sets_reclaimed`; clearing a store drops them all
+outright.
 
 ### `schema_version`
 
-A single-column table holding the metadata schema version.
+```sql
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+```
+
+A single-column table holding the catalog schema version. Creating the catalog inserts `version = 1`
+if the table is empty; `1` is the current value. This tracks the SQLite schema alone and is distinct
+from the NetCDF `data_format_version` attribute, which governs the artifact as a whole and is the
+value `open` validates.
 
 ### Indexes
 

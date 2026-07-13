@@ -5,6 +5,7 @@
 
 pub mod schema;
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -97,6 +98,98 @@ pub struct MetadataFilter {
     pub features_hash: Option<[u8; 32]>,
 }
 
+/// Remembers which content-addressed feature sets a batch of inserts has already
+/// written, so each distinct set is written once per batch rather than once per
+/// row. Scoped to a single transaction: it records what *this* batch wrote, and
+/// carries no meaning once that transaction ends.
+#[derive(Debug, Default)]
+pub struct FeatureSetCache {
+    seen: HashSet<[u8; 32]>,
+}
+
+/// The full identity of one stored association: everything the uniqueness
+/// invariant keys on. Periods stay in their catalog ISO-8601 encoding — this is
+/// an equality/hash token, never a value to compute with.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AssociationIdentity {
+    pub owner_id: i64,
+    pub owner_category: OwnerCategory,
+    pub name: String,
+    pub resolution: Option<String>,
+    pub interval: Option<String>,
+    pub features_hash: [u8; 32],
+}
+
+/// An association identity with the interval projected away: the "family" of
+/// series that describe one variable of one owner at one resolution, across all
+/// forecast intervals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SeriesFamily {
+    pub owner_id: i64,
+    pub owner_category: OwnerCategory,
+    pub name: String,
+    pub resolution: Option<String>,
+    pub features_hash: [u8; 32],
+}
+
+impl From<AssociationIdentity> for SeriesFamily {
+    fn from(id: AssociationIdentity) -> Self {
+        Self {
+            owner_id: id.owner_id,
+            owner_category: id.owner_category,
+            name: id.name,
+            resolution: id.resolution,
+            features_hash: id.features_hash,
+        }
+    }
+}
+
+impl MetadataFilter {
+    /// Render the filter as a `WHERE` clause plus its bound parameters, so the
+    /// same predicate can be reused across the row query and the batched
+    /// features query without building the SQL twice.
+    ///
+    /// `features` is not represented here: it is a subset match applied
+    /// in memory after hydration, not a SQL predicate.
+    fn to_sql(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut sql = String::from("WHERE 1=1");
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(owner_id) = self.owner_id {
+            sql.push_str(" AND owner_id = ?");
+            params_vec.push(Box::new(owner_id));
+        }
+        if let Some(owner_category) = self.owner_category {
+            sql.push_str(" AND owner_category = ?");
+            params_vec.push(Box::new(owner_category.as_str().to_string()));
+        }
+        if let Some(ref owner_type) = self.owner_type {
+            sql.push_str(" AND owner_type = ?");
+            params_vec.push(Box::new(owner_type.clone()));
+        }
+        if let Some(ts_type) = self.time_series_type {
+            sql.push_str(" AND time_series_type = ?");
+            params_vec.push(Box::new(ts_type.as_str().to_string()));
+        }
+        if let Some(ref name) = self.name {
+            sql.push_str(" AND name = ?");
+            params_vec.push(Box::new(name.clone()));
+        }
+        if let Some(resolution) = self.resolution {
+            sql.push_str(" AND resolution = ?");
+            params_vec.push(Box::new(period_to_iso(resolution)));
+        }
+        if let Some(interval) = self.interval {
+            sql.push_str(" AND interval = ?");
+            params_vec.push(Box::new(period_to_iso(interval)));
+        }
+        if let Some(ref f_hash) = self.features_hash {
+            sql.push_str(" AND features_hash = ?");
+            params_vec.push(Box::new(f_hash.to_vec()));
+        }
+        (sql, params_vec)
+    }
+}
+
 impl MetadataStore {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
@@ -105,6 +198,15 @@ impl MetadataStore {
             conn,
             read_only: false,
         })
+    }
+
+    /// Copy the entire metadata database to a new SQLite file at `path`
+    /// (used to materialize an in-memory store to disk). SQLite's `VACUUM INTO`
+    /// creates the target, which must not already exist.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        Ok(())
     }
 
     pub fn open_path(path: &Path, read_only: bool) -> Result<Self> {
@@ -132,6 +234,12 @@ impl MetadataStore {
         // contract) and can prevent a read-only connection from opening the
         // database in some deployments. That trade-off deserves its own change.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // `prepare_cached` keys on SQL text, and `MetadataFilter` renders a
+        // distinct statement per combination of set predicates (times two, since
+        // `list` issues a row query and a features query). rusqlite's default
+        // cache holds 16, which a mixed workload can thrash past, silently
+        // re-parsing on every call. Room for the realistic shapes is cheap.
+        conn.set_prepared_statement_cache_capacity(64);
         // Try to apply schema; on a read-only connection this no-ops because
         // CREATE TABLE IF NOT EXISTS against an empty read-only DB would error,
         // so we only run it when writes are possible.
@@ -161,6 +269,23 @@ impl MetadataStore {
     /// Insert a metadata record + its features inside the supplied transaction.
     /// Returns the association id. Caller is responsible for committing.
     pub fn insert(tx: &Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<i64> {
+        Self::insert_batched(tx, meta, &mut FeatureSetCache::default())
+    }
+
+    /// [`Self::insert`], but reusing a caller-held [`FeatureSetCache`] across the
+    /// rows of one batch.
+    ///
+    /// Feature sets are content-addressed and shared, so in a batch that inserts
+    /// N rows over a handful of distinct sets, all but the first row per set
+    /// would issue `INSERT OR IGNORE` statements that write nothing. The cache
+    /// remembers which sets this batch has already written and skips the rest —
+    /// which is what stops a bulk add, and a transform, from scaling with the
+    /// number of features per series.
+    pub fn insert_batched(
+        tx: &Transaction<'_>,
+        meta: &TimeSeriesMetadata,
+        cache: &mut FeatureSetCache,
+    ) -> Result<i64> {
         let f_hash = features_hash(&meta.features);
         let initial_ts = meta.initial_timestamp.map(|t| t.to_rfc3339());
         let resolution_iso = meta.resolution.map(period_to_iso);
@@ -222,12 +347,39 @@ impl MetadataStore {
             Err(e) => return Err(e.into()),
         };
 
+        // `insert` on the cache returns true the first time this batch sees the
+        // set; every later row carrying it is a no-op we can skip outright.
+        if cache.seen.insert(f_hash) {
+            Self::insert_feature_set(tx, &f_hash, &meta.features)?;
+        }
+
+        Ok(id)
+    }
+
+    /// Record a feature set under its content hash, if it is not already stored.
+    ///
+    /// `OR IGNORE` makes this a no-op whenever some other association already
+    /// wrote this exact set — which is the common case, and the whole point of
+    /// content-addressing them: a derived `DeterministicSingleTimeSeries` shares
+    /// its source's features, so it writes nothing here.
+    ///
+    /// Equal hash implies equal set (SHA-256 of the canonical encoding), so an
+    /// ignored conflict cannot silently keep a *different* set under the same
+    /// hash.
+    fn insert_feature_set(
+        tx: &Transaction<'_>,
+        f_hash: &[u8; 32],
+        features: &Features,
+    ) -> Result<()> {
+        if features.is_empty() {
+            return Ok(());
+        }
         let mut feature_stmt = tx.prepare_cached(
-            "INSERT INTO features
-             (association_id, key, value_kind, value_int, value_float, value_bool, value_str)
+            "INSERT OR IGNORE INTO feature_sets
+             (features_hash, key, value_kind, value_int, value_float, value_bool, value_str)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
-        for (k, v) in &meta.features {
+        for (k, v) in features {
             let (kind, vi, vf, vb, vs): (
                 &str,
                 Option<i64>,
@@ -240,10 +392,23 @@ impl MetadataStore {
                 FeatureValue::Bool(b) => ("bool", None, None, Some(*b as i64), None),
                 FeatureValue::Str(s) => ("str", None, None, None, Some(s.as_str())),
             };
-            feature_stmt.execute(params![id, k, kind, vi, vf, vb, vs])?;
+            feature_stmt.execute(params![f_hash.as_slice(), k, kind, vi, vf, vb, vs])?;
         }
+        Ok(())
+    }
 
-        Ok(id)
+    /// Delete feature sets no association references any more, and return how
+    /// many rows went. Deleting an association leaves its set behind (sets are
+    /// shared, so deletion cannot cascade); this reclaims the ones that are now
+    /// unreachable. Called from [`crate::Store::compact`].
+    pub fn sweep_orphan_feature_sets(tx: &Transaction<'_>) -> Result<usize> {
+        let n = tx.execute(
+            "DELETE FROM feature_sets
+             WHERE features_hash NOT IN
+                   (SELECT DISTINCT features_hash FROM time_series_associations)",
+            [],
+        )?;
+        Ok(n)
     }
 
     /// Delete an association by primary-key tuple. Returns the number of rows
@@ -353,6 +518,10 @@ impl MetadataStore {
             .filter_map(|bytes| bytes_to_hash32(&bytes))
             .collect::<Vec<_>>();
         tx.execute("DELETE FROM time_series_associations", [])?;
+        // Clearing the store empties it, so every feature set is unreachable by
+        // construction. Drop them here rather than leaving the whole catalog's
+        // worth of orphans for a compaction that a cleared store may never get.
+        tx.execute("DELETE FROM feature_sets", [])?;
         Ok(hashes)
     }
 
@@ -369,63 +538,57 @@ impl MetadataStore {
     }
 
     pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
-        // Build a SELECT with the always-on columns; layer on optional WHERE
-        // clauses using sqlite's parameter binding.
-        let mut sql = String::from(
-            "SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
-                    data_hash, initial_timestamp, resolution, length, horizon,
-                    interval, count, timestamps_json, units, percentiles_json,
-                    dtype, element_shape, logical_type
-             FROM time_series_associations WHERE 1=1",
-        );
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(owner_id) = filter.owner_id {
-            sql.push_str(" AND owner_id = ?");
-            params_vec.push(Box::new(owner_id));
-        }
-        if let Some(owner_category) = filter.owner_category {
-            sql.push_str(" AND owner_category = ?");
-            params_vec.push(Box::new(owner_category.as_str().to_string()));
-        }
-        if let Some(ref owner_type) = filter.owner_type {
-            sql.push_str(" AND owner_type = ?");
-            params_vec.push(Box::new(owner_type.clone()));
-        }
-        if let Some(ts_type) = filter.time_series_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(ts_type.as_str().to_string()));
-        }
-        if let Some(ref name) = filter.name {
-            sql.push_str(" AND name = ?");
-            params_vec.push(Box::new(name.clone()));
-        }
-        if let Some(resolution) = filter.resolution {
-            sql.push_str(" AND resolution = ?");
-            params_vec.push(Box::new(period_to_iso(resolution)));
-        }
-        if let Some(interval) = filter.interval {
-            sql.push_str(" AND interval = ?");
-            params_vec.push(Box::new(period_to_iso(interval)));
-        }
-        if let Some(ref f_hash) = filter.features_hash {
-            sql.push_str(" AND features_hash = ?");
-            params_vec.push(Box::new(f_hash.to_vec()));
-        }
-
+        let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
             .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
             .collect();
 
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows: Vec<(i64, MetaRow)> = stmt
+        let sql = format!(
+            "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
+                    data_hash, initial_timestamp, resolution, length, horizon,
+                    interval, count, timestamps_json, units, percentiles_json,
+                    dtype, element_shape, logical_type
+             FROM time_series_associations {where_clause}"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows: Vec<([u8; 32], MetaRow)> = stmt
             .query_map(param_refs.as_slice(), parse_meta_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // Hydrate features for each candidate.
+        // Hydrate features in one query rather than one per row. Because feature
+        // sets are content-addressed, this fetches each DISTINCT set once, no
+        // matter how many matched rows share it — listing 50k series that all
+        // carry the same two features reads two rows here, not 100k.
+        //
+        // Re-running the row predicate as a subquery (rather than binding an
+        // `IN (...)` list of hashes) keeps this to two statements regardless of
+        // match count, and sidesteps SQLite's bound-parameter ceiling on a large
+        // store. Rows whose feature set is empty simply get no group.
+        let feat_sql = format!(
+            "SELECT fs.features_hash, fs.key, fs.value_kind, fs.value_int, fs.value_float,
+                    fs.value_bool, fs.value_str
+             FROM feature_sets fs
+             WHERE fs.features_hash IN
+                   (SELECT features_hash FROM time_series_associations {where_clause})"
+        );
+        let mut feat_stmt = self.conn.prepare_cached(&feat_sql)?;
+        let mut by_hash: HashMap<[u8; 32], Features> = HashMap::new();
+        let mut feat_rows = feat_stmt.query(param_refs.as_slice())?;
+        while let Some(row) = feat_rows.next()? {
+            let hash = bytes_to_hash32(&row.get::<_, Vec<u8>>(0)?).ok_or_else(|| {
+                TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
+            })?;
+            let (key, value) = parse_feature_row(row)?;
+            // `Features` is a BTreeMap, so it orders keys itself; the query does
+            // not need an ORDER BY.
+            by_hash.entry(hash).or_default().insert(key, value);
+        }
+
         let mut out = Vec::with_capacity(rows.len());
-        for (id, partial) in rows {
-            let features = self.fetch_features(id)?;
+        for (f_hash, partial) in rows {
+            // Cloned, not removed: many rows legitimately share one set.
+            let features = by_hash.get(&f_hash).cloned().unwrap_or_default();
             // Optional features-subset filter, in-memory.
             if let Some(ref required) = filter.features
                 && !is_subset(required, &features)
@@ -435,6 +598,48 @@ impl MetadataStore {
             out.push(partial.into_metadata(features));
         }
         Ok(out)
+    }
+
+    /// The identity of every association of `ts_type`, read straight from the
+    /// associations table with no feature hydration.
+    ///
+    /// `features_hash` is a stored column, so a caller that only needs to test
+    /// identity ("does this series already exist?") can skip both the features
+    /// join and the SHA-256 recomputation that [`Self::list`] would do.
+    pub fn list_identities(&self, ts_type: TimeSeriesType) -> Result<Vec<AssociationIdentity>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT owner_id, owner_category, name, resolution, interval, features_hash
+             FROM time_series_associations WHERE time_series_type = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![ts_type.as_str()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(owner_id, cat, name, resolution, interval, hash_blob)| {
+                Ok(AssociationIdentity {
+                    owner_id,
+                    owner_category: OwnerCategory::parse(&cat).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("unknown owner_category: {cat}"))
+                    })?,
+                    name,
+                    resolution,
+                    interval,
+                    features_hash: hash_blob.as_slice().try_into().map_err(|_| {
+                        TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
+                    })?,
+                })
+            })
+            .collect()
     }
 
     pub fn list_keys_for_owner(
@@ -748,37 +953,31 @@ impl MetadataStore {
     pub fn has_match(&self, filter: &MetadataFilter) -> Result<bool> {
         Ok(!self.list(filter)?.is_empty())
     }
+}
 
-    fn fetch_features(&self, association_id: i64) -> Result<Features> {
-        let mut stmt = self.conn.prepare(
-            "SELECT key, value_kind, value_int, value_float, value_bool, value_str
-             FROM features WHERE association_id = ?1 ORDER BY key",
-        )?;
-        let rows = stmt
-            .query_map(params![association_id], |row| {
-                let key: String = row.get(0)?;
-                let kind: String = row.get(1)?;
-                let value = match kind.as_str() {
-                    "int" => FeatureValue::Int(row.get::<_, i64>(2)?),
-                    "float" => FeatureValue::Float(row.get::<_, f64>(3)?),
-                    "bool" => FeatureValue::Bool(row.get::<_, i64>(4)? != 0),
-                    "str" => FeatureValue::Str(row.get::<_, String>(5)?),
-                    _ => {
-                        return Err(rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("unknown feature kind: {kind}"),
-                            )),
-                        ));
-                    }
-                };
-                Ok((key, value))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows.into_iter().collect())
-    }
+/// Parse one `features` row into its key/value pair. The row must select
+/// `key, value_kind, value_int, value_float, value_bool, value_str` starting at
+/// the column after `association_id`.
+fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, FeatureValue)> {
+    let key: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let value = match kind.as_str() {
+        "int" => FeatureValue::Int(row.get::<_, i64>(3)?),
+        "float" => FeatureValue::Float(row.get::<_, f64>(4)?),
+        "bool" => FeatureValue::Bool(row.get::<_, i64>(5)? != 0),
+        "str" => FeatureValue::Str(row.get::<_, String>(6)?),
+        _ => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown feature kind: {kind}"),
+                )),
+            ));
+        }
+    };
+    Ok((key, value))
 }
 
 /// Canonical ISO-8601 encoding of a period for storage in the catalog.
@@ -870,8 +1069,11 @@ impl MetaRow {
     }
 }
 
-fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
-    let id: i64 = row.get(0)?;
+/// Parse one association row. Column 0 is the `features_hash`, which is how the
+/// caller looks the row's feature set up in the content-addressed `feature_sets`
+/// table.
+fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRow)> {
+    let features_hash: Vec<u8> = row.get(0)?;
     let owner_id: i64 = row.get(1)?;
     let owner_type: String = row.get(2)?;
     let owner_category: String = row.get(3)?;
@@ -982,8 +1184,19 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, MetaRow)> {
     let horizon = parse_period(10, horizon_iso)?;
     let interval = parse_period(11, interval_iso)?;
 
+    let features_hash = bytes_to_hash32(&features_hash).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "features_hash must be 32 bytes",
+            )),
+        )
+    })?;
+
     Ok((
-        id,
+        features_hash,
         MetaRow {
             owner_id,
             owner_type,

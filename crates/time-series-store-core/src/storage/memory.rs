@@ -90,6 +90,9 @@ impl StorageBackend for MemoryBackend {
         Ok(CompactionReport {
             slots_reclaimed: reclaimed,
             datasets_dropped: 0,
+            // The catalog is not the backend's to sweep; `Store::compact` fills
+            // this in after the array side is done.
+            feature_sets_reclaimed: 0,
         })
     }
 

@@ -120,18 +120,23 @@ tss-bench --log-level debug add --count 100
 
 The key spans emitted by `time-series-store-core`:
 
-| Span                      | Layer          | Key fields                                    |
-| ------------------------- | -------------- | --------------------------------------------- |
-| `add_time_series_bulk`    | `Store`        | `count` — number of items in the bulk request |
-| `get_time_series`         | `Store`        | `owner`, `name`, `has_time_range`, `ts_type`  |
-| `remove_time_series`      | `Store`        | `owner`, `name`                               |
-| `put_array`               | NetCDF backend | `bytes`, `packed`                             |
-| `put_packed`              | NetCDF backend | `bytes`, `resolution_ms`                      |
-| `put_packed_block`        | NetCDF backend | `n` — series written in one batch-sized block |
-| `put_standalone`          | NetCDF backend | `bytes`                                       |
-| `get_array` / `get_slice` | NetCDF backend | `start`, `end` (slice only)                   |
-| `read_locked`             | NetCDF backend | —                                             |
-| `rebuild_index`           | NetCDF backend | — (runs once on `Store::open`)                |
+| Span                      | Layer          | Key fields                                       |
+| ------------------------- | -------------- | ------------------------------------------------ |
+| `add_time_series_bulk`    | `Store`        | `count` — number of items in the bulk request    |
+| `get_time_series`         | `Store`        | `owner`, `name`, `has_time_range`                |
+| `copy_time_series`        | `Store`        | `owner`, `name` — of the source series           |
+| `remove_time_series`      | `Store`        | `owner`, `name`                                  |
+| `bulk_read`               | `Store`        | `count` — number of keys read in one pass        |
+| `put_array`               | NetCDF backend | `bytes`, `packed`                                |
+| `put_packed`              | NetCDF backend | `bytes`                                          |
+| `put_packed_block`        | NetCDF backend | `n` — series written in one batch-sized block    |
+| `put_standalone`          | NetCDF backend | `bytes`                                          |
+| `get_array` / `get_slice` | NetCDF backend | `start`, `end` (slice only)                      |
+| `read_arrays`             | NetCDF backend | `n` — arrays fetched in one decompress-once pass |
+| `read_index_into`         | NetCDF backend | `n`, `index` — one timestep across `n` series    |
+| `read_window_into`        | NetCDF backend | `count_axis`, `window_index`                     |
+| `read_locked`             | NetCDF backend | —                                                |
+| `rebuild_index`           | NetCDF backend | — (runs once on `Store::open`)                   |
 
 Spans nest: a single `add_time_series_bulk` call groups packed series by shape and emits one
 `put_packed_block` span per group (filling whole chunks), plus a `put_array` → `put_standalone` span

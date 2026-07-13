@@ -64,7 +64,8 @@ The conventions that shape the Julia API:
   matching Julia exception type.
 - **Out-parameters and caller-owned buffers.** Arrays come back through an out-pointer plus a length
   and a dtype code; Julia copies them into a `Vector{T}` for the requested element type and frees
-  the Rust buffer with `ts_buffer_free_f64` / `ts_buffer_free_u8` / `ts_buffer_free_i64`.
+  the Rust buffer with the deallocator matching the buffer's element type — `ts_buffer_free_f64`,
+  `ts_buffer_free_u8`, `ts_buffer_free_i64`, or `ts_buffer_free_u64` (shape/dims buffers).
 - **Features cross as JSON.** Julia serializes the feature dict to a JSON string, which the FFI
   layer parses into a `Features` map.
 - **Forecasts are wrapped.** `TimeSeriesStore.jl` exposes `Deterministic` / `Probabilistic` /

@@ -42,6 +42,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
         E::ConnectionError(m) => TimeSeriesError::new_err(format!("connection: {m}")),
         E::IncompatibleForecast => TimeSeriesError::new_err("incompatible forecast"),
+        ref e @ E::IncompatibleFormat { .. } => TimeSeriesError::new_err(e.to_string()),
         E::Io(e) => TimeSeriesError::new_err(format!("io: {e}")),
         E::Sqlite(e) => TimeSeriesError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => TimeSeriesError::new_err(format!("serde: {e}")),
@@ -1020,8 +1021,10 @@ impl PyStore {
     }
 
     /// Return a list of metadata dicts matching the filter. Each dict has
-    /// `owner_id`, `owner_type`, `time_series_type`, `name`, `length`,
-    /// `resolution` (ISO 8601 duration string, e.g. `PT1H`), `features`, `units`.
+    /// `owner_id`, `owner_type`, `owner_category`, `time_series_type`, `name`,
+    /// `data_hash` (hex string), `length`, `resolution` (ISO 8601 duration
+    /// string, e.g. `PT1H`, or `None`), `timestamps` (list of RFC 3339 strings
+    /// for non-sequential series, `None` otherwise), `features`, `units`.
     #[pyo3(signature = (
         owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, resolution=None, features=None
@@ -1244,6 +1247,7 @@ impl PyStore {
         let d = PyDict::new(py);
         d.set_item("slots_reclaimed", r.slots_reclaimed)?;
         d.set_item("datasets_dropped", r.datasets_dropped)?;
+        d.set_item("feature_sets_reclaimed", r.feature_sets_reclaimed)?;
         Ok(d)
     }
 

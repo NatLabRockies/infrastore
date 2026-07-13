@@ -1,11 +1,14 @@
 //! High-level `Store` composing the storage backend and metadata store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
-use crate::metadata::{MetadataFilter, MetadataStore, references_to_in_tx};
+use crate::metadata::{
+    AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, SeriesFamily,
+    references_to_in_tx,
+};
 use crate::reader::{ForecastReader, StaticReader, WindowRead};
 use crate::storage::{
     CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
@@ -257,6 +260,9 @@ impl Store {
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.transaction()?;
         let mut keys = Vec::with_capacity(items.len());
+        // Feature sets are shared, and a batch typically spans only a handful of
+        // distinct ones; write each once rather than once per item.
+        let mut feature_sets = FeatureSetCache::default();
 
         for item in &items {
             let RequestParts {
@@ -281,7 +287,7 @@ impl Store {
                 staged_hashes.push(hash);
             }
 
-            match insert_association(&tx, &meta) {
+            match insert_association(&tx, &meta, &mut feature_sets) {
                 Ok(()) => {
                     keys.push(key);
                 }
@@ -375,8 +381,9 @@ impl Store {
 
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.transaction()?;
+        let mut feature_sets = FeatureSetCache::default();
         for p in &parts {
-            if let Err(e) = insert_association(&tx, &p.meta) {
+            if let Err(e) = insert_association(&tx, &p.meta, &mut feature_sets) {
                 drop(tx);
                 for staged in &staged_hashes {
                     let _ = self.backend.remove_array(staged);
@@ -456,6 +463,57 @@ impl Store {
         let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner, owner_category)?;
         tx.commit()?;
         Ok(updated)
+    }
+
+    /// Copy an existing association onto another owner, optionally renaming it.
+    ///
+    /// Arrays are content-addressed, so this writes only a new association row
+    /// pointing at the same `data_hash`: no array data is duplicated. Every
+    /// descriptive column is carried over verbatim — crucially the
+    /// `time_series_type`, so a `DeterministicSingleTimeSeries` stays one instead
+    /// of being materialized into a dense `Deterministic` (which is what a
+    /// read-then-write copy through the bindings would produce).
+    ///
+    /// The copy keeps the source's `owner_category`; `new_name` defaults to the
+    /// source name. Fails with `DuplicateTimeSeries` if the destination already
+    /// holds a series with the same identity.
+    #[tracing::instrument(skip(self, src), fields(owner = src.owner_id, name = %src.name))]
+    pub fn copy_time_series(
+        &mut self,
+        src: &KeyIdentity,
+        dst_owner_id: i64,
+        dst_owner_type: &str,
+        new_name: Option<&str>,
+    ) -> Result<TimeSeriesKey> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+
+        let mut meta = self.metadata.get_by_key(src)?;
+        meta.owner_id = dst_owner_id;
+        meta.owner_type = dst_owner_type.to_string();
+        if let Some(name) = new_name {
+            meta.name = name.to_string();
+        }
+
+        let dst = KeyIdentity {
+            owner_id: meta.owner_id,
+            owner_category: meta.owner_category,
+            time_series_type: meta.time_series_type,
+            name: meta.name.clone(),
+            resolution: meta.resolution,
+            interval: meta.interval,
+            features: meta.features.clone(),
+        };
+        if self.has_time_series(&dst)? {
+            return Err(TimeSeriesError::DuplicateTimeSeries);
+        }
+
+        let tx = self.metadata.transaction()?;
+        MetadataStore::insert(&tx, &meta)?;
+        tx.commit()?;
+
+        TimeSeriesKey::from_metadata(&meta)
     }
 
     #[tracing::instrument(skip(self, key, time_range), fields(owner = key.owner_id, name = %key.name, has_time_range = time_range.is_some()))]
@@ -1115,22 +1173,16 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
         let (horizon, interval) = (horizon.into(), interval.into());
-        use crate::metadata::MetadataFilter;
-        let mut sources = self.metadata.list(&MetadataFilter {
+        // Push the owner-category and resolution restrictions into SQL rather
+        // than listing every SingleTimeSeries and discarding the misses: a store
+        // whose components are transformed one resolution at a time should not
+        // pay to hydrate the other resolutions' features on every call.
+        let sources = self.metadata.list(&MetadataFilter {
             time_series_type: Some(TimeSeriesType::SingleTimeSeries),
+            owner_category,
+            resolution,
             ..Default::default()
         })?;
-        // Restrict the transform to one owner category (e.g. only components,
-        // leaving supplemental-attribute series untouched) when requested.
-        if let Some(cat) = owner_category {
-            sources.retain(|m| m.owner_category == cat);
-        }
-        // Restrict the transform to a single resolution when requested, so series
-        // of other resolutions (which may be incompatible with the interval) are
-        // left untouched.
-        if let Some(res) = resolution {
-            sources.retain(|m| m.resolution == Some(res));
-        }
 
         // Series that already have a DeterministicSingleTimeSeries view *at this
         // interval* are skipped so the transform is idempotent (e.g. re-deriving
@@ -1138,61 +1190,27 @@ impl Store {
         // copy). The dedup key is the full identity: owner_id/owner_category plus
         // name/resolution/interval/features. Interval is part of the identity, so
         // re-deriving the same series at a different interval is a distinct view.
+        //
+        // Both dedup sets are read via `list_identities`, which returns the
+        // stored `features_hash` column directly: the identity test needs the
+        // hash, not the features themselves, so this skips hydrating (and
+        // re-hashing) the features of every forecast already in the store.
         let interval_iso = interval.to_iso8601();
-        #[allow(clippy::type_complexity)]
-        let existing_dst: std::collections::HashSet<(
-            i64,
-            OwnerCategory,
-            String,
-            Option<String>,
-            Option<String>,
-            [u8; 32],
-        )> = self
+        let existing_dst: HashSet<AssociationIdentity> = self
             .metadata
-            .list(&MetadataFilter {
-                time_series_type: Some(TimeSeriesType::DeterministicSingleTimeSeries),
-                ..Default::default()
-            })?
-            .iter()
-            .map(|m| {
-                (
-                    m.owner_id,
-                    m.owner_category,
-                    m.name.clone(),
-                    m.resolution.map(|r| r.to_iso8601()),
-                    m.interval.map(|i| i.to_iso8601()),
-                    crate::hash::features_hash(&m.features),
-                )
-            })
+            .list_identities(TimeSeriesType::DeterministicSingleTimeSeries)?
+            .into_iter()
             .collect();
 
         // Families that already hold a real `Deterministic` forecast. A DST is a
         // synthetic view and is mutually exclusive with a `Deterministic` for one
         // family (owner, name, resolution, features, ignoring interval), so
         // deriving a DST over such a family is rejected.
-        #[allow(clippy::type_complexity)]
-        let existing_det: std::collections::HashSet<(
-            i64,
-            OwnerCategory,
-            String,
-            Option<String>,
-            [u8; 32],
-        )> = self
+        let existing_det: HashSet<SeriesFamily> = self
             .metadata
-            .list(&MetadataFilter {
-                time_series_type: Some(TimeSeriesType::Deterministic),
-                ..Default::default()
-            })?
-            .iter()
-            .map(|m| {
-                (
-                    m.owner_id,
-                    m.owner_category,
-                    m.name.clone(),
-                    m.resolution.map(|r| r.to_iso8601()),
-                    crate::hash::features_hash(&m.features),
-                )
-            })
+            .list_identities(TimeSeriesType::Deterministic)?
+            .into_iter()
+            .map(SeriesFamily::from)
             .collect();
 
         // Build every DST metadata row up front so a single ineligible series
@@ -1203,13 +1221,13 @@ impl Store {
             let src_resolution_iso = src.resolution.map(|r| r.to_iso8601());
             // Reject deriving a DST over a family that already holds a real
             // Deterministic forecast (interval-independent).
-            let det_family = (
-                src.owner_id,
-                src.owner_category,
-                src.name.clone(),
-                src_resolution_iso.clone(),
-                src_features_hash,
-            );
+            let det_family = SeriesFamily {
+                owner_id: src.owner_id,
+                owner_category: src.owner_category,
+                name: src.name.clone(),
+                resolution: src_resolution_iso.clone(),
+                features_hash: src_features_hash,
+            };
             if existing_det.contains(&det_family) {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "cannot derive DeterministicSingleTimeSeries for '{}': a Deterministic \
@@ -1217,14 +1235,14 @@ impl Store {
                     src.name
                 )));
             }
-            let src_key = (
-                src.owner_id,
-                src.owner_category,
-                src.name.clone(),
-                src_resolution_iso,
-                Some(interval_iso.clone()),
-                src_features_hash,
-            );
+            let src_key = AssociationIdentity {
+                owner_id: src.owner_id,
+                owner_category: src.owner_category,
+                name: src.name.clone(),
+                resolution: src_resolution_iso,
+                interval: Some(interval_iso.clone()),
+                features_hash: src_features_hash,
+            };
             if existing_dst.contains(&src_key) {
                 continue;
             }
@@ -1258,8 +1276,13 @@ impl Store {
         }
 
         let tx = self.metadata.transaction()?;
+        // One cache for the whole batch: every derived row shares its source's
+        // feature set, and sources overwhelmingly share sets with each other, so
+        // the feature-set writes collapse to a handful regardless of how many
+        // series are transformed.
+        let mut feature_sets = FeatureSetCache::default();
         for meta in &new_metas {
-            if let Err(e) = MetadataStore::insert(&tx, meta) {
+            if let Err(e) = MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
                 drop(tx);
                 return Err(e);
             }
@@ -1423,11 +1446,18 @@ impl Store {
         self.metadata.forecast_summary()
     }
 
+    /// Reclaim space in both halves of the artifact: reusable packed slots and
+    /// unreachable arrays in the NetCDF file, and feature sets in the SQLite
+    /// catalog that no association references any more.
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        self.backend.compact()
+        let mut report = self.backend.compact()?;
+        let tx = self.metadata.transaction()?;
+        report.feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
+        tx.commit()?;
+        Ok(report)
     }
 
     pub fn verify_integrity(&self) -> Result<IntegrityReport> {
@@ -1436,6 +1466,52 @@ impl Store {
 
     pub fn flush(&mut self) -> Result<()> {
         self.backend.flush()
+    }
+
+    /// Persist this store's data to `path` (the NetCDF arrays) and its companion
+    /// `<path>.sqlite` (the metadata). Works for both on-disk stores (copies the
+    /// two artifacts) and in-memory stores (materializes arrays + metadata to
+    /// disk). Existing target files are overwritten.
+    ///
+    /// Because arrays are content-addressed, copying every array by hash plus the
+    /// full metadata database reproduces all time series — static, forecast, and
+    /// non-sequential — without reconstructing per-type semantics.
+    pub fn persist_to(&mut self, path: &Path) -> Result<()> {
+        self.flush()?;
+        let sqlite_path = catalog_sqlite_path(path);
+
+        if let Some(src) = self.netcdf_path.clone() {
+            if src != path {
+                std::fs::copy(&src, path)?;
+                std::fs::copy(catalog_sqlite_path(&src), &sqlite_path)?;
+            }
+            return Ok(());
+        }
+
+        // In-memory store: materialize arrays and metadata to disk. VACUUM INTO
+        // requires the target sqlite to be absent, so clear both artifacts first.
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&sqlite_path);
+        {
+            let mut nc = NetCdfBackend::create(path, self.compression())?;
+            let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
+                if !seen.insert(hash) {
+                    continue;
+                }
+                let array = self.backend.get_array(&hash)?;
+                // The resolution only groups the on-disk layout; reads locate arrays
+                // by content hash, so the fallback for resolution-less (non-sequential)
+                // series is harmless.
+                let resolution = key
+                    .resolution()
+                    .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
+                nc.put_array(&hash, &array, resolution, true)?;
+            }
+            nc.flush()?;
+        }
+        self.metadata.backup_to(&sqlite_path)?;
+        Ok(())
     }
 }
 
@@ -1717,7 +1793,11 @@ fn request_array(item: &AddRequest) -> &TypedArray {
 /// may hold one or the other but never both. A DST is only ever created by
 /// [`Store::transform_single_time_series`], so the only overlap reachable here is
 /// adding a `Deterministic` when a DST already exists.
-fn insert_association(tx: &rusqlite::Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<()> {
+fn insert_association(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &TimeSeriesMetadata,
+    cache: &mut FeatureSetCache,
+) -> Result<()> {
     let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
         crate::metadata::forecast_family_conflict(
             tx,
@@ -1737,7 +1817,7 @@ fn insert_association(tx: &rusqlite::Transaction<'_>, meta: &TimeSeriesMetadata)
              same series already exists; they are mutually exclusive",
             meta.name
         ))),
-        Ok(false) => MetadataStore::insert(tx, meta).map(|_| ()),
+        Ok(false) => MetadataStore::insert_batched(tx, meta, cache).map(|_| ()),
         Err(e) => Err(e),
     }
 }

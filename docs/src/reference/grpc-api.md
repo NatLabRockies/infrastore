@@ -95,7 +95,7 @@ message ListResp { repeated TimeSeriesMetadata metadata = 1; }
 
 message GetReq {
   TimeSeriesKey   key           = 1;
-  optional string start_rfc3339 = 2;   // optional time-axis slice
+  optional string start_rfc3339 = 2;   // optional time-axis slice; all-or-nothing with end
   optional string end_rfc3339   = 3;
 }
 message GetResp {
@@ -145,6 +145,13 @@ message VerifyReq  {}
 message VerifyResp { repeated string errors = 1; }
 ```
 
+### `GetReq` Time Slice
+
+`start_rfc3339` and `end_rfc3339` are **all-or-nothing**: supply both to request a time-axis slice,
+or neither to fetch the whole series. Setting exactly one is rejected with `InvalidArgument`
+(`"start_rfc3339 and end_rfc3339 must be supplied together"`). Each value must parse as RFC 3339; a
+malformed timestamp is also `InvalidArgument`.
+
 ## Forecasts Over gRPC
 
 The service is read-only, but its read surface covers dense forecasts. Forecast associations created
@@ -167,14 +174,28 @@ survive the round trip without coercion. One caveat:
 ## Authentication
 
 When the server is configured with `method = "api_key"`, clients must send the key in the
-**`x-api-key`** request metadata (header). The server compares it in constant time against the
-configured keys; a missing or wrong key is rejected before the RPC runs. With `method = "none"` no
-metadata is required. See [Server Configuration](./server-config.md).
+**`x-api-key`** request metadata (header). The server checks the supplied key against every
+configured key of the same length without early-exit, so a match is not leaked by timing; the
+comparison is not blinded against the supplied key's _length_, which is treated as non-secret. A
+missing or wrong key is rejected before the RPC runs. With `method = "none"` no metadata is
+required. See [Server Configuration](./server-config.md).
 
 ## Rust Client
 
 `time-series-store-server` ships an async `RemoteClient` that mirrors the read methods and returns
-core types, mapping gRPC `Status` codes to `TimeSeriesError::ConnectionError`:
+core types, mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy:
+
+| gRPC `Code`          | `TimeSeriesError`                |
+| -------------------- | -------------------------------- |
+| `NotFound`           | `NotFound`                       |
+| `AlreadyExists`      | `DuplicateTimeSeries`            |
+| `InvalidArgument`    | `InvalidParameter(message)`      |
+| `FailedPrecondition` | `InvalidParameter(message)`      |
+| `DataLoss`           | `IntegrityError(message)`        |
+| anything else        | `ConnectionError(code: message)` |
+
+`ConnectionError` is only the fallback arm, so a remote `NotFound` or a rejected argument surfaces
+with the same variant a local `Store` would return.
 
 ```rust
 use time_series_store_core::OwnerCategory;
