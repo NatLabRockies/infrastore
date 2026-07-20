@@ -76,7 +76,7 @@ def test_persistent_round_trip(tmp_path):
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
 
     report = reopened.verify_integrity()
-    assert report == [], f"integrity errors: {report}"
+    assert report == {"ok": True, "errors": []}, f"integrity errors: {report}"
 
 
 @pytest.mark.parametrize(
@@ -108,7 +108,7 @@ def test_compression_round_trip(tmp_path, kwargs):
     keys = reopened.get_time_series_keys(1, OwnerCategory.Component)
     got = reopened.get_time_series(keys[0])
     np.testing.assert_array_equal(np.asarray(got.data), np.asarray(s.data))
-    assert reopened.verify_integrity() == []
+    assert reopened.verify_integrity() == {"ok": True, "errors": []}
 
 
 def test_get_compression_in_memory_is_none():

@@ -7,7 +7,8 @@
 //!     TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
 //!     TimeSeriesType, OwnerCategory,
 //!     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError, InvalidParameterError,
-//!     IntegrityError, ReadOnlyStoreError,
+//!     IntegrityError, ReadOnlyStoreError, IoError, ConnectionError,
+//!     IncompatibleFormatError, IncompatibleForecastError, StorageError,
 //! )
 //! ```
 
@@ -29,6 +30,15 @@ create_exception!(time_series_store, DuplicateTimeSeriesError, TimeSeriesError);
 create_exception!(time_series_store, InvalidParameterError, TimeSeriesError);
 create_exception!(time_series_store, IntegrityError, TimeSeriesError);
 create_exception!(time_series_store, ReadOnlyStoreError, TimeSeriesError);
+create_exception!(time_series_store, IoError, TimeSeriesError);
+create_exception!(time_series_store, ConnectionError, TimeSeriesError);
+create_exception!(time_series_store, IncompatibleFormatError, TimeSeriesError);
+create_exception!(
+    time_series_store,
+    IncompatibleForecastError,
+    TimeSeriesError
+);
+create_exception!(time_series_store, StorageError, TimeSeriesError);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -40,12 +50,14 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         E::InvalidParameter(m) => InvalidParameterError::new_err(m),
         E::IntegrityError(m) => IntegrityError::new_err(m),
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
-        E::ConnectionError(m) => TimeSeriesError::new_err(format!("connection: {m}")),
-        E::IncompatibleForecast => TimeSeriesError::new_err("incompatible forecast"),
-        ref e @ E::IncompatibleFormat { .. } => TimeSeriesError::new_err(e.to_string()),
-        E::Io(e) => TimeSeriesError::new_err(format!("io: {e}")),
-        E::Sqlite(e) => TimeSeriesError::new_err(format!("sqlite: {e}")),
-        E::Serde(e) => TimeSeriesError::new_err(format!("serde: {e}")),
+        E::ConnectionError(m) => ConnectionError::new_err(m),
+        E::IncompatibleForecast => IncompatibleForecastError::new_err(
+            "forecast parameters are incompatible with existing forecasts",
+        ),
+        ref e @ E::IncompatibleFormat { .. } => IncompatibleFormatError::new_err(e.to_string()),
+        E::Io(e) => IoError::new_err(e.to_string()),
+        E::Sqlite(e) => StorageError::new_err(format!("sqlite: {e}")),
+        E::Serde(e) => StorageError::new_err(format!("serde: {e}")),
         // `TimeSeriesError` is non_exhaustive; map future variants to the base
         // exception rather than failing to compile against a newer core.
         e => TimeSeriesError::new_err(e.to_string()),
@@ -337,6 +349,16 @@ impl PyDeterministic {
         numpy_from_typed(py, &self.inner.data)
     }
 
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of forecast windows (`count`).
+    fn __len__(&self) -> usize {
+        self.inner.count
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Deterministic(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, shape={:?})",
@@ -434,6 +456,16 @@ impl PyProbabilistic {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of forecast windows (`count`).
+    fn __len__(&self) -> usize {
+        self.inner.count
     }
 
     fn __repr__(&self) -> String {
@@ -539,6 +571,16 @@ impl PyScenarios {
         numpy_from_typed(py, &self.inner.data)
     }
 
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of forecast windows (`count`).
+    fn __len__(&self) -> usize {
+        self.inner.count
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Scenarios(name={:?}, initial_timestamp={}, count={}, horizon={}, interval={}, resolution={}, scenario_count={}, shape={:?})",
@@ -609,6 +651,16 @@ impl PySingleTimeSeries {
         numpy_from_typed(py, &self.inner.data)
     }
 
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of time steps (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "SingleTimeSeries(name={:?}, initial_timestamp={}, length={}, resolution={}, shape={:?})",
@@ -667,6 +719,16 @@ impl PyNonSequentialTimeSeries {
     #[getter]
     fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         numpy_from_typed(py, &self.inner.data)
+    }
+
+    /// Value equality: all fields including the data array (bitwise).
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Number of time steps (`length`).
+    fn __len__(&self) -> usize {
+        self.inner.length
     }
 
     fn __repr__(&self) -> String {
@@ -883,6 +945,21 @@ impl PyStaticReader {
         self.inner.timestamps().collect()
     }
 
+    fn __repr__(&self) -> String {
+        format!(
+            "StaticReader(initial_timestamp={}, resolution={}, length={}, groups={}, columns={})",
+            self.inner.initial_timestamp(),
+            self.inner.resolution().to_iso8601(),
+            self.inner.length(),
+            self.inner.groups().len(),
+            self.inner
+                .groups()
+                .iter()
+                .map(|g| g.num_columns())
+                .sum::<usize>(),
+        )
+    }
+
     /// The most-recent read of group `index` as a numpy array shaped
     /// `(num_columns, *element_shape)`. Empty until the first `static_read`.
     fn group_values<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PyAny>> {
@@ -935,6 +1012,18 @@ impl PyForecastReader {
     /// Every window start timestamp, in order.
     fn timestamps(&self) -> Vec<DateTime<Utc>> {
         self.inner.timestamps().collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ForecastReader(time_series_type={}, initial_timestamp={}, resolution={}, interval={}, count={}, entries={})",
+            self.inner.time_series_type().as_str(),
+            self.inner.initial_timestamp(),
+            self.inner.resolution().to_iso8601(),
+            self.inner.interval().to_iso8601(),
+            self.inner.count(),
+            self.inner.entries().len(),
+        )
     }
 
     /// The most-recent read of entry `index` as a numpy array shaped
@@ -995,7 +1084,7 @@ impl PyStore {
     /// byte `shuffle`; `"none"` disables compression. The setting is ignored
     /// for in-memory stores and is persisted so later appends reuse it.
     #[classmethod]
-    #[pyo3(signature = (path=None, in_memory=false, compression="deflate", compression_level=3, shuffle=true))]
+    #[pyo3(signature = (path=None, *, in_memory=false, compression="deflate", compression_level=3, shuffle=true))]
     fn create(
         _cls: &Bound<'_, pyo3::types::PyType>,
         path: Option<PathBuf>,
@@ -1021,7 +1110,7 @@ impl PyStore {
 
     /// Open an existing store from disk. `read_only=True` blocks all writes.
     #[classmethod]
-    #[pyo3(signature = (path, read_only=false))]
+    #[pyo3(signature = (path, *, read_only=false))]
     fn open(
         _cls: &Bound<'_, pyo3::types::PyType>,
         path: PathBuf,
@@ -1080,7 +1169,7 @@ impl PyStore {
     /// `features` is a `dict[str, int|float|bool|str]`. `units` and
     /// `logical_type` are optional strings (`logical_type` is an opaque
     /// domain-reconstruction tag stored on the association).
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, features=None, units=None, logical_type=None))]
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, logical_type=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -1177,7 +1266,7 @@ impl PyStore {
     /// `transform_single_time_series!`). Each `SingleTimeSeries` is re-described
     /// as a DST sharing the same underlying array; `count` is derived from each
     /// series' length. Returns the number of series transformed.
-    #[pyo3(signature = (horizon, interval, owner_category=None, resolution=None))]
+    #[pyo3(signature = (horizon, interval, *, owner_category=None, resolution=None))]
     fn transform_single_time_series(
         &mut self,
         horizon: Bound<'_, PyAny>,
@@ -1210,7 +1299,7 @@ impl PyStore {
     /// Remove every time series for the owner `(owner_id, owner_category)`, or
     /// every time series in the store when neither is given. Both must be
     /// supplied together or neither.
-    #[pyo3(signature = (owner_id=None, owner_category=None))]
+    #[pyo3(signature = (*, owner_id=None, owner_category=None))]
     fn clear_time_series(
         &mut self,
         owner_id: Option<i64>,
@@ -1243,7 +1332,7 @@ impl PyStore {
 
     /// Fetch a static time series by key. `time_range`, if given, is a tuple of
     /// `(start: datetime, end: datetime)` with end exclusive.
-    #[pyo3(signature = (key, time_range=None))]
+    #[pyo3(signature = (key, *, time_range=None))]
     fn get_time_series(
         &self,
         py: Python<'_>,
@@ -1263,7 +1352,7 @@ impl PyStore {
     /// `get_time_series`); other types reuse the per-key path. `time_range`, if
     /// given, is a `(start: datetime, end: datetime)` tuple (end exclusive)
     /// applied to every series.
-    #[pyo3(signature = (keys, time_range=None))]
+    #[pyo3(signature = (keys, *, time_range=None))]
     fn bulk_read(
         &self,
         py: Python<'_>,
@@ -1311,9 +1400,13 @@ impl PyStore {
     /// `data_hash` (hex string), `length`, `resolution` (ISO 8601 duration
     /// string, e.g. `PT1H`, or `None`), `timestamps` (list of RFC 3339 strings
     /// for non-sequential series, `None` otherwise), `features`, `units`.
+    ///
+    /// `name_glob` filters names by a SQLite `GLOB` pattern (case-sensitive,
+    /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
+    /// must match. All filter arguments are keyword-only.
     #[pyo3(signature = (
-        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, resolution=None, interval=None, features=None
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_time_series<'py>(
@@ -1324,6 +1417,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
+        name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1334,6 +1428,7 @@ impl PyStore {
             owner_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features,
@@ -1352,8 +1447,8 @@ impl PyStore {
     /// share one deduplicated array. Accepts the same filters as
     /// `list_time_series`. Wraps the core `list_keys_with_hash`.
     #[pyo3(signature = (
-        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, resolution=None, interval=None, features=None
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_array_groups<'py>(
@@ -1364,6 +1459,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
+        name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1374,6 +1470,7 @@ impl PyStore {
             owner_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features,
@@ -1439,7 +1536,7 @@ impl PyStore {
     /// `interval` (ISO 8601 duration strings, e.g. `PT1H`), `count` (int), and
     /// `resolution` (ISO 8601 duration string). Each value is `None` when the
     /// store holds no forecasts.
-    #[pyo3(signature = (resolution=None, interval=None))]
+    #[pyo3(signature = (*, resolution=None, interval=None))]
     fn get_forecast_parameters<'py>(
         &self,
         py: Python<'py>,
@@ -1513,8 +1610,14 @@ impl PyStore {
         Ok(d)
     }
 
-    fn verify_integrity(&self) -> PyResult<Vec<String>> {
-        Ok(self.store()?.verify_integrity().map_err(map_err)?.errors)
+    /// Run the integrity check and return the full report as a dict:
+    /// `{"ok": bool, "errors": list[str]}`.
+    fn verify_integrity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let report = self.store()?.verify_integrity().map_err(map_err)?;
+        let d = PyDict::new(py);
+        d.set_item("ok", report.ok())?;
+        d.set_item("errors", report.errors)?;
+        Ok(d)
     }
 
     fn flush(&mut self) -> PyResult<()> {
@@ -1526,7 +1629,7 @@ impl PyStore {
     /// Build a `StaticReader` over the `SingleTimeSeries` matching the filter.
     /// A `resolution` is required (one resolution per reader); all matched series
     /// must share one grid. Drive it with `static_read`.
-    #[pyo3(signature = (resolution, owner_id=None, owner_category=None, owner_type=None, name=None, features=None))]
+    #[pyo3(signature = (resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
@@ -1535,6 +1638,7 @@ impl PyStore {
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
         name: Option<String>,
+        name_glob: Option<String>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
@@ -1543,6 +1647,7 @@ impl PyStore {
             owner_type,
             None,
             name,
+            name_glob,
             Some(resolution),
             None,
             features,
@@ -1562,7 +1667,7 @@ impl PyStore {
     /// Build a `ForecastReader` over the forecasts of `time_series_type` matching
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`. Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, owner_id=None, owner_category=None, owner_type=None, name=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -1572,6 +1677,7 @@ impl PyStore {
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
         name: Option<String>,
+        name_glob: Option<String>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
@@ -1580,6 +1686,7 @@ impl PyStore {
             owner_type,
             Some(time_series_type),
             name,
+            name_glob,
             Some(resolution),
             None,
             features,
@@ -1613,8 +1720,8 @@ impl PyStore {
 
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
-        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, resolution=None, interval=None, features=None
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_keys(
@@ -1624,6 +1731,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
+        name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1634,6 +1742,7 @@ impl PyStore {
             owner_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features,
@@ -1664,8 +1773,8 @@ impl PyStore {
 
     /// Distinct series names matching the filter, sorted.
     #[pyo3(signature = (
-        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, resolution=None, interval=None, features=None
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -1675,6 +1784,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
+        name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1685,6 +1795,7 @@ impl PyStore {
             owner_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features,
@@ -1694,8 +1805,8 @@ impl PyStore {
 
     /// Distinct owner types matching the filter, sorted.
     #[pyo3(signature = (
-        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, resolution=None, interval=None, features=None
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -1705,6 +1816,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
+        name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1715,6 +1827,7 @@ impl PyStore {
             owner_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features,
@@ -1725,8 +1838,8 @@ impl PyStore {
     /// Remove every series matching the filter in one all-or-nothing
     /// transaction. Returns the number of associations removed.
     #[pyo3(signature = (
-        owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, resolution=None, interval=None, features=None
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -1736,6 +1849,7 @@ impl PyStore {
         owner_type: Option<String>,
         time_series_type: Option<PyTimeSeriesType>,
         name: Option<String>,
+        name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1746,6 +1860,7 @@ impl PyStore {
             owner_type,
             time_series_type,
             name,
+            name_glob,
             resolution,
             interval,
             features,
@@ -1755,7 +1870,7 @@ impl PyStore {
 
     /// Copy an association onto another owner, optionally renaming it. Shares the
     /// underlying array (no data is duplicated). Returns the new key.
-    #[pyo3(signature = (src, dst_owner_id, dst_owner_type, new_name=None))]
+    #[pyo3(signature = (src, dst_owner_id, dst_owner_type, *, new_name=None))]
     fn copy_time_series(
         &mut self,
         src: &PyTimeSeriesKey,
@@ -1779,7 +1894,7 @@ impl PyStore {
 
     /// Distinct owner ids of `owner_category` that have a time series, optionally
     /// restricted by type and/or resolution.
-    #[pyo3(signature = (owner_category, time_series_type=None, resolution=None))]
+    #[pyo3(signature = (owner_category, *, time_series_type=None, resolution=None))]
     fn list_owner_ids(
         &self,
         owner_category: PyOwnerCategory,
@@ -1952,7 +2067,7 @@ impl PyStore {
     /// concrete key. `requested_type` is a `TimeSeriesType` or the string
     /// `"abstract_deterministic"` (matches a stored `Deterministic` or
     /// `DeterministicSingleTimeSeries`).
-    #[pyo3(signature = (owner_id, owner_category, name, requested_type, resolution=None, interval=None, features=None))]
+    #[pyo3(signature = (owner_id, owner_category, name, requested_type, *, resolution=None, interval=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn resolve_forecast_key(
         &self,
@@ -2010,8 +2125,10 @@ impl PyStore {
 /// calendar (irregular) periods.
 fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
     if let Ok(s) = v.extract::<String>() {
+        // A malformed value stays inside the library's exception hierarchy;
+        // only a wholly wrong argument type raises TypeError below.
         core_lib::Period::from_iso8601(&s)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+            .map_err(|e| InvalidParameterError::new_err(e.to_string()))
     } else if let Ok(d) = v.extract::<chrono::Duration>() {
         Ok(core_lib::Period::Fixed(d))
     } else {
@@ -2046,6 +2163,7 @@ fn build_list_filter(
     owner_type: Option<String>,
     time_series_type: Option<PyTimeSeriesType>,
     name: Option<String>,
+    name_glob: Option<String>,
     resolution: Option<Bound<'_, PyAny>>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
@@ -2065,6 +2183,9 @@ fn build_list_filter(
     }
     if let Some(n) = name {
         filter = filter.name(n);
+    }
+    if let Some(g) = name_glob {
+        filter = filter.name_glob(g);
     }
     if let Some(r) = resolution {
         filter = filter.resolution(pyany_to_period(&r)?);
@@ -2179,6 +2300,17 @@ fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("IntegrityError", py.get_type::<IntegrityError>())?;
     m.add("ReadOnlyStoreError", py.get_type::<ReadOnlyStoreError>())?;
+    m.add("IoError", py.get_type::<IoError>())?;
+    m.add("ConnectionError", py.get_type::<ConnectionError>())?;
+    m.add(
+        "IncompatibleFormatError",
+        py.get_type::<IncompatibleFormatError>(),
+    )?;
+    m.add(
+        "IncompatibleForecastError",
+        py.get_type::<IncompatibleForecastError>(),
+    )?;
+    m.add("StorageError", py.get_type::<StorageError>())?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(init_tracing, m)?)?;
