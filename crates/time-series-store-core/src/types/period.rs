@@ -381,6 +381,29 @@ impl Period {
     }
 }
 
+/// Serialize as the ISO-8601 duration string (`"PT1H"`, `"P1M"`, …), the same
+/// representation used on disk and across every binding. A custom impl (rather
+/// than a derive over the `Fixed`/`Months` enum) keeps the serde form identical
+/// to the canonical string encoding, so serialized `Period`s are portable and
+/// human-readable.
+impl serde::Serialize for Period {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_iso8601())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Period {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Period::from_iso8601(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 impl From<Duration> for Period {
     /// A [`chrono::Duration`] is unambiguously a fixed-span period.
     fn from(d: Duration) -> Self {

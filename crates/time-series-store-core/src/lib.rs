@@ -20,7 +20,7 @@ pub use store::{
     TimeSeriesCounts, TimeSeriesCountsDetailed,
 };
 pub use types::{
-    array::{Dtype, TypedArray},
+    array::{Dtype, Element, TypedArray},
     key::{
         ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
         TimeSeriesKey,

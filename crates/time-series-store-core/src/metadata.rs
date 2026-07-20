@@ -498,12 +498,43 @@ impl MetadataStore {
         new_owner: i64,
         owner_category: OwnerCategory,
     ) -> Result<usize> {
-        let updated = tx.execute(
+        // A collision (the new owner already holds an identical association)
+        // fires the unique index on the UPDATE; surface the spec error rather
+        // than a raw rusqlite error (REVIEW_FOLLOWUPS.md item 5).
+        tx.execute(
             "UPDATE time_series_associations SET owner_id = ?1
              WHERE owner_id = ?2 AND owner_category = ?3",
             params![new_owner, old_owner, owner_category.as_str()],
-        )?;
-        Ok(updated)
+        )
+        .map_err(map_unique_violation)
+    }
+
+    /// Rename one association identified by `key` to `new_name`, leaving its data
+    /// and hash untouched. Returns the number of rows updated (0 if `key` matches
+    /// nothing). A collision with an existing series of the new identity maps to
+    /// [`TimeSeriesError::DuplicateTimeSeries`].
+    pub fn rename(tx: &Transaction<'_>, key: &KeyIdentity, new_name: &str) -> Result<usize> {
+        let f_hash = features_hash(&key.features);
+        let resolution_iso = key.resolution.map(period_to_iso);
+        let interval_iso = key.interval.map(period_to_iso);
+        tx.execute(
+            "UPDATE time_series_associations SET name = ?1
+             WHERE owner_id = ?2 AND owner_category = ?3 AND time_series_type = ?4 AND name = ?5
+               AND ((?6 IS NULL AND resolution IS NULL) OR resolution = ?6)
+               AND (?7 IS NULL OR interval = ?7)
+               AND features_hash = ?8",
+            params![
+                new_name,
+                key.owner_id,
+                key.owner_category.as_str(),
+                key.time_series_type.as_str(),
+                key.name,
+                resolution_iso,
+                interval_iso,
+                f_hash.as_slice(),
+            ],
+        )
+        .map_err(map_unique_violation)
     }
 
     /// Delete every association in the store. Returns the removed data_hashes.
@@ -705,6 +736,34 @@ impl MetadataStore {
             params_vec.push(Box::new(t.as_str().to_string()));
         }
         sql.push_str(" ORDER BY resolution ASC");
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter().map(|s| iso_to_period(&s)).collect()
+    }
+
+    /// Distinct forecast `interval`s, optionally scoped to one time series type.
+    /// Ordered by the ISO-8601 text (lexical, like [`Self::distinct_resolutions`]):
+    /// mixed period kinds have no numeric order, so text order is the stable
+    /// choice. Only forecast rows carry an interval, so non-forecast types yield
+    /// an empty list.
+    pub fn distinct_intervals(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+        let mut sql = String::from(
+            "SELECT DISTINCT interval FROM time_series_associations
+             WHERE interval IS NOT NULL",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(t) = ts_type {
+            sql.push_str(" AND time_series_type = ?");
+            params_vec.push(Box::new(t.as_str().to_string()));
+        }
+        sql.push_str(" ORDER BY interval ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
             .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
@@ -1008,6 +1067,21 @@ fn parse_feature_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Featu
         }
     };
     Ok((key, value))
+}
+
+/// Map a SQLite UNIQUE-index constraint violation to the spec's
+/// [`TimeSeriesError::DuplicateTimeSeries`], passing every other error through.
+/// Shared by the `INSERT` and `UPDATE` paths where the association uniqueness
+/// index can fire (`rename`, `replace_owner`).
+fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
+    match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            TimeSeriesError::DuplicateTimeSeries
+        }
+        other => other.into(),
+    }
 }
 
 /// Canonical ISO-8601 encoding of a period for storage in the catalog.

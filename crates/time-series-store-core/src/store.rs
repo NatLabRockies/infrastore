@@ -104,6 +104,48 @@ pub struct AddRequest {
     pub logical_type: Option<String>,
 }
 
+impl AddRequest {
+    /// Start a request with empty features and no units or logical type. Chain
+    /// [`Self::with_features`], [`Self::with_units`], and
+    /// [`Self::with_logical_type`] to set the optional fields. This is the
+    /// ergonomic constructor for [`Store::add`] and [`BulkAdd::push`]; unlike the
+    /// wide [`Store::add_time_series`] signature it preserves `logical_type`.
+    pub fn new(
+        owner_id: i64,
+        owner_type: impl Into<String>,
+        owner_category: OwnerCategory,
+        data: TimeSeriesData,
+    ) -> Self {
+        Self {
+            owner_id,
+            owner_type: owner_type.into(),
+            owner_category,
+            data,
+            features: Features::new(),
+            units: None,
+            logical_type: None,
+        }
+    }
+
+    /// Set the feature set.
+    pub fn with_features(mut self, features: Features) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// Set the units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque logical-type label carried through to the metadata row.
+    pub fn with_logical_type(mut self, logical_type: impl Into<String>) -> Self {
+        self.logical_type = Some(logical_type.into());
+        self
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TimeSeriesCounts {
     pub components_with_time_series: i64,
@@ -125,14 +167,14 @@ pub struct TimeSeriesCountsDetailed {
 /// One resolution's shared static grid, as reported by
 /// [`Store::check_static_consistency`]: every `SingleTimeSeries` at
 /// `resolution` shares this `(initial_timestamp, length)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StaticConsistency {
     pub resolution: Period,
     pub initial_timestamp: chrono::DateTime<chrono::Utc>,
     pub length: usize,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForecastParameters {
     pub horizon: Option<Period>,
     pub interval: Option<Period>,
@@ -241,6 +283,14 @@ impl Store {
             logical_type: None,
         }])
         .map(|mut keys| keys.remove(0))
+    }
+
+    /// Add one time series from an [`AddRequest`], preserving every field
+    /// including `logical_type` (which [`Self::add_time_series`] cannot set).
+    /// Routed through the same per-column path as [`Self::add_time_series`].
+    pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
+        self.add_per_column(vec![request])
+            .map(|mut keys| keys.remove(0))
     }
 
     /// Bulk insert. All-or-nothing: any error rolls back every association and
@@ -430,6 +480,73 @@ impl Store {
             self.backend.remove_array(&h)?;
         }
         Ok(())
+    }
+
+    /// Remove several time series in one all-or-nothing transaction, dropping
+    /// each underlying array that no surviving association references (exactly
+    /// like [`Self::remove_time_series`], and sharing its removal helper).
+    /// Returns the number of associations removed.
+    ///
+    /// A key that matches nothing makes the whole batch fail with
+    /// [`TimeSeriesError::NotFound`] and roll back — the batch either removes
+    /// every requested series or none.
+    pub fn remove_time_series_bulk(&mut self, keys: &[&KeyIdentity]) -> Result<usize> {
+        self.remove_identities(keys, true)
+    }
+
+    /// Remove every time series matching `filter` in one all-or-nothing
+    /// transaction, dropping newly unreferenced arrays like
+    /// [`Self::remove_time_series`]. Returns the number of associations removed;
+    /// an empty match is `Ok(0)`.
+    pub fn remove_by_filter(&mut self, filter: ListFilter) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let identities: Vec<KeyIdentity> = self
+            .list_keys(filter)?
+            .into_iter()
+            .map(|k| k.identity().clone())
+            .collect();
+        let refs: Vec<&KeyIdentity> = identities.iter().collect();
+        // Keys come straight from `list_keys`, so each is guaranteed to match;
+        // `require_all` is moot here but keeps one code path.
+        self.remove_identities(&refs, false)
+    }
+
+    /// Shared removal core for the bulk paths: delete every key's association(s)
+    /// in one transaction, then drop each array left unreferenced. With
+    /// `require_all`, a key matching nothing aborts and rolls back the batch.
+    fn remove_identities(&mut self, keys: &[&KeyIdentity], require_all: bool) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let mut removed_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut count = 0usize;
+        for key in keys {
+            let removed = MetadataStore::delete_by_key(&tx, key)?;
+            if removed.is_empty() && require_all {
+                // Roll back (tx drops) so the batch is all-or-nothing.
+                return Err(TimeSeriesError::NotFound);
+            }
+            count += removed.len();
+            removed_hashes.extend(removed);
+        }
+        // Decide array drops after *all* deletes so a hash referenced only by
+        // other rows removed in this same batch is reclaimed too. Dedup so a
+        // hash removed via several keys is checked (and dropped) once.
+        let mut to_drop = Vec::new();
+        let mut seen = HashSet::new();
+        for h in &removed_hashes {
+            if seen.insert(*h) && references_to_in_tx(&tx, h)? == 0 {
+                to_drop.push(*h);
+            }
+        }
+        tx.commit()?;
+        for h in to_drop {
+            self.backend.remove_array(&h)?;
+        }
+        Ok(count)
     }
 
     /// Remove every time series for the owner `(owner_id, owner_category)`, or
@@ -1042,6 +1159,26 @@ impl Store {
         Ok(out)
     }
 
+    /// Read many series at once, optionally sliced to `time_range`. With `None`
+    /// this is exactly [`Self::bulk_read`] (whole series, with the packed
+    /// batch-read optimization). With a range, each key is read through
+    /// [`Self::get_time_series`], so the slice semantics match a per-key sliced
+    /// read; the packed-batch fast path is not applied to sliced reads.
+    #[tracing::instrument(skip(self, keys), fields(count = keys.len(), has_time_range = time_range.is_some()))]
+    pub fn bulk_read_range(
+        &self,
+        keys: &[&KeyIdentity],
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<Vec<TimeSeriesData>> {
+        match time_range {
+            None => self.bulk_read(keys),
+            Some(range) => keys
+                .iter()
+                .map(|k| self.get_time_series(k, Some(range)))
+                .collect(),
+        }
+    }
+
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
@@ -1336,6 +1473,71 @@ impl Store {
 
     pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
+    }
+
+    /// Distinct forecast intervals, optionally scoped to one time series type.
+    /// The interval analog of [`Self::get_resolutions`]; ordered lexically by
+    /// ISO-8601 text (mixed period kinds have no numeric order). Non-forecast
+    /// types have no interval, so they return an empty list.
+    pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+        self.metadata.distinct_intervals(time_series_type)
+    }
+
+    /// Distinct series names matching `filter`, sorted. A discovery projection
+    /// over the authoritative filtered listing, so every filter (including the
+    /// `features` subset match) is honored.
+    pub fn list_names(&self, filter: ListFilter) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .list_time_series(filter)?
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
+    /// Distinct owner types matching `filter`, sorted. Same projection approach
+    /// as [`Self::list_names`].
+    pub fn list_owner_types(&self, filter: ListFilter) -> Result<Vec<String>> {
+        let mut types: Vec<String> = self
+            .list_time_series(filter)?
+            .into_iter()
+            .map(|m| m.owner_type)
+            .collect();
+        types.sort();
+        types.dedup();
+        Ok(types)
+    }
+
+    /// Rename the series identified by `key` to `new_name`, returning the new
+    /// key. Only the catalog association's name changes; the underlying array
+    /// and its hash are untouched. Errors: [`TimeSeriesError::NotFound`] if `key`
+    /// matches nothing, [`TimeSeriesError::DuplicateTimeSeries`] if a series with
+    /// the new identity already exists, [`TimeSeriesError::ReadOnlyStore`] on a
+    /// read-only store.
+    pub fn rename_time_series(
+        &mut self,
+        key: &KeyIdentity,
+        new_name: &str,
+    ) -> Result<TimeSeriesKey> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let updated = MetadataStore::rename(&tx, key, new_name)?;
+        if updated == 0 {
+            // No matching row; tx drops (rolls back a no-op).
+            return Err(TimeSeriesError::NotFound);
+        }
+        tx.commit()?;
+        // Rebuild the key from the renamed row (same identity, new name).
+        let new_identity = KeyIdentity {
+            name: new_name.to_string(),
+            ..key.clone()
+        };
+        let meta = self.metadata.get_by_key(&new_identity)?;
+        TimeSeriesKey::from_metadata(&meta)
     }
 
     /// Return the forecast parameters recorded in the store, optionally

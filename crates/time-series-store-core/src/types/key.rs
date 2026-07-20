@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use super::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
 use super::period::Period;
@@ -23,7 +24,7 @@ use crate::error::{Result, TimeSeriesError};
 /// forecasts of one variable at the same resolution but different intervals are
 /// distinct series. It is `Some` for every forecast type and `None` for the
 /// static types, which never carry an interval.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KeyIdentity {
     pub owner_id: i64,
     pub owner_category: OwnerCategory,
@@ -36,7 +37,11 @@ pub struct KeyIdentity {
 
 /// Identifying key plus the descriptive snapshot for a `SingleTimeSeries`. The
 /// resolution is always present (a `SingleTimeSeries` is a regular grid).
-#[derive(Debug, Clone)]
+///
+/// Unlike [`TimeSeriesKey`], the snapshot structs compare by *all* fields
+/// (identity + descriptive): they are point-in-time views, and full equality is
+/// what a test comparing two snapshots wants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SingleTimeSeriesKey {
     pub identity: KeyIdentity,
     pub initial_timestamp: DateTime<Utc>,
@@ -47,7 +52,7 @@ pub struct SingleTimeSeriesKey {
 /// `NonSequentialTimeSeries`. Its timestamps are irregular, so the snapshot is
 /// just `length`; the actual timestamps are read from the data. The resolution
 /// is always absent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NonSequentialTimeSeriesKey {
     pub identity: KeyIdentity,
     pub length: usize,
@@ -60,7 +65,7 @@ pub struct NonSequentialTimeSeriesKey {
 /// `interval` is part of the identity, so it lives in [`KeyIdentity`] rather
 /// than as a descriptive field here; read it via [`Self::interval`]. `horizon`
 /// and `count`, by contrast, are descriptive and excluded from equality.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForecastTimeSeriesKey {
     pub identity: KeyIdentity,
     pub initial_timestamp: DateTime<Utc>,
@@ -76,7 +81,7 @@ pub struct ForecastTimeSeriesKey {
 /// equal even if their descriptive snapshots differ, so a key stays a reliable
 /// handle. The descriptive fields are a point-in-time view and are deliberately
 /// excluded from equality.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TimeSeriesKey {
     Single(SingleTimeSeriesKey),
     NonSequential(NonSequentialTimeSeriesKey),
@@ -284,3 +289,80 @@ impl PartialEq for TimeSeriesKey {
 }
 
 impl Eq for TimeSeriesKey {}
+
+impl std::hash::Hash for TimeSeriesKey {
+    /// Hashes the [`KeyIdentity`] only, mirroring the identity-only [`PartialEq`]
+    /// above. This upholds the `Eq`/`Hash` contract (equal keys hash equal): two
+    /// keys with the same identity but differing descriptive snapshots compare
+    /// equal, so they must — and do — hash equal, letting a key stay a reliable
+    /// `HashMap`/`HashSet` handle.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.identity().hash(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use chrono::{TimeZone, Utc};
+
+    use super::*;
+    use crate::types::period::Period;
+
+    fn hash_of(k: &TimeSeriesKey) -> u64 {
+        let mut h = DefaultHasher::new();
+        k.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn keys_are_usable_in_a_hash_set() {
+        let a = TimeSeriesKey::Single(SingleTimeSeriesKey::new(
+            1,
+            OwnerCategory::Component,
+            "load".into(),
+            Period::fixed(chrono::Duration::hours(1)),
+            Features::new(),
+            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            4,
+        ));
+        let b = TimeSeriesKey::Single(SingleTimeSeriesKey::new(
+            2,
+            OwnerCategory::Component,
+            "load".into(),
+            Period::fixed(chrono::Duration::hours(1)),
+            Features::new(),
+            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            4,
+        ));
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        set.insert(b.clone());
+        set.insert(a.clone());
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&a));
+    }
+
+    #[test]
+    fn equal_identity_different_snapshot_hashes_equal() {
+        // Same identity, different descriptive `length` snapshot.
+        let base = |length: usize| {
+            TimeSeriesKey::Single(SingleTimeSeriesKey::new(
+                1,
+                OwnerCategory::Component,
+                "load".into(),
+                Period::fixed(chrono::Duration::hours(1)),
+                Features::new(),
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+                length,
+            ))
+        };
+        let a = base(4);
+        let b = base(8);
+        assert_eq!(a, b, "identity-only equality ignores the snapshot");
+        assert_eq!(hash_of(&a), hash_of(&b), "equal keys must hash equal");
+    }
+}

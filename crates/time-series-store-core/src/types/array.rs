@@ -82,7 +82,13 @@ impl Dtype {
 }
 
 /// A runtime-typed, N-dimensional array stored as raw little-endian bytes.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Eq` is sound because `PartialEq` compares the raw byte buffers: float
+/// element comparison is bitwise (NaN ≠ NaN by bits, `+0.0` ≠ `-0.0`), which is
+/// the reflexive total equality `Eq` requires. This matches the store's
+/// content-addressing, where two arrays are "the same" iff their bytes hash
+/// identically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedArray {
     pub dtype: Dtype,
     /// `[length, k1, k2, ...]`. The first dim is time; trailing dims are the
@@ -131,28 +137,153 @@ impl TypedArray {
         self.shape.iter().product()
     }
 
-    /// Build an `f64` `TypedArray` from values + shape.
-    pub fn from_f64(shape: Vec<usize>, values: &[f64]) -> Self {
-        let mut bytes = Vec::with_capacity(values.len() * 8);
-        for v in values {
-            bytes.extend_from_slice(&v.to_le_bytes());
+    /// Build a `TypedArray` from a typed slice + shape, validating that
+    /// `values.len()` equals the shape's element count. The array's dtype is
+    /// `T`'s dtype ([`Element::DTYPE`]). Values are encoded little-endian in
+    /// row-major order, matching the on-disk layout.
+    pub fn from_slice<T: Element>(shape: Vec<usize>, values: &[T]) -> Result<Self, String> {
+        let n: usize = shape.iter().product();
+        if values.len() != n {
+            return Err(format!(
+                "TypedArray::from_slice: {} values does not match shape {:?} ({} expected)",
+                values.len(),
+                shape,
+                n
+            ));
         }
-        Self {
-            dtype: Dtype::F64,
+        let mut bytes = Vec::with_capacity(values.len() * T::DTYPE.size());
+        for &v in values {
+            v.push_le_bytes(&mut bytes);
+        }
+        Ok(Self {
+            dtype: T::DTYPE,
             shape,
             bytes,
+        })
+    }
+
+    /// Decode the bytes as a `Vec<T>` (errors if the array's dtype is not `T`'s).
+    ///
+    /// Decoding copies element by element via `from_le_bytes`; it never casts the
+    /// `&[u8]` buffer to `&[T]`, so it is sound regardless of buffer alignment.
+    pub fn to_vec<T: Element>(&self) -> Result<Vec<T>, String> {
+        if self.dtype != T::DTYPE {
+            return Err(format!(
+                "expected {}, got {}",
+                T::DTYPE.as_str(),
+                self.dtype.as_str()
+            ));
         }
+        Ok(self
+            .bytes
+            .chunks_exact(T::DTYPE.size())
+            .map(T::from_le_bytes)
+            .collect())
+    }
+
+    /// Build an `f64` `TypedArray` from values + shape. Convenience over
+    /// [`Self::from_slice`]; panics on a shape/length mismatch (callers that
+    /// build the shape from the values never hit this).
+    pub fn from_f64(shape: Vec<usize>, values: &[f64]) -> Self {
+        Self::from_slice(shape, values).expect("from_f64: shape does not match value count")
     }
 
     /// Decode the bytes as `f64`s (errors if the dtype is not `F64`).
     pub fn to_f64_vec(&self) -> Result<Vec<f64>, String> {
-        if self.dtype != Dtype::F64 {
-            return Err(format!("expected f64, got {}", self.dtype.as_str()));
+        self.to_vec::<f64>()
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A physical element type a [`TypedArray`] can hold, carrying its [`Dtype`] and
+/// little-endian codec. Sealed: only the six supported types
+/// (`f64`, `f32`, `i64`, `i32`, `u64`, `bool`) implement it, so the mapping to
+/// [`Dtype`] stays exhaustive and closed.
+pub trait Element: sealed::Sealed + Copy {
+    /// The [`Dtype`] a `TypedArray` built from this element carries.
+    const DTYPE: Dtype;
+    /// Append this value's little-endian encoding to `out`.
+    fn push_le_bytes(self, out: &mut Vec<u8>);
+    /// Decode one element from its little-endian bytes. `bytes.len()` is
+    /// `DTYPE.size()` (the chunk width [`TypedArray::to_vec`] feeds it).
+    fn from_le_bytes(bytes: &[u8]) -> Self;
+}
+
+macro_rules! impl_numeric_element {
+    ($t:ty, $dtype:expr) => {
+        impl sealed::Sealed for $t {}
+        impl Element for $t {
+            const DTYPE: Dtype = $dtype;
+            fn push_le_bytes(self, out: &mut Vec<u8>) {
+                out.extend_from_slice(&self.to_le_bytes());
+            }
+            fn from_le_bytes(bytes: &[u8]) -> Self {
+                <$t>::from_le_bytes(bytes.try_into().expect("chunk width matches dtype size"))
+            }
         }
-        Ok(self
-            .bytes
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
-            .collect())
+    };
+}
+
+impl_numeric_element!(f64, Dtype::F64);
+impl_numeric_element!(f32, Dtype::F32);
+impl_numeric_element!(i64, Dtype::I64);
+impl_numeric_element!(i32, Dtype::I32);
+impl_numeric_element!(u64, Dtype::U64);
+
+impl sealed::Sealed for bool {}
+impl Element for bool {
+    const DTYPE: Dtype = Dtype::Bool;
+    fn push_le_bytes(self, out: &mut Vec<u8>) {
+        // One byte per bool, matching the on-disk 1-byte width.
+        out.push(self as u8);
+    }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_round_trip_every_dtype() {
+        let a = TypedArray::from_slice(vec![2, 2], &[1.0f64, 2.5, -3.0, 4.0]).unwrap();
+        assert_eq!(a.dtype, Dtype::F64);
+        assert_eq!(a.to_vec::<f64>().unwrap(), vec![1.0, 2.5, -3.0, 4.0]);
+
+        let a = TypedArray::from_slice(vec![3], &[1.5f32, 2.5, 3.5]).unwrap();
+        assert_eq!(a.dtype, Dtype::F32);
+        assert_eq!(a.to_vec::<f32>().unwrap(), vec![1.5, 2.5, 3.5]);
+
+        let a = TypedArray::from_slice(vec![3], &[-1i64, 0, 9_000_000_000]).unwrap();
+        assert_eq!(a.to_vec::<i64>().unwrap(), vec![-1, 0, 9_000_000_000]);
+
+        let a = TypedArray::from_slice(vec![2], &[-7i32, 42]).unwrap();
+        assert_eq!(a.to_vec::<i32>().unwrap(), vec![-7, 42]);
+
+        let a = TypedArray::from_slice(vec![2], &[1u64, u64::MAX]).unwrap();
+        assert_eq!(a.to_vec::<u64>().unwrap(), vec![1, u64::MAX]);
+
+        let a = TypedArray::from_slice(vec![4], &[true, false, true, true]).unwrap();
+        assert_eq!(a.dtype, Dtype::Bool);
+        assert_eq!(a.bytes, vec![1, 0, 1, 1]);
+        assert_eq!(a.to_vec::<bool>().unwrap(), vec![true, false, true, true]);
+    }
+
+    #[test]
+    fn to_vec_wrong_dtype_errors() {
+        let a = TypedArray::from_slice(vec![2], &[1.0f64, 2.0]).unwrap();
+        assert!(a.to_vec::<i64>().is_err());
+        assert!(a.to_vec::<f32>().is_err());
+        assert!(a.to_vec::<bool>().is_err());
+    }
+
+    #[test]
+    fn from_slice_length_mismatch_errors() {
+        assert!(TypedArray::from_slice(vec![2, 2], &[1.0f64, 2.0]).is_err());
     }
 }
