@@ -28,9 +28,15 @@ matching forecast object across the Rust core, Python, and Julia (the C ABI keep
 `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
 `transform_single_time_series` rather than added directly. Forecast writes are not exposed over the
 read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
-binding, including Python) and may have multidimensional per-timestep values. Auth is `none`
-(default) or `api_key` via the `x-api-key` header. See `README.md` and
-`docs/src/explanation/data-model.md` for the authoritative feature matrix.
+binding, including Python) and may have multidimensional per-timestep values. The columnar
+simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
+and Python. The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
+`remove_by_filter`, `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`,
+`AddRequest`/`Store::add` preserving `logical_type`, and serde on the core types) is available in
+the Rust core and threaded through the C ABI/Julia and Python bindings; the gRPC additive read RPCs
+(full-key wire + `ListKeys`/`BulkRead`/etc.) remain a tracked follow-up. Auth is `none` (default) or
+`api_key` via the `x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for
+the authoritative feature matrix.
 
 ## Code Quality Requirements
 

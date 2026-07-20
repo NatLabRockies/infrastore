@@ -19,29 +19,54 @@ tss [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 
 `--store` is required by every command except `template`.
 
-`-f`/`--format` only affects the read commands (`list`, `get`, `info`). It is accepted anywhere
-because it is global, but `add`, `remove`, `transform`, and `template` ignore it and always print
-plain text (`template` always prints a JSON descriptor).
+`-f`/`--format` affects the read/inspection commands (`list`, `get`, `info`, `stats`, `summary`,
+`verify`, `check-consistency`, `resolutions`, `params`, `compact`). It is accepted anywhere because
+it is global, but the write commands (`add`, `remove`, `rename`, `copy`, `replace-owner`, `clear`,
+`transform`, `persist`) ignore it and print plain text; `template` always prints a JSON descriptor.
 
 ## Commands
 
-| Command     | Purpose                                                                |
-| ----------- | ---------------------------------------------------------------------- |
-| `add`       | Add one or more series from a descriptor JSON + CSV.                   |
-| `list`      | List stored series matching the selector filters.                      |
-| `get`       | Read and display a single series' values.                              |
-| `info`      | Show metadata plus numeric stats for a single series.                  |
-| `remove`    | Delete a single series (prompts unless `--force` or non-interactive).  |
-| `transform` | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`. |
-| `template`  | Print an example descriptor for a given type to stdout.                |
+| Command             | Purpose                                                                         |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `add`               | Add one or more series from a descriptor JSON + CSV.                            |
+| `list`              | List stored series matching the selector filters.                               |
+| `get`               | Read and display a single series' values.                                       |
+| `info`              | Show metadata plus numeric stats for a single series.                           |
+| `remove`            | Delete a single series, or every match with `--all` (prompts unless `--force`). |
+| `rename`            | Rename the single series a selector resolves to (`--new-name`).                 |
+| `copy`              | Copy the single series a selector resolves to onto another owner.               |
+| `replace-owner`     | Reassign every series from one owner to another.                                |
+| `clear`             | Remove all series, or all for one owner (prompts unless `--force`).             |
+| `transform`         | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.          |
+| `persist`           | Write the store to a new NetCDF + SQLite artifact (`--dest`).                   |
+| `compact`           | Reclaim reusable space; print the compaction report.                            |
+| `stats`             | Overall + detailed + per-type counts and distinct-array count.                  |
+| `summary`           | Grouped static and/or forecast summaries (`--static`/`--forecast`).             |
+| `verify`            | Verify store integrity; nonzero exit if errors are present.                     |
+| `check-consistency` | Verify the per-resolution static grid (`--resolution`).                         |
+| `resolutions`       | List distinct resolutions and forecast intervals.                               |
+| `params`            | Show the store's forecast parameters (`--resolution`/`--interval`).             |
+| `template`          | Print an example descriptor for a given type to stdout.                         |
 
 ```text
 tss --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>]
 tss --store <PATH> list    [SELECTOR...]
 tss --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
 tss --store <PATH> info    [SELECTOR...]
-tss --store <PATH> remove  [SELECTOR...] [--force]
-tss --store <PATH> transform --horizon <DUR> --interval <DUR>
+tss --store <PATH> remove  [SELECTOR...] [--all] [--force]
+tss --store <PATH> rename  [SELECTOR...] --new-name <NAME>
+tss --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>]
+tss --store <PATH> replace-owner --old <I> --new <I> --owner-category <C>
+tss --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force]
+tss --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
+tss --store <PATH> persist --dest <PATH.nc>
+tss --store <PATH> compact
+tss --store <PATH> stats
+tss --store <PATH> summary [--static | --forecast]
+tss --store <PATH> verify
+tss --store <PATH> check-consistency [--resolution <DUR>]
+tss --store <PATH> resolutions
+tss --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
 tss template <single|non_sequential|deterministic|probabilistic|scenarios>
 ```
 
@@ -50,8 +75,14 @@ describes a single series. Passing it alongside a descriptor array holding more 
 fails with `--csv cannot be used with an array descriptor`.
 
 `transform` takes no selector: it rewrites **every** `SingleTimeSeries` in the store, deriving a
-`DeterministicSingleTimeSeries` from each. `--horizon` must not exceed the shortest stored series
+`DeterministicSingleTimeSeries` from each. `--owner-category` and `--resolution` optionally scope it
+to one category and/or resolution. `--horizon` must not exceed the shortest matched series
 (`horizon / resolution` steps must fit within its `length`), or the command fails.
+
+`remove --all` uses the selector as a filter that may match several series, removing them all in one
+transaction; without `--all`, the selector must resolve to exactly one series. `stats`, `summary`,
+`verify`, `check-consistency`, `resolutions`, and `params` are read-only inspection commands and
+honor `-f/--format`; `verify` exits nonzero when the integrity report lists any errors.
 
 ### Selectors
 

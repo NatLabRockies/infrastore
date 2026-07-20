@@ -22,7 +22,15 @@ Spec:
 - Multi-dim per-step values (e.g. quadratic-curve coefficients) are supported: arrays carry an
   element `dtype` and a `(length, *element_shape)` shape, and the NetCDF backend persists the
   trailing element axes.
+- Columnar **readers** (`StaticReader` / `ForecastReader`) for the simulation access pattern — every
+  series' value at one timestamp — are exposed across the Rust core, C ABI, Julia, and Python.
+- Discovery / maintenance surface across the bindings: `get_intervals`, `list_names`,
+  `list_owner_types`, filtered/bulk delete (`remove_by_filter`, `remove_time_series_bulk`),
+  `rename_time_series`, time-sliced `bulk_read`, and serde on the core types.
 - Read-only gRPC server. Writes require local filesystem access.
+- The `tss` CLI covers inspection (`stats`, `summary`, `verify`, `check-consistency`, `resolutions`,
+  `params`) and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
+  `remove --all`) in addition to add / list / get / info / transform.
 - Auth: `none` (default) or `api_key` via the `x-api-key` header.
 
 ## Repo layout
