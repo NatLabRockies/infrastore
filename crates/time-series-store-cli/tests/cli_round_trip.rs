@@ -393,3 +393,89 @@ fn batch_json_array_adds_multiple() {
     );
     assert_eq!(data_lines(&out_b), ["4", "5", "6"]);
 }
+
+/// Seed a store with two SingleTimeSeries (owners 1 and 2, name "load").
+fn seed_two(dir: &Path, store: &Path) {
+    write(dir, "d.csv", "1.0\n2.0\n3.0\n4.0\n");
+    for owner in [1, 2] {
+        let json = format!(
+            r#"{{
+  "owner_id": {owner},
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "csv": "d.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}}"#
+        );
+        let descriptor = write(dir, "s.json", &json);
+        run(
+            store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+}
+
+#[test]
+fn admin_commands_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("admin.nc");
+    seed_two(dir.path(), &store);
+
+    let stats = run(&store, &["-f", "json", "stats"]);
+    assert!(
+        stats.contains("\"static_time_series\": 2"),
+        "stats: {stats}"
+    );
+    assert!(stats.contains("num_distinct_arrays"), "stats: {stats}");
+
+    let res = run(&store, &["-f", "json", "resolutions"]);
+    assert!(res.contains("PT1H"), "resolutions: {res}");
+
+    let verify = run(&store, &["-f", "json", "verify"]);
+    assert!(verify.contains("\"errors\""), "verify: {verify}");
+
+    let cc = run(&store, &["-f", "json", "check-consistency"]);
+    assert!(cc.contains("PT1H"), "check-consistency: {cc}");
+
+    let summary = run(&store, &["-f", "json", "summary"]);
+    assert!(summary.contains("\"static\""), "summary: {summary}");
+
+    // Table output smoke-check (must not crash).
+    run(&store, &["stats"]);
+    run(&store, &["summary"]);
+}
+
+#[test]
+fn rename_and_remove_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("rn.nc");
+    seed_two(dir.path(), &store);
+
+    // Rename owner 1's series.
+    run(
+        &store,
+        &[
+            "rename",
+            "--owner-id",
+            "1",
+            "--owner-category",
+            "component",
+            "--name",
+            "load",
+            "--new-name",
+            "load2",
+        ],
+    );
+    let list = run(&store, &["-f", "json", "list", "--owner-id", "1"]);
+    assert!(list.contains("load2"), "renamed list: {list}");
+    assert!(!list.contains("\"load\""), "old name gone: {list}");
+
+    // Remove every "load" series (owner 2 still has it) with --all.
+    run(&store, &["remove", "--all", "--force", "--name", "load"]);
+    let after = run(&store, &["-f", "json", "list", "--name", "load"]);
+    assert!(after.contains("\"items\": []"), "removed: {after}");
+}

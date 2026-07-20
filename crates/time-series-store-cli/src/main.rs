@@ -82,10 +82,14 @@ enum Commands {
         #[command(flatten)]
         selector: SelectorArgs,
     },
-    /// Remove a single time series.
+    /// Remove time series. A selector resolving to one series removes that one;
+    /// with `--all` a selector may match several.
     Remove {
         #[command(flatten)]
         selector: SelectorArgs,
+        /// Remove every series matching the selector (may be more than one).
+        #[arg(long)]
+        all: bool,
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
         force: bool,
@@ -98,6 +102,88 @@ enum Commands {
         /// Forecast interval, e.g. 1h.
         #[arg(long)]
         interval: String,
+        /// Restrict to one owner category (component|supplemental_attribute).
+        #[arg(long)]
+        owner_category: Option<String>,
+        /// Restrict to one resolution, e.g. 1h.
+        #[arg(long)]
+        resolution: Option<String>,
+    },
+    /// Rename the single series a selector resolves to.
+    Rename {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// The new name.
+        #[arg(long)]
+        new_name: String,
+    },
+    /// Copy the single series a selector resolves to onto another owner.
+    Copy {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Destination owner id.
+        #[arg(long)]
+        dst_owner_id: i64,
+        /// Destination owner type.
+        #[arg(long)]
+        dst_owner_type: String,
+        /// Optional new name for the copy (defaults to the source name).
+        #[arg(long)]
+        new_name: Option<String>,
+    },
+    /// Reassign every series from one owner to another.
+    ReplaceOwner {
+        #[arg(long)]
+        old: i64,
+        #[arg(long)]
+        new: i64,
+        #[arg(long)]
+        owner_category: String,
+    },
+    /// Remove all series, or all for one owner.
+    Clear {
+        #[arg(long)]
+        owner_id: Option<i64>,
+        #[arg(long)]
+        owner_category: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Persist the store to a new NetCDF + SQLite artifact.
+    Persist {
+        /// Destination `.nc` path.
+        #[arg(long)]
+        dest: PathBuf,
+    },
+    /// Reclaim reusable space and print the compaction report.
+    Compact {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Overall counts, detailed counts, per-type counts, distinct arrays.
+    Stats,
+    /// Grouped static and/or forecast summaries.
+    Summary {
+        #[arg(long)]
+        static_only: bool,
+        #[arg(long)]
+        forecast_only: bool,
+    },
+    /// Verify store integrity; nonzero exit if errors are present.
+    Verify,
+    /// Verify per-resolution static grid consistency.
+    CheckConsistency {
+        #[arg(long)]
+        resolution: Option<String>,
+    },
+    /// List distinct resolutions and forecast intervals.
+    Resolutions,
+    /// Show the store's forecast parameters.
+    Params {
+        #[arg(long)]
+        resolution: Option<String>,
+        #[arg(long)]
+        interval: Option<String>,
     },
     /// Print an example descriptor JSON for a time-series type.
     Template {
@@ -140,12 +226,90 @@ fn run(cli: &Cli) -> Result<(), String> {
         Commands::Info { selector } => {
             commands::show::info(&require_store(cli)?, selector, cli.format)
         }
-        Commands::Remove { selector, force } => {
-            commands::manage::remove(&require_store(cli)?, selector, *force)
+        Commands::Remove {
+            selector,
+            all,
+            force,
+        } => {
+            let store = require_store(cli)?;
+            if *all {
+                commands::manage::remove_all(&store, selector, *force)
+            } else {
+                commands::manage::remove(&store, selector, *force)
+            }
         }
-        Commands::Transform { horizon, interval } => {
-            commands::manage::transform(&require_store(cli)?, horizon, interval)
+        Commands::Transform {
+            horizon,
+            interval,
+            owner_category,
+            resolution,
+        } => commands::manage::transform(
+            &require_store(cli)?,
+            horizon,
+            interval,
+            owner_category.as_deref(),
+            resolution.as_deref(),
+        ),
+        Commands::Rename { selector, new_name } => {
+            commands::manage::rename(&require_store(cli)?, selector, new_name)
         }
+        Commands::Copy {
+            selector,
+            dst_owner_id,
+            dst_owner_type,
+            new_name,
+        } => commands::manage::copy(
+            &require_store(cli)?,
+            selector,
+            *dst_owner_id,
+            dst_owner_type,
+            new_name.as_deref(),
+        ),
+        Commands::ReplaceOwner {
+            old,
+            new,
+            owner_category,
+        } => commands::manage::replace_owner(&require_store(cli)?, *old, *new, owner_category),
+        Commands::Clear {
+            owner_id,
+            owner_category,
+            force,
+        } => commands::manage::clear(
+            &require_store(cli)?,
+            *owner_id,
+            owner_category.as_deref(),
+            *force,
+        ),
+        Commands::Persist { dest } => commands::manage::persist(&require_store(cli)?, dest),
+        Commands::Compact { force: _ } => {
+            commands::manage::compact(&require_store(cli)?, cli.format)
+        }
+        Commands::Stats => commands::admin::stats(&require_store(cli)?, cli.format),
+        Commands::Summary {
+            static_only,
+            forecast_only,
+        } => commands::admin::summary(
+            &require_store(cli)?,
+            *static_only,
+            *forecast_only,
+            cli.format,
+        ),
+        Commands::Verify => commands::admin::verify(&require_store(cli)?, cli.format),
+        Commands::CheckConsistency { resolution } => commands::admin::check_consistency(
+            &require_store(cli)?,
+            resolution.as_deref(),
+            cli.format,
+        ),
+        Commands::Resolutions => commands::admin::resolutions(&require_store(cli)?, cli.format),
+        Commands::Params {
+            resolution,
+            interval,
+        } => commands::admin::params(
+            &require_store(cli)?,
+            resolution.as_deref(),
+            interval.as_deref(),
+            cli.format,
+        ),
         Commands::Template { ts_type } => commands::manage::template(ts_type),
     }
 }

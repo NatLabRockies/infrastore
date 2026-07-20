@@ -46,13 +46,24 @@ pub fn remove(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result
     Ok(())
 }
 
-/// `transform`: derive DeterministicSingleTimeSeries from stored SingleTimeSeries.
-pub fn transform(store_path: &Path, horizon: &str, interval: &str) -> Result<(), String> {
+/// `transform`: derive DeterministicSingleTimeSeries from stored SingleTimeSeries,
+/// optionally scoped to an owner category and/or resolution.
+pub fn transform(
+    store_path: &Path,
+    horizon: &str,
+    interval: &str,
+    owner_category: Option<&str>,
+    resolution: Option<&str>,
+) -> Result<(), String> {
     let horizon = parse::parse_period(horizon)?;
     let interval = parse::parse_period(interval)?;
+    let owner_category = owner_category
+        .map(parse::parse_owner_category)
+        .transpose()?;
+    let resolution = resolution.map(parse::parse_period).transpose()?;
     let mut store = store_access::open_writable(store_path)?;
     let n = store
-        .transform_single_time_series(horizon, interval, None, None)
+        .transform_single_time_series(horizon, interval, owner_category, resolution)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     println!(
@@ -61,6 +72,194 @@ pub fn transform(store_path: &Path, horizon: &str, interval: &str) -> Result<(),
             "Transformed {n} SingleTimeSeries into DeterministicSingleTimeSeries."
         ))
     );
+    Ok(())
+}
+
+/// `rename`: rename the single series a selector resolves to.
+pub fn rename(store_path: &Path, selector: &SelectorArgs, new_name: &str) -> Result<(), String> {
+    let store = store_access::open_readonly(store_path)?;
+    let (meta, key) = selector.resolve(&store)?;
+    drop(store);
+    let mut store = store_access::open_writable(store_path)?;
+    store
+        .rename_time_series(&key, new_name)
+        .map_err(|e| e.to_string())?;
+    store.flush().map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        color::header(&format!(
+            "Renamed '{}' (owner {}) to '{new_name}'.",
+            meta.name, meta.owner_id
+        ))
+    );
+    Ok(())
+}
+
+/// `remove --all`: remove every series matching the selector (may be several).
+pub fn remove_all(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result<(), String> {
+    let store = store_access::open_readonly(store_path)?;
+    let filter = selector.to_filter()?;
+    let matches = store
+        .list_time_series(filter.clone())
+        .map_err(|e| e.to_string())?;
+    drop(store);
+    if matches.is_empty() {
+        println!("{}", color::dim("No time series matched the selector."));
+        return Ok(());
+    }
+    if !force && std::io::stdin().is_terminal() {
+        print!(
+            "Remove {} time series matching the selector? [y/N] ",
+            matches.len()
+        );
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|e| e.to_string())?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("{}", color::dim("Aborted."));
+            return Ok(());
+        }
+    }
+    let mut store = store_access::open_writable(store_path)?;
+    let n = store.remove_by_filter(filter).map_err(|e| e.to_string())?;
+    store.flush().map_err(|e| e.to_string())?;
+    println!("{}", color::header(&format!("Removed {n} time series.")));
+    Ok(())
+}
+
+/// `clear`: remove all series, or all for one owner, confirming when interactive.
+pub fn clear(
+    store_path: &Path,
+    owner_id: Option<i64>,
+    owner_category: Option<&str>,
+    force: bool,
+) -> Result<(), String> {
+    let owner = match (owner_id, owner_category) {
+        (Some(id), Some(cat)) => Some((id, parse::parse_owner_category(cat)?)),
+        (None, None) => None,
+        _ => {
+            return Err("clear requires both --owner-id and --owner-category, or neither".into());
+        }
+    };
+    if !force && std::io::stdin().is_terminal() {
+        let scope = match owner {
+            Some((id, _)) => format!("owner {id}"),
+            None => "the entire store".to_string(),
+        };
+        print!("Clear all time series for {scope}? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|e| e.to_string())?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("{}", color::dim("Aborted."));
+            return Ok(());
+        }
+    }
+    let mut store = store_access::open_writable(store_path)?;
+    let n = store.clear_time_series(owner).map_err(|e| e.to_string())?;
+    store.flush().map_err(|e| e.to_string())?;
+    println!("{}", color::header(&format!("Cleared {n} time series.")));
+    Ok(())
+}
+
+/// `replace-owner`: reassign every series from one owner to another.
+pub fn replace_owner(
+    store_path: &Path,
+    old: i64,
+    new: i64,
+    owner_category: &str,
+) -> Result<(), String> {
+    let category = parse::parse_owner_category(owner_category)?;
+    let mut store = store_access::open_writable(store_path)?;
+    let n = store
+        .replace_owner(old, new, category)
+        .map_err(|e| e.to_string())?;
+    store.flush().map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        color::header(&format!(
+            "Reassigned {n} time series from owner {old} to {new}."
+        ))
+    );
+    Ok(())
+}
+
+/// `copy`: copy the single series a selector resolves to onto another owner.
+pub fn copy(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    dst_owner_id: i64,
+    dst_owner_type: &str,
+    new_name: Option<&str>,
+) -> Result<(), String> {
+    let store = store_access::open_readonly(store_path)?;
+    let (_meta, key) = selector.resolve(&store)?;
+    drop(store);
+    let mut store = store_access::open_writable(store_path)?;
+    store
+        .copy_time_series(&key, dst_owner_id, dst_owner_type, new_name)
+        .map_err(|e| e.to_string())?;
+    store.flush().map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        color::header(&format!(
+            "Copied to owner {dst_owner_id} ({dst_owner_type})."
+        ))
+    );
+    Ok(())
+}
+
+/// `persist`: write the store to a new NetCDF + SQLite artifact.
+pub fn persist(store_path: &Path, dest: &Path) -> Result<(), String> {
+    let mut store = store_access::open_writable(store_path)?;
+    store.persist_to(dest).map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        color::header(&format!("Persisted store to {}.", dest.display()))
+    );
+    Ok(())
+}
+
+/// `compact`: reclaim reusable space; print the compaction report.
+pub fn compact(store_path: &Path, format: crate::output::Format) -> Result<(), String> {
+    let mut store = store_access::open_writable(store_path)?;
+    let report = store.compact().map_err(|e| e.to_string())?;
+    store.flush().map_err(|e| e.to_string())?;
+    match format {
+        crate::output::Format::Json => crate::output::print_json(&serde_json::json!({
+            "slots_reclaimed": report.slots_reclaimed,
+            "datasets_dropped": report.datasets_dropped,
+            "feature_sets_reclaimed": report.feature_sets_reclaimed,
+        }))?,
+        _ => {
+            let headers = vec!["Metric".to_string(), "Value".to_string()];
+            let rows = vec![
+                vec![
+                    "slots_reclaimed".to_string(),
+                    report.slots_reclaimed.to_string(),
+                ],
+                vec![
+                    "datasets_dropped".to_string(),
+                    report.datasets_dropped.to_string(),
+                ],
+                vec![
+                    "feature_sets_reclaimed".to_string(),
+                    report.feature_sets_reclaimed.to_string(),
+                ],
+            ];
+            if format == crate::output::Format::Csv {
+                crate::output::display_csv_rows(&headers, &rows)?;
+            } else {
+                crate::output::display_table_dyn(&headers, &rows);
+            }
+        }
+    }
     Ok(())
 }
 
