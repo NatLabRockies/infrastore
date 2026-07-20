@@ -3021,6 +3021,10 @@ pub unsafe extern "C" fn ts_store_add_batch(
 /// `SingleTimeSeries`; a forecast or non-sequential key makes the whole call
 /// fail with `TS_ERR_INVALID_PARAMETER`.
 ///
+/// Soft-deprecated: prefer `ts_store_bulk_read`, which handles every variant
+/// (and optional time-range slicing) through the same result handle. This
+/// entry point is kept for ABI compatibility with single-type callers.
+///
 /// # Safety
 ///
 /// `handle` must be a live store handle. `keys` must point to `n` live key

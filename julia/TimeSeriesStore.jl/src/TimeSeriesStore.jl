@@ -21,7 +21,7 @@ export Store, SingleTimeSeries, NonSequentialTimeSeries,
        rename_time_series!, resolve_forecast_key, has_for_owner,
        open_store, flush!, clear!, replace_owner!,
        transform_single_time_series!, has_typed, remove_typed!, copy_time_series!,
-       close!,
+       close!, persist!,
        StaticReader, build_static_reader, static_grid, static_groups,
        static_read!, static_values,
        ForecastReader, build_forecast_reader, forecast_timeline, forecast_entries,
@@ -102,6 +102,7 @@ struct InvalidParameterError    <: TimeSeriesException; msg::String; end
 struct IntegrityError           <: TimeSeriesException; msg::String; end
 struct ReadOnlyStoreError       <: TimeSeriesException; msg::String; end
 struct IncompatibleFormatError  <: TimeSeriesException; msg::String; end
+struct IOError                  <: TimeSeriesException; msg::String; end
 struct GenericError             <: TimeSeriesException; msg::String; code::Int32; end
 
 Base.showerror(io::IO, e::TimeSeriesException) = print(io, "TimeSeriesStore.", typeof(e).name.name, ": ", e.msg)
@@ -135,6 +136,8 @@ function _check(code::Int32)
         throw(ReadOnlyStoreError(msg))
     elseif code == TS_ERR_INCOMPATIBLE_FORMAT
         throw(IncompatibleFormatError(msg))
+    elseif code == TS_ERR_IO
+        throw(IOError(msg))
     else
         throw(GenericError(msg, code))
     end
@@ -400,6 +403,37 @@ function open_store(path::AbstractString; read_only::Bool=false)
                  path, read_only, out)
     _check(code)
     return Store(out[])
+end
+
+"""
+    Store(f::Function; kwargs...)
+    open_store(f::Function, path; read_only=false)
+
+Do-block forms: construct (or open) a store, run `f(store)`, and guarantee
+`close!` on exit — including on throw.
+
+```julia
+Store(in_memory=true) do store
+    add_time_series!(store, 1, "Generator", Component, ts)
+end
+```
+"""
+function Store(f::Function; kwargs...)
+    s = Store(; kwargs...)
+    try
+        return f(s)
+    finally
+        close!(s)
+    end
+end
+
+function open_store(f::Function, path::AbstractString; read_only::Bool=false)
+    s = open_store(path; read_only=read_only)
+    try
+        return f(s)
+    finally
+        close!(s)
+    end
 end
 
 # ---- Operations -----------------------------------------------------------
@@ -1634,14 +1668,16 @@ end
 
 # Key-based alias so `SingleTimeSeries` matches the `get_time_series(T, store, key)`
 # shape the other types use (the bare `get_time_series(store, key)` form is kept).
-get_time_series(::Type{SingleTimeSeries}, store::Store, key::TimeSeriesKey) =
-    get_time_series(store, key)
+get_time_series(::Type{SingleTimeSeries}, store::Store, key::TimeSeriesKey;
+                time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing) =
+    get_time_series(store, key; time_range=time_range)
 
 """
-    get_time_series(SingleTimeSeries, store, owner_id, owner_category, name; resolution, features)
+    get_time_series(SingleTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
 
 Attribute-addressed counterpart to `get_time_series(store, key)`. `owner_category`
-is the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`).
+is the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). The
+optional `time_range` `(start, stop)` slices like the key-based form.
 """
 function get_time_series(
     ::Type{SingleTimeSeries},
@@ -1651,17 +1687,19 @@ function get_time_series(
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     key = _make_key(owner_id, owner_category, name, TS_TYPE_SINGLE; resolution=resolution, features=features)
-    return get_time_series(store, key)
+    return get_time_series(store, key; time_range=time_range)
 end
 
 """
-    get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name; resolution, features)
+    get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
 
 Attribute-addressed counterpart to `get_time_series(NonSequentialTimeSeries, store, key)`.
 `owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`).
+`SupplementalAttribute`). The optional `time_range` `(start, stop)` slices like
+the key-based form.
 """
 function get_time_series(
     ::Type{NonSequentialTimeSeries},
@@ -1671,9 +1709,10 @@ function get_time_series(
     name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     key = _make_key(owner_id, owner_category, name, TS_TYPE_NON_SEQUENTIAL; resolution=resolution, features=features)
-    return get_time_series(NonSequentialTimeSeries, store, key)
+    return get_time_series(NonSequentialTimeSeries, store, key; time_range=time_range)
 end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)
@@ -3484,5 +3523,84 @@ function forecast_values(reader::ForecastReader, entry_index::Integer)
                  reader.handle, UInt64(entry_index - 1), out_ptr, out_len))
     return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape)
 end
+
+# ---- Base interface --------------------------------------------------------
+#
+# Key equality/hash delegate to the Rust core identity semantics via the FFI so
+# Julia never re-implements them. The value types delegate their container
+# interface to the wrapped `data` array; forecast `length` is the window count.
+
+"""
+Identity equality (owner, category, type, name, resolution, interval,
+features), delegated to the Rust core. Consistent with `hash`, so keys work as
+`Dict`/`Set` members.
+"""
+function Base.:(==)(a::TimeSeriesKey, b::TimeSeriesKey)
+    out = Ref{Bool}(false)
+    _check(ccall((:ts_key_eq, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}), a.handle, b.handle, out))
+    return out[]
+end
+
+function Base.hash(k::TimeSeriesKey, h::UInt)
+    out = Ref{UInt64}(0)
+    _check(ccall((:ts_key_identity_hash, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ref{UInt64}), k.handle, out))
+    return hash(out[], h)
+end
+
+function Base.show(io::IO, k::TimeSeriesKey)
+    if k.handle == C_NULL
+        print(io, "TimeSeriesKey(freed)")
+        return
+    end
+    info = key_info(k)
+    print(io, "TimeSeriesKey(", info.time_series_type, " name=", repr(info.name),
+          " owner_id=", info.owner_id, " owner_category=", info.owner_category, ")")
+end
+
+function Base.show(io::IO, s::Store)
+    if s.handle == C_NULL
+        print(io, "Store(closed)")
+    else
+        print(io, "Store(read_only=", read_only(s), ")")
+    end
+end
+
+function Base.show(io::IO, ts::SingleTimeSeries{T,N}) where {T,N}
+    print(io, "SingleTimeSeries{", T, ",", N, "}(name=", repr(ts.name),
+          " length=", size(ts.data, 1), " initial_timestamp=", ts.initial_timestamp,
+          " resolution=", ts.resolution, ")")
+end
+
+function Base.show(io::IO, ts::NonSequentialTimeSeries{T,N}) where {T,N}
+    print(io, "NonSequentialTimeSeries{", T, ",", N, "}(name=", repr(ts.name),
+          " length=", size(ts.data, 1), ")")
+end
+
+for FT in (:Deterministic, :Probabilistic, :Scenarios)
+    @eval function Base.show(io::IO, ts::$FT{T,N}) where {T,N}
+        print(io, $(string(FT)), "{", T, ",", N, "}(name=", repr(ts.name),
+              " count=", ts.count, " horizon=", ts.horizon,
+              " interval=", ts.interval, ")")
+    end
+end
+
+# Container interface: full delegation to `data` (element count, not time
+# steps, for multi-dimensional values — consistent with `iterate`/`getindex`).
+for ST in (:SingleTimeSeries, :NonSequentialTimeSeries)
+    @eval begin
+        Base.length(ts::$ST) = length(ts.data)
+        Base.eltype(::Type{$ST{T,N}}) where {T,N} = T
+        Base.getindex(ts::$ST, i...) = getindex(ts.data, i...)
+        Base.iterate(ts::$ST) = iterate(ts.data)
+        Base.iterate(ts::$ST, state) = iterate(ts.data, state)
+    end
+end
+
+# Forecast length is the number of forecast windows.
+Base.length(ts::Deterministic) = ts.count
+Base.length(ts::Probabilistic) = ts.count
+Base.length(ts::Scenarios) = ts.count
 
 end # module TimeSeriesStore

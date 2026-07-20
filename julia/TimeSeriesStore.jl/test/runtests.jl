@@ -1316,3 +1316,86 @@ end
 
     close!(store)
 end
+
+@testset "Round-2 Julia idioms: Base interface, do-block, time_range, persist!" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    # Do-block form closes the store, even on throw.
+    captured = Ref{Any}(nothing)
+    result = Store(in_memory=true) do store
+        captured[] = store
+        add_time_series!(store, 1, "Generator", Component,
+                         SingleTimeSeries(t0, res, collect(1.0:8.0), "load"))
+        42
+    end
+    @test result == 42
+    @test captured[].handle == C_NULL
+    @test_throws ErrorException Store(in_memory=true) do store
+        captured[] = store
+        error("boom")
+    end
+    @test captured[].handle == C_NULL
+
+    store = Store(in_memory=true)
+    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
+    k = add_time_series!(store, 1, "Generator", Component, sts)
+
+    # time_range on the typed key alias and the attribute-addressed forms.
+    sliced = get_time_series(SingleTimeSeries, store, k;
+                             time_range=(t0 + Hour(2), t0 + Hour(5)))
+    @test sliced.data == collect(3.0:5.0)
+    sliced = get_time_series(SingleTimeSeries, store, 1, Component, "load";
+                             resolution=res, time_range=(t0 + Hour(2), t0 + Hour(5)))
+    @test sliced.data == collect(3.0:5.0)
+
+    nsts = NonSequentialTimeSeries([t0, t0 + Hour(3), t0 + Hour(7)],
+                                   [10.0, 20.0, 30.0], "events")
+    add_time_series!(store, 2, "Bus", Component, nsts)
+    ns_sliced = get_time_series(NonSequentialTimeSeries, store, 2, Component, "events";
+                                time_range=(t0 + Hour(1), t0 + Hour(5)))
+    @test ns_sliced.data == [20.0]
+
+    # Key equality/hash delegate to core identity: separately-fetched keys of
+    # the same series are equal, hash equal, and work as Dict keys.
+    k2 = get_time_series_keys(store, 1, Component)[1]
+    @test k == k2
+    @test hash(k) == hash(k2)
+    kother = get_time_series_keys(store, 2, Component)[1]
+    @test k != kother
+    d = Dict(k => "a")
+    d[k2] = "b"
+    @test length(d) == 1 && d[k] == "b"
+
+    # show forms are compact one-liners.
+    @test occursin("name=\"load\"", sprint(show, k))
+    @test occursin("read_only=false", sprint(show, store))
+    @test occursin("length=8", sprint(show, sts))
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
+                        reshape(collect(1.0:6.0), 2, 3), "fc")
+    @test occursin("count=3", sprint(show, det))
+
+    # Container interface delegates to `data`; forecast length = window count.
+    @test length(sts) == 8
+    @test eltype(typeof(sts)) == Float64
+    @test sts[3] == 3.0
+    @test collect(sts) == sts.data
+    @test length(nsts) == 3
+    @test length(det) == 3
+
+    # persist! is exported and materializes an on-disk artifact.
+    dir = mktempdir()
+    dest = joinpath(dir, "persisted.nc")
+    persist!(store, dest)
+    @test isfile(dest)
+    reopened = open_store(dest; read_only=true)
+    @test get_time_series(SingleTimeSeries, store, 1, Component, "load").data ==
+          get_time_series(SingleTimeSeries, reopened, 1, Component, "load").data
+    close!(reopened)
+
+    # Typed IOError is part of the exception hierarchy.
+    @test TimeSeriesStore.IOError <: TimeSeriesStore.TimeSeriesException
+
+    close!(store)
+    @test occursin("closed", sprint(show, store))
+end
