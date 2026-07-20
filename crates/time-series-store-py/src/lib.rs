@@ -46,6 +46,9 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         E::Io(e) => TimeSeriesError::new_err(format!("io: {e}")),
         E::Sqlite(e) => TimeSeriesError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => TimeSeriesError::new_err(format!("serde: {e}")),
+        // `TimeSeriesError` is non_exhaustive; map future variants to the base
+        // exception rather than failing to compile against a newer core.
+        e => TimeSeriesError::new_err(e.to_string()),
     }
 }
 

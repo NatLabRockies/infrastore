@@ -32,6 +32,9 @@ pub struct ListFilter {
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
+    /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
+    /// wildcards). Applied in addition to `name` when both are set.
+    pub name_glob: Option<String>,
     pub resolution: Option<Period>,
     pub interval: Option<Period>,
     pub features: Option<Features>,
@@ -61,6 +64,10 @@ impl ListFilter {
         self.name = Some(n.into());
         self
     }
+    pub fn name_glob(mut self, pattern: impl Into<String>) -> Self {
+        self.name_glob = Some(pattern.into());
+        self
+    }
     pub fn resolution(mut self, r: impl Into<Period>) -> Self {
         self.resolution = Some(r.into());
         self
@@ -83,6 +90,7 @@ impl From<ListFilter> for MetadataFilter {
             owner_type: value.owner_type,
             time_series_type: value.time_series_type,
             name: value.name,
+            name_glob: value.name_glob,
             resolution: value.resolution,
             interval: value.interval,
             features: value.features,

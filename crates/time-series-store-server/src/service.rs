@@ -130,6 +130,9 @@ fn map_err(e: TimeSeriesError) -> Status {
         TimeSeriesError::Io(e) => Status::internal(format!("io: {e}")),
         TimeSeriesError::Sqlite(e) => Status::internal(format!("sqlite: {e}")),
         TimeSeriesError::Serde(e) => Status::internal(format!("serde: {e}")),
+        // `TimeSeriesError` is non_exhaustive; surface future variants as
+        // internal rather than failing to compile against a newer core.
+        e => Status::internal(e.to_string()),
     }
 }
 

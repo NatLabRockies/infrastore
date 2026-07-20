@@ -85,6 +85,9 @@ pub struct MetadataFilter {
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
+    /// SQLite `GLOB` pattern on the name (case-sensitive; `*`/`?` wildcards).
+    /// Combined with `name` as AND when both are set.
+    pub name_glob: Option<String>,
     pub resolution: Option<Period>,
     /// Forecast window interval. When set, restricts to rows with exactly this
     /// interval (part of the identity); `None` does not filter on interval.
@@ -173,6 +176,10 @@ impl MetadataFilter {
         if let Some(ref name) = self.name {
             sql.push_str(" AND name = ?");
             params_vec.push(Box::new(name.clone()));
+        }
+        if let Some(ref pattern) = self.name_glob {
+            sql.push_str(" AND name GLOB ?");
+            params_vec.push(Box::new(pattern.clone()));
         }
         if let Some(resolution) = self.resolution {
             sql.push_str(" AND resolution = ?");
@@ -698,6 +705,7 @@ impl MetadataStore {
             features: None,
             features_hash: Some(features_hash(&key.features)),
             owner_type: None,
+            name_glob: None,
         })?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {
