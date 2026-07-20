@@ -11,18 +11,19 @@ tss [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 
 ### Global options
 
-| Option           | Description                                                             |
-| ---------------- | ----------------------------------------------------------------------- |
-| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. |
-| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                     |
-| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.          |
+| Option           | Description                                                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `TSS_STORE` environment variable. |
+| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                         |
+| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                              |
 
-`--store` is required by every command except `template`.
+`--store` (or `TSS_STORE`) is required by every command except `template` and `completions`.
 
-`-f`/`--format` affects the read/inspection commands (`list`, `get`, `info`, `stats`, `summary`,
-`verify`, `check-consistency`, `resolutions`, `params`, `compact`). It is accepted anywhere because
-it is global, but the write commands (`add`, `remove`, `rename`, `copy`, `replace-owner`, `clear`,
-`transform`, `persist`) ignore it and print plain text; `template` always prints a JSON descriptor.
+`-f`/`--format` affects the read/inspection commands (`list`, `get`, `info`, `export`, `stats`,
+`summary`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`). It is accepted
+anywhere because it is global, but the write commands (`add`, `remove`, `rename`, `copy`,
+`replace-owner`, `clear`, `transform`, `persist`) ignore it and print plain text; `template` always
+prints a JSON descriptor. `export` requires `-f csv` or `-f json` (there is no table export).
 
 ## Commands
 
@@ -32,6 +33,7 @@ it is global, but the write commands (`add`, `remove`, `rename`, `copy`, `replac
 | `list`              | List stored series matching the selector filters.                               |
 | `get`               | Read and display a single series' values.                                       |
 | `info`              | Show metadata plus numeric stats for a single series.                           |
+| `export`            | Write series values to CSV/JSON files (`--dir`), or stdout for one match.       |
 | `remove`            | Delete a single series, or every match with `--all` (prompts unless `--force`). |
 | `rename`            | Rename the single series a selector resolves to (`--new-name`).                 |
 | `copy`              | Copy the single series a selector resolves to onto another owner.               |
@@ -39,7 +41,8 @@ it is global, but the write commands (`add`, `remove`, `rename`, `copy`, `replac
 | `clear`             | Remove all series, or all for one owner (prompts unless `--force`).             |
 | `transform`         | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.          |
 | `persist`           | Write the store to a new NetCDF + SQLite artifact (`--dest`).                   |
-| `compact`           | Reclaim reusable space; print the compaction report.                            |
+| `compact`           | Reclaim reusable space (prompts unless `--force`); print the report.            |
+| `completions`       | Generate shell completions to stdout (bash/zsh/fish/…).                         |
 | `stats`             | Overall + detailed + per-type counts and distinct-array count.                  |
 | `summary`           | Grouped static and/or forecast summaries (`--static`/`--forecast`).             |
 | `verify`            | Verify store integrity; nonzero exit if errors are present.                     |
@@ -49,19 +52,21 @@ it is global, but the write commands (`add`, `remove`, `rename`, `copy`, `replac
 | `template`          | Print an example descriptor for a given type to stdout.                         |
 
 ```text
-tss --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>]
+tss --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>] [--compression <none|deflate[:LEVEL]>] [--no-shuffle]
 tss --store <PATH> list    [SELECTOR...]
 tss --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
 tss --store <PATH> info    [SELECTOR...]
-tss --store <PATH> remove  [SELECTOR...] [--all] [--force]
-tss --store <PATH> rename  [SELECTOR...] --new-name <NAME>
-tss --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>]
-tss --store <PATH> replace-owner --old <I> --new <I> --owner-category <C>
-tss --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force]
+tss --store <PATH> -f csv|json export [SELECTOR...] [--dir <DIR>]
+tss --store <PATH> remove  [SELECTOR...] [--all] [--force] [--dry-run]
+tss --store <PATH> rename  [SELECTOR...] --new-name <NAME> [--dry-run]
+tss --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>] [--dry-run]
+tss --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
+tss --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
 tss --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
 tss --store <PATH> persist --dest <PATH.nc>
-tss --store <PATH> compact
+tss --store <PATH> compact [--force]
 tss --store <PATH> stats
+tss completions <SHELL>
 tss --store <PATH> summary [--static | --forecast]
 tss --store <PATH> verify
 tss --store <PATH> check-consistency [--resolution <DUR>]
@@ -84,6 +89,17 @@ transaction; without `--all`, the selector must resolve to exactly one series. `
 `verify`, `check-consistency`, `resolutions`, and `params` are read-only inspection commands and
 honor `-f/--format`; `verify` exits nonzero when the integrity report lists any errors.
 
+`export` is the read-direction inverse of the batch `add`: the selector may match many series, and
+each is written to `<owner_id>_<owner_type>_<name>_<type>.csv|json` inside `--dir`. Without `--dir`
+the selector must match exactly one series, which goes to stdout. CSV output carries real timestamps
+(see the CSV Layout section); JSON output is one structured object per series.
+
+`--dry-run` on `remove`, `clear`, `replace-owner`, `rename`, and `copy` prints what would change and
+exits without opening the store for writing. `add --compression` sets the NetCDF compression policy
+for a store this command creates (`none`, `deflate`, or `deflate:LEVEL` with `--no-shuffle` to
+disable byte-shuffle); passing it for an existing store is an error, since the persisted policy
+governs.
+
 ### Selectors
 
 `get`, `info`, and `remove` identify exactly one series with these flags; `list` accepts the same
@@ -94,7 +110,8 @@ value:
 | ---------------------- | -------------------------------------------------------------------------- |
 | `--owner-id <I>`       | Owner identifier (`i64` integer).                                          |
 | `--owner-category <C>` | Restrict to `component` or `supplemental_attribute`; omit to match either. |
-| `--name <N>`           | Series name.                                                               |
+| `--name <N>`           | Series name (exact match).                                                 |
+| `--name-glob <P>`      | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
 | `--type <T>`           | See the type spellings below.                                              |
 | `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`, or ISO-8601 like `PT1H`, `P1M`.            |
 | `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
@@ -161,6 +178,7 @@ The CSV holds only numbers (plus a leading timestamp column for `non_sequential`
 | `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                |
 | `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).         |
 | `units`                        | optional                    | Free-form label.                                       |
+| `logical_type`                 | optional                    | Opaque domain-reconstruction tag on the association.   |
 | `features`                     | optional                    | JSON object; int/float/bool/string values.             |
 | `initial_timestamp`            | all except `non_sequential` |                                                        |
 | `resolution`                   | all except `non_sequential` |                                                        |
@@ -185,9 +203,15 @@ silently dropping a setting.
 | `probabilistic`  | `[num_percentiles, H, count, *E]` | Flat row-major values.                                                 |
 | `scenarios`      | `[scenario_count, H, count, *E]`  | Flat row-major values.                                                 |
 
-`bool` cells accept `true`/`false`/`1`/`0`. `get -f csv` re-emits the same layout `add` consumes, so
-values round-trip. That output always starts with a header row (`value`, or `timestamp,value...` for
-`non_sequential`), which is what the `has_header: true` default — and every `template` — expects.
+`bool` cells accept `true`/`false`/`1`/`0`. For `single` and `non_sequential` series, `get -f csv`
+re-emits the same layout `add` consumes, so values round-trip. That output always starts with a
+header row (`value`, or `timestamp,value...` for `non_sequential`), which is what the
+`has_header: true` default — and every `template` — expects.
+
+For forecasts, `get -f csv` and `export -f csv` emit **timestamped** rows instead of the flat ingest
+layout: one row per `(window, step)` with `issue_time` and `target_time` columns, and one value
+column per percentile (`value[p10]`), scenario (`value[s0]`), or element entry. This output is for
+analysis, not re-ingestion — re-adding a forecast needs the flat row-major CSV described above.
 
 ## Exit Status
 

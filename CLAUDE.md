@@ -31,14 +31,23 @@ read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`
 binding, including Python) and may have multidimensional per-timestep values. The columnar
 simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
 and Python. The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
-`remove_by_filter`, `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`,
-`AddRequest`/`Store::add` preserving `logical_type`, and serde on the core types) is available in
-the Rust core and threaded through the C ABI/Julia and Python bindings. The read-only gRPC server
-carries the full read surface too: full `TimeSeriesKey`s over the wire plus `ListKeys`,
-`GetMetadata`, `BulkRead`, detailed/per-type counts, `ListOwnerIds`, `GetIntervals`, static/forecast
-summaries, `CheckStaticConsistency`, and `ResolveForecastKey`. Auth is `none` (default) or `api_key`
-via the `x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for the
-authoritative feature matrix.
+name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_filter`,
+`remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
+preserving `logical_type`, and serde on the core types) is available in the Rust core and threaded
+through the C ABI/Julia and Python bindings. Metadata getters surface `element_shape` and `features`
+in every binding. Python ships type stubs (`time_series_store.pyi` + a pytest drift guard), a full
+exception hierarchy, and keyword-only optional arguments; Julia overloads `Base`
+(`==`/`hash`/`show`/`length`/`iterate`) and offers do-block `Store`/`open_store` forms. A stored
+`DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
+design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI
+additionally has `export` (bulk read-direction inverse of `add`, timestamped forecast CSV),
+`--name-glob` selectors, `--dry-run` on destructive commands, store-creation `--compression` flags,
+shell `completions`, and a `TSS_STORE` env fallback. The read-only gRPC server carries the full read
+surface too: full `TimeSeriesKey`s over the wire plus `ListKeys`, `GetMetadata`, `BulkRead`,
+detailed/per-type counts, `ListOwnerIds`, `GetIntervals`, static/forecast summaries,
+`CheckStaticConsistency`, and `ResolveForecastKey`. Auth is `none` (default) or `api_key` via the
+`x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for the authoritative
+feature matrix.
 
 ## Code Quality Requirements
 

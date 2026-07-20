@@ -18,7 +18,7 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
 `get_forecast_metadata`, `get_array_by_hash`, `count_array_references`, `open_store`, `flush!`,
 `clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`,
-`copy_time_series!`, `close!`, `StaticReader`, `build_static_reader`, `static_grid`,
+`copy_time_series!`, `close!`, `persist!`, `StaticReader`, `build_static_reader`, `static_grid`,
 `static_groups`, `static_read!`, `static_values`, `ForecastReader`, `build_forecast_reader`,
 `forecast_timeline`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_values`,
 `init_logging`.
@@ -159,15 +159,19 @@ add_time_series!(
     logical_type = ts.logical_type,
 ) -> TimeSeriesKey
 
-get_time_series(store::Store, key::TimeSeriesKey) -> SingleTimeSeries
-get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey) -> SingleTimeSeries
-get_time_series(NonSequentialTimeSeries, store::Store, key::TimeSeriesKey) -> NonSequentialTimeSeries
+get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -> SingleTimeSeries
+get_time_series(SingleTimeSeries, store::Store, key::TimeSeriesKey;
+               time_range=nothing) -> SingleTimeSeries
+get_time_series(NonSequentialTimeSeries, store::Store, key::TimeSeriesKey;
+               time_range=nothing) -> NonSequentialTimeSeries
 
 get_time_series(SingleTimeSeries, store, owner_id, owner_category, name;
-               resolution=nothing, features=Dict()) -> SingleTimeSeries
+               resolution=nothing, features=Dict(), time_range=nothing) -> SingleTimeSeries
 get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name;
-               resolution=nothing, features=Dict()) -> NonSequentialTimeSeries
+               resolution=nothing, features=Dict(), time_range=nothing) -> NonSequentialTimeSeries
 ```
+
+`time_range = (start::DateTime, stop::DateTime)` (exclusive end) slices the read on every form.
 
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
@@ -227,8 +231,13 @@ remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
 `owner_category` (`Component` / `SupplementalAttribute`) is required: the owner identity is the pair
 `(owner_id, owner_category)`, so a component and a supplemental attribute may share a numeric
 `owner_id` and remain distinct. `get_metadata` returns
-`(initial_timestamp, resolution, length, data_hash, dtype, logical_type)`, where `data_hash` is the
-32-byte content hash. It throws `NotFoundError` if absent.
+`(initial_timestamp, resolution, length, data_hash, dtype, logical_type, units, element_shape,
+features)`,
+where `data_hash` is the 32-byte content hash, `element_shape` is the per-timestep shape tuple
+(empty for scalar elements), and `features` is the feature dictionary. It throws `NotFoundError` if
+absent. `get_forecast_metadata` and `get_probabilistic_metadata` carry the same
+`element_shape`/`features` fields (there, `element_shape` is the stored array's trailing dims after
+its first axis).
 
 ```julia
 get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -> Vector{T}
@@ -242,7 +251,11 @@ Fetches the flattened array for a 32-byte content hash, decoded as element type 
 ```julia
 has_time_series(store, key::TimeSeriesKey) -> Bool
 remove_time_series!(store, key::TimeSeriesKey) -> Nothing
+remove_time_series!(store, keys::Vector{TimeSeriesKey}) -> Int
 ```
+
+The vector form removes every key in one all-or-nothing transaction and returns the count; a single
+missing key aborts the whole batch.
 
 ### Enumerating keys
 
@@ -609,9 +622,32 @@ All subtype `TimeSeriesException`:
 | `IntegrityError`           | `TS_ERR_INTEGRITY`                                                         |
 | `ReadOnlyStoreError`       | `TS_ERR_READ_ONLY`                                                         |
 | `IncompatibleFormatError`  | `TS_ERR_INCOMPATIBLE_FORMAT`                                               |
+| `IOError`                  | `TS_ERR_IO`                                                                |
 | `GenericError`             | Any other non-zero code (carries the numeric `code`)                       |
 
 The message text comes from the FFI layer's thread-local error buffer.
+
+## Base Interface
+
+The package overloads `Base` so the wrapped types behave like native Julia values:
+
+- `==` and `hash` on `TimeSeriesKey` delegate to the Rust core's identity semantics (owner,
+  category, type, name, resolution, interval, features), so keys work as `Dict`/`Set` members.
+- `show` renders compact one-liners for `Store`, `TimeSeriesKey`, and the five value types.
+- `length`, `eltype`, `getindex`, and `iterate` on `SingleTimeSeries` / `NonSequentialTimeSeries`
+  delegate to the wrapped `data` array (element count, not time steps, for multi-dimensional
+  values). Forecast types define `length` = window count.
+- Do-block forms guarantee `close!` even on throw:
+
+```julia
+Store(in_memory=true) do store
+    add_time_series!(store, 1, "Generator", Component, ts)
+end
+
+open_store(path; read_only=true) do store
+    get_metadata(store, 1, Component, "load")
+end
+```
 
 ## Time and Resolution Conversions
 

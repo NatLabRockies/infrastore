@@ -759,6 +759,7 @@ ListFilter::new()
     .owner_category(OwnerCategory::Component)
     .time_series_type(TimeSeriesType::SingleTimeSeries)
     .name("load")
+    .name_glob("load_*")  // SQLite GLOB (case-sensitive, `*`/`?`); ANDed with .name
     .resolution(Duration::hours(1))   // impl Into<Period>
     .interval(Duration::hours(24))    // impl Into<Period>; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
@@ -884,6 +885,7 @@ pub struct ForecastParameters {
 ```rust
 pub type Result<T> = std::result::Result<T, TimeSeriesError>;
 
+#[non_exhaustive] // match with a wildcard arm; new variants are not semver breaks
 pub enum TimeSeriesError {
     NotFound,
     DuplicateTimeSeries,
