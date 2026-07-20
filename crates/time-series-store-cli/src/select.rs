@@ -16,6 +16,10 @@ pub struct SelectorArgs {
     /// Time series name.
     #[arg(long)]
     pub name: Option<String>,
+    /// Name pattern (SQLite GLOB: case-sensitive, `*`/`?` wildcards). ANDed
+    /// with --name when both are given.
+    #[arg(long)]
+    pub name_glob: Option<String>,
     /// Time series type (single|non_sequential|deterministic|probabilistic|scenarios).
     #[arg(long = "type")]
     pub ts_type: Option<String>,
@@ -39,6 +43,9 @@ impl SelectorArgs {
         }
         if let Some(n) = &self.name {
             filter = filter.name(n.clone());
+        }
+        if let Some(g) = &self.name_glob {
+            filter = filter.name_glob(g.clone());
         }
         if let Some(t) = &self.ts_type {
             filter = filter.time_series_type(parse::parse_ts_type(t)?);
@@ -72,7 +79,7 @@ impl SelectorArgs {
             }
             n => {
                 let mut msg = format!(
-                    "{n} time series matched; narrow with --name/--type/--resolution/--feature:\n"
+                    "{n} time series matched; narrow with --name/--name-glob/--type/--resolution/--feature:\n"
                 );
                 for m in &matches {
                     msg.push_str(&format!(

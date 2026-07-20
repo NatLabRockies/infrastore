@@ -34,8 +34,9 @@ const HELP_STYLES: Styles = Styles::styled()
     styles = HELP_STYLES
 )]
 struct Cli {
-    /// Path to the NetCDF store file (.nc). The SQLite catalog is derived automatically.
-    #[arg(long, global = true)]
+    /// Path to the NetCDF store file (.nc). The SQLite catalog is derived
+    /// automatically. Falls back to the TSS_STORE environment variable.
+    #[arg(long, global = true, env = "TSS_STORE")]
     store: Option<PathBuf>,
 
     /// Output format.
@@ -60,6 +61,13 @@ enum Commands {
         /// Override the CSV path from the descriptor (single-series descriptors only).
         #[arg(long)]
         csv: Option<PathBuf>,
+        /// Compression for a store created by this command: none, deflate, or
+        /// deflate:LEVEL (0-9). Errors if the store already exists.
+        #[arg(long)]
+        compression: Option<String>,
+        /// Disable byte-shuffle for deflate compression (only with --compression).
+        #[arg(long)]
+        no_shuffle: bool,
     },
     /// List stored time series matching the given filters.
     List(SelectorArgs),
@@ -93,6 +101,9 @@ enum Commands {
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
         force: bool,
+        /// Show what would be removed without changing the store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Derive DeterministicSingleTimeSeries from stored SingleTimeSeries.
     Transform {
@@ -116,6 +127,9 @@ enum Commands {
         /// The new name.
         #[arg(long)]
         new_name: String,
+        /// Show what would be renamed without changing the store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Copy the single series a selector resolves to onto another owner.
     Copy {
@@ -130,6 +144,9 @@ enum Commands {
         /// Optional new name for the copy (defaults to the source name).
         #[arg(long)]
         new_name: Option<String>,
+        /// Show what would be copied without changing the store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Reassign every series from one owner to another.
     ReplaceOwner {
@@ -139,6 +156,9 @@ enum Commands {
         new: i64,
         #[arg(long)]
         owner_category: String,
+        /// Show how many series would move without changing the store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove all series, or all for one owner.
     Clear {
@@ -148,6 +168,9 @@ enum Commands {
         owner_category: Option<String>,
         #[arg(long)]
         force: bool,
+        /// Show how many series would be cleared without changing the store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Persist the store to a new NetCDF + SQLite artifact.
     Persist {
@@ -157,8 +180,25 @@ enum Commands {
     },
     /// Reclaim reusable space and print the compaction report.
     Compact {
+        /// Skip the interactive confirmation prompt.
         #[arg(long)]
         force: bool,
+    },
+    /// Export series values to CSV or JSON files (the read-direction inverse
+    /// of `add`). One file per matched series into --dir, or stdout when the
+    /// selector matches exactly one series.
+    Export {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Directory to write one file per matched series.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Generate shell completions to stdout (e.g. `tss completions zsh`).
+    Completions {
+        /// Shell to generate for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
     /// Overall counts, detailed counts, per-type counts, distinct arrays.
     Stats,
@@ -204,8 +244,22 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<(), String> {
     match &cli.command {
-        Commands::Add { descriptor, csv } => {
-            commands::add::run(&require_store(cli)?, descriptor, csv.as_deref())
+        Commands::Add {
+            descriptor,
+            csv,
+            compression,
+            no_shuffle,
+        } => {
+            let compression = compression
+                .as_deref()
+                .map(|spec| parse::parse_compression(spec, !no_shuffle))
+                .transpose()?;
+            commands::add::run(
+                &require_store(cli)?,
+                descriptor,
+                csv.as_deref(),
+                compression,
+            )
         }
         Commands::List(selector) => {
             commands::show::list(&require_store(cli)?, selector, cli.format)
@@ -230,12 +284,13 @@ fn run(cli: &Cli) -> Result<(), String> {
             selector,
             all,
             force,
+            dry_run,
         } => {
             let store = require_store(cli)?;
             if *all {
-                commands::manage::remove_all(&store, selector, *force)
+                commands::manage::remove_all(&store, selector, *force, *dry_run)
             } else {
-                commands::manage::remove(&store, selector, *force)
+                commands::manage::remove(&store, selector, *force, *dry_run)
             }
         }
         Commands::Transform {
@@ -250,39 +305,60 @@ fn run(cli: &Cli) -> Result<(), String> {
             owner_category.as_deref(),
             resolution.as_deref(),
         ),
-        Commands::Rename { selector, new_name } => {
-            commands::manage::rename(&require_store(cli)?, selector, new_name)
-        }
+        Commands::Rename {
+            selector,
+            new_name,
+            dry_run,
+        } => commands::manage::rename(&require_store(cli)?, selector, new_name, *dry_run),
         Commands::Copy {
             selector,
             dst_owner_id,
             dst_owner_type,
             new_name,
+            dry_run,
         } => commands::manage::copy(
             &require_store(cli)?,
             selector,
             *dst_owner_id,
             dst_owner_type,
             new_name.as_deref(),
+            *dry_run,
         ),
         Commands::ReplaceOwner {
             old,
             new,
             owner_category,
-        } => commands::manage::replace_owner(&require_store(cli)?, *old, *new, owner_category),
+            dry_run,
+        } => commands::manage::replace_owner(
+            &require_store(cli)?,
+            *old,
+            *new,
+            owner_category,
+            *dry_run,
+        ),
         Commands::Clear {
             owner_id,
             owner_category,
             force,
+            dry_run,
         } => commands::manage::clear(
             &require_store(cli)?,
             *owner_id,
             owner_category.as_deref(),
             *force,
+            *dry_run,
         ),
         Commands::Persist { dest } => commands::manage::persist(&require_store(cli)?, dest),
-        Commands::Compact { force: _ } => {
-            commands::manage::compact(&require_store(cli)?, cli.format)
+        Commands::Compact { force } => {
+            commands::manage::compact(&require_store(cli)?, *force, cli.format)
+        }
+        Commands::Export { selector, dir } => {
+            commands::export::run(&require_store(cli)?, selector, dir.as_deref(), cli.format)
+        }
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(*shell, &mut Cli::command(), "tss", &mut std::io::stdout());
+            Ok(())
         }
         Commands::Stats => commands::admin::stats(&require_store(cli)?, cli.format),
         Commands::Summary {

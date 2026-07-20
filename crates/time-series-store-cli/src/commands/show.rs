@@ -85,6 +85,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     );
     obj.insert("length".into(), json!(m.length));
     obj.insert("units".into(), json!(m.units));
+    obj.insert("logical_type".into(), json!(m.logical_type));
     Value::Object(obj)
 }
 
@@ -170,6 +171,9 @@ pub fn info(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
     }
     if let Some(u) = &meta.units {
         fields.push(("units".into(), u.clone()));
+    }
+    if let Some(lt) = &meta.logical_type {
+        fields.push(("logical_type".into(), lt.clone()));
     }
     for (k, v) in &meta.features {
         fields.push((format!("feature.{k}"), feature_to_string(v)));
@@ -313,8 +317,8 @@ fn render_forecast(
             }
         }
         Format::Csv => {
-            let rows: Vec<Vec<String>> = decoded.iter().map(|v| vec![v.clone()]).collect();
-            output::display_csv_rows(&["value".to_string()], &rows)?;
+            let (headers, rows) = forecast_csv_rows(meta, data)?;
+            output::display_csv_rows(&headers, &rows)?;
         }
         Format::Json => {
             let mut obj = Map::new();
@@ -335,6 +339,89 @@ fn value_headers(per_step: usize) -> Vec<String> {
     } else {
         (0..per_step).map(|i| format!("value[{i}]")).collect()
     }
+}
+
+/// Timestamped CSV rows for a dense forecast: one row per (window, step) with
+/// `issue_time` / `target_time`, and one value column per leading series
+/// (percentile / scenario) x element entry. Shared by `get -f csv` and
+/// `export`.
+pub fn forecast_csv_rows(
+    meta: &TimeSeriesMetadata,
+    data: &TimeSeriesData,
+) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    let arr = data_array(data);
+    let decoded = csv_io::array_to_strings(arr);
+    let initial = meta
+        .initial_timestamp
+        .ok_or("forecast metadata is missing initial_timestamp")?;
+    let resolution = meta
+        .resolution
+        .ok_or("forecast metadata is missing resolution")?;
+    let interval = meta
+        .interval
+        .ok_or("forecast metadata is missing interval")?;
+
+    // Leading series axis (percentiles / scenarios) and its column labels;
+    // Deterministic has none.
+    let (series_labels, h_axis) = match data {
+        TimeSeriesData::Probabilistic(p) => (
+            p.percentiles
+                .iter()
+                .map(|p| format!("p{p}"))
+                .collect::<Vec<_>>(),
+            1,
+        ),
+        TimeSeriesData::Scenarios(s) => {
+            ((0..s.scenario_count).map(|i| format!("s{i}")).collect(), 1)
+        }
+        _ => (Vec::new(), 0),
+    };
+    let horizon_len = *arr
+        .shape
+        .get(h_axis)
+        .ok_or_else(|| format!("unexpected forecast array shape {:?}", arr.shape))?;
+    let count = *arr
+        .shape
+        .get(h_axis + 1)
+        .ok_or_else(|| format!("unexpected forecast array shape {:?}", arr.shape))?;
+    let per_step: usize = arr.shape[h_axis + 2..].iter().product::<usize>().max(1);
+    let num_series = series_labels.len().max(1);
+
+    let mut headers = vec!["issue_time".to_string(), "target_time".to_string()];
+    if series_labels.is_empty() {
+        headers.extend(value_headers(per_step));
+    } else {
+        for label in &series_labels {
+            if per_step <= 1 {
+                headers.push(format!("value[{label}]"));
+            } else {
+                for j in 0..per_step {
+                    headers.push(format!("value[{label}][{j}]"));
+                }
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(count * horizon_len);
+    for c in 0..count {
+        let issue = interval
+            .add_to(initial, c as i64)
+            .ok_or_else(|| format!("timestamp overflow at window {c}"))?;
+        for h in 0..horizon_len {
+            let target = resolution
+                .add_to(issue, h as i64)
+                .ok_or_else(|| format!("timestamp overflow at window {c} step {h}"))?;
+            let mut row = vec![issue.to_rfc3339(), target.to_rfc3339()];
+            for s in 0..num_series {
+                for j in 0..per_step {
+                    let idx = (((s * horizon_len + h) * count) + c) * per_step + j;
+                    row.push(decoded[idx].clone());
+                }
+            }
+            rows.push(row);
+        }
+    }
+    Ok((headers, rows))
 }
 
 fn data_array(d: &TimeSeriesData) -> &TypedArray {
@@ -358,6 +445,9 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     obj.insert("element_shape".into(), json!(arr.element_shape()));
     if let Some(u) = &meta.units {
         obj.insert("units".into(), json!(u));
+    }
+    if let Some(lt) = &meta.logical_type {
+        obj.insert("logical_type".into(), json!(lt));
     }
     if let Some(r) = meta.resolution {
         obj.insert("resolution".into(), json!(parse::format_period(r)));

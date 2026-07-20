@@ -9,10 +9,25 @@ use crate::select::SelectorArgs;
 use crate::store_access;
 
 /// `remove`: delete a single series, confirming first when interactive.
-pub fn remove(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result<(), String> {
+pub fn remove(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    force: bool,
+    dry_run: bool,
+) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
     drop(store);
+
+    if dry_run {
+        println!(
+            "Would remove {} '{}' (owner {}).",
+            meta.time_series_type.as_str(),
+            meta.name,
+            meta.owner_id
+        );
+        return Ok(());
+    }
 
     if !force && std::io::stdin().is_terminal() {
         print!(
@@ -76,10 +91,22 @@ pub fn transform(
 }
 
 /// `rename`: rename the single series a selector resolves to.
-pub fn rename(store_path: &Path, selector: &SelectorArgs, new_name: &str) -> Result<(), String> {
+pub fn rename(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    new_name: &str,
+    dry_run: bool,
+) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
     drop(store);
+    if dry_run {
+        println!(
+            "Would rename '{}' (owner {}) to '{new_name}'.",
+            meta.name, meta.owner_id
+        );
+        return Ok(());
+    }
     let mut store = store_access::open_writable(store_path)?;
     store
         .rename_time_series(&key, new_name)
@@ -96,7 +123,12 @@ pub fn rename(store_path: &Path, selector: &SelectorArgs, new_name: &str) -> Res
 }
 
 /// `remove --all`: remove every series matching the selector (may be several).
-pub fn remove_all(store_path: &Path, selector: &SelectorArgs, force: bool) -> Result<(), String> {
+pub fn remove_all(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    force: bool,
+    dry_run: bool,
+) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let filter = selector.to_filter()?;
     let matches = store
@@ -105,6 +137,18 @@ pub fn remove_all(store_path: &Path, selector: &SelectorArgs, force: bool) -> Re
     drop(store);
     if matches.is_empty() {
         println!("{}", color::dim("No time series matched the selector."));
+        return Ok(());
+    }
+    if dry_run {
+        println!("Would remove {} time series:", matches.len());
+        for m in &matches {
+            println!(
+                "  - owner={} type={} name={}",
+                m.owner_id,
+                m.time_series_type.as_str(),
+                m.name
+            );
+        }
         return Ok(());
     }
     if !force && std::io::stdin().is_terminal() {
@@ -136,6 +180,7 @@ pub fn clear(
     owner_id: Option<i64>,
     owner_category: Option<&str>,
     force: bool,
+    dry_run: bool,
 ) -> Result<(), String> {
     let owner = match (owner_id, owner_category) {
         (Some(id), Some(cat)) => Some((id, parse::parse_owner_category(cat)?)),
@@ -144,6 +189,16 @@ pub fn clear(
             return Err("clear requires both --owner-id and --owner-category, or neither".into());
         }
     };
+    if dry_run {
+        let store = store_access::open_readonly(store_path)?;
+        let mut filter = time_series_store_core::ListFilter::new();
+        if let Some((id, cat)) = owner {
+            filter = filter.owner_id(id).owner_category(cat);
+        }
+        let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
+        println!("Would clear {n} time series.");
+        return Ok(());
+    }
     if !force && std::io::stdin().is_terminal() {
         let scope = match owner {
             Some((id, _)) => format!("owner {id}"),
@@ -174,8 +229,18 @@ pub fn replace_owner(
     old: i64,
     new: i64,
     owner_category: &str,
+    dry_run: bool,
 ) -> Result<(), String> {
     let category = parse::parse_owner_category(owner_category)?;
+    if dry_run {
+        let store = store_access::open_readonly(store_path)?;
+        let filter = time_series_store_core::ListFilter::new()
+            .owner_id(old)
+            .owner_category(category);
+        let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
+        println!("Would reassign {n} time series from owner {old} to {new}.");
+        return Ok(());
+    }
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .replace_owner(old, new, category)
@@ -197,10 +262,20 @@ pub fn copy(
     dst_owner_id: i64,
     dst_owner_type: &str,
     new_name: Option<&str>,
+    dry_run: bool,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
-    let (_meta, key) = selector.resolve(&store)?;
+    let (meta, key) = selector.resolve(&store)?;
     drop(store);
+    if dry_run {
+        println!(
+            "Would copy '{}' (owner {}) to owner {dst_owner_id} ({dst_owner_type}) as '{}'.",
+            meta.name,
+            meta.owner_id,
+            new_name.unwrap_or(&meta.name)
+        );
+        return Ok(());
+    }
     let mut store = store_access::open_writable(store_path)?;
     store
         .copy_time_series(&key, dst_owner_id, dst_owner_type, new_name)
@@ -226,8 +301,26 @@ pub fn persist(store_path: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `compact`: reclaim reusable space; print the compaction report.
-pub fn compact(store_path: &Path, format: crate::output::Format) -> Result<(), String> {
+/// `compact`: reclaim reusable space; print the compaction report. Confirms
+/// first when interactive (it rewrites store internals); `--force` bypasses.
+pub fn compact(
+    store_path: &Path,
+    force: bool,
+    format: crate::output::Format,
+) -> Result<(), String> {
+    if !force && std::io::stdin().is_terminal() {
+        print!("Compact the store (rewrites internal bookkeeping)? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|e| e.to_string())?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("{}", color::dim("Aborted."));
+            return Ok(());
+        }
+    }
     let mut store = store_access::open_writable(store_path)?;
     let report = store.compact().map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
@@ -292,6 +385,7 @@ const SINGLE: &str = r#"{
   "type": "single",
   "dtype": "f64",
   "units": "MW",
+  "logical_type": "Profile",
   "csv": "load.csv",
   "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
