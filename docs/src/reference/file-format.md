@@ -194,7 +194,6 @@ One row per association between an owner and a stored array.
 | `owner_category`    | TEXT    | `CHECK` in (`Component`, `SupplementalAttribute`); part of key  |
 | `time_series_type`  | TEXT    | One of the six `TimeSeriesType` names                           |
 | `name`              | TEXT    | Series name                                                     |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable |
 | `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`           |
 | `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential |
 | `length`            | INTEGER | Number of timesteps                                             |
@@ -207,7 +206,11 @@ One row per association between an owner and a stored array.
 | `dtype`             | TEXT    | Element dtype string (`NOT NULL DEFAULT 'f64'`)                 |
 | `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                     |
 | `logical_type`      | TEXT    | Opaque binding-owned domain label; `NULL` if unset              |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable |
 | `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                              |
+
+The two content-address hashes are the last two columns. Column order is not load-bearing — every
+statement names its columns — so the layout is chosen for readability.
 
 ### `feature_sets`
 
@@ -223,13 +226,13 @@ associations with the same features therefore reference the same rows here — i
 
 | Column          | Type    | Notes                                      |
 | --------------- | ------- | ------------------------------------------ |
-| `features_hash` | BLOB    | 32-byte SHA-256 of the feature map         |
 | `key`           | TEXT    | Feature name                               |
 | `value_kind`    | TEXT    | `CHECK` in (`int`, `float`, `bool`, `str`) |
 | `value_int`     | INTEGER | Set when `value_kind = 'int'`              |
 | `value_float`   | REAL    | Set when `value_kind = 'float'`            |
 | `value_bool`    | INTEGER | 0/1, set when `value_kind = 'bool'`        |
 | `value_str`     | TEXT    | Set when `value_kind = 'str'`              |
+| `features_hash` | BLOB    | 32-byte SHA-256 of the feature map         |
 |                 |         | `PRIMARY KEY (features_hash, key)`         |
 
 An empty feature map stores no rows.

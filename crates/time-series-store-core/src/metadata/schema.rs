@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     owner_category    TEXT    NOT NULL CHECK(owner_category IN ('Component','SupplementalAttribute')),
     time_series_type  TEXT    NOT NULL,
     name              TEXT    NOT NULL,
-    data_hash         BLOB    NOT NULL,
     initial_timestamp TEXT,
     resolution        TEXT,
     length            INTEGER,
@@ -20,6 +19,10 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     dtype             TEXT    NOT NULL DEFAULT 'f64',
     element_shape     TEXT,
     logical_type      TEXT,
+    -- Content-address hashes are grouped at the end of the row. Column order is
+    -- cosmetic: every INSERT/SELECT in metadata.rs names its columns explicitly,
+    -- so nothing depends on ordinal position.
+    data_hash         BLOB    NOT NULL,
     features_hash     BLOB    NOT NULL
 );
 
@@ -40,13 +43,13 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
 -- leaves it unreachable, mirroring the NetCDF side's unreachable standalone
 -- variables. `Store::compact` sweeps unreachable sets.
 CREATE TABLE IF NOT EXISTS feature_sets (
-    features_hash     BLOB    NOT NULL,
     key               TEXT    NOT NULL,
     value_kind        TEXT    NOT NULL CHECK(value_kind IN ('int','float','bool','str')),
     value_int         INTEGER,
     value_float       REAL,
     value_bool        INTEGER,
     value_str         TEXT,
+    features_hash     BLOB    NOT NULL,
     PRIMARY KEY (features_hash, key)
 );
 
