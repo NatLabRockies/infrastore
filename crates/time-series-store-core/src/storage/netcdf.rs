@@ -268,8 +268,33 @@ pub struct NetCdfBackend {
 /// (dtype, element_shape, length, resolution).
 type DatasetGroupKey = (Dtype, Vec<usize>, usize, Period);
 
+/// The NetCDF file handle, opened read-only or writable. A read-only open uses
+/// `netcdf::open`, which needs no write permission on the file (and takes only
+/// a shared HDF5 lock); every write path goes through [`Self::file_mut`], which
+/// rejects the read-only variant.
+enum NcFile {
+    ReadOnly(netcdf::File),
+    Writable(FileMut),
+}
+
+impl NcFile {
+    fn file(&self) -> &netcdf::File {
+        match self {
+            NcFile::ReadOnly(f) => f,
+            NcFile::Writable(f) => f,
+        }
+    }
+
+    fn file_mut(&mut self) -> Result<&mut FileMut> {
+        match self {
+            NcFile::ReadOnly(_) => Err(TimeSeriesError::ReadOnlyStore),
+            NcFile::Writable(f) => Ok(f),
+        }
+    }
+}
+
 struct Inner {
-    file: FileMut,
+    file: NcFile,
     path: PathBuf,
     datasets: HashMap<String, DatasetState>,
     /// Packed dataset names per group key, kept sorted by name so writers
@@ -294,7 +319,7 @@ impl NetCdfBackend {
         }
         Ok(Self {
             inner: Mutex::new(Inner {
-                file,
+                file: NcFile::Writable(file),
                 path: path.to_path_buf(),
                 datasets: HashMap::new(),
                 dataset_groups: HashMap::new(),
@@ -305,14 +330,26 @@ impl NetCdfBackend {
         })
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
-        let file = netcdf::append(path).map_err(map_nc)?;
+    /// Open an existing store file. A read-only open needs no write permission
+    /// on the file (it works on read-only media) and takes only a shared HDF5
+    /// lock; any write attempted through it fails with
+    /// [`TimeSeriesError::ReadOnlyStore`].
+    pub fn open(path: &Path, read_only: bool) -> Result<Self> {
+        let file = if read_only {
+            NcFile::ReadOnly(netcdf::open(path).map_err(map_nc)?)
+        } else {
+            NcFile::Writable(netcdf::append(path).map_err(map_nc)?)
+        };
         // Refuse a store written in a different on-disk format. `DATA_FORMAT_VERSION`
         // is bumped only for backward-incompatible changes, so any mismatch means
         // this build cannot read the file correctly — exact equality is the test.
         // Failing here yields a clear diagnostic instead of a downstream surprise
         // (a missing SQLite table, or worse, a plausible-but-wrong read).
-        let found = match file.attribute("data_format_version").map(|a| a.value()) {
+        let found = match file
+            .file()
+            .attribute("data_format_version")
+            .map(|a| a.value())
+        {
             Some(Ok(netcdf::AttributeValue::Str(s))) => s,
             // Predates the attribute entirely, so certainly not the current format.
             _ => "unspecified".to_string(),
@@ -326,7 +363,7 @@ impl NetCdfBackend {
         // Restore the compression policy the store was created with so that
         // appended arrays reuse the same filter. Legacy stores without the
         // attribute fall back to the historical default.
-        let compression = match file.attribute(COMPRESSION_ATTR).map(|a| a.value()) {
+        let compression = match file.file().attribute(COMPRESSION_ATTR).map(|a| a.value()) {
             Some(Ok(netcdf::AttributeValue::Str(s))) => Compression::decode(&s),
             _ => Compression::default(),
         };
@@ -464,6 +501,7 @@ impl Inner {
     {
         let ts = self
             .file
+            .file()
             .group(ROOT_GROUP)
             .map_err(map_nc)?
             .ok_or_else(|| TimeSeriesError::IntegrityError(format!("missing {ROOT_GROUP}")))?;
@@ -479,6 +517,7 @@ impl Inner {
     {
         let mut ts = self
             .file
+            .file_mut()?
             .group_mut(ROOT_GROUP)
             .map_err(map_nc)?
             .ok_or_else(|| TimeSeriesError::IntegrityError(format!("missing {ROOT_GROUP}")))?;
@@ -1335,7 +1374,11 @@ impl StorageBackend for NetCdfBackend {
 
     fn flush(&mut self) -> Result<()> {
         let inner = self.inner.lock().unwrap();
-        inner.file.sync().map_err(map_nc)
+        match &inner.file {
+            // A read-only handle has nothing to flush.
+            NcFile::ReadOnly(_) => Ok(()),
+            NcFile::Writable(f) => f.sync().map_err(map_nc),
+        }
     }
 
     fn compression(&self) -> Compression {

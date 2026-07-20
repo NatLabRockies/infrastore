@@ -6,9 +6,9 @@
 
 use chrono::{Duration, TimeZone, Utc};
 use time_series_store_core::{
-    Compression, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesError, TypedArray, create_store, create_store_with_compression,
-    open_store,
+    Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
+    create_store_with_compression, open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -97,6 +97,111 @@ fn in_memory_persist_round_trip() {
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }
 
+/// Persisting an in-memory store must preserve each array's storage layout:
+/// dense forecasts and non-sequential series stay standalone (the forecast
+/// window read path rejects packed arrays), while `SingleTimeSeries` stays
+/// packed. Regression test: `persist_to` used to write every array packed,
+/// which broke `forecast_read` on the reopened store.
+#[test]
+fn in_memory_persist_preserves_forecast_window_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+    let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+
+    {
+        let mut store = create_store(None, true).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2030, 24, 100.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        // H=2, count=3, scalar. Row-major [s, k]; value = k*10 + s.
+        let det = Deterministic::new(
+            t0,
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            TypedArray::from_f64(vec![2, 3], &[0.0, 10.0, 20.0, 1.0, 11.0, 21.0]),
+            "fc",
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(det),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        let stamps = vec![t0, t0 + Duration::minutes(7), t0 + Duration::days(3)];
+        let ns = NonSequentialTimeSeries::new(
+            stamps,
+            TypedArray::from_f64(vec![3], &[1.5, 2.5, 3.5]),
+            "events",
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                3,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(ns),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store.persist_to(&path).unwrap();
+    }
+
+    let store = open_store(&path, false).unwrap();
+
+    // Forecast window reads work on the reopened store.
+    let mut reader = store
+        .build_forecast_reader(
+            ListFilter::new()
+                .time_series_type(TimeSeriesType::Deterministic)
+                .resolution(Duration::hours(1)),
+        )
+        .unwrap();
+    store
+        .forecast_read(&mut reader, t0 + Duration::hours(1))
+        .unwrap();
+    let window: Vec<f64> = reader
+        .entry_slot(0)
+        .window()
+        .chunks_exact(8)
+        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(window, vec![10.0, 11.0]);
+
+    // The static reader still sees the packed SingleTimeSeries.
+    let mut static_reader = store
+        .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+        .unwrap();
+    store
+        .static_read(&mut static_reader, t0 + Duration::hours(2))
+        .unwrap();
+    assert_eq!(static_reader.groups()[0].num_columns(), 1);
+
+    // Whole-series reads work for every type.
+    for owner in [1i64, 2, 3] {
+        let keys = store
+            .get_time_series_keys(owner, OwnerCategory::Component)
+            .unwrap();
+        assert_eq!(keys.len(), 1, "owner {owner}");
+        store.get_time_series(keys[0].identity(), None).unwrap();
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
 /// Every supported compression policy must round-trip transparently: data
 /// written under one filter reads back identically, and appends after reopen
 /// reuse the persisted policy.
@@ -166,6 +271,70 @@ fn compression_policies_round_trip() {
         }
         let report = store.verify_integrity().unwrap();
         assert!(report.ok(), "integrity errors: {:?}", report.errors);
+    }
+}
+
+/// A read-only open must not require write permission on either artifact:
+/// stores on read-only media (or shared, permission-locked deployments) must
+/// still be readable. Regression test: the NetCDF side used to open in append
+/// mode regardless of `read_only`, which failed on write-protected files.
+#[test]
+fn read_only_open_works_on_write_protected_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    // Write-protect both halves of the artifact, as on read-only media.
+    let mut protected = Vec::new();
+    for file in [path.clone(), path.with_file_name("store.nc.sqlite")] {
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+        protected.push(file);
+    }
+
+    {
+        let mut store = open_store(path.as_path(), true).unwrap();
+        let keys = store
+            .get_time_series_keys(1, OwnerCategory::Component)
+            .unwrap();
+        assert_eq!(keys.len(), 1);
+        let got = store.get_time_series(keys[0].identity(), None).unwrap();
+        assert_eq!(got.as_single().unwrap().length, 24);
+        // Writes through a read-only store are rejected, not attempted.
+        let err = store
+            .add_time_series(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, TimeSeriesError::ReadOnlyStore));
+    }
+
+    // Restore permissions so the tempdir can be cleaned up everywhere.
+    for file in protected {
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
     }
 }
 

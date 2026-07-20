@@ -16,8 +16,8 @@ pub use metadata::{ForecastSummaryRow, StaticSummaryRow};
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
 pub use store::{
-    AddRequest, BulkAdd, ForecastParameters, ListFilter, Store, TimeSeriesCounts,
-    TimeSeriesCountsDetailed,
+    AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
+    TimeSeriesCounts, TimeSeriesCountsDetailed,
 };
 pub use types::{
     array::{Dtype, TypedArray},

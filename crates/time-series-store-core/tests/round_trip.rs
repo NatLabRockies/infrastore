@@ -872,3 +872,73 @@ fn transform_reuses_the_sources_feature_set() {
         );
     }
 }
+
+/// Consistency is per resolution: SingleTimeSeries at different resolutions
+/// have legitimately different `(initial_timestamp, length)` grids (an hourly
+/// and a 30-minute profile over one span differ in length), so multiple
+/// resolutions coexist without an integrity error. Divergence *within* one
+/// resolution is still rejected, and the optional resolution filter scopes both
+/// the check and the returned rows.
+#[test]
+fn static_consistency_is_checked_per_resolution() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    let add = |store: &mut time_series_store_core::Store, owner: i64, res, len: usize| {
+        let values: Vec<f64> = (0..len).map(|i| owner as f64 * 100.0 + i as f64).collect();
+        let s = SingleTimeSeries::new(
+            initial,
+            res,
+            TypedArray::from_f64(vec![len], &values),
+            "load",
+        );
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(s),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+    };
+
+    assert!(store.check_static_consistency(None).unwrap().is_empty());
+
+    // Two resolutions, each internally consistent.
+    add(&mut store, 1, Duration::hours(1), 4);
+    add(&mut store, 2, Duration::hours(1), 4);
+    add(&mut store, 3, Duration::minutes(30), 8);
+    let grids = store.check_static_consistency(None).unwrap();
+    assert_eq!(grids.len(), 2);
+    for g in &grids {
+        assert_eq!(g.initial_timestamp, initial);
+        let expected_len = if g.resolution == Period::fixed(Duration::hours(1)) {
+            4
+        } else {
+            8
+        };
+        assert_eq!(g.length, expected_len, "resolution {}", g.resolution);
+    }
+
+    // Scoping to one resolution returns only that grid.
+    let hourly = store
+        .check_static_consistency(Some(Duration::hours(1).into()))
+        .unwrap();
+    assert_eq!(hourly.len(), 1);
+    assert_eq!(hourly[0].length, 4);
+
+    // Divergence within one resolution is an integrity error…
+    add(&mut store, 4, Duration::hours(1), 3);
+    let err = store.check_static_consistency(None).unwrap_err();
+    assert!(
+        matches!(&err, TimeSeriesError::IntegrityError(msg) if msg.contains("PT1H")),
+        "expected a per-resolution integrity error, got {err:?}"
+    );
+    // …but the other resolution still checks out on its own.
+    let ok = store
+        .check_static_consistency(Some(Duration::minutes(30).into()))
+        .unwrap();
+    assert_eq!(ok.len(), 1);
+    assert_eq!(ok[0].length, 8);
+}

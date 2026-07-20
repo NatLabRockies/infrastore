@@ -604,7 +604,7 @@ end
 
 @testset "check_static_consistency and filtered get_forecast_parameters" begin
     store = Store(in_memory=true)
-    @test check_static_consistency(store) === nothing
+    @test isempty(check_static_consistency(store))
 
     t0 = DateTime(2024, 1, 1)
     add_time_series!(store, 1, "Generator", Component,
@@ -612,12 +612,30 @@ end
     add_time_series!(store, 2, "Generator", Component,
         SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "a"))
     cs = check_static_consistency(store)
-    @test cs.initial_timestamp == t0
-    @test cs.length == 4
-    # A differing length makes the store inconsistent.
+    @test length(cs) == 1
+    @test cs[1].resolution == Millisecond(Hour(1))
+    @test cs[1].initial_timestamp == t0
+    @test cs[1].length == 4
+
+    # A second resolution is a distinct grid, not an inconsistency.
+    add_time_series!(store, 4, "Generator", Component,
+        SingleTimeSeries(t0, Minute(30), Float64[1, 2, 3, 4, 5, 6, 7, 8], "a"))
+    multi = check_static_consistency(store)
+    @test length(multi) == 2
+    @test Set(g.resolution for g in multi) ==
+          Set([Millisecond(Hour(1)), Millisecond(Minute(30))])
+    # Scoping to one resolution returns only that grid.
+    hourly = check_static_consistency(store; resolution=Hour(1))
+    @test length(hourly) == 1
+    @test hourly[1].length == 4
+
+    # A differing length at an existing resolution is an inconsistency.
     add_time_series!(store, 3, "Generator", Component,
         SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "a"))
     @test_throws TimeSeriesStore.IntegrityError check_static_consistency(store)
+    # The other resolution's grid still checks out on its own.
+    ok = check_static_consistency(store; resolution=Minute(30))
+    @test length(ok) == 1 && ok[1].length == 8
 
     # Filtered forecast parameters.
     fstore = Store(in_memory=true)

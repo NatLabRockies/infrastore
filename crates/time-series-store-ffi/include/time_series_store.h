@@ -334,21 +334,25 @@ int32_t ts_store_get_forecast_parameters(const struct TsStore *handle,
                                          int64_t *out_initial_ms);
 
 /**
- * Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.
- *
- * `out_present` is `false` when the store has no `SingleTimeSeries`; otherwise
- * `true` and `out_initial_ms` / `out_length` receive the shared pair. Returns an
- * error when more than one distinct pair exists (the catalog is inconsistent).
+ * Verify that, per resolution, all `SingleTimeSeries` share one
+ * `(initial_timestamp, length)` grid, and return the grids as a JSON array of
+ * `{"resolution": <ISO-8601>, "initial_timestamp_ms": <i64>, "length": <i64>}`
+ * objects, ordered by resolution (empty array = no `SingleTimeSeries`).
+ * `filter_resolution` (nullable ISO-8601 duration) scopes the check to one
+ * resolution. Errors when any single resolution holds more than one distinct
+ * pair. Probe-then-fetch (see `ts_store_list_keys`).
  *
  * # Safety
  *
- * `handle` must be a live store handle. Each out pointer must be valid for one
- * write.
+ * `handle` must be a live store handle. `filter_resolution` must be null or a
+ * valid NUL-terminated string. `out_len` must be writable; `buf` must be null
+ * or valid for `cap` bytes.
  */
 int32_t ts_store_check_static_consistency(const struct TsStore *handle,
-                                          bool *out_present,
-                                          int64_t *out_initial_ms,
-                                          int64_t *out_length);
+                                          const char *filter_resolution,
+                                          char *buf,
+                                          uint64_t cap,
+                                          uint64_t *out_len);
 
 /**
  * List the distinct resolutions present in the store as a JSON array of

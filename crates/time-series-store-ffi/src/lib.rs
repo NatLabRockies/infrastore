@@ -1072,50 +1072,57 @@ pub unsafe extern "C" fn ts_store_get_forecast_parameters(
     }
 }
 
-/// Verify all `SingleTimeSeries` share one `(initial_timestamp, length)`.
-///
-/// `out_present` is `false` when the store has no `SingleTimeSeries`; otherwise
-/// `true` and `out_initial_ms` / `out_length` receive the shared pair. Returns an
-/// error when more than one distinct pair exists (the catalog is inconsistent).
+/// Verify that, per resolution, all `SingleTimeSeries` share one
+/// `(initial_timestamp, length)` grid, and return the grids as a JSON array of
+/// `{"resolution": <ISO-8601>, "initial_timestamp_ms": <i64>, "length": <i64>}`
+/// objects, ordered by resolution (empty array = no `SingleTimeSeries`).
+/// `filter_resolution` (nullable ISO-8601 duration) scopes the check to one
+/// resolution. Errors when any single resolution holds more than one distinct
+/// pair. Probe-then-fetch (see `ts_store_list_keys`).
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. Each out pointer must be valid for one
-/// write.
+/// `handle` must be a live store handle. `filter_resolution` must be null or a
+/// valid NUL-terminated string. `out_len` must be writable; `buf` must be null
+/// or valid for `cap` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ts_store_check_static_consistency(
     handle: *const TsStoreHandle,
-    out_present: *mut bool,
-    out_initial_ms: *mut i64,
-    out_length: *mut i64,
+    filter_resolution: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if out_present.is_null() || out_initial_ms.is_null() || out_length.is_null() {
+    if out_len.is_null() {
+        set_error("out_len is null");
         return TS_ERR_NULL_POINTER;
     }
-    match store.inner.check_static_consistency() {
-        Ok(None) => {
-            unsafe {
-                *out_present = false;
-                *out_initial_ms = 0;
-                *out_length = 0;
-            }
-            TS_OK
-        }
-        Ok(Some((ts, len))) => {
-            unsafe {
-                *out_present = true;
-                *out_initial_ms = datetime_to_unix_ms(ts).unwrap_or(0);
-                *out_length = len as i64;
-            }
-            TS_OK
-        }
-        Err(e) => map_core_error(e),
-    }
+    let resolution = match unsafe { cstr_to_optional_period(filter_resolution) } {
+        Ok(r) => r,
+        Err(c) => return c,
+    };
+    let grids = match store.inner.check_static_consistency(resolution) {
+        Ok(g) => g,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = grids
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "resolution": g.resolution.to_iso8601(),
+                "initial_timestamp_ms": datetime_to_unix_ms(g.initial_timestamp).unwrap_or(0),
+                "length": g.length as i64,
+            })
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
 }
 
 /// List the distinct resolutions present in the store as a JSON array of

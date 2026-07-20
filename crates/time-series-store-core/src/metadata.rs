@@ -600,15 +600,22 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// The identity of every association of `ts_type`, read straight from the
+    /// The identity of every association of `ts_type` — paired with its stored
+    /// `horizon` (`None` for non-forecast rows) — read straight from the
     /// associations table with no feature hydration.
     ///
     /// `features_hash` is a stored column, so a caller that only needs to test
     /// identity ("does this series already exist?") can skip both the features
-    /// join and the SHA-256 recomputation that [`Self::list`] would do.
-    pub fn list_identities(&self, ts_type: TimeSeriesType) -> Result<Vec<AssociationIdentity>> {
+    /// join and the SHA-256 recomputation that [`Self::list`] would do. The
+    /// horizon rides along because it is *not* part of the identity: a caller
+    /// deciding whether an existing row satisfies a request (e.g. the DST
+    /// transform's idempotency check) must compare it separately.
+    pub fn list_identities(
+        &self,
+        ts_type: TimeSeriesType,
+    ) -> Result<Vec<(AssociationIdentity, Option<Period>)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT owner_id, owner_category, name, resolution, interval, features_hash
+            "SELECT owner_id, owner_category, name, resolution, interval, features_hash, horizon
              FROM time_series_associations WHERE time_series_type = ?1",
         )?;
         let rows = stmt
@@ -620,25 +627,32 @@ impl MetadataStore {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         rows.into_iter()
-            .map(|(owner_id, cat, name, resolution, interval, hash_blob)| {
-                Ok(AssociationIdentity {
-                    owner_id,
-                    owner_category: OwnerCategory::parse(&cat).ok_or_else(|| {
-                        TimeSeriesError::IntegrityError(format!("unknown owner_category: {cat}"))
-                    })?,
-                    name,
-                    resolution,
-                    interval,
-                    features_hash: hash_blob.as_slice().try_into().map_err(|_| {
-                        TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
-                    })?,
-                })
-            })
+            .map(
+                |(owner_id, cat, name, resolution, interval, hash_blob, horizon)| {
+                    let identity = AssociationIdentity {
+                        owner_id,
+                        owner_category: OwnerCategory::parse(&cat).ok_or_else(|| {
+                            TimeSeriesError::IntegrityError(format!(
+                                "unknown owner_category: {cat}"
+                            ))
+                        })?,
+                        name,
+                        resolution,
+                        interval,
+                        features_hash: hash_blob.as_slice().try_into().map_err(|_| {
+                            TimeSeriesError::IntegrityError("features_hash is not 32 bytes".into())
+                        })?,
+                    };
+                    let horizon = horizon.map(|s| iso_to_period(&s)).transpose()?;
+                    Ok((identity, horizon))
+                },
+            )
             .collect()
     }
 
@@ -903,26 +917,42 @@ impl MetadataStore {
         Ok(out)
     }
 
-    /// Distinct `(initial_timestamp, length)` pairs across all `SingleTimeSeries`
-    /// associations. Used to verify the store holds a single consistent static
-    /// horizon. One `DISTINCT` query.
-    pub fn distinct_single_initial_and_length(&self) -> Result<Vec<(DateTime<Utc>, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT initial_timestamp, length FROM time_series_associations
-             WHERE time_series_type = ?1",
+    /// Distinct `(resolution, initial_timestamp, length)` triples across the
+    /// `SingleTimeSeries` associations, ordered by resolution (ISO-8601 text
+    /// order, so equal resolutions are adjacent). Used to verify that each
+    /// resolution's series share a single static grid; `resolution` optionally
+    /// restricts the scan to one resolution. One `DISTINCT` query.
+    pub fn distinct_single_grids(
+        &self,
+        resolution: Option<Period>,
+    ) -> Result<Vec<(Period, DateTime<Utc>, i64)>> {
+        let res_iso = resolution.map(period_to_iso);
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT resolution, initial_timestamp, length
+             FROM time_series_associations
+             WHERE time_series_type = ?1 AND (?2 IS NULL OR resolution = ?2)
+             ORDER BY resolution",
         )?;
-        let rows = stmt.query_map(params![TimeSeriesType::SingleTimeSeries.as_str()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![TimeSeriesType::SingleTimeSeries.as_str(), res_iso],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
-            let (ts_str, len) = row?;
+            let (res_str, ts_str, len) = row?;
+            let res = iso_to_period(&res_str)?;
             let ts = DateTime::parse_from_rfc3339(&ts_str)
                 .map_err(|e| {
                     TimeSeriesError::IntegrityError(format!("bad initial_timestamp: {e}"))
                 })?
                 .with_timezone(&Utc);
-            out.push((ts, len));
+            out.push((res, ts, len));
         }
         Ok(out)
     }

@@ -1516,19 +1516,37 @@ function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period
 end
 
 """
-    check_static_consistency(store) -> Union{Nothing, NamedTuple}
+    check_static_consistency(store; resolution=nothing) -> Vector{NamedTuple}
 
-Return `(initial_timestamp, length)` shared by every `SingleTimeSeries`, or
-`nothing` when there are none. Throws if the stored `SingleTimeSeries` disagree on
-their `(initial_timestamp, length)`. One catalog query.
+Verify that, per resolution, every `SingleTimeSeries` shares one
+`(initial_timestamp, length)` grid, and return one
+`(resolution, initial_timestamp, length)` NamedTuple per resolution present
+(empty vector when there are none), ordered by resolution. Series at different
+resolutions legitimately have different grids, so consistency is only required
+within a resolution; pass `resolution` (a `Period`) to scope the check to one
+grid. Throws `IntegrityError` when the `SingleTimeSeries` at a single
+resolution disagree on their `(initial_timestamp, length)`. One catalog query.
 """
-function check_static_consistency(store::Store)
-    present = Ref{Bool}(false); initial_ms = Ref{Int64}(0); len = Ref{Int64}(0)
+function check_static_consistency(store::Store; resolution::Union{Nothing, Period} = nothing)
+    fres = _period_to_cstr(resolution)
+    out_len = Ref{UInt64}(0)
     code = ccall((:ts_store_check_static_consistency, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Bool}, Ref{Int64}, Ref{Int64}),
-                 store.handle, present, initial_ms, len)
+                 (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, fres, C_NULL, UInt64(0), out_len)
     _check(code)
-    return present[] ? (initial_timestamp=_from_unix_ms(initial_ms[]), length=Int(len[])) : nothing
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall((:ts_store_check_static_consistency, lib_path()), Int32,
+                 (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+                 store.handle, fres, buf, UInt64(length(buf)), out_len)
+    _check(code)
+    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    return [
+        (
+            resolution=_iso_to_period(String(r["resolution"])),
+            initial_timestamp=_from_unix_ms(Int64(r["initial_timestamp_ms"])),
+            length=Int(r["length"]),
+        ) for r in rows
+    ]
 end
 
 """

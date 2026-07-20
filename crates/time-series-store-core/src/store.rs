@@ -122,6 +122,16 @@ pub struct TimeSeriesCountsDetailed {
     pub forecast_count: i64,
 }
 
+/// One resolution's shared static grid, as reported by
+/// [`Store::check_static_consistency`]: every `SingleTimeSeries` at
+/// `resolution` shares this `(initial_timestamp, length)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticConsistency {
+    pub resolution: Period,
+    pub initial_timestamp: chrono::DateTime<chrono::Utc>,
+    pub length: usize,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ForecastParameters {
     pub horizon: Option<Period>,
@@ -185,10 +195,11 @@ impl Store {
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
         let metadata = MetadataStore::open_path(&sqlite_path, read_only)?;
-        // For v0, `read_only` only locks down the metadata side. The NetCDF
-        // backend opens in append mode regardless; write attempts are rejected
-        // earlier in the `Store::add_*` / `remove_*` path.
-        let backend = NetCdfBackend::open(path)?;
+        // A read-only store opens both halves read-only: the NetCDF side needs
+        // no write permission (works on read-only media, shared HDF5 lock) and
+        // its write paths error with `ReadOnlyStore` as a backstop behind the
+        // `Store::add_*` / `remove_*` guards.
+        let backend = NetCdfBackend::open(path, read_only)?;
         Ok(Self {
             backend: Box::new(backend),
             metadata,
@@ -1187,16 +1198,21 @@ impl Store {
         // Series that already have a DeterministicSingleTimeSeries view *at this
         // interval* are skipped so the transform is idempotent (e.g. re-deriving
         // one series when others were transformed earlier, as during a component
-        // copy). The dedup key is the full identity: owner_id/owner_category plus
-        // name/resolution/interval/features. Interval is part of the identity, so
-        // re-deriving the same series at a different interval is a distinct view.
+        // copy) — but only when the existing view also has this `horizon`. The
+        // identity (owner_id/owner_category plus name/resolution/interval/
+        // features) does not include the horizon, so a same-identity view with a
+        // *different* horizon cannot coexist with the requested one; silently
+        // skipping it would leave the old horizon serving reads while reporting
+        // success, so that case is an error instead. Interval is part of the
+        // identity, so re-deriving the same series at a different interval is a
+        // distinct view.
         //
         // Both dedup sets are read via `list_identities`, which returns the
         // stored `features_hash` column directly: the identity test needs the
         // hash, not the features themselves, so this skips hydrating (and
         // re-hashing) the features of every forecast already in the store.
         let interval_iso = interval.to_iso8601();
-        let existing_dst: HashSet<AssociationIdentity> = self
+        let existing_dst: HashMap<AssociationIdentity, Option<Period>> = self
             .metadata
             .list_identities(TimeSeriesType::DeterministicSingleTimeSeries)?
             .into_iter()
@@ -1210,7 +1226,7 @@ impl Store {
             .metadata
             .list_identities(TimeSeriesType::Deterministic)?
             .into_iter()
-            .map(SeriesFamily::from)
+            .map(|(identity, _horizon)| SeriesFamily::from(identity))
             .collect();
 
         // Build every DST metadata row up front so a single ineligible series
@@ -1243,8 +1259,27 @@ impl Store {
                 interval: Some(interval_iso.clone()),
                 features_hash: src_features_hash,
             };
-            if existing_dst.contains(&src_key) {
-                continue;
+            if let Some(existing_horizon) = existing_dst.get(&src_key) {
+                if *existing_horizon == Some(horizon) {
+                    // Same identity, same horizon: already derived; idempotent.
+                    continue;
+                }
+                // Same identity but a different horizon: the two views cannot
+                // coexist (horizon is not part of the identity), and silently
+                // keeping the old one would misreport success.
+                let describe = |h: &Option<Period>| match h {
+                    Some(h) => h.to_iso8601(),
+                    None => "-".to_string(),
+                };
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot derive DeterministicSingleTimeSeries for '{}' at interval {}: \
+                     a view with horizon {} already exists (requested {}); remove it first \
+                     or transform at a different interval",
+                    src.name,
+                    interval.to_iso8601(),
+                    describe(existing_horizon),
+                    horizon.to_iso8601(),
+                )));
             }
             let resolution = required_resolution(src, "transform_single_time_series")?;
             let total_len = src.length.ok_or_else(|| {
@@ -1345,24 +1380,47 @@ impl Store {
         Ok(ForecastParameters::default())
     }
 
-    /// Verify that all `SingleTimeSeries` share one `(initial_timestamp, length)`
-    /// pair. Returns `None` when there are no `SingleTimeSeries`, `Some(pair)`
-    /// when they agree, or [`TimeSeriesError::IntegrityError`] when more than one
-    /// distinct pair is present. One `DISTINCT` query.
+    /// Verify that, per resolution, all `SingleTimeSeries` share one
+    /// `(initial_timestamp, length)` grid. Series at *different* resolutions
+    /// legitimately have different grids (an hourly and a 5-minute profile over
+    /// one year differ in length), so consistency is only required within a
+    /// resolution.
+    ///
+    /// Returns one [`StaticConsistency`] row per resolution present (empty when
+    /// the store has no `SingleTimeSeries`), ordered by resolution. `resolution`
+    /// optionally scopes the check (and the returned rows) to one grid. Errors
+    /// with [`TimeSeriesError::IntegrityError`] when any single resolution holds
+    /// more than one distinct `(initial_timestamp, length)` pair. One `DISTINCT`
+    /// query.
     pub fn check_static_consistency(
         &self,
-    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, usize)>> {
-        let pairs = self.metadata.distinct_single_initial_and_length()?;
-        match pairs.len() {
-            0 => Ok(None),
-            1 => {
-                let (ts, len) = pairs[0];
-                Ok(Some((ts, len as usize)))
+        resolution: Option<Period>,
+    ) -> Result<Vec<StaticConsistency>> {
+        let rows = self.metadata.distinct_single_grids(resolution)?;
+        let mut out: Vec<StaticConsistency> = Vec::with_capacity(rows.len());
+        for (res, ts, len) in rows {
+            // Rows arrive ordered by resolution, so a divergent grid shows up
+            // as two adjacent rows with the same resolution.
+            if let Some(prev) = out.last()
+                && prev.resolution == res
+            {
+                return Err(TimeSeriesError::IntegrityError(format!(
+                    "SingleTimeSeries at resolution {} have more than one \
+                     (initial_timestamp, length) pair: ({}, {}) vs ({}, {})",
+                    res.to_iso8601(),
+                    prev.initial_timestamp,
+                    prev.length,
+                    ts,
+                    len,
+                )));
             }
-            _ => Err(TimeSeriesError::IntegrityError(format!(
-                "SingleTimeSeries have more than one (initial_timestamp, length) set: {pairs:?}"
-            ))),
+            out.push(StaticConsistency {
+                resolution: res,
+                initial_timestamp: ts,
+                length: len as usize,
+            });
         }
+        Ok(out)
     }
 
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts> {
@@ -1494,19 +1552,32 @@ impl Store {
         let _ = std::fs::remove_file(&sqlite_path);
         {
             let mut nc = NetCdfBackend::create(path, self.compression())?;
-            let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            // Plan each distinct array's layout before writing: packed is only
+            // valid for arrays that every referencing association reads as a
+            // series along axis 0 (SingleTimeSeries and its derived DST views).
+            // Dense forecasts and non-sequential series must stay standalone —
+            // the forecast window read path rejects packed arrays.
+            let mut plans: HashMap<[u8; 32], (bool, Period)> = HashMap::new();
             for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
-                if !seen.insert(hash) {
-                    continue;
-                }
-                let array = self.backend.get_array(&hash)?;
-                // The resolution only groups the on-disk layout; reads locate arrays
-                // by content hash, so the fallback for resolution-less (non-sequential)
-                // series is harmless.
+                let packed = matches!(
+                    key.time_series_type(),
+                    TimeSeriesType::SingleTimeSeries
+                        | TimeSeriesType::DeterministicSingleTimeSeries
+                );
+                // The resolution only groups the packed on-disk layout; reads
+                // locate arrays by content hash, so the fallback for
+                // resolution-less (non-sequential) series is harmless.
                 let resolution = key
                     .resolution()
                     .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
-                nc.put_array(&hash, &array, resolution, true)?;
+                plans
+                    .entry(hash)
+                    .and_modify(|(p, _)| *p &= packed)
+                    .or_insert((packed, resolution));
+            }
+            for (hash, (packed, resolution)) in &plans {
+                let array = self.backend.get_array(hash)?;
+                nc.put_array(hash, &array, *resolution, *packed)?;
             }
             nc.flush()?;
         }
