@@ -13,8 +13,11 @@ use crate::types::period::Period;
 pub mod memory;
 pub mod netcdf;
 
-pub use memory::MemoryBackend;
-pub use netcdf::NetCdfBackend;
+// The concrete backends and the trait seam are internal: the public surface is
+// `Store`, which owns a boxed backend. (The `netcdf` module stays `pub` so
+// white-box tests can reach `DEFAULT_COLS_PER_DATASET`.)
+pub(crate) use memory::MemoryBackend;
+pub(crate) use netcdf::NetCdfBackend;
 
 /// Compression filter applied to NetCDF4 data variables when they are created.
 ///
@@ -119,7 +122,7 @@ impl IntegrityReport {
 /// Each array is identified by its 32-byte content hash. Implementations are
 /// responsible for any deduplication, slot management, or compaction; the
 /// `Store` layer above drives them through this trait.
-pub trait StorageBackend: Send + Sync {
+pub(crate) trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
     /// data is reused for content addressing) and `false` is returned; a write
     /// of new content returns `true`. The array's dtype + shape travel with it;

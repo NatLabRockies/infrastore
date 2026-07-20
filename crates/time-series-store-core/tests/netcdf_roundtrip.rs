@@ -831,7 +831,7 @@ fn golden_hash_pin() {
     // Pin the exact SHA-256 of a fixed input. Any change in the canonical
     // hash domain that perturbs this value is a format-breaking change and
     // must bump DATA_FORMAT_VERSION.
-    use time_series_store_core::hash::{array_hash, hash_hex};
+    use time_series_store_core::{array_hash, hash_hex};
     let data = TypedArray::from_f64(vec![4], &[0.0, 1.0, 2.0, 3.0]);
     let h = array_hash(&data);
     let hex = hash_hex(&h);

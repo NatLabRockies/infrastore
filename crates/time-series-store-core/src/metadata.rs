@@ -255,10 +255,6 @@ impl MetadataStore {
         Ok(())
     }
 
-    pub fn read_only(&self) -> bool {
-        self.read_only
-    }
-
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -556,18 +552,6 @@ impl MetadataStore {
         Ok(hashes)
     }
 
-    /// Count of distinct data_hashes that still have at least one association.
-    /// Used by the store layer to decide whether removing an association also
-    /// removes the underlying array.
-    pub fn references_to(&self, data_hash: &[u8; 32]) -> Result<i64> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1",
-            params![data_hash.as_slice()],
-            |row| row.get(0),
-        )?;
-        Ok(count)
-    }
-
     pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -774,15 +758,6 @@ impl MetadataStore {
             .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows.into_iter().map(|s| iso_to_period(&s)).collect()
-    }
-
-    pub fn count(&self) -> Result<i64> {
-        let n: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM time_series_associations", [], |r| {
-                    r.get(0)
-                })?;
-        Ok(n)
     }
 
     pub fn count_by_type(&self, ts_type: TimeSeriesType) -> Result<i64> {
@@ -1037,10 +1012,6 @@ impl MetadataStore {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
-    }
-
-    pub fn has_match(&self, filter: &MetadataFilter) -> Result<bool> {
-        Ok(!self.list(filter)?.is_empty())
     }
 }
 

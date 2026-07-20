@@ -15,7 +15,7 @@ use super::{CompactionReport, IntegrityReport, StorageBackend};
 /// "tombstoned" set so the slot-reclamation behaviour can be exercised against
 /// the same surface as the NetCDF backend.
 #[derive(Debug, Default)]
-pub struct MemoryBackend {
+pub(crate) struct MemoryBackend {
     arrays: HashMap<[u8; 32], TypedArray>,
     tombstoned: HashSet<[u8; 32]>,
 }

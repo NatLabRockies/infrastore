@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 use netcdf::{Extents, FileMut, Group, GroupMut};
@@ -260,7 +260,7 @@ fn add_typed_variable(
     Ok(())
 }
 
-pub struct NetCdfBackend {
+pub(crate) struct NetCdfBackend {
     inner: Mutex<Inner>,
 }
 
@@ -295,7 +295,6 @@ impl NcFile {
 
 struct Inner {
     file: NcFile,
-    path: PathBuf,
     datasets: HashMap<String, DatasetState>,
     /// Packed dataset names per group key, kept sorted by name so writers
     /// prefer the earliest spill with a free slot. Avoids scanning every
@@ -320,7 +319,6 @@ impl NetCdfBackend {
         Ok(Self {
             inner: Mutex::new(Inner {
                 file: NcFile::Writable(file),
-                path: path.to_path_buf(),
                 datasets: HashMap::new(),
                 dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
@@ -370,7 +368,6 @@ impl NetCdfBackend {
         let mut backend = Self {
             inner: Mutex::new(Inner {
                 file,
-                path: path.to_path_buf(),
                 datasets: HashMap::new(),
                 dataset_groups: HashMap::new(),
                 standalone_vars: HashSet::new(),
@@ -380,11 +377,6 @@ impl NetCdfBackend {
         };
         backend.rebuild_index()?;
         Ok(backend)
-    }
-
-    pub fn path(&self) -> PathBuf {
-        let inner = self.inner.lock().expect("mutex poisoned");
-        inner.path.clone()
     }
 
     pub fn compression(&self) -> Compression {

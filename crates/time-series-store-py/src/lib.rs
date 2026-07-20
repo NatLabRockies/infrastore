@@ -1072,7 +1072,7 @@ impl PyStore {
             d.set_item("owner_category", m.owner_category.as_str())?;
             d.set_item("time_series_type", m.time_series_type.as_str())?;
             d.set_item("name", &m.name)?;
-            d.set_item("data_hash", core_lib::hash::hash_hex(&m.data_hash))?;
+            d.set_item("data_hash", core_lib::hash_hex(&m.data_hash))?;
             d.set_item("length", m.length)?;
             d.set_item("resolution", m.resolution.map(|p| p.to_iso8601()))?;
             d.set_item(
@@ -1148,7 +1148,7 @@ impl PyStore {
         let mut out = Vec::with_capacity(groups.len());
         for (hash, keys) in groups {
             let d = PyDict::new(py);
-            d.set_item("data_hash", core_lib::hash::hash_hex(&hash))?;
+            d.set_item("data_hash", core_lib::hash_hex(&hash))?;
             d.set_item("keys", keys)?;
             out.push(d);
         }

@@ -3,15 +3,24 @@
 //! Static time-series types are available through [`TimeSeriesData`].
 
 pub mod error;
-pub mod hash;
-pub mod metadata;
 pub mod reader;
 pub mod storage;
 pub mod store;
 pub mod types;
 pub mod version;
 
+// Implementation-detail modules. The intended public surface is the root
+// re-exports below; these modules hold the catalog store and hashing internals
+// (`MetadataStore`, `MetadataFilter`, the association identity/family types, the
+// feature-set cache, the transaction-taking free functions, and the hashing
+// helpers), which are not part of the supported API.
+pub(crate) mod hash;
+pub(crate) mod metadata;
+
 pub use error::{Result, TimeSeriesError};
+// The two hashing utilities a binding genuinely needs: `array_hash` to
+// content-address an array and `hash_hex` to render a 32-byte hash as hex.
+pub use hash::{array_hash, hash_hex};
 pub use metadata::{ForecastSummaryRow, StaticSummaryRow};
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
