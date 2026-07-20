@@ -46,6 +46,11 @@ def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
   `InvalidParameterError`.
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
 
+The store is also a context manager: `with TimeSeriesStore.create(...) as store:` closes it on exit.
+`store.close()` drops the underlying handle and releases its files; subsequent operations raise
+`TimeSeriesError` (it is idempotent). `repr(store)` shows the path (or `in-memory`), the read-only
+flag, and `closed` once closed.
+
 ### Property
 
 ```python

@@ -955,7 +955,30 @@ impl PyForecastReader {
 
 #[pyclass(name = "TimeSeriesStore", module = "time_series_store", unsendable)]
 pub struct PyStore {
-    inner: core_lib::Store,
+    /// `None` once `close()` (or `__exit__`) has dropped the store; every store
+    /// operation then raises via [`PyStore::store`] / [`PyStore::store_mut`].
+    inner: Option<core_lib::Store>,
+    /// Whether the store was opened read-only (cached for `__repr__`/`read_only`
+    /// so they work even after `close()`).
+    read_only: bool,
+    /// Human-readable source for `__repr__`: the path, or `"in-memory"`.
+    descr: String,
+}
+
+impl PyStore {
+    /// Borrow the live store, or raise if it has been closed.
+    fn store(&self) -> PyResult<&core_lib::Store> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| TimeSeriesError::new_err("store is closed"))
+    }
+
+    /// Mutably borrow the live store, or raise if it has been closed.
+    fn store_mut(&mut self) -> PyResult<&mut core_lib::Store> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| TimeSeriesError::new_err("store is closed"))
+    }
 }
 
 #[pymethods]
@@ -979,10 +1002,18 @@ impl PyStore {
         shuffle: bool,
     ) -> PyResult<Self> {
         let compression = parse_compression(compression, compression_level, shuffle)?;
+        let descr = match &path {
+            Some(p) if !in_memory => p.display().to_string(),
+            _ => "in-memory".to_string(),
+        };
         let store =
             core_lib::create_store_with_compression(path.as_deref(), in_memory, compression)
                 .map_err(map_err)?;
-        Ok(Self { inner: store })
+        Ok(Self {
+            inner: Some(store),
+            read_only: false,
+            descr,
+        })
     }
 
     /// Open an existing store from disk. `read_only=True` blocks all writes.
@@ -993,13 +1024,51 @@ impl PyStore {
         path: PathBuf,
         read_only: bool,
     ) -> PyResult<Self> {
+        let descr = path.display().to_string();
         let store = core_lib::open_store(&path, read_only).map_err(map_err)?;
-        Ok(Self { inner: store })
+        Ok(Self {
+            inner: Some(store),
+            read_only,
+            descr,
+        })
     }
 
     #[getter]
     fn read_only(&self) -> bool {
-        self.inner.read_only()
+        self.read_only
+    }
+
+    /// Close the store, dropping the underlying handle and flushing/releasing
+    /// its files. Subsequent store operations raise `TimeSeriesError`. Idempotent
+    /// (a second `close()` is a no-op).
+    fn close(&mut self) {
+        self.inner = None;
+    }
+
+    /// Context-manager entry: returns the store itself.
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Context-manager exit: closes the store. Does not suppress exceptions.
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_value: Option<Py<PyAny>>,
+        _traceback: Option<Py<PyAny>>,
+    ) -> bool {
+        self.close();
+        false
+    }
+
+    fn __repr__(&self) -> String {
+        let state = if self.inner.is_none() { ", closed" } else { "" };
+        let read_only = if self.read_only { "True" } else { "False" };
+        format!(
+            "TimeSeriesStore({}, read_only={}{})",
+            self.descr, read_only, state
+        )
     }
 
     /// Add a time series. The association `name` comes from the time series
@@ -1031,7 +1100,7 @@ impl PyStore {
         if let Some(lt) = logical_type {
             request = request.with_logical_type(lt);
         }
-        let key = self.inner.add(request).map_err(map_err)?;
+        let key = self.store_mut()?.add(request).map_err(map_err)?;
         Ok(PyTimeSeriesKey {
             inner: key.identity().clone(),
         })
@@ -1088,7 +1157,10 @@ impl PyStore {
                 logical_type,
             });
         }
-        let keys = self.inner.add_time_series_bulk(requests).map_err(map_err)?;
+        let keys = self
+            .store_mut()?
+            .add_time_series_bulk(requests)
+            .map_err(map_err)?;
         Ok(keys
             .into_iter()
             .map(|k| PyTimeSeriesKey {
@@ -1116,7 +1188,7 @@ impl PyStore {
             Some(r) => Some(pyany_to_period(&r)?),
             None => None,
         };
-        self.inner
+        self.store_mut()?
             .transform_single_time_series(
                 horizon,
                 interval,
@@ -1127,7 +1199,9 @@ impl PyStore {
     }
 
     fn remove_time_series(&mut self, key: &PyTimeSeriesKey) -> PyResult<()> {
-        self.inner.remove_time_series(&key.inner).map_err(map_err)
+        self.store_mut()?
+            .remove_time_series(&key.inner)
+            .map_err(map_err)
     }
 
     /// Remove every time series for the owner `(owner_id, owner_category)`, or
@@ -1148,7 +1222,7 @@ impl PyStore {
                 ));
             }
         };
-        self.inner.clear_time_series(owner).map_err(map_err)
+        self.store_mut()?.clear_time_series(owner).map_err(map_err)
     }
 
     /// Reassign every time series owned by `(old_owner, owner_category)` to
@@ -1159,7 +1233,7 @@ impl PyStore {
         new_owner: i64,
         owner_category: PyOwnerCategory,
     ) -> PyResult<usize> {
-        self.inner
+        self.store_mut()?
             .replace_owner(old_owner, new_owner, owner_category.into())
             .map_err(map_err)
     }
@@ -1174,7 +1248,7 @@ impl PyStore {
         time_range: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> PyResult<Py<PyAny>> {
         let data = self
-            .inner
+            .store()?
             .get_time_series(&key.inner, time_range)
             .map_err(map_err)?;
         time_series_data_to_py(py, data)
@@ -1195,7 +1269,7 @@ impl PyStore {
     ) -> PyResult<Vec<Py<PyAny>>> {
         let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
         let datas = self
-            .inner
+            .store()?
             .bulk_read_range(&identities, time_range)
             .map_err(map_err)?;
         datas
@@ -1208,7 +1282,7 @@ impl PyStore {
     /// nothing fails the whole batch. Returns the number of associations removed.
     fn remove_time_series_bulk(&mut self, keys: Vec<PyTimeSeriesKey>) -> PyResult<usize> {
         let identities: Vec<&core_lib::KeyIdentity> = keys.iter().map(|k| &k.inner).collect();
-        self.inner
+        self.store_mut()?
             .remove_time_series_bulk(&identities)
             .map_err(map_err)
     }
@@ -1221,7 +1295,7 @@ impl PyStore {
         new_name: &str,
     ) -> PyResult<PyTimeSeriesKey> {
         let k = self
-            .inner
+            .store_mut()?
             .rename_time_series(&key.inner, new_name)
             .map_err(map_err)?;
         Ok(PyTimeSeriesKey {
@@ -1261,7 +1335,7 @@ impl PyStore {
             interval,
             features,
         )?;
-        let metas = self.inner.list_time_series(filter).map_err(map_err)?;
+        let metas = self.store()?.list_time_series(filter).map_err(map_err)?;
         let mut out = Vec::with_capacity(metas.len());
         for m in &metas {
             out.push(metadata_to_dict(py, m)?);
@@ -1301,7 +1375,7 @@ impl PyStore {
             interval,
             features,
         )?;
-        let rows = self.inner.list_keys_with_hash(filter).map_err(map_err)?;
+        let rows = self.store()?.list_keys_with_hash(filter).map_err(map_err)?;
         let mut groups: BTreeMap<[u8; 32], Vec<Py<PyTimeSeriesKey>>> = BTreeMap::new();
         for (key, hash) in rows {
             let pk = Py::new(
@@ -1328,7 +1402,7 @@ impl PyStore {
         owner_category: PyOwnerCategory,
     ) -> PyResult<Vec<PyTimeSeriesKey>> {
         Ok(self
-            .inner
+            .store()?
             .get_time_series_keys(owner_id, owner_category.into())
             .map_err(map_err)?
             .into_iter()
@@ -1339,7 +1413,7 @@ impl PyStore {
     }
 
     fn has_time_series(&self, key: &PyTimeSeriesKey) -> PyResult<bool> {
-        self.inner.has_time_series(&key.inner).map_err(map_err)
+        self.store()?.has_time_series(&key.inner).map_err(map_err)
     }
 
     #[pyo3(signature = (time_series_type=None))]
@@ -1350,7 +1424,7 @@ impl PyStore {
     ) -> PyResult<Vec<String>> {
         let _ = py;
         Ok(self
-            .inner
+            .store()?
             .get_resolutions(time_series_type.map(Into::into))
             .map_err(map_err)?
             .into_iter()
@@ -1378,7 +1452,7 @@ impl PyStore {
             None => None,
         };
         let p = self
-            .inner
+            .store()?
             .get_forecast_parameters(resolution, interval)
             .map_err(map_err)?;
         let d = PyDict::new(py);
@@ -1400,7 +1474,7 @@ impl PyStore {
     /// stores report `"none"`.
     fn get_compression<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        match self.inner.compression() {
+        match self.store()?.compression() {
             core_lib::Compression::None => {
                 d.set_item("compression", "none")?;
                 d.set_item("level", 0u8)?;
@@ -1416,7 +1490,7 @@ impl PyStore {
     }
 
     fn get_time_series_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let counts = self.inner.get_time_series_counts().map_err(map_err)?;
+        let counts = self.store()?.get_time_series_counts().map_err(map_err)?;
         let d = PyDict::new(py);
         d.set_item(
             "components_with_time_series",
@@ -1428,7 +1502,7 @@ impl PyStore {
     }
 
     fn compact<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let r = self.inner.compact().map_err(map_err)?;
+        let r = self.store_mut()?.compact().map_err(map_err)?;
         let d = PyDict::new(py);
         d.set_item("slots_reclaimed", r.slots_reclaimed)?;
         d.set_item("datasets_dropped", r.datasets_dropped)?;
@@ -1437,11 +1511,11 @@ impl PyStore {
     }
 
     fn verify_integrity(&self) -> PyResult<Vec<String>> {
-        Ok(self.inner.verify_integrity().map_err(map_err)?.errors)
+        Ok(self.store()?.verify_integrity().map_err(map_err)?.errors)
     }
 
     fn flush(&mut self) -> PyResult<()> {
-        self.inner.flush().map_err(map_err)
+        self.store_mut()?.flush().map_err(map_err)
     }
 
     // ---- Readers ----------------------------------------------------------
@@ -1470,14 +1544,14 @@ impl PyStore {
             None,
             features,
         )?;
-        let reader = self.inner.build_static_reader(filter).map_err(map_err)?;
+        let reader = self.store()?.build_static_reader(filter).map_err(map_err)?;
         Ok(PyStaticReader { inner: reader })
     }
 
     /// Fill `reader`'s buffers with every column's value at `when` (off-grid
     /// raises). Afterwards read a group with `reader.group_values(i)`.
     fn static_read(&self, reader: &mut PyStaticReader, when: DateTime<Utc>) -> PyResult<()> {
-        self.inner
+        self.store()?
             .static_read(&mut reader.inner, when)
             .map_err(map_err)
     }
@@ -1507,14 +1581,17 @@ impl PyStore {
             None,
             features,
         )?;
-        let reader = self.inner.build_forecast_reader(filter).map_err(map_err)?;
+        let reader = self
+            .store()?
+            .build_forecast_reader(filter)
+            .map_err(map_err)?;
         Ok(PyForecastReader { inner: reader })
     }
 
     /// Fill `reader`'s buffers with every entry's forecast window at `when`
     /// (off-grid raises). Afterwards read an entry with `reader.entry_values(i)`.
     fn forecast_read(&self, reader: &mut PyForecastReader, when: DateTime<Utc>) -> PyResult<()> {
-        self.inner
+        self.store()?
             .forecast_read(&mut reader.inner, when)
             .map_err(map_err)
     }
@@ -1527,7 +1604,7 @@ impl PyStore {
         py: Python<'py>,
         key: &PyTimeSeriesKey,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let m = self.inner.get_metadata(&key.inner).map_err(map_err)?;
+        let m = self.store()?.get_metadata(&key.inner).map_err(map_err)?;
         metadata_to_dict(py, &m)
     }
 
@@ -1559,7 +1636,7 @@ impl PyStore {
             features,
         )?;
         Ok(self
-            .inner
+            .store()?
             .list_keys(filter)
             .map_err(map_err)?
             .into_iter()
@@ -1574,7 +1651,7 @@ impl PyStore {
     #[pyo3(signature = (time_series_type=None))]
     fn get_intervals(&self, time_series_type: Option<PyTimeSeriesType>) -> PyResult<Vec<String>> {
         Ok(self
-            .inner
+            .store()?
             .get_intervals(time_series_type.map(Into::into))
             .map_err(map_err)?
             .into_iter()
@@ -1609,7 +1686,7 @@ impl PyStore {
             interval,
             features,
         )?;
-        self.inner.list_names(filter).map_err(map_err)
+        self.store()?.list_names(filter).map_err(map_err)
     }
 
     /// Distinct owner types matching the filter, sorted.
@@ -1639,7 +1716,7 @@ impl PyStore {
             interval,
             features,
         )?;
-        self.inner.list_owner_types(filter).map_err(map_err)
+        self.store()?.list_owner_types(filter).map_err(map_err)
     }
 
     /// Remove every series matching the filter in one all-or-nothing
@@ -1670,7 +1747,7 @@ impl PyStore {
             interval,
             features,
         )?;
-        self.inner.remove_by_filter(filter).map_err(map_err)
+        self.store_mut()?.remove_by_filter(filter).map_err(map_err)
     }
 
     /// Copy an association onto another owner, optionally renaming it. Shares the
@@ -1684,7 +1761,7 @@ impl PyStore {
         new_name: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let k = self
-            .inner
+            .store_mut()?
             .copy_time_series(
                 &src.inner,
                 dst_owner_id,
@@ -1710,7 +1787,7 @@ impl PyStore {
             Some(r) => Some(pyany_to_period(&r)?),
             None => None,
         };
-        self.inner
+        self.store()?
             .list_owner_ids(
                 owner_category.into(),
                 time_series_type.map(Into::into),
@@ -1723,7 +1800,7 @@ impl PyStore {
     /// combination with the association `count`.
     fn static_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
-        self.inner
+        self.store()?
             .static_summary()
             .map_err(map_err)?
             .iter()
@@ -1749,7 +1826,7 @@ impl PyStore {
     /// configuration with the association `count`.
     fn forecast_summary<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let iso = |p: Option<core_lib::Period>| p.map(|x| x.to_iso8601());
-        self.inner
+        self.store()?
             .forecast_summary()
             .map_err(map_err)?
             .iter()
@@ -1776,7 +1853,7 @@ impl PyStore {
     /// Association count grouped by time series type, as a `dict[str, int]`.
     fn counts_by_type<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        for (t, n) in self.inner.counts_by_type().map_err(map_err)? {
+        for (t, n) in self.store()?.counts_by_type().map_err(map_err)? {
             d.set_item(t.as_str(), n)?;
         }
         Ok(d)
@@ -1784,13 +1861,16 @@ impl PyStore {
 
     /// Number of distinct stored arrays (shared series count once).
     fn num_distinct_arrays(&self) -> PyResult<i64> {
-        self.inner.num_distinct_arrays().map_err(map_err)
+        self.store()?.num_distinct_arrays().map_err(map_err)
     }
 
     /// Distinct owners per category and distinct stored arrays per kind, as a
     /// dict.
     fn time_series_counts_detailed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let c = self.inner.time_series_counts_detailed().map_err(map_err)?;
+        let c = self
+            .store()?
+            .time_series_counts_detailed()
+            .map_err(map_err)?;
         let d = PyDict::new(py);
         d.set_item("components_with_time_series", c.components_with_time_series)?;
         d.set_item(
@@ -1815,7 +1895,7 @@ impl PyStore {
             Some(r) => Some(pyany_to_period(&r)?),
             None => None,
         };
-        self.inner
+        self.store()?
             .check_static_consistency(resolution)
             .map_err(map_err)?
             .iter()
@@ -1838,7 +1918,10 @@ impl PyStore {
         data_hash: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         let hash = hash_from_hex(data_hash)?;
-        let (sts, dst) = self.inner.count_array_references(&hash).map_err(map_err)?;
+        let (sts, dst) = self
+            .store()?
+            .count_array_references(&hash)
+            .map_err(map_err)?;
         let d = PyDict::new(py);
         d.set_item("sts", sts)?;
         d.set_item("dst", dst)?;
@@ -1853,13 +1936,13 @@ impl PyStore {
         data_hash: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let hash = hash_from_hex(data_hash)?;
-        let arr = self.inner.get_array_by_hash(&hash).map_err(map_err)?;
+        let arr = self.store()?.get_array_by_hash(&hash).map_err(map_err)?;
         numpy_from_typed(py, &arr)
     }
 
     /// Persist the store to a new NetCDF + SQLite artifact at `path`.
     fn persist_to(&mut self, path: PathBuf) -> PyResult<()> {
-        self.inner.persist_to(&path).map_err(map_err)
+        self.store_mut()?.persist_to(&path).map_err(map_err)
     }
 
     /// Resolve a forecast addressed by attributes plus a requested type to its
@@ -1900,7 +1983,7 @@ impl PyStore {
         };
         let features = features_from_dict(features)?;
         let k = self
-            .inner
+            .store()?
             .resolve_forecast_key(
                 owner_id,
                 owner_category.into(),

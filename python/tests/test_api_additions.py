@@ -170,3 +170,41 @@ def test_list_time_series_new_fields_and_interval_filter():
     assert row["interval"] == "PT1H"
     # No forecast at a different interval.
     assert store.list_time_series(interval=timedelta(hours=2)) == []
+
+
+def test_close_and_repr():
+    store = TimeSeriesStore.create(in_memory=True)
+    store.add_time_series(
+        owner_id=1, owner_type="Generator",
+        owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0),
+    )
+    assert "in-memory" in repr(store)
+    assert "read_only=False" in repr(store)
+    assert "closed" not in repr(store)
+
+    store.close()
+    assert "closed" in repr(store)
+    # Subsequent operations raise.
+    with pytest.raises(Exception):
+        store.list_names()
+    # close() is idempotent.
+    store.close()
+
+
+def test_context_manager_reopen(tmp_path):
+    path = tmp_path / "s.nc"
+    with TimeSeriesStore.create(path=str(path)) as store:
+        store.add_time_series(
+            owner_id=1, owner_type="Generator",
+            owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0),
+        )
+        store.flush()
+    # The with-block closed the store; operations now raise.
+    with pytest.raises(Exception):
+        store.list_names()
+
+    # Reopen read-only via the context manager and read the data back.
+    with TimeSeriesStore.open(str(path), read_only=True) as ro:
+        assert ro.read_only is True
+        assert str(path) in repr(ro)
+        assert ro.list_names() == ["load"]
