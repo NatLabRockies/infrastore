@@ -78,10 +78,17 @@ objects it errors (`--csv cannot be used with an array descriptor`).
 
 ```sh
 tss --store demo.nc list                                       # what's in the store
+tss --store demo.nc list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
 tss --store demo.nc get  --owner-id 42 --name load             # pretty table
 tss --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable CSV
 tss --store demo.nc -f json info --owner-id 42 --name load     # metadata + stats
+tss --store demo.nc -f csv  export --dir out/                  # one file per series
 ```
+
+`export` is the bulk read-direction inverse of `add`: every series the selector matches is written
+to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches). Setting
+`TSS_STORE` in the environment stands in for `--store`, and destructive commands (`remove`, `clear`,
+`replace-owner`, `rename`, `copy`) accept `--dry-run` to preview their effect.
 
 `info` reports metadata plus stats over the values: `min`/`max`/`mean` for numeric dtypes, or
 `true_count`/`false_count` when `dtype` is `bool`, and always `num_elements`.
@@ -123,9 +130,10 @@ must equal the product of the type's shape:
 
 `H = horizon / resolution` — with the template's `"horizon": "24h"`, `"resolution": "1h"`, and
 `"count": 7`, a scalar `deterministic` needs exactly `24 * 7 = 168` values (plus the header row that
-`has_header: true` skips). Use `-f csv` or `-f json` to read them back at full fidelity;
-`get -f csv` emits a `value` header row and one value per line, which is exactly what `add` consumes
-again.
+`has_header: true` skips). Use `-f json` to read the flat values back at full fidelity. `get -f csv`
+on a forecast emits **timestamped analysis rows** instead — one row per `(window, step)` with
+`issue_time`/`target_time` columns and one value column per percentile or scenario — so it is not
+re-ingestible by `add` (static series' `get -f csv` still round-trips).
 
 `DeterministicSingleTimeSeries` is not added from CSV — store a `SingleTimeSeries`, then derive it.
 `transform` takes **no selector**: it rewrites _every_ `SingleTimeSeries` in the store. `--horizon`

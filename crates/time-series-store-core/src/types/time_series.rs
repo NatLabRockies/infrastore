@@ -90,7 +90,7 @@ impl RequestedType {
 /// `data` is a [`TypedArray`]: its first dimension is time (`length`) and any
 /// trailing dimensions are the per-step element shape (e.g. the 3 coefficients
 /// of a quadratic cost curve). The element dtype is part of the array.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SingleTimeSeries {
     pub initial_timestamp: DateTime<Utc>,
     pub resolution: Period,
@@ -121,7 +121,7 @@ impl SingleTimeSeries {
 ///
 /// Timestamps must be strictly increasing and the timestamp count must equal
 /// the first dimension of `data`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NonSequentialTimeSeries {
     pub timestamps: Vec<DateTime<Utc>>,
     pub length: usize,
@@ -158,7 +158,7 @@ impl NonSequentialTimeSeries {
 ///
 /// `data` has shape `[H, count, *E]` in row-major order, where
 /// `H = horizon / resolution` and `*E` is the per-step element shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deterministic {
     pub initial_timestamp: DateTime<Utc>,
     pub resolution: Period,
@@ -221,7 +221,7 @@ impl Deterministic {
 /// A probabilistic forecast: per-percentile, per-window horizon arrays.
 ///
 /// `data` has shape `[num_percentiles, H, count, *E]` in row-major order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Probabilistic {
     pub initial_timestamp: DateTime<Utc>,
     pub resolution: Period,
@@ -295,7 +295,7 @@ impl Probabilistic {
 /// A scenarios forecast: per-scenario, per-window horizon arrays.
 ///
 /// `data` has shape `[scenario_count, H, count, *E]` in row-major order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenarios {
     pub initial_timestamp: DateTime<Utc>,
     pub resolution: Period,
@@ -386,7 +386,7 @@ fn validate_positive_periods(
 ///
 /// `DeterministicSingleTimeSeries` is synthesized into `Deterministic` on
 /// read; there is no separate `DeterministicSingleTimeSeries` variant here.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TimeSeriesData {
     SingleTimeSeries(SingleTimeSeries),
     NonSequentialTimeSeries(NonSequentialTimeSeries),

@@ -3,6 +3,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, TimeSeriesError>;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum TimeSeriesError {
     #[error("time series not found")]
     NotFound,

@@ -9,16 +9,32 @@ remove, clear, compact) requires local filesystem access and is intentionally ab
 
 ## Methods
 
-| RPC                     | Request             | Response             | Purpose                              |
-| ----------------------- | ------------------- | -------------------- | ------------------------------------ |
-| `ListTimeSeries`        | `ListReq`           | `ListResp`           | List metadata matching a filter      |
-| `GetTimeSeries`         | `GetReq`            | `GetResp`            | Fetch one series' values             |
-| `GetTimeSeriesKeys`     | `KeysReq`           | `KeysResp`           | List keys for an owner               |
-| `GetResolutions`        | `ResolutionsReq`    | `ResolutionsResp`    | Distinct resolutions present         |
-| `GetCounts`             | `CountsReq`         | `CountsResp`         | Aggregate counts                     |
-| `GetForecastParameters` | `ForecastParamsReq` | `ForecastParamsResp` | Horizon, interval, count, resolution |
-| `HasTimeSeries`         | `HasReq`            | `HasResp`            | Existence check                      |
-| `VerifyIntegrity`       | `VerifyReq`         | `VerifyResp`         | Recompute and compare stored hashes  |
+| RPC                      | Request                 | Response                 | Purpose                                 |
+| ------------------------ | ----------------------- | ------------------------ | --------------------------------------- |
+| `ListTimeSeries`         | `ListReq`               | `ListResp`               | List metadata matching a filter         |
+| `GetTimeSeries`          | `GetReq`                | `GetResp`                | Fetch one series' values                |
+| `GetTimeSeriesKeys`      | `KeysReq`               | `KeysResp`               | List keys for an owner                  |
+| `GetResolutions`         | `ResolutionsReq`        | `ResolutionsResp`        | Distinct resolutions present            |
+| `GetCounts`              | `CountsReq`             | `CountsResp`             | Aggregate counts                        |
+| `GetForecastParameters`  | `ForecastParamsReq`     | `ForecastParamsResp`     | Horizon, interval, count, resolution    |
+| `HasTimeSeries`          | `HasReq`                | `HasResp`                | Existence check                         |
+| `VerifyIntegrity`        | `VerifyReq`             | `VerifyResp`             | Recompute and compare stored hashes     |
+| `ListKeys`               | `ListKeysReq`           | `ListKeysResp`           | Full keys (opt. content hash) by filter |
+| `GetMetadata`            | `KeyReq`                | `TimeSeriesMetadata`     | Metadata for one key                    |
+| `BulkRead`               | `BulkReadReq`           | `BulkReadResp`           | Fetch many series at once (opt. range)  |
+| `GetDetailedCounts`      | `EmptyReq`              | `DetailedCountsResp`     | Distinct owners/arrays per kind         |
+| `GetCountsByType`        | `EmptyReq`              | `CountsByTypeResp`       | Association count per type              |
+| `ListOwnerIds`           | `ListOwnerIdsReq`       | `ListOwnerIdsResp`       | Distinct owner ids in a category        |
+| `GetIntervals`           | `IntervalsReq`          | `IntervalsResp`          | Distinct forecast intervals             |
+| `GetStaticSummary`       | `EmptyReq`              | `StaticSummaryResp`      | Grouped static-series summary           |
+| `GetForecastSummary`     | `EmptyReq`              | `ForecastSummaryResp`    | Grouped forecast summary                |
+| `CheckStaticConsistency` | `ConsistencyReq`        | `ConsistencyResp`        | Per-resolution static-grid check        |
+| `ResolveForecastKey`     | `ResolveForecastKeyReq` | `ResolveForecastKeyResp` | Attributes + type → concrete key        |
+
+`TimeSeriesKey` messages returned by `GetTimeSeriesKeys`, `ListKeys`, and `ResolveForecastKey` now
+carry the per-variant descriptive snapshot (`initial_timestamp_rfc3339`, `length`, `horizon`,
+`count`) in addition to the identity tuple, so `RemoteClient` reconstructs the full core
+`TimeSeriesKey` enum.
 
 ## Common Messages
 
@@ -53,6 +69,11 @@ message TimeSeriesKey {
   Features       features         = 5;
   OwnerCategory  owner_category   = 6;   // part of the owner identity / key
   string         interval         = 7;   // ISO-8601 duration; empty = unset
+  // Descriptive snapshot (NOT part of the identity); variant implied by type.
+  optional string initial_timestamp_rfc3339 = 8;
+  optional uint64 length                     = 9;
+  optional string horizon                    = 10;  // ISO-8601 duration
+  optional uint64 count                      = 11;
 }
 
 message TimeSeriesMetadata {

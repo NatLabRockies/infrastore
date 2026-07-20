@@ -170,6 +170,28 @@ pub fn feature_from_json(key: &str, v: &serde_json::Value) -> Result<FeatureValu
     })
 }
 
+/// Parse a compression spec: `none`, `deflate`, or `deflate:LEVEL` (0-9).
+/// `shuffle` is threaded from its own flag.
+pub fn parse_compression(
+    spec: &str,
+    shuffle: bool,
+) -> Result<time_series_store_core::Compression, String> {
+    use time_series_store_core::Compression;
+    match spec.to_ascii_lowercase().as_str() {
+        "none" => Ok(Compression::None),
+        "deflate" => Ok(Compression::Deflate { level: 3, shuffle }),
+        other => {
+            let level = other
+                .strip_prefix("deflate:")
+                .and_then(|l| l.parse::<u8>().ok())
+                .ok_or_else(|| {
+                    format!("invalid --compression '{spec}' (use none, deflate, or deflate:LEVEL)")
+                })?;
+            Ok(Compression::Deflate { level, shuffle })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,6 +29,8 @@ pub struct Descriptor {
     pub ts_type: String,
     pub dtype: String,
     pub units: Option<String>,
+    /// Opaque logical-type tag stored on the association (domain reconstruction).
+    pub logical_type: Option<String>,
     /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
     pub csv: Option<String>,
     #[serde(default = "default_true")]
@@ -145,7 +147,7 @@ impl Descriptor {
             data,
             features: self.features()?,
             units: self.units.clone(),
-            logical_type: None,
+            logical_type: self.logical_type.clone(),
         })
     }
 

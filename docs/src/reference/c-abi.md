@@ -92,7 +92,17 @@ int32_t ts_store_get_single(const struct TsStore *handle, const struct TsKey *ke
                             uint8_t **out_data, uint64_t *out_data_byte_len);  /* ts_buffer_free_u8 */
 
 int32_t ts_store_remove(struct TsStore *handle, const struct TsKey *key);
+/* All-or-nothing batched remove: on any error (including one missing key)
+   nothing is removed. *out_removed receives the count on success. */
+int32_t ts_store_remove_bulk(struct TsStore *handle,
+                             const struct TsKey *const *keys, uint64_t len,
+                             uint64_t *out_removed);
 int32_t ts_store_has(const struct TsStore *handle, const struct TsKey *key, bool *out_present);
+
+/* Key identity comparison and hashing (consistent with each other; the hash is
+   stable only within one process). */
+int32_t ts_key_eq(const struct TsKey *a, const struct TsKey *b, bool *out_eq);
+int32_t ts_key_identity_hash(const struct TsKey *key, uint64_t *out_hash);
 ```
 
 ## NonSequentialTimeSeries
@@ -143,7 +153,13 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
                               uint64_t *out_length, uint8_t *out_data_hash, /* 32-byte buffer */
                               int32_t *out_dtype,
                               char *out_logical_type, uint64_t logical_type_cap,
-                              uint64_t *out_logical_type_len);
+                              uint64_t *out_logical_type_len,
+                              char *out_units, uint64_t units_cap,
+                              uint64_t *out_units_len,        /* empty => unset */
+                              uint64_t *out_element_shape, uint64_t element_shape_cap,
+                              uint64_t *out_element_shape_len, /* 0 => scalar elements */
+                              char *out_features_json, uint64_t features_json_cap,
+                              uint64_t *out_features_json_len); /* "{}" => none */
 
 int32_t ts_store_has_by_attrs(const struct TsStore *handle,
                               int64_t owner_id, int32_t owner_category, const char *name,
@@ -358,7 +374,13 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        uint64_t *out_count, uint64_t *out_length,
                                        uint8_t *out_data_hash,
                                        char *logical_type_buf, uint64_t logical_type_cap,
-                                       uint64_t *out_logical_type_len);
+                                       uint64_t *out_logical_type_len,
+                                       char *out_units, uint64_t units_cap,
+                                       uint64_t *out_units_len,
+                                       uint64_t *out_element_shape, uint64_t element_shape_cap,
+                                       uint64_t *out_element_shape_len,
+                                       char *out_features_json, uint64_t features_json_cap,
+                                       uint64_t *out_features_json_len);
 
 int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             int64_t owner_id, int32_t owner_category,
@@ -370,7 +392,13 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             char **out_interval,  /* ISO-8601; ts_string_free */
                                             uint64_t *out_count,
                                             uint64_t *out_length, uint8_t *out_data_hash,
-                                            double **out_percentiles, uint64_t *out_percentiles_len);
+                                            double **out_percentiles, uint64_t *out_percentiles_len,
+                                            char *out_units, uint64_t units_cap,
+                                            uint64_t *out_units_len,
+                                            uint64_t *out_element_shape, uint64_t element_shape_cap,
+                                            uint64_t *out_element_shape_len,
+                                            char *out_features_json, uint64_t features_json_cap,
+                                            uint64_t *out_features_json_len);
 
 int32_t ts_store_has_typed(const struct TsStore *handle,
                            int64_t owner_id, int32_t owner_category, const char *name,

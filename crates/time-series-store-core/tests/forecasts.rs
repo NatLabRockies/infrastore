@@ -1387,6 +1387,65 @@ fn transform_honors_owner_category_and_resolution_filters() {
     );
 }
 
+/// Re-transforming at the same interval with a *different* horizon must error,
+/// not silently skip: the DST identity does not include the horizon, so the
+/// requested view cannot coexist with the existing one, and skipping would
+/// report success while the old horizon kept serving reads. Same horizon stays
+/// idempotent, and a different interval is a legitimately distinct view.
+#[test]
+fn transform_rejects_horizon_change_at_same_interval() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let interval = Duration::hours(1);
+
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution,
+                f64_arr(vec![8], &dst_source_vals()),
+                "load",
+            )),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .transform_single_time_series(Duration::hours(2), interval, None, None)
+            .unwrap(),
+        1
+    );
+    // Same horizon + interval: idempotent no-op.
+    assert_eq!(
+        store
+            .transform_single_time_series(Duration::hours(2), interval, None, None)
+            .unwrap(),
+        0
+    );
+    // Different horizon at the same interval: hard error.
+    let err = store
+        .transform_single_time_series(Duration::hours(3), interval, None, None)
+        .unwrap_err();
+    assert!(
+        matches!(&err, TimeSeriesError::InvalidParameter(msg)
+            if msg.contains("horizon PT2H already exists (requested PT3H)")),
+        "expected a horizon-mismatch error, got {err:?}"
+    );
+    // Different interval: a distinct view, derived alongside the first.
+    assert_eq!(
+        store
+            .transform_single_time_series(Duration::hours(3), Duration::hours(2), None, None)
+            .unwrap(),
+        1
+    );
+}
+
 #[test]
 fn count_array_references_counts_sts_and_dst() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

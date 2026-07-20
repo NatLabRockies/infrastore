@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::types::array::Dtype;
+use crate::types::array::{Dtype, Element};
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
 use crate::types::period::Period;
@@ -100,6 +100,26 @@ impl StaticGroup {
         if self.filled { &self.buf } else { &[] }
     }
 
+    /// Decode the most-recent read buffer as a `Vec<T>` in row-major
+    /// `[num_columns, *element_shape]` order (dtype-checked; errors if `T` is not
+    /// the group's dtype). A copy-based decode, so it is sound regardless of
+    /// buffer alignment; use [`Self::values`] for the zero-copy byte view. Empty
+    /// until [`Store::static_read`] has run at least once.
+    pub fn values_to_vec<T: Element>(&self) -> Result<Vec<T>> {
+        if self.dtype != T::DTYPE {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "group dtype is {}, requested {}",
+                self.dtype.as_str(),
+                T::DTYPE.as_str()
+            )));
+        }
+        Ok(self
+            .values()
+            .chunks_exact(T::DTYPE.size())
+            .map(T::from_le_bytes)
+            .collect())
+    }
+
     /// Number of elements per column (product of `element_shape`; 1 for scalar).
     fn elements_per_column(&self) -> usize {
         self.element_shape.iter().product::<usize>().max(1)
@@ -158,6 +178,47 @@ impl StaticReader {
             "grid",
         )
     }
+
+    /// The wall-clock timestamp at 0-based grid index `index`
+    /// (`initial_timestamp + index · resolution`), calendar-aware for a
+    /// `Period::Months` grid. The inverse of [`Self::index_at`]. Errors if
+    /// `index >= length` or the date arithmetic overflows.
+    pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>> {
+        timestamp_on_grid(
+            self.initial_timestamp,
+            self.resolution,
+            self.length,
+            index,
+            "grid",
+        )
+    }
+
+    /// Iterate every timestamp on the reader's grid, `[0, length)` in order.
+    /// The canonical simulation loop is:
+    ///
+    /// ```no_run
+    /// # use time_series_store_core::{Store, ListFilter};
+    /// # use chrono::Duration;
+    /// # fn run(store: &mut Store) -> time_series_store_core::Result<()> {
+    /// let mut reader = store.build_static_reader(ListFilter::new().resolution(Duration::hours(1)))?;
+    /// // Collect first so the iterator's borrow of `reader` ends before the
+    /// // `&mut reader` read below.
+    /// let timeline: Vec<_> = reader.timestamps().collect();
+    /// for t in timeline {
+    ///     store.static_read(&mut reader, t)?;
+    ///     // ... walk reader.groups() for the columnar bytes at `t` ...
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        let (initial, resolution) = (self.initial_timestamp, self.resolution);
+        (0..self.length).map(move |k| {
+            resolution
+                .add_to(initial, k as i64)
+                .expect("timestamp on the reader grid is representable")
+        })
+    }
 }
 
 /// Map `at` to a 0-based index on a regular grid `initial + k·step` for
@@ -181,6 +242,28 @@ fn index_on_grid(
         )));
     }
     Ok(idx)
+}
+
+/// The timestamp at 0-based `index` on a regular grid `initial + index·step`.
+/// The inverse of [`index_on_grid`]: bounds-checks `index < len` and errors on
+/// date-arithmetic overflow. `what` names the grid in error messages.
+fn timestamp_on_grid(
+    initial: DateTime<Utc>,
+    step: Period,
+    len: usize,
+    index: usize,
+    what: &str,
+) -> Result<DateTime<Utc>> {
+    if index >= len {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "index {index} is past the {what} extent ({len})"
+        )));
+    }
+    step.add_to(initial, index as i64).ok_or_else(|| {
+        TimeSeriesError::InvalidParameter(format!(
+            "timestamp at index {index} on the {what} grid is out of range"
+        ))
+    })
 }
 
 /// Resolve a set of `SingleTimeSeries` metadata rows into the reader's master
@@ -360,6 +443,25 @@ impl WindowSlot {
         if self.filled { &self.buf } else { &[] }
     }
 
+    /// Decode the most-recent window buffer as a `Vec<T>` in row-major
+    /// [`Self::window_shape`] order (dtype-checked; errors if `T` is not the
+    /// slot's dtype). Copy-based, so alignment-safe; use [`Self::window`] for the
+    /// zero-copy byte view. Empty until [`Store::forecast_read`] has run.
+    pub fn window_to_vec<T: Element>(&self) -> Result<Vec<T>> {
+        if self.dtype != T::DTYPE {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "slot dtype is {}, requested {}",
+                self.dtype.as_str(),
+                T::DTYPE.as_str()
+            )));
+        }
+        Ok(self
+            .window()
+            .chunks_exact(T::DTYPE.size())
+            .map(T::from_le_bytes)
+            .collect())
+    }
+
     /// Drive a backend window read into this slot's reusable buffer. The closure
     /// receives the read descriptor, the array hash, and the buffer to fill;
     /// splitting the borrow across fields avoids aliasing.
@@ -452,6 +554,31 @@ impl ForecastReader {
             at,
             "forecast window",
         )
+    }
+
+    /// The initial timestamp of window `index` on the forecast timeline
+    /// (`initial_timestamp + index · interval`). The inverse of
+    /// [`Self::window_index`]. Errors if `index >= count` or the arithmetic
+    /// overflows.
+    pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>> {
+        timestamp_on_grid(
+            self.initial_timestamp,
+            self.interval,
+            self.count,
+            index,
+            "forecast window",
+        )
+    }
+
+    /// Iterate every window start timestamp, `[0, count)` in order — the forecast
+    /// analog of [`StaticReader::timestamps`], stepping by `interval`.
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
+        let (initial, interval) = (self.initial_timestamp, self.interval);
+        (0..self.count).map(move |k| {
+            interval
+                .add_to(initial, k as i64)
+                .expect("timestamp on the forecast timeline is representable")
+        })
     }
 
     pub(crate) fn from_parts(
@@ -1555,6 +1682,105 @@ mod tests {
                 assert_eq!(got, k.owner_id() as f64 * 10.0 + i as f64);
             }
         }
+    }
+
+    #[test]
+    fn timestamps_iterator_agrees_with_index_at() {
+        let mut store = Store::create(None, true).unwrap();
+        add_f64(&mut store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
+        let reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+
+        let stamps: Vec<_> = reader.timestamps().collect();
+        assert_eq!(stamps.len(), 4);
+        for (i, t) in stamps.iter().enumerate() {
+            assert_eq!(reader.index_at(*t).unwrap(), i);
+            assert_eq!(reader.timestamp_at(i).unwrap(), *t);
+        }
+        // Out-of-bounds index errors.
+        assert!(reader.timestamp_at(4).is_err());
+    }
+
+    #[test]
+    fn timestamps_iterator_on_months_grid() {
+        let mut store = Store::create(None, true).unwrap();
+        // 3-month calendar grid from t0.
+        let ts = SingleTimeSeries::new(
+            t0(),
+            Period::Months(1),
+            TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+            "monthly",
+        );
+        store
+            .add_time_series(
+                1,
+                "Gen",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(ts),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+
+        let reader = store
+            .build_static_reader(ListFilter::new().resolution(Period::Months(1)))
+            .unwrap();
+        let stamps: Vec<_> = reader.timestamps().collect();
+        assert_eq!(
+            stamps,
+            vec![
+                t0(),
+                t0() + Duration::days(31), // Jan -> Feb (2030-02-01)
+                t0() + Duration::days(31 + 28),
+            ]
+        );
+        for (i, t) in stamps.iter().enumerate() {
+            assert_eq!(reader.index_at(*t).unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn values_to_vec_typed_decode() {
+        let mut store = Store::create(None, true).unwrap();
+        add_f64(&mut store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
+        add_i64(&mut store, 2, "count", &[100, 101, 102, 103]);
+        let mut reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        store
+            .static_read(&mut reader, t0() + Duration::hours(2))
+            .unwrap();
+
+        let f = &reader.groups()[0];
+        assert_eq!(f.values_to_vec::<f64>().unwrap(), vec![12.0]);
+        // Wrong dtype errors.
+        assert!(f.values_to_vec::<i64>().is_err());
+
+        let i = &reader.groups()[1];
+        assert_eq!(i.values_to_vec::<i64>().unwrap(), vec![102]);
+    }
+
+    #[test]
+    fn window_to_vec_typed_decode() {
+        let mut store = Store::create(None, true).unwrap();
+        add_det(
+            &mut store,
+            1,
+            "gen",
+            2,
+            3,
+            vec![],
+            &[0.0, 10.0, 20.0, 1.0, 11.0, 21.0],
+        );
+        let mut reader = store.build_forecast_reader(forecast_filter()).unwrap();
+        store
+            .forecast_read(&mut reader, t0() + Duration::hours(1))
+            .unwrap();
+        let slot = reader.entry_slot(0);
+        // Window k=1 = [10, 11].
+        assert_eq!(slot.window_to_vec::<f64>().unwrap(), vec![10.0, 11.0]);
+        assert!(slot.window_to_vec::<i64>().is_err());
     }
 
     /// A reader pins one resolution: series at other resolutions are excluded

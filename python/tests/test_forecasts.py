@@ -406,6 +406,7 @@ def test_get_forecast_parameters_no_forecasts():
         "interval": None,
         "count": None,
         "resolution": None,
+        "initial_timestamp": None,
     }
 
 

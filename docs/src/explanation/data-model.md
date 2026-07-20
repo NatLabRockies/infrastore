@@ -47,6 +47,14 @@ C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-onl
 adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by transforming a
 stored `SingleTimeSeries`.
 
+**`DeterministicSingleTimeSeries` is a storage-level view, and reads always return a
+`Deterministic`.** This is by design in every binding: `TimeSeriesData` has no
+`DeterministicSingleTimeSeries` variant, and a read synthesizes the windowed `Deterministic` from
+the underlying static array without copying it. The `DeterministicSingleTimeSeries` tag stays
+visible in _catalog_ surfaces — keys, metadata rows, counts, summaries — because callers need it to
+address, copy, or remove the association (and `RequestedType::AbstractDeterministic` exists so
+readers can match either concrete type without caring which is stored).
+
 Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
 `Scenarios` object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type

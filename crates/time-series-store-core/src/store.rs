@@ -32,6 +32,9 @@ pub struct ListFilter {
     pub owner_type: Option<String>,
     pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
+    /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
+    /// wildcards). Applied in addition to `name` when both are set.
+    pub name_glob: Option<String>,
     pub resolution: Option<Period>,
     pub interval: Option<Period>,
     pub features: Option<Features>,
@@ -61,6 +64,10 @@ impl ListFilter {
         self.name = Some(n.into());
         self
     }
+    pub fn name_glob(mut self, pattern: impl Into<String>) -> Self {
+        self.name_glob = Some(pattern.into());
+        self
+    }
     pub fn resolution(mut self, r: impl Into<Period>) -> Self {
         self.resolution = Some(r.into());
         self
@@ -83,6 +90,7 @@ impl From<ListFilter> for MetadataFilter {
             owner_type: value.owner_type,
             time_series_type: value.time_series_type,
             name: value.name,
+            name_glob: value.name_glob,
             resolution: value.resolution,
             interval: value.interval,
             features: value.features,
@@ -104,6 +112,48 @@ pub struct AddRequest {
     pub logical_type: Option<String>,
 }
 
+impl AddRequest {
+    /// Start a request with empty features and no units or logical type. Chain
+    /// [`Self::with_features`], [`Self::with_units`], and
+    /// [`Self::with_logical_type`] to set the optional fields. This is the
+    /// ergonomic constructor for [`Store::add`] and [`BulkAdd::push`]; unlike the
+    /// wide [`Store::add_time_series`] signature it preserves `logical_type`.
+    pub fn new(
+        owner_id: i64,
+        owner_type: impl Into<String>,
+        owner_category: OwnerCategory,
+        data: TimeSeriesData,
+    ) -> Self {
+        Self {
+            owner_id,
+            owner_type: owner_type.into(),
+            owner_category,
+            data,
+            features: Features::new(),
+            units: None,
+            logical_type: None,
+        }
+    }
+
+    /// Set the feature set.
+    pub fn with_features(mut self, features: Features) -> Self {
+        self.features = features;
+        self
+    }
+
+    /// Set the units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque logical-type label carried through to the metadata row.
+    pub fn with_logical_type(mut self, logical_type: impl Into<String>) -> Self {
+        self.logical_type = Some(logical_type.into());
+        self
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct TimeSeriesCounts {
     pub components_with_time_series: i64,
@@ -122,7 +172,17 @@ pub struct TimeSeriesCountsDetailed {
     pub forecast_count: i64,
 }
 
-#[derive(Debug, Default, Clone)]
+/// One resolution's shared static grid, as reported by
+/// [`Store::check_static_consistency`]: every `SingleTimeSeries` at
+/// `resolution` shares this `(initial_timestamp, length)`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaticConsistency {
+    pub resolution: Period,
+    pub initial_timestamp: chrono::DateTime<chrono::Utc>,
+    pub length: usize,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ForecastParameters {
     pub horizon: Option<Period>,
     pub interval: Option<Period>,
@@ -185,10 +245,11 @@ impl Store {
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
         let metadata = MetadataStore::open_path(&sqlite_path, read_only)?;
-        // For v0, `read_only` only locks down the metadata side. The NetCDF
-        // backend opens in append mode regardless; write attempts are rejected
-        // earlier in the `Store::add_*` / `remove_*` path.
-        let backend = NetCdfBackend::open(path)?;
+        // A read-only store opens both halves read-only: the NetCDF side needs
+        // no write permission (works on read-only media, shared HDF5 lock) and
+        // its write paths error with `ReadOnlyStore` as a backstop behind the
+        // `Store::add_*` / `remove_*` guards.
+        let backend = NetCdfBackend::open(path, read_only)?;
         Ok(Self {
             backend: Box::new(backend),
             metadata,
@@ -230,6 +291,14 @@ impl Store {
             logical_type: None,
         }])
         .map(|mut keys| keys.remove(0))
+    }
+
+    /// Add one time series from an [`AddRequest`], preserving every field
+    /// including `logical_type` (which [`Self::add_time_series`] cannot set).
+    /// Routed through the same per-column path as [`Self::add_time_series`].
+    pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
+        self.add_per_column(vec![request])
+            .map(|mut keys| keys.remove(0))
     }
 
     /// Bulk insert. All-or-nothing: any error rolls back every association and
@@ -419,6 +488,73 @@ impl Store {
             self.backend.remove_array(&h)?;
         }
         Ok(())
+    }
+
+    /// Remove several time series in one all-or-nothing transaction, dropping
+    /// each underlying array that no surviving association references (exactly
+    /// like [`Self::remove_time_series`], and sharing its removal helper).
+    /// Returns the number of associations removed.
+    ///
+    /// A key that matches nothing makes the whole batch fail with
+    /// [`TimeSeriesError::NotFound`] and roll back — the batch either removes
+    /// every requested series or none.
+    pub fn remove_time_series_bulk(&mut self, keys: &[&KeyIdentity]) -> Result<usize> {
+        self.remove_identities(keys, true)
+    }
+
+    /// Remove every time series matching `filter` in one all-or-nothing
+    /// transaction, dropping newly unreferenced arrays like
+    /// [`Self::remove_time_series`]. Returns the number of associations removed;
+    /// an empty match is `Ok(0)`.
+    pub fn remove_by_filter(&mut self, filter: ListFilter) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let identities: Vec<KeyIdentity> = self
+            .list_keys(filter)?
+            .into_iter()
+            .map(|k| k.identity().clone())
+            .collect();
+        let refs: Vec<&KeyIdentity> = identities.iter().collect();
+        // Keys come straight from `list_keys`, so each is guaranteed to match;
+        // `require_all` is moot here but keeps one code path.
+        self.remove_identities(&refs, false)
+    }
+
+    /// Shared removal core for the bulk paths: delete every key's association(s)
+    /// in one transaction, then drop each array left unreferenced. With
+    /// `require_all`, a key matching nothing aborts and rolls back the batch.
+    fn remove_identities(&mut self, keys: &[&KeyIdentity], require_all: bool) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let mut removed_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut count = 0usize;
+        for key in keys {
+            let removed = MetadataStore::delete_by_key(&tx, key)?;
+            if removed.is_empty() && require_all {
+                // Roll back (tx drops) so the batch is all-or-nothing.
+                return Err(TimeSeriesError::NotFound);
+            }
+            count += removed.len();
+            removed_hashes.extend(removed);
+        }
+        // Decide array drops after *all* deletes so a hash referenced only by
+        // other rows removed in this same batch is reclaimed too. Dedup so a
+        // hash removed via several keys is checked (and dropped) once.
+        let mut to_drop = Vec::new();
+        let mut seen = HashSet::new();
+        for h in &removed_hashes {
+            if seen.insert(*h) && references_to_in_tx(&tx, h)? == 0 {
+                to_drop.push(*h);
+            }
+        }
+        tx.commit()?;
+        for h in to_drop {
+            self.backend.remove_array(&h)?;
+        }
+        Ok(count)
     }
 
     /// Remove every time series for the owner `(owner_id, owner_category)`, or
@@ -1031,6 +1167,26 @@ impl Store {
         Ok(out)
     }
 
+    /// Read many series at once, optionally sliced to `time_range`. With `None`
+    /// this is exactly [`Self::bulk_read`] (whole series, with the packed
+    /// batch-read optimization). With a range, each key is read through
+    /// [`Self::get_time_series`], so the slice semantics match a per-key sliced
+    /// read; the packed-batch fast path is not applied to sliced reads.
+    #[tracing::instrument(skip(self, keys), fields(count = keys.len(), has_time_range = time_range.is_some()))]
+    pub fn bulk_read_range(
+        &self,
+        keys: &[&KeyIdentity],
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<Vec<TimeSeriesData>> {
+        match time_range {
+            None => self.bulk_read(keys),
+            Some(range) => keys
+                .iter()
+                .map(|k| self.get_time_series(k, Some(range)))
+                .collect(),
+        }
+    }
+
     /// Look up the full metadata record for a key. Errors with `NotFound` if no
     /// association matches. Used by external bindings (e.g. the Julia
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
@@ -1187,16 +1343,21 @@ impl Store {
         // Series that already have a DeterministicSingleTimeSeries view *at this
         // interval* are skipped so the transform is idempotent (e.g. re-deriving
         // one series when others were transformed earlier, as during a component
-        // copy). The dedup key is the full identity: owner_id/owner_category plus
-        // name/resolution/interval/features. Interval is part of the identity, so
-        // re-deriving the same series at a different interval is a distinct view.
+        // copy) — but only when the existing view also has this `horizon`. The
+        // identity (owner_id/owner_category plus name/resolution/interval/
+        // features) does not include the horizon, so a same-identity view with a
+        // *different* horizon cannot coexist with the requested one; silently
+        // skipping it would leave the old horizon serving reads while reporting
+        // success, so that case is an error instead. Interval is part of the
+        // identity, so re-deriving the same series at a different interval is a
+        // distinct view.
         //
         // Both dedup sets are read via `list_identities`, which returns the
         // stored `features_hash` column directly: the identity test needs the
         // hash, not the features themselves, so this skips hydrating (and
         // re-hashing) the features of every forecast already in the store.
         let interval_iso = interval.to_iso8601();
-        let existing_dst: HashSet<AssociationIdentity> = self
+        let existing_dst: HashMap<AssociationIdentity, Option<Period>> = self
             .metadata
             .list_identities(TimeSeriesType::DeterministicSingleTimeSeries)?
             .into_iter()
@@ -1210,7 +1371,7 @@ impl Store {
             .metadata
             .list_identities(TimeSeriesType::Deterministic)?
             .into_iter()
-            .map(SeriesFamily::from)
+            .map(|(identity, _horizon)| SeriesFamily::from(identity))
             .collect();
 
         // Build every DST metadata row up front so a single ineligible series
@@ -1243,8 +1404,27 @@ impl Store {
                 interval: Some(interval_iso.clone()),
                 features_hash: src_features_hash,
             };
-            if existing_dst.contains(&src_key) {
-                continue;
+            if let Some(existing_horizon) = existing_dst.get(&src_key) {
+                if *existing_horizon == Some(horizon) {
+                    // Same identity, same horizon: already derived; idempotent.
+                    continue;
+                }
+                // Same identity but a different horizon: the two views cannot
+                // coexist (horizon is not part of the identity), and silently
+                // keeping the old one would misreport success.
+                let describe = |h: &Option<Period>| match h {
+                    Some(h) => h.to_iso8601(),
+                    None => "-".to_string(),
+                };
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "cannot derive DeterministicSingleTimeSeries for '{}' at interval {}: \
+                     a view with horizon {} already exists (requested {}); remove it first \
+                     or transform at a different interval",
+                    src.name,
+                    interval.to_iso8601(),
+                    describe(existing_horizon),
+                    horizon.to_iso8601(),
+                )));
             }
             let resolution = required_resolution(src, "transform_single_time_series")?;
             let total_len = src.length.ok_or_else(|| {
@@ -1303,6 +1483,71 @@ impl Store {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
+    /// Distinct forecast intervals, optionally scoped to one time series type.
+    /// The interval analog of [`Self::get_resolutions`]; ordered lexically by
+    /// ISO-8601 text (mixed period kinds have no numeric order). Non-forecast
+    /// types have no interval, so they return an empty list.
+    pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+        self.metadata.distinct_intervals(time_series_type)
+    }
+
+    /// Distinct series names matching `filter`, sorted. A discovery projection
+    /// over the authoritative filtered listing, so every filter (including the
+    /// `features` subset match) is honored.
+    pub fn list_names(&self, filter: ListFilter) -> Result<Vec<String>> {
+        let mut names: Vec<String> = self
+            .list_time_series(filter)?
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
+    /// Distinct owner types matching `filter`, sorted. Same projection approach
+    /// as [`Self::list_names`].
+    pub fn list_owner_types(&self, filter: ListFilter) -> Result<Vec<String>> {
+        let mut types: Vec<String> = self
+            .list_time_series(filter)?
+            .into_iter()
+            .map(|m| m.owner_type)
+            .collect();
+        types.sort();
+        types.dedup();
+        Ok(types)
+    }
+
+    /// Rename the series identified by `key` to `new_name`, returning the new
+    /// key. Only the catalog association's name changes; the underlying array
+    /// and its hash are untouched. Errors: [`TimeSeriesError::NotFound`] if `key`
+    /// matches nothing, [`TimeSeriesError::DuplicateTimeSeries`] if a series with
+    /// the new identity already exists, [`TimeSeriesError::ReadOnlyStore`] on a
+    /// read-only store.
+    pub fn rename_time_series(
+        &mut self,
+        key: &KeyIdentity,
+        new_name: &str,
+    ) -> Result<TimeSeriesKey> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let updated = MetadataStore::rename(&tx, key, new_name)?;
+        if updated == 0 {
+            // No matching row; tx drops (rolls back a no-op).
+            return Err(TimeSeriesError::NotFound);
+        }
+        tx.commit()?;
+        // Rebuild the key from the renamed row (same identity, new name).
+        let new_identity = KeyIdentity {
+            name: new_name.to_string(),
+            ..key.clone()
+        };
+        let meta = self.metadata.get_by_key(&new_identity)?;
+        TimeSeriesKey::from_metadata(&meta)
+    }
+
     /// Return the forecast parameters recorded in the store, optionally
     /// restricted to forecasts with a given `resolution` and/or `interval`.
     ///
@@ -1345,24 +1590,47 @@ impl Store {
         Ok(ForecastParameters::default())
     }
 
-    /// Verify that all `SingleTimeSeries` share one `(initial_timestamp, length)`
-    /// pair. Returns `None` when there are no `SingleTimeSeries`, `Some(pair)`
-    /// when they agree, or [`TimeSeriesError::IntegrityError`] when more than one
-    /// distinct pair is present. One `DISTINCT` query.
+    /// Verify that, per resolution, all `SingleTimeSeries` share one
+    /// `(initial_timestamp, length)` grid. Series at *different* resolutions
+    /// legitimately have different grids (an hourly and a 5-minute profile over
+    /// one year differ in length), so consistency is only required within a
+    /// resolution.
+    ///
+    /// Returns one [`StaticConsistency`] row per resolution present (empty when
+    /// the store has no `SingleTimeSeries`), ordered by resolution. `resolution`
+    /// optionally scopes the check (and the returned rows) to one grid. Errors
+    /// with [`TimeSeriesError::IntegrityError`] when any single resolution holds
+    /// more than one distinct `(initial_timestamp, length)` pair. One `DISTINCT`
+    /// query.
     pub fn check_static_consistency(
         &self,
-    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, usize)>> {
-        let pairs = self.metadata.distinct_single_initial_and_length()?;
-        match pairs.len() {
-            0 => Ok(None),
-            1 => {
-                let (ts, len) = pairs[0];
-                Ok(Some((ts, len as usize)))
+        resolution: Option<Period>,
+    ) -> Result<Vec<StaticConsistency>> {
+        let rows = self.metadata.distinct_single_grids(resolution)?;
+        let mut out: Vec<StaticConsistency> = Vec::with_capacity(rows.len());
+        for (res, ts, len) in rows {
+            // Rows arrive ordered by resolution, so a divergent grid shows up
+            // as two adjacent rows with the same resolution.
+            if let Some(prev) = out.last()
+                && prev.resolution == res
+            {
+                return Err(TimeSeriesError::IntegrityError(format!(
+                    "SingleTimeSeries at resolution {} have more than one \
+                     (initial_timestamp, length) pair: ({}, {}) vs ({}, {})",
+                    res.to_iso8601(),
+                    prev.initial_timestamp,
+                    prev.length,
+                    ts,
+                    len,
+                )));
             }
-            _ => Err(TimeSeriesError::IntegrityError(format!(
-                "SingleTimeSeries have more than one (initial_timestamp, length) set: {pairs:?}"
-            ))),
+            out.push(StaticConsistency {
+                resolution: res,
+                initial_timestamp: ts,
+                length: len as usize,
+            });
         }
+        Ok(out)
     }
 
     pub fn get_time_series_counts(&self) -> Result<TimeSeriesCounts> {
@@ -1494,19 +1762,32 @@ impl Store {
         let _ = std::fs::remove_file(&sqlite_path);
         {
             let mut nc = NetCdfBackend::create(path, self.compression())?;
-            let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+            // Plan each distinct array's layout before writing: packed is only
+            // valid for arrays that every referencing association reads as a
+            // series along axis 0 (SingleTimeSeries and its derived DST views).
+            // Dense forecasts and non-sequential series must stay standalone —
+            // the forecast window read path rejects packed arrays.
+            let mut plans: HashMap<[u8; 32], (bool, Period)> = HashMap::new();
             for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
-                if !seen.insert(hash) {
-                    continue;
-                }
-                let array = self.backend.get_array(&hash)?;
-                // The resolution only groups the on-disk layout; reads locate arrays
-                // by content hash, so the fallback for resolution-less (non-sequential)
-                // series is harmless.
+                let packed = matches!(
+                    key.time_series_type(),
+                    TimeSeriesType::SingleTimeSeries
+                        | TimeSeriesType::DeterministicSingleTimeSeries
+                );
+                // The resolution only groups the packed on-disk layout; reads
+                // locate arrays by content hash, so the fallback for
+                // resolution-less (non-sequential) series is harmless.
                 let resolution = key
                     .resolution()
                     .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
-                nc.put_array(&hash, &array, resolution, true)?;
+                plans
+                    .entry(hash)
+                    .and_modify(|(p, _)| *p &= packed)
+                    .or_insert((packed, resolution));
+            }
+            for (hash, (packed, resolution)) in &plans {
+                let array = self.backend.get_array(hash)?;
+                nc.put_array(hash, &array, *resolution, *packed)?;
             }
             nc.flush()?;
         }

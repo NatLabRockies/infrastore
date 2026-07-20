@@ -86,7 +86,10 @@ async fn list_and_get_round_trip() {
         .await
         .unwrap();
     assert_eq!(keys.len(), 1);
-    let data = client.get_time_series(&keys[0], None).await.unwrap();
+    let data = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
     let single = data.as_single().unwrap();
     assert_eq!(single.length, 24);
     assert_eq!(single.data.to_f64_vec().unwrap()[0], 100.0);
@@ -106,7 +109,7 @@ async fn time_range_slicing_over_grpc() {
     let start = initial + Duration::hours(2);
     let end = initial + Duration::hours(5);
     let data = client
-        .get_time_series(&keys[0], Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end)))
         .await
         .unwrap();
     let single = data.as_single().unwrap();
@@ -152,7 +155,7 @@ async fn counts_resolutions_has_verify() {
         .get_time_series_keys(42, OwnerCategory::Component)
         .await
         .unwrap();
-    let present = client.has_time_series(&keys[0]).await.unwrap();
+    let present = client.has_time_series(keys[0].identity()).await.unwrap();
     assert!(present);
 
     let report = client.verify_integrity().await.unwrap();
@@ -212,10 +215,10 @@ async fn non_sequential_round_trip_over_grpc() {
         .get_time_series_keys(44, OwnerCategory::Component)
         .await
         .unwrap();
-    assert_eq!(keys[0].resolution, None);
+    assert_eq!(keys[0].resolution(), None);
     let got = client
         .get_time_series(
-            &keys[0],
+            keys[0].identity(),
             Some((initial + Duration::hours(1), initial + Duration::days(3))),
         )
         .await
@@ -254,7 +257,10 @@ async fn dtype_preserved_over_grpc() {
         .get_time_series_keys(1, OwnerCategory::Component)
         .await
         .unwrap();
-    let got = client.get_time_series(&keys[0], None).await.unwrap();
+    let got = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
     let single = got.as_single().unwrap();
     // dtype + raw bytes survive the round trip.
     assert_eq!(single.data.dtype, Dtype::I64);
@@ -265,4 +271,79 @@ async fn dtype_preserved_over_grpc() {
         .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
         .collect();
     assert_eq!(vals, vec![10, 20, 30]);
+}
+
+#[tokio::test]
+async fn additive_read_rpcs() {
+    let addr = spawn_server(fixture_store()).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+
+    // Full keys over the wire: get_time_series_keys returns the core enum with
+    // the descriptive snapshot filled (Single -> length).
+    let keys = client
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .await
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    match &keys[0] {
+        time_series_store_core::TimeSeriesKey::Single(s) => assert_eq!(s.length, 24),
+        other => panic!("expected Single key, got {other:?}"),
+    }
+
+    // ListKeys with and without hash.
+    let rows = client
+        .list_keys(None, None, None, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|(_, h)| h.is_none()));
+    let with_hash = client
+        .list_keys(None, None, None, None, None, None, None, None, true)
+        .await
+        .unwrap();
+    assert!(with_hash.iter().all(|(_, h)| h.is_some()));
+
+    // GetMetadata: owner 42 carries units "MW".
+    let meta = client.get_metadata(keys[0].identity()).await.unwrap();
+    assert_eq!(meta.units.as_deref(), Some("MW"));
+
+    // BulkRead the two series.
+    let all_keys = client
+        .list_keys(None, None, None, None, None, None, None, None, false)
+        .await
+        .unwrap();
+    let ids: Vec<_> = all_keys.iter().map(|(k, _)| k.identity().clone()).collect();
+    let refs: Vec<_> = ids.iter().collect();
+    let datas = client.bulk_read(&refs, None).await.unwrap();
+    assert_eq!(datas.len(), 2);
+
+    // Detailed counts + counts by type.
+    let detailed = client.time_series_counts_detailed().await.unwrap();
+    assert_eq!(detailed.static_time_series_count, 2);
+    let by_type = client.counts_by_type().await.unwrap();
+    assert_eq!(
+        by_type
+            .iter()
+            .find(|(t, _)| *t == TimeSeriesType::SingleTimeSeries)
+            .map(|(_, n)| *n),
+        Some(2)
+    );
+
+    // Owner ids + intervals + summaries + consistency.
+    let owner_ids = client
+        .list_owner_ids(OwnerCategory::Component, None, None)
+        .await
+        .unwrap();
+    assert_eq!(owner_ids, vec![42, 43]);
+    assert!(client.get_intervals(None).await.unwrap().is_empty());
+    // Both series share owner_type/name/shape/grid, so they group into one
+    // summary row with count 2.
+    let static_summary = client.static_summary().await.unwrap();
+    assert_eq!(static_summary.len(), 1);
+    assert_eq!(static_summary[0].count, 2);
+    assert!(client.forecast_summary().await.unwrap().is_empty());
+    let cc = client.check_static_consistency(None).await.unwrap();
+    assert_eq!(cc.len(), 1);
+    assert_eq!(cc[0].length, 24);
+    assert_eq!(cc[0].resolution, Period::Fixed(Duration::hours(1)));
 }

@@ -166,7 +166,15 @@ fn forecast_round_trips() {
         &det_store,
         &["-f", "csv", "get", "--owner-id", "1", "--name", "det"],
     );
-    assert_eq!(flat_values(&out), ["1", "2", "3", "4", "5", "6"]);
+    // Timestamped forecast CSV: one row per (window, step), values in
+    // (window, step) order over the stored [H, count] layout.
+    assert_eq!(out.lines().next().unwrap(), "issue_time,target_time,value");
+    let lines = data_lines(&out);
+    assert_eq!(lines.len(), 6);
+    let values: Vec<&str> = lines.iter().map(|l| l.split(',').nth(2).unwrap()).collect();
+    assert_eq!(values, ["1", "4", "2", "5", "3", "6"]);
+    assert!(lines[0].starts_with("2024-01-01T00:00:00+00:00,2024-01-01T00:00:00+00:00"));
+    assert!(lines[1].starts_with("2024-01-01T00:00:00+00:00,2024-01-01T01:00:00+00:00"));
 
     // Probabilistic: P=3, H=2, count=2 -> 12 flat values.
     let prob_store = dir.path().join("prob.nc");
@@ -199,7 +207,14 @@ fn forecast_round_trips() {
         &prob_store,
         &["-f", "csv", "get", "--owner-id", "2", "--name", "prob"],
     );
-    assert_eq!(flat_values(&out).len(), 12);
+    // P=3 value columns, count*H = 4 rows.
+    assert_eq!(
+        out.lines().next().unwrap(),
+        "issue_time,target_time,value[p10],value[p50],value[p90]"
+    );
+    let lines = data_lines(&out);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.iter().flat_map(|l| l.split(',').skip(2)).count(), 12);
 
     // Scenarios: scenario_count inferred (8 values / (H=2 * count=2) = 2).
     let scen_store = dir.path().join("scen.nc");
@@ -231,7 +246,14 @@ fn forecast_round_trips() {
         &scen_store,
         &["-f", "csv", "get", "--owner-id", "3", "--name", "scen"],
     );
-    assert_eq!(flat_values(&out).len(), 8);
+    // S=2 value columns, count*H = 4 rows.
+    assert_eq!(
+        out.lines().next().unwrap(),
+        "issue_time,target_time,value[s0],value[s1]"
+    );
+    let lines = data_lines(&out);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.iter().flat_map(|l| l.split(',').skip(2)).count(), 8);
 }
 
 #[test]
@@ -392,4 +414,325 @@ fn batch_json_array_adds_multiple() {
         &["-f", "csv", "get", "--owner-id", "10", "--name", "series_b"],
     );
     assert_eq!(data_lines(&out_b), ["4", "5", "6"]);
+}
+
+/// Seed a store with two SingleTimeSeries (owners 1 and 2, name "load").
+fn seed_two(dir: &Path, store: &Path) {
+    write(dir, "d.csv", "1.0\n2.0\n3.0\n4.0\n");
+    for owner in [1, 2] {
+        let json = format!(
+            r#"{{
+  "owner_id": {owner},
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "csv": "d.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}}"#
+        );
+        let descriptor = write(dir, "s.json", &json);
+        run(
+            store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+}
+
+#[test]
+fn admin_commands_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("admin.nc");
+    seed_two(dir.path(), &store);
+
+    let stats = run(&store, &["-f", "json", "stats"]);
+    assert!(
+        stats.contains("\"static_time_series\": 2"),
+        "stats: {stats}"
+    );
+    assert!(stats.contains("num_distinct_arrays"), "stats: {stats}");
+
+    let res = run(&store, &["-f", "json", "resolutions"]);
+    assert!(res.contains("PT1H"), "resolutions: {res}");
+
+    let verify = run(&store, &["-f", "json", "verify"]);
+    assert!(verify.contains("\"errors\""), "verify: {verify}");
+
+    let cc = run(&store, &["-f", "json", "check-consistency"]);
+    assert!(cc.contains("PT1H"), "check-consistency: {cc}");
+
+    let summary = run(&store, &["-f", "json", "summary"]);
+    assert!(summary.contains("\"static\""), "summary: {summary}");
+
+    // Table output smoke-check (must not crash).
+    run(&store, &["stats"]);
+    run(&store, &["summary"]);
+}
+
+#[test]
+fn rename_and_remove_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("rn.nc");
+    seed_two(dir.path(), &store);
+
+    // Rename owner 1's series.
+    run(
+        &store,
+        &[
+            "rename",
+            "--owner-id",
+            "1",
+            "--owner-category",
+            "component",
+            "--name",
+            "load",
+            "--new-name",
+            "load2",
+        ],
+    );
+    let list = run(&store, &["-f", "json", "list", "--owner-id", "1"]);
+    assert!(list.contains("load2"), "renamed list: {list}");
+    assert!(!list.contains("\"load\""), "old name gone: {list}");
+
+    // Remove every "load" series (owner 2 still has it) with --all.
+    run(&store, &["remove", "--all", "--force", "--name", "load"]);
+    let after = run(&store, &["-f", "json", "list", "--name", "load"]);
+    assert!(after.contains("\"items\": []"), "removed: {after}");
+}
+
+/// Run `tss`, expecting failure; returns stderr.
+fn run_err(store: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_tss"))
+        .arg("--store")
+        .arg(store)
+        .args(args)
+        .output()
+        .expect("failed to spawn tss");
+    assert!(
+        !output.status.success(),
+        "tss {args:?} unexpectedly succeeded:\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout),
+    );
+    String::from_utf8(output.stderr).expect("utf8 stderr")
+}
+
+/// Seed one store with distinctly-named series for glob/export tests.
+fn seed_named(dir: &Path, store: &Path, names: &[&str]) {
+    write(dir, "n.csv", "1.0\n2.0\n3.0\n");
+    for (i, name) in names.iter().enumerate() {
+        let json = format!(
+            r#"{{
+  "owner_id": {},
+  "owner_type": "Generator",
+  "name": "{name}",
+  "type": "single",
+  "dtype": "f64",
+  "csv": "n.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}}"#,
+            i + 1
+        );
+        let descriptor = write(dir, "n.json", &json);
+        run(
+            store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+}
+
+#[test]
+fn name_glob_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("glob.nc");
+    seed_named(dir.path(), &store, &["wind_speed", "wind_dir", "solar"]);
+
+    let list = run(&store, &["-f", "json", "list", "--name-glob", "wind_*"]);
+    assert!(list.contains("wind_speed") && list.contains("wind_dir"));
+    assert!(!list.contains("solar"));
+
+    run(
+        &store,
+        &["remove", "--all", "--force", "--name-glob", "wind_*"],
+    );
+    let after = run(&store, &["-f", "json", "list"]);
+    assert!(after.contains("solar") && !after.contains("wind_"));
+}
+
+#[test]
+fn dry_run_mutates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("dry.nc");
+    seed_two(dir.path(), &store);
+
+    let out = run(&store, &["remove", "--all", "--dry-run", "--name", "load"]);
+    assert!(out.contains("Would remove 2 time series"), "dry-run: {out}");
+    let out = run(&store, &["clear", "--dry-run"]);
+    assert!(out.contains("Would clear 2"), "clear dry-run: {out}");
+    let out = run(
+        &store,
+        &[
+            "replace-owner",
+            "--old",
+            "1",
+            "--new",
+            "9",
+            "--owner-category",
+            "component",
+            "--dry-run",
+        ],
+    );
+    assert!(out.contains("Would reassign 1"), "replace dry-run: {out}");
+    let out = run(
+        &store,
+        &[
+            "rename",
+            "--owner-id",
+            "1",
+            "--name",
+            "load",
+            "--new-name",
+            "x",
+            "--dry-run",
+        ],
+    );
+    assert!(out.contains("Would rename"), "rename dry-run: {out}");
+
+    // Nothing changed.
+    let list = run(&store, &["-f", "json", "list"]);
+    assert_eq!(list.matches("\"load\"").count(), 2, "unchanged: {list}");
+}
+
+#[test]
+fn export_to_dir_and_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("exp.nc");
+    seed_named(dir.path(), &store, &["a_series", "b_series"]);
+
+    // stdout export requires a unique match.
+    let out = run(&store, &["-f", "csv", "export", "--name", "a_series"]);
+    assert_eq!(out.lines().next().unwrap(), "timestamp,value");
+    assert_eq!(data_lines(&out).len(), 3);
+    let err = run_err(&store, &["-f", "csv", "export"]);
+    assert!(err.contains("--dir"), "multi-match error: {err}");
+
+    // Directory export writes one file per series.
+    let out_dir = dir.path().join("exported");
+    run(
+        &store,
+        &["-f", "json", "export", "--dir", out_dir.to_str().unwrap()],
+    );
+    let mut files: Vec<String> = fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "1_Generator_a_series_SingleTimeSeries.json",
+            "2_Generator_b_series_SingleTimeSeries.json"
+        ]
+    );
+    let body = fs::read_to_string(out_dir.join(&files[0])).unwrap();
+    assert!(body.contains("\"values\""), "export json: {body}");
+
+    // Table format is refused.
+    let err = run_err(&store, &["export", "--name", "a_series"]);
+    assert!(err.contains("csv or -f json"), "table refused: {err}");
+}
+
+#[test]
+fn logical_type_round_trips_through_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("lt.nc");
+    write(dir.path(), "lt.csv", "1.0\n2.0\n");
+    let descriptor = write(
+        dir.path(),
+        "lt.json",
+        r#"{
+  "owner_id": 5,
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "logical_type": "Profile",
+  "csv": "lt.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+    let info = run(&store, &["-f", "json", "info", "--owner-id", "5"]);
+    assert!(
+        info.contains("\"logical_type\": \"Profile\""),
+        "info: {info}"
+    );
+    let list = run(&store, &["-f", "json", "list"]);
+    assert!(
+        list.contains("\"logical_type\": \"Profile\""),
+        "list: {list}"
+    );
+}
+
+#[test]
+fn compression_flag_only_on_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("comp.nc");
+    write(dir.path(), "c.csv", "1.0\n2.0\n");
+    let descriptor = write(
+        dir.path(),
+        "c.json",
+        r#"{
+  "owner_id": 1,
+  "owner_type": "Generator",
+  "name": "load",
+  "type": "single",
+  "dtype": "f64",
+  "csv": "c.csv",
+  "has_header": false,
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "1h"
+}"#,
+    );
+    run(
+        &store,
+        &[
+            "add",
+            "--descriptor",
+            descriptor.to_str().unwrap(),
+            "--compression",
+            "deflate:9",
+        ],
+    );
+    // A second add against the existing store must not accept the flag.
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--descriptor",
+            descriptor.to_str().unwrap(),
+            "--compression",
+            "none",
+        ],
+    );
+    assert!(err.contains("already exists"), "existing-store: {err}");
+}
+
+#[test]
+fn completions_generate() {
+    let output = Command::new(env!("CARGO_BIN_EXE_tss"))
+        .args(["completions", "zsh"])
+        .output()
+        .expect("failed to spawn tss");
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("_tss"), "zsh completion body: {text}");
 }

@@ -2,12 +2,15 @@
 
 use std::path::Path;
 
+use time_series_store_core::Compression;
+
 use crate::{color, descriptor, store_access};
 
 pub fn run(
     store_path: &Path,
     descriptor_path: &Path,
     csv_override: Option<&Path>,
+    compression: Option<Compression>,
 ) -> Result<(), String> {
     let descriptors = descriptor::load(descriptor_path)?;
     if csv_override.is_some() && descriptors.len() > 1 {
@@ -20,7 +23,7 @@ pub fn run(
         requests.push(desc.to_add_request(base_dir, csv_override)?);
     }
 
-    let mut store = store_access::open_writable(store_path)?;
+    let mut store = store_access::open_writable_with(store_path, compression)?;
     let keys = store
         .add_time_series_bulk(requests)
         .map_err(|e| e.to_string())?;

@@ -604,7 +604,7 @@ end
 
 @testset "check_static_consistency and filtered get_forecast_parameters" begin
     store = Store(in_memory=true)
-    @test check_static_consistency(store) === nothing
+    @test isempty(check_static_consistency(store))
 
     t0 = DateTime(2024, 1, 1)
     add_time_series!(store, 1, "Generator", Component,
@@ -612,12 +612,30 @@ end
     add_time_series!(store, 2, "Generator", Component,
         SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "a"))
     cs = check_static_consistency(store)
-    @test cs.initial_timestamp == t0
-    @test cs.length == 4
-    # A differing length makes the store inconsistent.
+    @test length(cs) == 1
+    @test cs[1].resolution == Millisecond(Hour(1))
+    @test cs[1].initial_timestamp == t0
+    @test cs[1].length == 4
+
+    # A second resolution is a distinct grid, not an inconsistency.
+    add_time_series!(store, 4, "Generator", Component,
+        SingleTimeSeries(t0, Minute(30), Float64[1, 2, 3, 4, 5, 6, 7, 8], "a"))
+    multi = check_static_consistency(store)
+    @test length(multi) == 2
+    @test Set(g.resolution for g in multi) ==
+          Set([Millisecond(Hour(1)), Millisecond(Minute(30))])
+    # Scoping to one resolution returns only that grid.
+    hourly = check_static_consistency(store; resolution=Hour(1))
+    @test length(hourly) == 1
+    @test hourly[1].length == 4
+
+    # A differing length at an existing resolution is an inconsistency.
     add_time_series!(store, 3, "Generator", Component,
         SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "a"))
     @test_throws TimeSeriesStore.IntegrityError check_static_consistency(store)
+    # The other resolution's grid still checks out on its own.
+    ok = check_static_consistency(store; resolution=Minute(30))
+    @test length(ok) == 1 && ok[1].length == 8
 
     # Filtered forecast parameters.
     fstore = Store(in_memory=true)
@@ -1170,4 +1188,214 @@ end
     @test typeof(det) == Deterministic{Float64,2}
     scen = Scenarios(t0, res, Hour(2), Hour(1), 5, Float32[v for v in 1:(3 * 2 * 5)] |> a -> reshape(a, 3, 2, 5), "s")
     @test typeof(scen) == Scenarios{Float32,3}
+end
+
+@testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    # units round-trips through get_metadata (previously write-only).
+    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
+    k = add_time_series!(store, 1, "Generator", Component, sts;
+                         units="MW", logical_type="Profile")
+    md = get_metadata(store, 1, Component, "load"; resolution=res)
+    @test md.units == "MW"
+    @test md.logical_type == "Profile"
+
+    # time_range slicing on the SingleTimeSeries get path matches a full read.
+    full = get_time_series(store, k)
+    sliced = get_time_series(store, k; time_range=(t0 + Hour(2), t0 + Hour(5)))
+    @test sliced.data == full.data[3:5]
+    @test sliced.initial_timestamp == t0 + Hour(2)
+
+    # read_only reflects the store mode.
+    @test read_only(store) == false
+
+    # A forecast so discovery has an interval + a mixed bulk read.
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
+                        Float64[h * 10 + c for h in 1:2, c in 1:3], "fc")
+    kf = add_time_series!(store, 2, "Bus", Component, det)
+
+    @test get_intervals(store) == [Hour(1)]
+    @test isempty(get_intervals(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE))
+    @test sort(list_names(store)) == ["fc", "load"]
+    @test list_names(store; owner_id=1) == ["load"]
+    @test sort(list_owner_types(store)) == ["Bus", "Generator"]
+
+    # Full metadata rows include units + logical_type.
+    rows = list_time_series(store; owner_id=1)
+    @test length(rows) == 1
+    @test rows[1]["units"] == "MW"
+    @test rows[1]["logical_type"] == "Profile"
+    @test rows[1]["dtype"] == "f64"
+
+    # get_probabilistic_metadata exposes percentiles + units without a data fetch.
+    prob = Probabilistic(t0, res, Hour(2), Hour(1), 3, [0.1, 0.5, 0.9],
+                         Float64[p + h + c for p in 1:3, h in 1:2, c in 1:3], "pf")
+    add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
+    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    @test pmd.percentiles == [0.1, 0.5, 0.9]
+    @test pmd.units == "MWp"
+
+    # bulk_read dispatches on stored type.
+    mixed = bulk_read(store, TimeSeriesKey[k, kf])
+    @test mixed[1] isa SingleTimeSeries
+    @test mixed[1].data == full.data
+    @test mixed[2] isa Deterministic
+    @test mixed[2].data == det.data
+
+    # resolve_forecast_key resolves the abstract-deterministic family.
+    rk = resolve_forecast_key(store, 2, Component, "fc",
+                              TimeSeriesStore.TS_TYPE_ABSTRACT_DETERMINISTIC)
+    @test get_time_series(Deterministic, store, rk).data == det.data
+
+    # rename_time_series! moves the association.
+    nk = rename_time_series!(store, k, "load2")
+    @test get_metadata(store, 1, Component, "load2"; resolution=res).units == "MW"
+    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, 1, Component, "load"; resolution=res)
+
+    # remove_by_filter! removes matching series.
+    removed = remove_by_filter!(store; owner_id=3)
+    @test removed == 1
+    @test isempty(list_names(store; owner_id=3))
+end
+
+@testset "Round-2 ABI: metadata element_shape/features, bulk remove" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    feats = Dict("scenario" => "high", "model_year" => 2030)
+
+    # Static series with per-step element shape (2,): data dims (time=4, 2).
+    mts = SingleTimeSeries(t0, res, reshape(collect(1.0:8.0), 4, 2), "flow")
+    add_time_series!(store, 1, "Line", Component, mts; features=feats)
+    md = get_metadata(store, 1, Component, "flow"; resolution=res, features=feats)
+    @test md.element_shape == (2,)
+    @test md.features == Dict("scenario" => "high", "model_year" => 2030)
+
+    # Scalar series reports an empty shape and empty features.
+    sts = SingleTimeSeries(t0, res, collect(1.0:4.0), "load")
+    add_time_series!(store, 1, "Line", Component, sts)
+    md0 = get_metadata(store, 1, Component, "load"; resolution=res)
+    @test md0.element_shape == ()
+    @test isempty(md0.features)
+
+    # Forecast metadata carries the element shape + features too. The catalog's
+    # element_shape is the stored array's trailing dims after its first axis:
+    # a Deterministic with dims (H=2, count=3, E=2) reports (3, 2).
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
+                        reshape(collect(1.0:12.0), 2, 3, 2), "fc")
+    add_time_series!(store, 2, "Bus", Component, det; features=feats)
+    fmd = get_forecast_metadata(store, 2, Component, "fc",
+                                TimeSeriesStore.TS_TYPE_DETERMINISTIC; features=feats)
+    @test fmd.element_shape == (3, 2)
+    @test fmd.features == Dict("scenario" => "high", "model_year" => 2030)
+
+    # Probabilistic dims (P=2, H=2, count=3) report trailing dims (2, 3).
+    prob = Probabilistic(t0, res, Hour(2), Hour(1), 3, [0.1, 0.9],
+                         Float64[p + h + c for p in 1:2, h in 1:2, c in 1:3], "pf")
+    add_time_series!(store, 3, "Generator", Component, prob)
+    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    @test pmd.element_shape == (2, 3)
+    @test isempty(pmd.features)
+    @test pmd.percentiles == [0.1, 0.9]
+
+    # Bulk remove: all-or-nothing.
+    keys = get_time_series_keys(store, 1, Component)
+    @test length(keys) == 2
+    @test remove_time_series!(store, keys) == 2
+    @test isempty(get_time_series_keys(store, 1, Component))
+
+    # Rollback: one already-removed key aborts the whole batch.
+    kf = get_time_series_keys(store, 2, Component)[1]
+    kp = get_time_series_keys(store, 3, Component)[1]
+    @test remove_time_series!(store, [kf]) == 1
+    @test_throws TimeSeriesStore.NotFoundError remove_time_series!(store, [kp, kf])
+    @test has_time_series(store, kp)
+
+    close!(store)
+end
+
+@testset "Round-2 Julia idioms: Base interface, do-block, time_range, persist!" begin
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    # Do-block form closes the store, even on throw.
+    captured = Ref{Any}(nothing)
+    result = Store(in_memory=true) do store
+        captured[] = store
+        add_time_series!(store, 1, "Generator", Component,
+                         SingleTimeSeries(t0, res, collect(1.0:8.0), "load"))
+        42
+    end
+    @test result == 42
+    @test captured[].handle == C_NULL
+    @test_throws ErrorException Store(in_memory=true) do store
+        captured[] = store
+        error("boom")
+    end
+    @test captured[].handle == C_NULL
+
+    store = Store(in_memory=true)
+    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
+    k = add_time_series!(store, 1, "Generator", Component, sts)
+
+    # time_range on the typed key alias and the attribute-addressed forms.
+    sliced = get_time_series(SingleTimeSeries, store, k;
+                             time_range=(t0 + Hour(2), t0 + Hour(5)))
+    @test sliced.data == collect(3.0:5.0)
+    sliced = get_time_series(SingleTimeSeries, store, 1, Component, "load";
+                             resolution=res, time_range=(t0 + Hour(2), t0 + Hour(5)))
+    @test sliced.data == collect(3.0:5.0)
+
+    nsts = NonSequentialTimeSeries([t0, t0 + Hour(3), t0 + Hour(7)],
+                                   [10.0, 20.0, 30.0], "events")
+    add_time_series!(store, 2, "Bus", Component, nsts)
+    ns_sliced = get_time_series(NonSequentialTimeSeries, store, 2, Component, "events";
+                                time_range=(t0 + Hour(1), t0 + Hour(5)))
+    @test ns_sliced.data == [20.0]
+
+    # Key equality/hash delegate to core identity: separately-fetched keys of
+    # the same series are equal, hash equal, and work as Dict keys.
+    k2 = get_time_series_keys(store, 1, Component)[1]
+    @test k == k2
+    @test hash(k) == hash(k2)
+    kother = get_time_series_keys(store, 2, Component)[1]
+    @test k != kother
+    d = Dict(k => "a")
+    d[k2] = "b"
+    @test length(d) == 1 && d[k] == "b"
+
+    # show forms are compact one-liners.
+    @test occursin("name=\"load\"", sprint(show, k))
+    @test occursin("read_only=false", sprint(show, store))
+    @test occursin("length=8", sprint(show, sts))
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
+                        reshape(collect(1.0:6.0), 2, 3), "fc")
+    @test occursin("count=3", sprint(show, det))
+
+    # Container interface delegates to `data`; forecast length = window count.
+    @test length(sts) == 8
+    @test eltype(typeof(sts)) == Float64
+    @test sts[3] == 3.0
+    @test collect(sts) == sts.data
+    @test length(nsts) == 3
+    @test length(det) == 3
+
+    # persist! is exported and materializes an on-disk artifact.
+    dir = mktempdir()
+    dest = joinpath(dir, "persisted.nc")
+    persist!(store, dest)
+    @test isfile(dest)
+    reopened = open_store(dest; read_only=true)
+    @test get_time_series(SingleTimeSeries, store, 1, Component, "load").data ==
+          get_time_series(SingleTimeSeries, reopened, 1, Component, "load").data
+    close!(reopened)
+
+    # Typed IOError is part of the exception hierarchy.
+    @test TimeSeriesStore.IOError <: TimeSeriesStore.TimeSeriesException
+
+    close!(store)
+    @test occursin("closed", sprint(show, store))
 end

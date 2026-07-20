@@ -22,7 +22,22 @@ Spec:
 - Multi-dim per-step values (e.g. quadratic-curve coefficients) are supported: arrays carry an
   element `dtype` and a `(length, *element_shape)` shape, and the NetCDF backend persists the
   trailing element axes.
+- Columnar **readers** (`StaticReader` / `ForecastReader`) for the simulation access pattern — every
+  series' value at one timestamp — are exposed across the Rust core, C ABI, Julia, and Python.
+- Discovery / maintenance surface across the bindings: `get_intervals`, `list_names`,
+  `list_owner_types`, name-pattern filtering (`ListFilter::name_glob`, SQLite `GLOB` semantics),
+  filtered/bulk delete (`remove_by_filter`, `remove_time_series_bulk`), `rename_time_series`,
+  time-sliced `bulk_read`, and serde on the core types.
+- Language-idiomatic bindings: the Python wheel ships type stubs (`.pyi`), a full exception
+  hierarchy, keyword-only optional arguments, and `__eq__`/`__len__` on the value classes; the Julia
+  package overloads `Base` (`==`/`hash` on keys via the core identity, `show`,
+  `length`/`iterate`/`getindex` on values) and supports do-block `Store`/`open_store` forms.
 - Read-only gRPC server. Writes require local filesystem access.
+- The `tss` CLI covers inspection (`stats`, `summary`, `verify`, `check-consistency`, `resolutions`,
+  `params`), bulk export (`export`: timestamped CSV or structured JSON, one file per series), and
+  maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`, `remove --all` —
+  destructive commands take `--dry-run`) in addition to add / list / get / info / transform, plus
+  `completions` and a `TSS_STORE` env fallback for `--store`.
 - Auth: `none` (default) or `api_key` via the `x-api-key` header.
 
 ## Repo layout

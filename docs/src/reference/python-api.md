@@ -46,6 +46,11 @@ def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
   `InvalidParameterError`.
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
 
+The store is also a context manager: `with TimeSeriesStore.create(...) as store:` closes it on exit.
+`store.close()` drops the underlying handle and releases its files; subsequent operations raise
+`TimeSeriesError` (it is idempotent). `repr(store)` shows the path (or `in-memory`), the read-only
+flag, and `closed` once closed.
+
 ### Property
 
 ```python
@@ -109,25 +114,21 @@ def replace_owner(
 
 def list_time_series(
     self,
+    *,
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
     time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
+    name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     resolution: timedelta | str | None = None,
+    interval: timedelta | str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> list[dict]: ...
 
-def list_array_groups(
-    self,
-    owner_id: int | None = None,
-    owner_category: OwnerCategory | None = None,
-    owner_type: str | None = None,
-    time_series_type: TimeSeriesType | None = None,
-    name: str | None = None,
-    resolution: timedelta | str | None = None,
-    features: dict[str, int | float | bool | str] | None = None,
-) -> list[dict]: ...
+def list_array_groups(self, *, ...) -> list[dict]: ...
+# Same keyword-only filter arguments as list_time_series; so do list_keys,
+# list_names, list_owner_types, and remove_by_filter.
 
 def get_time_series_keys(
     self,
@@ -141,9 +142,15 @@ def get_time_series_counts(self) -> dict: ...
 def get_forecast_parameters(self) -> dict: ...
 def get_compression(self) -> dict: ...
 def compact(self) -> dict: ...
-def verify_integrity(self) -> list[str]: ...
+def verify_integrity(self) -> dict: ...
+# {"ok": bool, "errors": list[str]}
 def flush(self) -> None: ...
 ```
+
+> **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
+> marker): filter kwargs, `features=`/`units=`/`logical_type=` on the add paths, `time_range=` on
+> the read paths, and so on. Positional use raises `TypeError`. The wheel ships a
+> `time_series_store.pyi` stub, so IDEs and type checkers see the full signatures.
 
 #### Return shapes
 
@@ -178,7 +185,8 @@ def flush(self) -> None: ...
   int}`.
   `feature_sets_reclaimed` counts content-addressed feature rows that no association referenced any
   more; see the [file format](file-format.md#feature_sets).
-- **`verify_integrity`** returns a list of error strings; an empty list means the store is intact.
+- **`verify_integrity`** returns `{"ok": bool, "errors": list[str]}`; `ok` is `True` when the error
+  list is empty.
 - **`get_time_series`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive.
 
 ## `SingleTimeSeries`
@@ -340,17 +348,22 @@ forecast.scenario_count -> int
 
 All inherit from `TimeSeriesError`:
 
-| Exception                  | Raised when                                           |
-| -------------------------- | ----------------------------------------------------- |
-| `NotFoundError`            | A key or array does not exist                         |
-| `DuplicateTimeSeriesError` | Adding a series whose key already exists              |
-| `InvalidParameterError`    | Bad arguments (e.g. bad feature type, bad timestamps) |
-| `IntegrityError`           | On-disk inconsistency detected                        |
-| `ReadOnlyStoreError`       | A write on a read-only store                          |
+| Exception                   | Raised when                                           |
+| --------------------------- | ----------------------------------------------------- |
+| `NotFoundError`             | A key or array does not exist                         |
+| `DuplicateTimeSeriesError`  | Adding a series whose key already exists              |
+| `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …) |
+| `IntegrityError`            | On-disk inconsistency detected                        |
+| `ReadOnlyStoreError`        | A write on a read-only store                          |
+| `IoError`                   | Filesystem I/O failure                                |
+| `ConnectionError`           | Connection failure (module-scoped, not the builtin)   |
+| `IncompatibleFormatError`   | Store written in an incompatible on-disk format       |
+| `IncompatibleForecastError` | Forecast parameters clash with existing forecasts     |
+| `StorageError`              | SQLite catalog or serialization failure               |
 
-Not every failure is a `TimeSeriesError`: a period argument (`resolution`, `horizon`, `interval`)
-that is a malformed ISO 8601 duration string raises a plain `ValueError`, and one that is neither a
-`timedelta` nor a `str` raises a plain `TypeError`. `except TimeSeriesError` will not catch either.
+A malformed ISO 8601 period string raises `InvalidParameterError` (inside the hierarchy). Only a
+period argument that is neither a `timedelta` nor a `str` raises a plain `TypeError`, which
+`except TimeSeriesError` will not catch.
 
 Feature-value typing note: because `bool` is a subtype of `int` in Python, the binding checks `bool`
 first, so `True`/`False` features are stored as booleans, not integers.
