@@ -494,6 +494,25 @@ function _take_buffer_string(buf::Vector{UInt8}, len::Integer)
     return n == 0 ? nothing : String(buf[1:n])
 end
 
+# Element-shape out-buffer: `len` is the full dimension count reported by the
+# FFI; anything beyond the buffer capacity is pathological, so fail loudly
+# rather than silently truncating a shape.
+function _take_element_shape(buf::Vector{UInt64}, len::Integer)
+    Int(len) <= length(buf) ||
+        error("element shape has $(Int(len)) dimensions, exceeding the $(length(buf))-slot buffer")
+    return Tuple(Int(d) for d in buf[1:Int(len)])
+end
+
+# Features out-buffer: the FFI reports the full JSON byte length; a truncated
+# JSON document must never be parsed, so fail loudly if it did not fit.
+function _take_features_json(buf::Vector{UInt8}, len::Integer)
+    Int(len) < length(buf) ||
+        error("features JSON is $(Int(len)) bytes, exceeding the $(length(buf))-byte buffer")
+    n = Int(len)
+    n == 0 && return Dict{String,Any}()
+    return JSON.parse(String(buf[1:n]))
+end
+
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
                      features=Dict(), units=nothing)
@@ -586,11 +605,14 @@ end
     get_metadata(store, owner_id, owner_category, name; resolution, features=Dict())
 
 Look up a SingleTimeSeries by attributes and return a named tuple of
-`(initial_timestamp, resolution, length, data_hash, dtype, logical_type, units)`.
-`owner_category` is the
+`(initial_timestamp, resolution, length, data_hash, dtype, logical_type, units,
+element_shape, features)`. `owner_category` is the
 owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). `data_hash` is
 the 32-byte content hash as a `Vector{UInt8}`. `logical_type` and `units` are
-`nothing` when unset. Throws `NotFoundError` if absent.
+`nothing` when unset. `element_shape` is the per-timestep shape tuple (empty for
+scalar elements; for forecasts across all metadata getters it is the stored
+array's trailing dims after its first axis) and `features` the feature
+dictionary (empty when none). Throws `NotFoundError` if absent.
 """
 function get_metadata(
     store::Store,
@@ -611,16 +633,24 @@ function get_metadata(
     out_lt_len = Ref{UInt64}(0)
     units_buf = Vector{UInt8}(undef, 256)
     out_units_len = Ref{UInt64}(0)
+    shape_buf = Vector{UInt64}(undef, 8)
+    out_shape_len = Ref{UInt64}(0)
+    fj_buf = Vector{UInt8}(undef, 4096)
+    out_fj_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring,
          Ref{Int64}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32},
          Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt64}, UInt64, Ref{UInt64},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
         store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_iso, features_json,
         out_initial, out_resolution, out_length, out_hash, out_dtype,
         lt_buf, UInt64(length(lt_buf)), out_lt_len,
         units_buf, UInt64(length(units_buf)), out_units_len,
+        shape_buf, UInt64(length(shape_buf)), out_shape_len,
+        fj_buf, UInt64(length(fj_buf)), out_fj_len,
     )
     _check(code)
     resolution = _take_period(out_resolution[])
@@ -634,13 +664,16 @@ function get_metadata(
         dtype=_julia_dtype(out_dtype[]),
         logical_type=logical_type,
         units=units,
+        element_shape=_take_element_shape(shape_buf, out_shape_len[]),
+        features=_take_features_json(fj_buf, out_fj_len[]),
     )
 end
 
 """
     get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval, features=Dict())
 
-Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, logical_type, units)`
+Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, logical_type,
+units, element_shape, features)`
 for a stored forecast of integer `ts_type` (see the `TS_TYPE_*` constants).
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`). The optional `interval` keyword (a `Period`) restricts
@@ -666,16 +699,22 @@ function get_forecast_metadata(
     out_hash = Vector{UInt8}(undef, 32)
     lt_buf = Vector{UInt8}(undef, 256); out_lt_len = Ref{UInt64}(0)
     units_buf = Vector{UInt8}(undef, 256); out_units_len = Ref{UInt64}(0)
+    shape_buf = Vector{UInt64}(undef, 8); out_shape_len = Ref{UInt64}(0)
+    fj_buf = Vector{UInt8}(undef, 4096); out_fj_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_forecast_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring,
          Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
          Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt64}, UInt64, Ref{UInt64},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
         store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json,
         out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
         lt_buf, UInt64(length(lt_buf)), out_lt_len,
         units_buf, UInt64(length(units_buf)), out_units_len,
+        shape_buf, UInt64(length(shape_buf)), out_shape_len,
+        fj_buf, UInt64(length(fj_buf)), out_fj_len,
     )
     _check(code)
     logical_type = _take_buffer_string(lt_buf, out_lt_len[])
@@ -690,13 +729,16 @@ function get_forecast_metadata(
         data_hash=out_hash,
         logical_type=logical_type,
         units=units,
+        element_shape=_take_element_shape(shape_buf, out_shape_len[]),
+        features=_take_features_json(fj_buf, out_fj_len[]),
     )
 end
 
 """
     get_probabilistic_metadata(store, owner_id, owner_category, name; resolution, interval, features=Dict())
 
-Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, percentiles, units)`
+Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, percentiles,
+units, element_shape, features)`
 for a stored `Probabilistic` forecast. `percentiles` is the stored percentile
 vector; `units` is `nothing` when unset. Previously the percentiles were only
 reachable through a full data fetch.
@@ -719,16 +761,22 @@ function get_probabilistic_metadata(
     out_hash = Vector{UInt8}(undef, 32)
     out_pct = Ref{Ptr{Float64}}(C_NULL); out_pct_len = Ref{UInt64}(0)
     units_buf = Vector{UInt8}(undef, 256); out_units_len = Ref{UInt64}(0)
+    shape_buf = Vector{UInt64}(undef, 8); out_shape_len = Ref{UInt64}(0)
+    fj_buf = Vector{UInt8}(undef, 4096); out_fj_len = Ref{UInt64}(0)
     code = ccall(
         (:ts_store_get_probabilistic_metadata, lib_path()), Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring, Cstring,
          Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
          Ref{Ptr{Float64}}, Ref{UInt64},
+         Ptr{UInt8}, UInt64, Ref{UInt64},
+         Ptr{UInt64}, UInt64, Ref{UInt64},
          Ptr{UInt8}, UInt64, Ref{UInt64}),
         store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_iso, interval_iso, features_json,
         out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
         out_pct, out_pct_len,
         units_buf, UInt64(length(units_buf)), out_units_len,
+        shape_buf, UInt64(length(shape_buf)), out_shape_len,
+        fj_buf, UInt64(length(fj_buf)), out_fj_len,
     )
     _check(code)
     percentiles = copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
@@ -743,6 +791,8 @@ function get_probabilistic_metadata(
         data_hash=out_hash,
         percentiles=percentiles,
         units=_take_buffer_string(units_buf, out_units_len[]),
+        element_shape=_take_element_shape(shape_buf, out_shape_len[]),
+        features=_take_features_json(fj_buf, out_fj_len[]),
     )
 end
 
@@ -1631,6 +1681,23 @@ function remove_time_series!(store::Store, key::TimeSeriesKey)
                  (Ptr{Cvoid}, Ptr{Cvoid}), store.handle, key.handle)
     _check(code)
     return nothing
+end
+
+"""
+    remove_time_series!(store, keys::Vector{TimeSeriesKey}) -> Int
+
+Remove several time series in one all-or-nothing transaction, returning the
+number removed. On any error (including a single missing key) nothing is
+removed.
+"""
+function remove_time_series!(store::Store, keys::Vector{TimeSeriesKey})
+    handles = Ptr{Cvoid}[k.handle for k in keys]
+    out_removed = Ref{UInt64}(0)
+    code = GC.@preserve keys ccall((:ts_store_remove_bulk, lib_path()), Int32,
+                 (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Ref{UInt64}),
+                 store.handle, handles, UInt64(length(handles)), out_removed)
+    _check(code)
+    return Int(out_removed[])
 end
 
 function has_time_series(store::Store, key::TimeSeriesKey)

@@ -299,6 +299,23 @@ int32_t ts_store_get_non_sequential(const struct TsStore *handle,
 int32_t ts_store_remove(struct TsStore *handle, const struct TsKey *key);
 
 /**
+ * Remove several time series in one all-or-nothing transaction. On success
+ * `*out_removed` receives the number of removed associations; on any error
+ * (including a single missing key) nothing is removed.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `keys` must point to `len`
+ * valid, non-null key-handle pointers created by this library. `out_removed`
+ * must be valid for writing one `u64`. No handle may be concurrently mutated
+ * for the duration of the call.
+ */
+int32_t ts_store_remove_bulk(struct TsStore *handle,
+                             const struct TsKey *const *keys,
+                             uint64_t len,
+                             uint64_t *out_removed);
+
+/**
  * Report whether the store contains the time series identified by `key`.
  *
  * # Safety
@@ -581,19 +598,25 @@ int32_t ts_store_persist(struct TsStore *handle, const char *path);
  * Look up a SingleTimeSeries metadata record by attributes. On success the
  * caller's out-params receive the initial timestamp, resolution, length, the
  * 32-byte content hash (written into the `out_data_hash` buffer, which must
- * have room for 32 bytes), the dtype code (`out_dtype`), and the logical-type
+ * have room for 32 bytes), the dtype code (`out_dtype`), the logical-type
  * tag and units string via probe-then-fetch (`out_logical_type` /
  * `out_logical_type_len` and `out_units` / `out_units_len`; an empty string
- * means the field is unset). Returns `TS_ERR_NOT_FOUND` if absent.
+ * means the field is unset), the per-timestep element shape via
+ * probe-then-fetch (`out_element_shape` / `out_element_shape_len`; length 0
+ * means scalar elements), and the features as a JSON object string via
+ * probe-then-fetch (`out_features_json` / `out_features_json_len`; `{}` means
+ * no features). Returns `TS_ERR_NOT_FOUND` if absent.
  *
  * # Safety
  *
  * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
  * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
- * value and `out_data_hash` must be valid for 32 bytes. The `out_logical_type` and `out_units`
- * caller buffers, when non-null, must be valid for `logical_type_cap` and `units_cap` bytes
- * respectively; their `*_len` out-pointers must be valid for one `u64` each.
+ * value and `out_data_hash` must be valid for 32 bytes. The `out_logical_type`, `out_units`, and
+ * `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+ * `units_cap`, and `features_json_cap` bytes respectively; the `out_element_shape` buffer, when
+ * non-null, must be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be
+ * valid for one `u64`.
  */
 int32_t ts_store_get_metadata(const struct TsStore *handle,
                               int64_t owner_id,
@@ -611,7 +634,13 @@ int32_t ts_store_get_metadata(const struct TsStore *handle,
                               uint64_t *out_logical_type_len,
                               char *out_units,
                               uint64_t units_cap,
-                              uint64_t *out_units_len);
+                              uint64_t *out_units_len,
+                              uint64_t *out_element_shape,
+                              uint64_t element_shape_cap,
+                              uint64_t *out_element_shape_len,
+                              char *out_features_json,
+                              uint64_t features_json_cap,
+                              uint64_t *out_features_json_len);
 
 /**
  * True iff a SingleTimeSeries with the given attributes exists.
@@ -1109,8 +1138,12 @@ int32_t ts_store_transform_single_time_series(struct TsStore *handle,
 /**
  * Read `Probabilistic` metadata. Like `ts_store_get_forecast_metadata` but also
  * returns the percentiles vector in `*out_percentiles` (caller frees with
- * `ts_buffer_free_f64`) and the units string via probe-then-fetch
- * (`out_units` / `out_units_len`; an empty string means unset).
+ * `ts_buffer_free_f64`), the units string via probe-then-fetch
+ * (`out_units` / `out_units_len`; an empty string means unset), the
+ * per-timestep element shape via probe-then-fetch (`out_element_shape` /
+ * `out_element_shape_len`; length 0 means scalar elements), and the features
+ * as a JSON object string via probe-then-fetch (`out_features_json` /
+ * `out_features_json_len`; `{}` means no features).
  *
  * # Safety
  *
@@ -1119,8 +1152,10 @@ int32_t ts_store_transform_single_time_series(struct TsStore *handle,
  * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
  * one value, `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for
  * writing one pointer. The returned percentile buffer must be released exactly once with
- * `ts_buffer_free_f64` using the returned length. The `out_units` caller buffer, when non-null,
- * must be valid for `units_cap` bytes and `out_units_len` for one `u64`.
+ * `ts_buffer_free_f64` using the returned length. The `out_units` and `out_features_json` caller
+ * buffers, when non-null, must be valid for `units_cap` and `features_json_cap` bytes; the
+ * `out_element_shape` buffer, when non-null, must be valid for `element_shape_cap` `u64` values;
+ * every `*_len` out-pointer must be valid for one `u64`.
  */
 int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             int64_t owner_id,
@@ -1140,14 +1175,24 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
                                             uint64_t *out_percentiles_len,
                                             char *out_units,
                                             uint64_t units_cap,
-                                            uint64_t *out_units_len);
+                                            uint64_t *out_units_len,
+                                            uint64_t *out_element_shape,
+                                            uint64_t element_shape_cap,
+                                            uint64_t *out_element_shape_len,
+                                            char *out_features_json,
+                                            uint64_t features_json_cap,
+                                            uint64_t *out_features_json_len);
 
 /**
  * Read forecast metadata by attributes. Out-params receive initial timestamp,
  * resolution, horizon, interval, count, the stored array length, the 32-byte
- * content hash (into `out_data_hash`), and the logical-type tag and units
+ * content hash (into `out_data_hash`), the logical-type tag and units
  * string via probe-then-fetch (`logical_type_buf` / `out_logical_type_len` and
- * `out_units` / `out_units_len`; an empty string means the field is unset).
+ * `out_units` / `out_units_len`; an empty string means the field is unset),
+ * the per-timestep element shape via probe-then-fetch (`out_element_shape` /
+ * `out_element_shape_len`; length 0 means scalar elements), and the features
+ * as a JSON object string via probe-then-fetch (`out_features_json` /
+ * `out_features_json_len`; `{}` means no features).
  *
  * # Safety
  *
@@ -1156,9 +1201,11 @@ int32_t ts_store_get_probabilistic_metadata(const struct TsStore *handle,
  * null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
  * ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
  * Scalar output pointers must each be valid for
- * one value and `out_data_hash` must be valid for 32 bytes. The `logical_type_buf` and
- * `out_units` caller buffers, when non-null, must be valid for `logical_type_cap` and `units_cap`
- * bytes; their `*_len` out-pointers must each be valid for one `u64`.
+ * one value and `out_data_hash` must be valid for 32 bytes. The `logical_type_buf`, `out_units`,
+ * and `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+ * `units_cap`, and `features_json_cap` bytes; the `out_element_shape` buffer, when non-null, must
+ * be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be valid for one
+ * `u64`.
  */
 int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        int64_t owner_id,
@@ -1180,7 +1227,13 @@ int32_t ts_store_get_forecast_metadata(const struct TsStore *handle,
                                        uint64_t *out_logical_type_len,
                                        char *out_units,
                                        uint64_t units_cap,
-                                       uint64_t *out_units_len);
+                                       uint64_t *out_units_len,
+                                       uint64_t *out_element_shape,
+                                       uint64_t element_shape_cap,
+                                       uint64_t *out_element_shape_len,
+                                       char *out_features_json,
+                                       uint64_t features_json_cap,
+                                       uint64_t *out_features_json_len);
 
 /**
  * Fetch a forecast by attributes and return the full data array plus metadata.
@@ -1754,6 +1807,29 @@ int32_t ts_store_replace_owner(struct TsStore *handle,
  * freed. The key must not be used after this call.
  */
 void ts_key_free(struct TsKey *key);
+
+/**
+ * Compare two key handles by identity (owner, category, type, name,
+ * resolution, interval, features). `*out_eq` receives the result.
+ *
+ * # Safety
+ *
+ * `a` and `b` must be live key handles created by this library and `out_eq`
+ * must be valid for writing one `bool`.
+ */
+int32_t ts_key_eq(const struct TsKey *a, const struct TsKey *b, bool *out_eq);
+
+/**
+ * Hash a key handle's identity into `*out_hash`, consistent with `ts_key_eq`
+ * (equal keys hash equal). The value is stable only within one process — do
+ * not persist it or compare it across library versions.
+ *
+ * # Safety
+ *
+ * `key` must be a live key handle created by this library and `out_hash` must
+ * be valid for writing one `u64`.
+ */
+int32_t ts_key_identity_hash(const struct TsKey *key, uint64_t *out_hash);
 
 /**
  * Release an `f64` buffer returned by this library.

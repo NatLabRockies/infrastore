@@ -1260,3 +1260,59 @@ end
     @test removed == 1
     @test isempty(list_names(store; owner_id=3))
 end
+
+@testset "Round-2 ABI: metadata element_shape/features, bulk remove" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    feats = Dict("scenario" => "high", "model_year" => 2030)
+
+    # Static series with per-step element shape (2,): data dims (time=4, 2).
+    mts = SingleTimeSeries(t0, res, reshape(collect(1.0:8.0), 4, 2), "flow")
+    add_time_series!(store, 1, "Line", Component, mts; features=feats)
+    md = get_metadata(store, 1, Component, "flow"; resolution=res, features=feats)
+    @test md.element_shape == (2,)
+    @test md.features == Dict("scenario" => "high", "model_year" => 2030)
+
+    # Scalar series reports an empty shape and empty features.
+    sts = SingleTimeSeries(t0, res, collect(1.0:4.0), "load")
+    add_time_series!(store, 1, "Line", Component, sts)
+    md0 = get_metadata(store, 1, Component, "load"; resolution=res)
+    @test md0.element_shape == ()
+    @test isempty(md0.features)
+
+    # Forecast metadata carries the element shape + features too. The catalog's
+    # element_shape is the stored array's trailing dims after its first axis:
+    # a Deterministic with dims (H=2, count=3, E=2) reports (3, 2).
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
+                        reshape(collect(1.0:12.0), 2, 3, 2), "fc")
+    add_time_series!(store, 2, "Bus", Component, det; features=feats)
+    fmd = get_forecast_metadata(store, 2, Component, "fc",
+                                TimeSeriesStore.TS_TYPE_DETERMINISTIC; features=feats)
+    @test fmd.element_shape == (3, 2)
+    @test fmd.features == Dict("scenario" => "high", "model_year" => 2030)
+
+    # Probabilistic dims (P=2, H=2, count=3) report trailing dims (2, 3).
+    prob = Probabilistic(t0, res, Hour(2), Hour(1), 3, [0.1, 0.9],
+                         Float64[p + h + c for p in 1:2, h in 1:2, c in 1:3], "pf")
+    add_time_series!(store, 3, "Generator", Component, prob)
+    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    @test pmd.element_shape == (2, 3)
+    @test isempty(pmd.features)
+    @test pmd.percentiles == [0.1, 0.9]
+
+    # Bulk remove: all-or-nothing.
+    keys = get_time_series_keys(store, 1, Component)
+    @test length(keys) == 2
+    @test remove_time_series!(store, keys) == 2
+    @test isempty(get_time_series_keys(store, 1, Component))
+
+    # Rollback: one already-removed key aborts the whole batch.
+    kf = get_time_series_keys(store, 2, Component)[1]
+    kp = get_time_series_keys(store, 3, Component)[1]
+    @test remove_time_series!(store, [kf]) == 1
+    @test_throws TimeSeriesStore.NotFoundError remove_time_series!(store, [kp, kf])
+    @test has_time_series(store, kp)
+
+    close!(store)
+end

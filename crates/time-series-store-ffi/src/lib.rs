@@ -953,6 +953,51 @@ pub unsafe extern "C" fn ts_store_remove(
     }
 }
 
+/// Remove several time series in one all-or-nothing transaction. On success
+/// `*out_removed` receives the number of removed associations; on any error
+/// (including a single missing key) nothing is removed.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `keys` must point to `len`
+/// valid, non-null key-handle pointers created by this library. `out_removed`
+/// must be valid for writing one `u64`. No handle may be concurrently mutated
+/// for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_remove_bulk(
+    handle: *mut TsStoreHandle,
+    keys: *const *const TsKeyHandle,
+    len: u64,
+    out_removed: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_removed.is_null() || (keys.is_null() && len > 0) {
+        set_error("an out pointer is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let mut identities: Vec<&core_lib::KeyIdentity> = Vec::with_capacity(len as usize);
+    for i in 0..len as usize {
+        match unsafe { (*keys.add(i)).as_ref() } {
+            Some(k) => identities.push(&k.inner),
+            None => {
+                set_error(format!("key {i} is null"));
+                return TS_ERR_NULL_POINTER;
+            }
+        }
+    }
+    match store.inner.remove_time_series_bulk(&identities) {
+        Ok(n) => {
+            unsafe { *out_removed = n as u64 };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Report whether the store contains the time series identified by `key`.
 ///
 /// # Safety
@@ -1768,19 +1813,25 @@ unsafe fn build_key_from_attrs(
 /// Look up a SingleTimeSeries metadata record by attributes. On success the
 /// caller's out-params receive the initial timestamp, resolution, length, the
 /// 32-byte content hash (written into the `out_data_hash` buffer, which must
-/// have room for 32 bytes), the dtype code (`out_dtype`), and the logical-type
+/// have room for 32 bytes), the dtype code (`out_dtype`), the logical-type
 /// tag and units string via probe-then-fetch (`out_logical_type` /
 /// `out_logical_type_len` and `out_units` / `out_units_len`; an empty string
-/// means the field is unset). Returns `TS_ERR_NOT_FOUND` if absent.
+/// means the field is unset), the per-timestep element shape via
+/// probe-then-fetch (`out_element_shape` / `out_element_shape_len`; length 0
+/// means scalar elements), and the features as a JSON object string via
+/// probe-then-fetch (`out_features_json` / `out_features_json_len`; `{}` means
+/// no features). Returns `TS_ERR_NOT_FOUND` if absent.
 ///
 /// # Safety
 ///
 /// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
 /// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
-/// value and `out_data_hash` must be valid for 32 bytes. The `out_logical_type` and `out_units`
-/// caller buffers, when non-null, must be valid for `logical_type_cap` and `units_cap` bytes
-/// respectively; their `*_len` out-pointers must be valid for one `u64` each.
+/// value and `out_data_hash` must be valid for 32 bytes. The `out_logical_type`, `out_units`, and
+/// `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+/// `units_cap`, and `features_json_cap` bytes respectively; the `out_element_shape` buffer, when
+/// non-null, must be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be
+/// valid for one `u64`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_metadata(
@@ -1801,6 +1852,12 @@ pub unsafe extern "C" fn ts_store_get_metadata(
     out_units: *mut c_char,
     units_cap: u64,
     out_units_len: *mut u64,
+    out_element_shape: *mut u64,
+    element_shape_cap: u64,
+    out_element_shape_len: *mut u64,
+    out_features_json: *mut c_char,
+    features_json_cap: u64,
+    out_features_json_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -1814,6 +1871,8 @@ pub unsafe extern "C" fn ts_store_get_metadata(
         || out_dtype.is_null()
         || out_logical_type_len.is_null()
         || out_units_len.is_null()
+        || out_element_shape_len.is_null()
+        || out_features_json_len.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
@@ -1856,6 +1915,19 @@ pub unsafe extern "C" fn ts_store_get_metadata(
             out_units,
             units_cap,
             out_units_len,
+        );
+        let shape: Vec<u64> = meta.element_shape.iter().map(|&d| d as u64).collect();
+        write_u64s_out(
+            &shape,
+            out_element_shape,
+            element_shape_cap,
+            out_element_shape_len,
+        );
+        write_str_out(
+            &features_to_json(&meta.features),
+            out_features_json,
+            features_json_cap,
+            out_features_json_len,
         );
     }
     TS_OK
@@ -2156,6 +2228,24 @@ unsafe fn write_str_out(s: &str, buf: *mut c_char, cap: u64, out_len: *mut u64) 
             let n = bytes.len().min((cap - 1) as usize);
             ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
             *buf.add(n) = 0;
+        }
+    }
+}
+
+/// Write `vals` into the caller buffer `buf` (truncated to `cap` entries),
+/// always reporting the full entry count through `out_len`. Safe to call with a
+/// null / zero-capacity buffer to probe the required length first.
+///
+/// # Safety
+///
+/// `out_len` must be valid for writing one `u64`. When `buf` is non-null it must
+/// be valid for writing `cap` `u64` values.
+unsafe fn write_u64s_out(vals: &[u64], buf: *mut u64, cap: u64, out_len: *mut u64) {
+    unsafe {
+        *out_len = vals.len() as u64;
+        if !buf.is_null() && cap > 0 {
+            let n = vals.len().min(cap as usize);
+            ptr::copy_nonoverlapping(vals.as_ptr(), buf, n);
         }
     }
 }
@@ -3469,8 +3559,12 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
 
 /// Read `Probabilistic` metadata. Like `ts_store_get_forecast_metadata` but also
 /// returns the percentiles vector in `*out_percentiles` (caller frees with
-/// `ts_buffer_free_f64`) and the units string via probe-then-fetch
-/// (`out_units` / `out_units_len`; an empty string means unset).
+/// `ts_buffer_free_f64`), the units string via probe-then-fetch
+/// (`out_units` / `out_units_len`; an empty string means unset), the
+/// per-timestep element shape via probe-then-fetch (`out_element_shape` /
+/// `out_element_shape_len`; length 0 means scalar elements), and the features
+/// as a JSON object string via probe-then-fetch (`out_features_json` /
+/// `out_features_json_len`; `{}` means no features).
 ///
 /// # Safety
 ///
@@ -3479,8 +3573,10 @@ pub unsafe extern "C" fn ts_store_transform_single_time_series(
 /// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
 /// one value, `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for
 /// writing one pointer. The returned percentile buffer must be released exactly once with
-/// `ts_buffer_free_f64` using the returned length. The `out_units` caller buffer, when non-null,
-/// must be valid for `units_cap` bytes and `out_units_len` for one `u64`.
+/// `ts_buffer_free_f64` using the returned length. The `out_units` and `out_features_json` caller
+/// buffers, when non-null, must be valid for `units_cap` and `features_json_cap` bytes; the
+/// `out_element_shape` buffer, when non-null, must be valid for `element_shape_cap` `u64` values;
+/// every `*_len` out-pointer must be valid for one `u64`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
@@ -3503,13 +3599,24 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
     out_units: *mut c_char,
     units_cap: u64,
     out_units_len: *mut u64,
+    out_element_shape: *mut u64,
+    element_shape_cap: u64,
+    out_element_shape_len: *mut u64,
+    out_features_json: *mut c_char,
+    features_json_cap: u64,
+    out_features_json_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
         Some(s) => s,
         None => return TS_ERR_NULL_POINTER,
     };
-    if out_percentiles.is_null() || out_percentiles_len.is_null() || out_units_len.is_null() {
+    if out_percentiles.is_null()
+        || out_percentiles_len.is_null()
+        || out_units_len.is_null()
+        || out_element_shape_len.is_null()
+        || out_features_json_len.is_null()
+    {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
     }
@@ -3558,15 +3665,32 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
             units_cap,
             out_units_len,
         );
+        let shape: Vec<u64> = meta.element_shape.iter().map(|&d| d as u64).collect();
+        write_u64s_out(
+            &shape,
+            out_element_shape,
+            element_shape_cap,
+            out_element_shape_len,
+        );
+        write_str_out(
+            &features_to_json(&meta.features),
+            out_features_json,
+            features_json_cap,
+            out_features_json_len,
+        );
     }
     TS_OK
 }
 
 /// Read forecast metadata by attributes. Out-params receive initial timestamp,
 /// resolution, horizon, interval, count, the stored array length, the 32-byte
-/// content hash (into `out_data_hash`), and the logical-type tag and units
+/// content hash (into `out_data_hash`), the logical-type tag and units
 /// string via probe-then-fetch (`logical_type_buf` / `out_logical_type_len` and
-/// `out_units` / `out_units_len`; an empty string means the field is unset).
+/// `out_units` / `out_units_len`; an empty string means the field is unset),
+/// the per-timestep element shape via probe-then-fetch (`out_element_shape` /
+/// `out_element_shape_len`; length 0 means scalar elements), and the features
+/// as a JSON object string via probe-then-fetch (`out_features_json` /
+/// `out_features_json_len`; `{}` means no features).
 ///
 /// # Safety
 ///
@@ -3575,9 +3699,11 @@ pub unsafe extern "C" fn ts_store_get_probabilistic_metadata(
 /// null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
 /// ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
 /// Scalar output pointers must each be valid for
-/// one value and `out_data_hash` must be valid for 32 bytes. The `logical_type_buf` and
-/// `out_units` caller buffers, when non-null, must be valid for `logical_type_cap` and `units_cap`
-/// bytes; their `*_len` out-pointers must each be valid for one `u64`.
+/// one value and `out_data_hash` must be valid for 32 bytes. The `logical_type_buf`, `out_units`,
+/// and `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+/// `units_cap`, and `features_json_cap` bytes; the `out_element_shape` buffer, when non-null, must
+/// be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be valid for one
+/// `u64`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn ts_store_get_forecast_metadata(
@@ -3602,6 +3728,12 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
     out_units: *mut c_char,
     units_cap: u64,
     out_units_len: *mut u64,
+    out_element_shape: *mut u64,
+    element_shape_cap: u64,
+    out_element_shape_len: *mut u64,
+    out_features_json: *mut c_char,
+    features_json_cap: u64,
+    out_features_json_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -3617,6 +3749,8 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
         || out_data_hash.is_null()
         || out_logical_type_len.is_null()
         || out_units_len.is_null()
+        || out_element_shape_len.is_null()
+        || out_features_json_len.is_null()
     {
         set_error("an out pointer is null");
         return TS_ERR_NULL_POINTER;
@@ -3669,6 +3803,19 @@ pub unsafe extern "C" fn ts_store_get_forecast_metadata(
             out_units,
             units_cap,
             out_units_len,
+        );
+        let shape: Vec<u64> = meta.element_shape.iter().map(|&d| d as u64).collect();
+        write_u64s_out(
+            &shape,
+            out_element_shape,
+            element_shape_cap,
+            out_element_shape_len,
+        );
+        write_str_out(
+            &features_to_json(&meta.features),
+            out_features_json,
+            features_json_cap,
+            out_features_json_len,
         );
     }
     TS_OK
@@ -5469,6 +5616,58 @@ pub unsafe extern "C" fn ts_key_free(key: *mut TsKeyHandle) {
     if !key.is_null() {
         unsafe { drop(Box::from_raw(key)) };
     }
+}
+
+/// Compare two key handles by identity (owner, category, type, name,
+/// resolution, interval, features). `*out_eq` receives the result.
+///
+/// # Safety
+///
+/// `a` and `b` must be live key handles created by this library and `out_eq`
+/// must be valid for writing one `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_key_eq(
+    a: *const TsKeyHandle,
+    b: *const TsKeyHandle,
+    out_eq: *mut bool,
+) -> i32 {
+    clear_error();
+    let (a, b) = match (unsafe { a.as_ref() }, unsafe { b.as_ref() }) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return TS_ERR_NULL_POINTER,
+    };
+    if out_eq.is_null() {
+        set_error("out_eq is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    unsafe { *out_eq = a.inner == b.inner };
+    TS_OK
+}
+
+/// Hash a key handle's identity into `*out_hash`, consistent with `ts_key_eq`
+/// (equal keys hash equal). The value is stable only within one process — do
+/// not persist it or compare it across library versions.
+///
+/// # Safety
+///
+/// `key` must be a live key handle created by this library and `out_hash` must
+/// be valid for writing one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_key_identity_hash(key: *const TsKeyHandle, out_hash: *mut u64) -> i32 {
+    clear_error();
+    let key = match unsafe { key.as_ref() } {
+        Some(k) => k,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_hash.is_null() {
+        set_error("out_hash is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.inner.hash(&mut hasher);
+    unsafe { *out_hash = hasher.finish() };
+    TS_OK
 }
 
 /// Release an `f64` buffer returned by this library.
