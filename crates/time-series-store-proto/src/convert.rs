@@ -4,9 +4,11 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use time_series_store_core::{
-    Deterministic, Dtype, FeatureValue, Features, KeyIdentity, NonSequentialTimeSeries,
-    OwnerCategory, Period, Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData,
-    TimeSeriesMetadata, TimeSeriesType, TypedArray,
+    Deterministic, Dtype, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
+    KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
+    Probabilistic, RequestedType, Scenarios, SingleTimeSeries, SingleTimeSeriesKey,
+    StaticSummaryRow, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType,
+    TypedArray,
 };
 
 use crate::pb;
@@ -121,9 +123,9 @@ pub fn features_from_pb(f: pb::Features) -> Result<Features, ConvertError> {
 
 // ---- Key + metadata ----
 
-// The protobuf key message carries only the identity tuple (the wire format is
-// identity-addressed), so it maps to a [`KeyIdentity`]. Descriptive window
-// fields are not transported.
+// The identity-only key encoding: maps a [`KeyIdentity`] with the descriptive
+// snapshot fields left absent. Used by the identity-addressed RPCs (get, has),
+// where only the identity tuple is needed to look a series up.
 pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
     pb::TimeSeriesKey {
         owner_id: k.owner_id,
@@ -133,6 +135,83 @@ pub fn key_to_pb(k: &KeyIdentity) -> pb::TimeSeriesKey {
         resolution: period_to_iso(k.resolution),
         interval: period_to_iso(k.interval),
         features: Some(features_to_pb(&k.features)),
+        initial_timestamp_rfc3339: None,
+        length: None,
+        horizon: None,
+        count: None,
+    }
+}
+
+// The full-key encoding: the identity plus the per-variant descriptive snapshot
+// (the variant is implied by `time_series_type`). Used by the RPCs that return
+// keys to a caller (ListKeys, GetTimeSeriesKeys, ResolveForecastKey).
+pub fn full_key_to_pb(k: &TimeSeriesKey) -> pb::TimeSeriesKey {
+    let mut pb = key_to_pb(k.identity());
+    match k {
+        TimeSeriesKey::Single(s) => {
+            pb.initial_timestamp_rfc3339 = Some(s.initial_timestamp.to_rfc3339());
+            pb.length = Some(s.length as u64);
+        }
+        TimeSeriesKey::NonSequential(s) => {
+            pb.length = Some(s.length as u64);
+        }
+        TimeSeriesKey::Forecast(f) => {
+            pb.initial_timestamp_rfc3339 = Some(f.initial_timestamp.to_rfc3339());
+            pb.horizon = Some(f.horizon.to_iso8601());
+            pb.count = Some(f.count as u64);
+        }
+    }
+    pb
+}
+
+// Decode a full key sent by the server back into the core [`TimeSeriesKey`]
+// enum, reconstructing the variant from `time_series_type`. The descriptive
+// snapshot fields are required for the matched variant (the server always sends
+// them via [`full_key_to_pb`]).
+pub fn full_key_from_pb(k: pb::TimeSeriesKey) -> Result<TimeSeriesKey, ConvertError> {
+    let ts_type_pb = pb::TimeSeriesType::try_from(k.time_series_type).map_err(|_| {
+        ConvertError::InvalidValue {
+            field: "time_series_type",
+            message: format!("unknown enum value {}", k.time_series_type),
+        }
+    })?;
+    let ts_type = TimeSeriesType::from(ts_type_pb);
+    let initial_ts = &k.initial_timestamp_rfc3339;
+    let horizon = &k.horizon;
+    let count = k.count;
+    let length = k.length;
+    let identity = key_from_pb(k.clone())?;
+
+    let parse_initial = |s: &Option<String>| -> Result<DateTime<Utc>, ConvertError> {
+        let s = s.as_deref().ok_or(ConvertError::MissingField(
+            "TimeSeriesKey.initial_timestamp_rfc3339",
+        ))?;
+        Ok(DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?)
+    };
+    let require_length = || length.ok_or(ConvertError::MissingField("TimeSeriesKey.length"));
+
+    match ts_type {
+        TimeSeriesType::SingleTimeSeries => Ok(TimeSeriesKey::Single(SingleTimeSeriesKey {
+            identity,
+            initial_timestamp: parse_initial(initial_ts)?,
+            length: require_length()? as usize,
+        })),
+        TimeSeriesType::NonSequentialTimeSeries => {
+            Ok(TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
+                identity,
+                length: require_length()? as usize,
+            }))
+        }
+        TimeSeriesType::Deterministic
+        | TimeSeriesType::DeterministicSingleTimeSeries
+        | TimeSeriesType::Probabilistic
+        | TimeSeriesType::Scenarios => Ok(TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
+            identity,
+            initial_timestamp: parse_initial(initial_ts)?,
+            horizon: opt_period(horizon.as_deref())?
+                .ok_or(ConvertError::MissingField("TimeSeriesKey.horizon"))?,
+            count: count.ok_or(ConvertError::MissingField("TimeSeriesKey.count"))? as usize,
+        })),
     }
 }
 
@@ -498,6 +577,121 @@ fn period_from_iso(s: &str) -> Result<Period, ConvertError> {
         field: "period",
         message: e.to_string(),
     })
+}
+
+// ---- Summary rows + requested type ----
+
+pub fn static_summary_row_to_pb(r: &StaticSummaryRow) -> pb::StaticSummaryRow {
+    pb::StaticSummaryRow {
+        owner_type: r.owner_type.clone(),
+        owner_category: pb::OwnerCategory::from(r.owner_category) as i32,
+        time_series_type: pb::TimeSeriesType::from(r.time_series_type) as i32,
+        name: r.name.clone(),
+        initial_timestamp_rfc3339: r.initial_timestamp.map(|t| t.to_rfc3339()),
+        resolution: r.resolution.map(|p| p.to_iso8601()),
+        time_step_count: r.time_step_count,
+        count: r.count,
+    }
+}
+
+pub fn static_summary_row_from_pb(
+    r: pb::StaticSummaryRow,
+) -> Result<StaticSummaryRow, ConvertError> {
+    Ok(StaticSummaryRow {
+        owner_type: r.owner_type,
+        owner_category: owner_category_from_i32(r.owner_category)?,
+        time_series_type: ts_type_from_i32(r.time_series_type)?,
+        name: r.name,
+        initial_timestamp: parse_opt_rfc3339(r.initial_timestamp_rfc3339.as_deref())?,
+        resolution: opt_period(r.resolution.as_deref())?,
+        time_step_count: r.time_step_count,
+        count: r.count,
+    })
+}
+
+pub fn forecast_summary_row_to_pb(r: &ForecastSummaryRow) -> pb::ForecastSummaryRow {
+    pb::ForecastSummaryRow {
+        owner_type: r.owner_type.clone(),
+        owner_category: pb::OwnerCategory::from(r.owner_category) as i32,
+        time_series_type: pb::TimeSeriesType::from(r.time_series_type) as i32,
+        name: r.name.clone(),
+        initial_timestamp_rfc3339: r.initial_timestamp.map(|t| t.to_rfc3339()),
+        resolution: r.resolution.map(|p| p.to_iso8601()),
+        horizon: r.horizon.map(|p| p.to_iso8601()),
+        interval: r.interval.map(|p| p.to_iso8601()),
+        window_count: r.window_count,
+        count: r.count,
+    }
+}
+
+pub fn forecast_summary_row_from_pb(
+    r: pb::ForecastSummaryRow,
+) -> Result<ForecastSummaryRow, ConvertError> {
+    Ok(ForecastSummaryRow {
+        owner_type: r.owner_type,
+        owner_category: owner_category_from_i32(r.owner_category)?,
+        time_series_type: ts_type_from_i32(r.time_series_type)?,
+        name: r.name,
+        initial_timestamp: parse_opt_rfc3339(r.initial_timestamp_rfc3339.as_deref())?,
+        resolution: opt_period(r.resolution.as_deref())?,
+        horizon: opt_period(r.horizon.as_deref())?,
+        interval: opt_period(r.interval.as_deref())?,
+        window_count: r.window_count,
+        count: r.count,
+    })
+}
+
+/// Decode a [`RequestedType`] from its proto oneof.
+pub fn requested_type_from_pb(r: pb::RequestedType) -> Result<RequestedType, ConvertError> {
+    match r.kind {
+        Some(pb::requested_type::Kind::Concrete(code)) => {
+            Ok(RequestedType::Concrete(ts_type_from_i32(code)?))
+        }
+        Some(pb::requested_type::Kind::AbstractDeterministic(_)) => {
+            Ok(RequestedType::AbstractDeterministic)
+        }
+        None => Err(ConvertError::MissingField("RequestedType.kind")),
+    }
+}
+
+/// Encode a [`RequestedType`] into its proto oneof.
+pub fn requested_type_to_pb(r: RequestedType) -> pb::RequestedType {
+    let kind = match r {
+        RequestedType::Concrete(t) => {
+            pb::requested_type::Kind::Concrete(pb::TimeSeriesType::from(t) as i32)
+        }
+        RequestedType::AbstractDeterministic => {
+            pb::requested_type::Kind::AbstractDeterministic(true)
+        }
+    };
+    pb::RequestedType { kind: Some(kind) }
+}
+
+fn owner_category_from_i32(v: i32) -> Result<OwnerCategory, ConvertError> {
+    pb::OwnerCategory::try_from(v)
+        .map(OwnerCategory::from)
+        .map_err(|_| ConvertError::InvalidValue {
+            field: "owner_category",
+            message: format!("unknown enum value {v}"),
+        })
+}
+
+fn ts_type_from_i32(v: i32) -> Result<TimeSeriesType, ConvertError> {
+    pb::TimeSeriesType::try_from(v)
+        .map(TimeSeriesType::from)
+        .map_err(|_| ConvertError::InvalidValue {
+            field: "time_series_type",
+            message: format!("unknown enum value {v}"),
+        })
+}
+
+fn parse_opt_rfc3339(s: Option<&str>) -> Result<Option<DateTime<Utc>>, ConvertError> {
+    match s {
+        Some(s) => Ok(Some(
+            DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?,
+        )),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

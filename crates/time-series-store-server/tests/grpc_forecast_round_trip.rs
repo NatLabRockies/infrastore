@@ -119,7 +119,10 @@ async fn deterministic_full_round_trip_over_grpc() {
         .unwrap();
     assert_eq!(keys.len(), 1);
 
-    let data = client.get_time_series(&keys[0], None).await.unwrap();
+    let data = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
     let det = data.as_deterministic().expect("expected Deterministic");
     assert_eq!(det.count, 6);
     assert_eq!(det.data.shape, vec![4, 6]);
@@ -153,7 +156,7 @@ async fn deterministic_time_range_over_grpc() {
     let end = t0 + Duration::hours(10); // window index 5 (exclusive)
 
     let data = client
-        .get_time_series(&keys[0], Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end)))
         .await
         .unwrap();
     let det = data.as_deterministic().expect("expected Deterministic");
@@ -182,7 +185,10 @@ async fn probabilistic_full_round_trip_over_grpc() {
         .unwrap();
     assert_eq!(keys.len(), 1);
 
-    let data = client.get_time_series(&keys[0], None).await.unwrap();
+    let data = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
     let prob = data.as_probabilistic().expect("expected Probabilistic");
     assert_eq!(prob.count, 5);
     assert_eq!(prob.data.shape, vec![3, 4, 5]);
@@ -212,7 +218,7 @@ async fn probabilistic_time_range_over_grpc() {
     let end = t0 + Duration::hours(6);
 
     let data = client
-        .get_time_series(&keys[0], Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end)))
         .await
         .unwrap();
     let prob = data.as_probabilistic().expect("expected Probabilistic");
@@ -241,7 +247,10 @@ async fn scenarios_full_round_trip_over_grpc() {
         .unwrap();
     assert_eq!(keys.len(), 1);
 
-    let data = client.get_time_series(&keys[0], None).await.unwrap();
+    let data = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
     let scen = data.as_scenarios().expect("expected Scenarios");
     assert_eq!(scen.count, 5);
     assert_eq!(scen.scenario_count, 4);
@@ -271,7 +280,7 @@ async fn scenarios_time_range_over_grpc() {
     let end = t0 + Duration::hours(4);
 
     let data = client
-        .get_time_series(&keys[0], Some((start, end)))
+        .get_time_series(keys[0].identity(), Some((start, end)))
         .await
         .unwrap();
     let scen = data.as_scenarios().expect("expected Scenarios");
@@ -313,4 +322,52 @@ async fn forecast_parameters_empty_store_over_grpc() {
     assert_eq!(params.interval, None);
     assert_eq!(params.count, None);
     assert_eq!(params.resolution, None);
+}
+
+#[tokio::test]
+async fn resolve_forecast_key_and_bulk_over_grpc() {
+    let mut store = time_series_store_core::create_store(None, true).unwrap();
+    add_det_forecast(&mut store); // owner 1, "price", Deterministic
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+
+    // Resolve the abstract-deterministic family to the concrete key.
+    let key = client
+        .resolve_forecast_key(
+            1,
+            OwnerCategory::Component,
+            "price",
+            None,
+            None,
+            Features::new(),
+            time_series_store_core::RequestedType::AbstractDeterministic,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        key.time_series_type(),
+        time_series_store_core::TimeSeriesType::Deterministic
+    );
+
+    // Full-key snapshot carries horizon + count for a forecast key.
+    match &key {
+        time_series_store_core::TimeSeriesKey::Forecast(f) => {
+            assert_eq!(f.count, 6);
+            assert_eq!(f.horizon, Period::Fixed(Duration::hours(4)));
+        }
+        other => panic!("expected Forecast key, got {other:?}"),
+    }
+
+    // BulkRead the resolved forecast.
+    let ids = [key.identity().clone()];
+    let refs: Vec<_> = ids.iter().collect();
+    let datas = client.bulk_read(&refs, None).await.unwrap();
+    assert_eq!(datas.len(), 1);
+    assert!(datas[0].as_deterministic().is_some());
+
+    // get_intervals now reports the forecast interval.
+    assert_eq!(
+        client.get_intervals(None).await.unwrap(),
+        vec![Period::Fixed(Duration::hours(2))]
+    );
 }

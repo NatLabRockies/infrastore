@@ -33,10 +33,12 @@ simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust c
 and Python. The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
 `remove_by_filter`, `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`,
 `AddRequest`/`Store::add` preserving `logical_type`, and serde on the core types) is available in
-the Rust core and threaded through the C ABI/Julia and Python bindings; the gRPC additive read RPCs
-(full-key wire + `ListKeys`/`BulkRead`/etc.) remain a tracked follow-up. Auth is `none` (default) or
-`api_key` via the `x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for
-the authoritative feature matrix.
+the Rust core and threaded through the C ABI/Julia and Python bindings. The read-only gRPC server
+carries the full read surface too: full `TimeSeriesKey`s over the wire plus `ListKeys`,
+`GetMetadata`, `BulkRead`, detailed/per-type counts, `ListOwnerIds`, `GetIntervals`, static/forecast
+summaries, `CheckStaticConsistency`, and `ResolveForecastKey`. Auth is `none` (default) or `api_key`
+via the `x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for the
+authoritative feature matrix.
 
 ## Code Quality Requirements
 
