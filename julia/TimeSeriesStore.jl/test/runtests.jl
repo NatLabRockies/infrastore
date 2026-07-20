@@ -11,7 +11,11 @@ using TimeSeriesStore
     ts = SingleTimeSeries(initial, resolution, values, "load")
 
     key = add_time_series!(
-        store, 42, "Generator", Component, ts;
+        store,
+        42,
+        "Generator",
+        Component,
+        ts;
         features=Dict("model_year" => 2030),
         units="MW",
     )
@@ -25,8 +29,9 @@ using TimeSeriesStore
     @test length(got.data) == 24
 
     # The same series is reachable attribute-addressed (both conventions unified).
-    got_attr = get_time_series(SingleTimeSeries, store, 42, Component, "load";
-                               features=Dict("model_year" => 2030))
+    got_attr = get_time_series(
+        SingleTimeSeries, store, 42, Component, "load"; features=Dict("model_year" => 2030)
+    )
     @test got_attr.data == values
     @test got_attr.name == "load"
     # ...and via the type-parameterized key form.
@@ -74,15 +79,9 @@ end
 
 @testset "non-sequential round-trip" begin
     store = Store(in_memory=true)
-    timestamps = [
-        DateTime(2024, 1, 1),
-        DateTime(2024, 1, 1, 4),
-        DateTime(2024, 1, 3),
-    ]
+    timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]
     series = NonSequentialTimeSeries(timestamps, Int64[10, 20, 30], "events")
-    key = add_time_series!(
-        store, 7, "Generator", Component, series,
-    )
+    key = add_time_series!(store, 7, "Generator", Component, series)
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
     @test got.data == Int64[10, 20, 30]
@@ -102,7 +101,9 @@ end
     # A (length, k) per-step element array tagged with an opaque logical type, as a
     # FunctionData encoding would produce on the InfrastructureSystems.jl side.
     data = Float64[1 2; 3 4; 5 6]
-    series = NonSequentialTimeSeries(timestamps, data, "curves"; logical_type="LinearFunctionData")
+    series = NonSequentialTimeSeries(
+        timestamps, data, "curves"; logical_type="LinearFunctionData"
+    )
     key = add_time_series!(store, 9, "Generator", Component, series)
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
@@ -125,14 +126,23 @@ end
 
     owner = 11
     feats = Dict("model_year" => 2030, "scenario" => "high")  # string feature value
-    add_time_series!(store, owner, "Generator", Component, ts;
-                     features=feats, units="MW")
+    add_time_series!(store, owner, "Generator", Component, ts; features=feats, units="MW")
 
-    @test has_time_series(store, owner, Component, "load"; resolution=resolution, features=feats)
-    @test !has_time_series(store, owner, Component, "load"; resolution=resolution,
-                           features=Dict("model_year" => 2031))
+    @test has_time_series(
+        store, owner, Component, "load"; resolution=resolution, features=feats
+    )
+    @test !has_time_series(
+        store,
+        owner,
+        Component,
+        "load";
+        resolution=resolution,
+        features=Dict("model_year" => 2031),
+    )
 
-    meta = get_metadata(store, owner, Component, "load"; resolution=resolution, features=feats)
+    meta = get_metadata(
+        store, owner, Component, "load"; resolution=resolution, features=feats
+    )
     @test meta.initial_timestamp == initial
     @test meta.resolution == Millisecond(resolution)
     @test meta.length == 24
@@ -141,10 +151,15 @@ end
     fetched = get_array_by_hash(store, meta.data_hash)
     @test fetched == values
 
-    remove_time_series!(store, owner, Component, "load"; resolution=resolution, features=feats)
-    @test !has_time_series(store, owner, Component, "load"; resolution=resolution, features=feats)
-    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, owner, Component, "load";
-                                                       resolution=resolution, features=feats)
+    remove_time_series!(
+        store, owner, Component, "load"; resolution=resolution, features=feats
+    )
+    @test !has_time_series(
+        store, owner, Component, "load"; resolution=resolution, features=feats
+    )
+    @test_throws TimeSeriesStore.NotFoundError get_metadata(
+        store, owner, Component, "load"; resolution=resolution, features=feats
+    )
 end
 
 @testset "TimeSeriesStore.jl persistent round-trip" begin
@@ -176,16 +191,26 @@ end
     t0 = DateTime(2024, 1, 1)
 
     # Int64 scalar series round-trips with its dtype.
-    add_time_series!(store, 1001, "Generator", Component,
-        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; logical_type="Int64"))
+    add_time_series!(
+        store,
+        1001,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; logical_type="Int64"),
+    )
     m = get_metadata(store, 1001, Component, "load"; resolution=res)
     @test m.dtype == Int64
     @test get_array_by_hash(store, m.data_hash, Int64) == Int64[10, 20, 30]
 
     # Multi-dim element tuple (4 steps × 3 coeffs) round-trips, row-major correct.
     A = Float64[i + j / 10 for i in 1:4, j in 1:3]
-    add_time_series!(store, 1002, "Generator", Component,
-        SingleTimeSeries(t0, res, A, "cost"; logical_type="QuadraticFunctionData"))
+    add_time_series!(
+        store,
+        1002,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, A, "cost"; logical_type="QuadraticFunctionData"),
+    )
     mq = get_metadata(store, 1002, Component, "cost"; resolution=res)
     @test mq.dtype == Float64
     flat = get_array_by_hash(store, mq.data_hash, Float64)
@@ -197,7 +222,7 @@ end
 @testset "Deterministic forecast round-trip" begin
     # H=4 (horizon=4h, resolution=1h), count=3, interval=1h, scalar values.
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 1, 1)
+    t0 = DateTime(2024, 1, 1)
     res = Hour(1)
     hor = Hour(4)
     ivl = Hour(1)
@@ -208,7 +233,10 @@ end
     data = Float64[h * 10 + c for h in 1:H, c in 1:count]  # Julia (col-maj) shape [4,3]
 
     key = add_time_series!(
-        store, 100, "Generator", Component,
+        store,
+        100,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, ivl, count, data, "pf"),
     )
 
@@ -232,7 +260,7 @@ end
 
 @testset "Deterministic forecast window-selected read" begin
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 1, 1)
+    t0 = DateTime(2024, 1, 1)
     res = Hour(1)
     hor = Hour(4)
     ivl = Hour(6)   # windows start every 6 hours
@@ -242,16 +270,21 @@ end
     data = Float64[h * 100 + c for h in 1:H, c in 1:count]
 
     add_time_series!(
-        store, 110, "Generator", Component,
+        store,
+        110,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, ivl, count, data, "pf2"),
     )
 
     # Select windows 1 and 2 (0-indexed: window 1 = t0+6h, window 2 = t0+12h).
     # Julia 1-indexed: columns 2 and 3.
     win_start = t0 + Hour(6)
-    win_end   = t0 + Hour(18)   # exclusive; covers windows at +6h and +12h
+    win_end = t0 + Hour(18)   # exclusive; covers windows at +6h and +12h
 
-    fc = get_time_series(Deterministic, store, 110, Component, "pf2"; time_range=(win_start, win_end))
+    fc = get_time_series(
+        Deterministic, store, 110, Component, "pf2"; time_range=(win_start, win_end)
+    )
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
     @test size(fc.data) == (H, 2)
@@ -263,7 +296,7 @@ end
 @testset "Deterministic forecast multidim element shape" begin
     # H=3, count=2, element_shape=(2,) → stored shape [H=3, count=2, E=2].
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 2, 1)
+    t0 = DateTime(2024, 2, 1)
     res = Hour(1)
     hor = Hour(3)
     ivl = Hour(3)
@@ -274,7 +307,10 @@ end
     data = Float64[h * 1000 + c * 10 + e for h in 1:H, c in 1:count, e in 1:E]
 
     add_time_series!(
-        store, 120, "Generator", Component,
+        store,
+        120,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, ivl, count, data, "pf_md"),
     )
 
@@ -285,7 +321,7 @@ end
 
 @testset "Probabilistic forecast round-trip" begin
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 3, 1)
+    t0 = DateTime(2024, 3, 1)
     res = Hour(1)
     hor = Hour(6)
     ivl = Hour(6)
@@ -297,7 +333,10 @@ end
     data = Float64[p * 1000 + h * 10 + c for p in 1:P, h in 1:H, c in 1:count]
 
     key = add_time_series!(
-        store, 200, "Generator", Component,
+        store,
+        200,
+        "Generator",
+        Component,
         Probabilistic(t0, res, hor, ivl, count, percentiles, data, "pf_prob"),
     )
 
@@ -322,7 +361,7 @@ end
 
 @testset "Probabilistic forecast window-selected read" begin
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 3, 1)
+    t0 = DateTime(2024, 3, 1)
     res = Hour(1)
     hor = Hour(4)
     ivl = Hour(4)
@@ -333,15 +372,20 @@ end
     data = Float64[p * 100 + h * 10 + c for p in 1:P, h in 1:H, c in 1:count]
 
     add_time_series!(
-        store, 210, "Generator", Component,
+        store,
+        210,
+        "Generator",
+        Component,
         Probabilistic(t0, res, hor, ivl, count, percentiles, data, "pf_prob_win"),
     )
 
     # Select windows 2 and 3 (Julia columns 2 and 3): start at t0+4h, end at t0+12h.
     win_start = t0 + Hour(4)
-    win_end   = t0 + Hour(12)
+    win_end = t0 + Hour(12)
 
-    fc = get_time_series(Probabilistic, store, 210, Component, "pf_prob_win"; time_range=(win_start, win_end))
+    fc = get_time_series(
+        Probabilistic, store, 210, Component, "pf_prob_win"; time_range=(win_start, win_end)
+    )
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
     @test fc.percentiles ≈ percentiles
@@ -351,7 +395,7 @@ end
 
 @testset "Scenarios forecast round-trip" begin
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 4, 1)
+    t0 = DateTime(2024, 4, 1)
     res = Hour(1)
     hor = Hour(4)
     ivl = Hour(4)
@@ -362,7 +406,10 @@ end
     data = Float64[s * 1000 + h * 10 + c for s in 1:scenario_count, h in 1:H, c in 1:count]
 
     key = add_time_series!(
-        store, 300, "Generator", Component,
+        store,
+        300,
+        "Generator",
+        Component,
         Scenarios(t0, res, hor, ivl, count, data, "pf_scen"),
     )
 
@@ -387,7 +434,7 @@ end
 
 @testset "Scenarios forecast window-selected read" begin
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 4, 1)
+    t0 = DateTime(2024, 4, 1)
     res = Hour(1)
     hor = Hour(4)
     ivl = Hour(8)
@@ -397,15 +444,20 @@ end
     data = Float64[s * 100 + h * 10 + c for s in 1:scenario_count, h in 1:H, c in 1:count]
 
     add_time_series!(
-        store, 310, "Generator", Component,
+        store,
+        310,
+        "Generator",
+        Component,
         Scenarios(t0, res, hor, ivl, count, data, "pf_scen_win"),
     )
 
     # Select windows 2 and 3 (Julia columns 2 and 3): start at t0+8h, end at t0+24h.
     win_start = t0 + Hour(8)
-    win_end   = t0 + Hour(24)
+    win_end = t0 + Hour(24)
 
-    fc = get_time_series(Scenarios, store, 310, Component, "pf_scen_win"; time_range=(win_start, win_end))
+    fc = get_time_series(
+        Scenarios, store, 310, Component, "pf_scen_win"; time_range=(win_start, win_end)
+    )
     @test fc.initial_timestamp == win_start
     @test fc.count == 2
     @test fc.scenario_count == scenario_count
@@ -416,7 +468,7 @@ end
 @testset "Forecast non-Float64 dtype (Int64)" begin
     # Verify that non-f64 dtypes survive the FFI round-trip for Deterministic.
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 5, 1)
+    t0 = DateTime(2024, 5, 1)
     res = Hour(1)
     hor = Hour(2)
     ivl = Hour(2)
@@ -425,7 +477,10 @@ end
     data = Int64[h * 100 + c for h in 1:H, c in 1:count]
 
     add_time_series!(
-        store, 130, "Generator", Component,
+        store,
+        130,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, ivl, count, data, "pf_i64"),
     )
 
@@ -438,15 +493,14 @@ end
     # Underlying STS: total_len=8, H=4 (horizon=4h, res=1h), interval=2h
     # => interval_steps=2, count = (8 - 4) / 2 + 1 = 3.
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 6, 1)
+    t0 = DateTime(2024, 6, 1)
     res = Hour(1)
     hor = Hour(4)
     ivl = Hour(2)
     underlying = Float64[i for i in 0:7]
 
     add_time_series!(
-        store, 400, "Generator", Component,
-        SingleTimeSeries(t0, res, underlying, "dst"),
+        store, 400, "Generator", Component, SingleTimeSeries(t0, res, underlying, "dst")
     )
 
     n = transform_single_time_series!(store, hor, ivl)
@@ -463,7 +517,8 @@ end
 
     # A concrete Deterministic request must NOT match a DST.
     @test_throws TimeSeriesStore.NotFoundError get_time_series(
-        Deterministic, store, 400, Component, "dst")
+        Deterministic, store, 400, Component, "dst"
+    )
 
     # get_time_series_keys enumerates both the source STS and the derived DST;
     # key_info lets us pick the DST and read it back by key (no key from transform).
@@ -472,8 +527,10 @@ end
     infos = [key_info(k) for k in keys]
     # time_series_type is the actual Julia type, as in InfrastructureSystems.jl.
     @test Set(i.time_series_type for i in infos) ==
-          Set([SingleTimeSeries, DeterministicSingleTimeSeries])
-    @test all(i -> i.owner_id == 400 && i.owner_category == Component && i.name == "dst", infos)
+        Set([SingleTimeSeries, DeterministicSingleTimeSeries])
+    @test all(
+        i -> i.owner_id == 400 && i.owner_category == Component && i.name == "dst", infos
+    )
 
     dst_idx = findfirst(i -> i.time_series_type == DeterministicSingleTimeSeries, infos)
     # The actual type drives the read directly; a DST has no struct so it returns
@@ -486,28 +543,43 @@ end
 
     # The source SingleTimeSeries key still reads back as the underlying series.
     sts_idx = findfirst(i -> i.time_series_type == SingleTimeSeries, infos)
-    @test get_time_series(infos[sts_idx].time_series_type, store, keys[sts_idx]).data == underlying
+    @test get_time_series(infos[sts_idx].time_series_type, store, keys[sts_idx]).data ==
+        underlying
 
     # Reference counting lives in the core: the STS and its derived DST share one
     # underlying array, so count_array_references reports one of each. The content
     # hash is physical storage detail, read via the metadata descriptor — it is not
     # carried on a key, so list_keys does not expose it.
     hash = get_metadata(store, 400, Component, "dst").data_hash
-    @test count_array_references(store, hash) == (sts = 1, dst = 1)
+    @test count_array_references(store, hash) == (sts=1, dst=1)
 end
 
 @testset "list_keys filters (owner, type, name, resolution, features)" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     vals = Float64[1, 2, 3, 4]
-    add_time_series!(store, 1, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), vals, "load"); features=Dict("scenario" => "high"))
-    add_time_series!(store, 1, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), vals, "load"); features=Dict("scenario" => "low"))
-    add_time_series!(store, 1, "Generator", Component,
-        SingleTimeSeries(t0, Minute(5), vals, "wind"))
-    add_time_series!(store, 2, "Bus", SupplementalAttribute,
-        SingleTimeSeries(t0, Hour(1), vals, "load"))
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load");
+        features=Dict("scenario" => "high"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load");
+        features=Dict("scenario" => "low"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component, SingleTimeSeries(t0, Minute(5), vals, "wind")
+    )
+    add_time_series!(
+        store, 2, "Bus", SupplementalAttribute, SingleTimeSeries(t0, Hour(1), vals, "load")
+    )
 
     @test length(list_keys(store)) == 4
     @test length(list_keys(store; owner_id=1)) == 3
@@ -528,8 +600,10 @@ end
     # as a set — periods of different kinds have no numeric total order).
     @test Set(get_resolutions(store)) == Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
     @test Set(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE)) ==
-          Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
-    @test isempty(get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC))
+        Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
+    @test isempty(
+        get_resolutions(store; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC)
+    )
 
     # counts_by_type: all four are SingleTimeSeries here.
     cbt = counts_by_type(store)
@@ -549,12 +623,27 @@ end
     shared = Float64[1, 2, 3, 4]
     # Two owners with identical data dedup to one array (one hash); a third owner's
     # distinct data gets a different hash.
-    add_time_series!(store, 1, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), copy(shared), "load"))
-    add_time_series!(store, 2, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), copy(shared), "load"))
-    add_time_series!(store, 3, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), Float64[9, 8, 7, 6], "load"))
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), copy(shared), "load"),
+    )
+    add_time_series!(
+        store,
+        2,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), copy(shared), "load"),
+    )
+    add_time_series!(
+        store,
+        3,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[9, 8, 7, 6], "load"),
+    )
 
     rows = list_array_groups(store)
     @test length(rows) == 3
@@ -562,7 +651,7 @@ end
     @test all(r -> r.data_hash isa String && length(r.data_hash) == 64, rows)
     @test all(r -> r.name == "load", rows)
 
-    groups = Dict{String, Vector{Int}}()
+    groups = Dict{String,Vector{Int}}()
     for r in rows
         push!(get!(groups, r.data_hash, Int[]), Int(r.owner_id))
     end
@@ -573,20 +662,35 @@ end
     # Filters behave exactly like list_keys.
     @test length(list_array_groups(store; owner_id=3)) == 1
     @test only(list_array_groups(store; owner_id=1)).data_hash ==
-          only(list_array_groups(store; owner_id=2)).data_hash
+        only(list_array_groups(store; owner_id=2)).data_hash
 end
 
 @testset "time_series_counts and list_owner_ids" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     v = Float64[1, 2, 3, 4]
-    add_time_series!(store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load"))
-    add_time_series!(store, 2, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "load"))
-    add_time_series!(store, 9, "Bus", SupplementalAttribute,
-        SingleTimeSeries(t0, Hour(1), v, "voltage"))  # shares content with owner 1
-    add_time_series!(store, 1, "Generator", Component,
-        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+    add_time_series!(
+        store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load")
+    )
+    add_time_series!(
+        store,
+        2,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "load"),
+    )
+    add_time_series!(
+        store, 9, "Bus", SupplementalAttribute, SingleTimeSeries(t0, Hour(1), v, "voltage")
+    )  # shares content with owner 1
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Deterministic(
+            t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"
+        ),
+    )
 
     c = time_series_counts(store)
     @test c.components_with_time_series == 2            # owners 1, 2
@@ -596,8 +700,9 @@ end
 
     @test sort!(list_owner_ids(store, Component)) == [1, 2]
     @test list_owner_ids(store, SupplementalAttribute) == [9]
-    @test list_owner_ids(store, Component;
-        time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC) == [1]
+    @test list_owner_ids(
+        store, Component; time_series_type=TimeSeriesStore.TS_TYPE_DETERMINISTIC
+    ) == [1]
     @test sort!(list_owner_ids(store, Component; resolution=Hour(1))) == [1, 2]
     @test isempty(list_owner_ids(store, Component; resolution=Minute(5)))
 end
@@ -607,10 +712,20 @@ end
     @test isempty(check_static_consistency(store))
 
     t0 = DateTime(2024, 1, 1)
-    add_time_series!(store, 1, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "a"))
-    add_time_series!(store, 2, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "a"))
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        2,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "a"),
+    )
     cs = check_static_consistency(store)
     @test length(cs) == 1
     @test cs[1].resolution == Millisecond(Hour(1))
@@ -618,20 +733,30 @@ end
     @test cs[1].length == 4
 
     # A second resolution is a distinct grid, not an inconsistency.
-    add_time_series!(store, 4, "Generator", Component,
-        SingleTimeSeries(t0, Minute(30), Float64[1, 2, 3, 4, 5, 6, 7, 8], "a"))
+    add_time_series!(
+        store,
+        4,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Minute(30), Float64[1, 2, 3, 4, 5, 6, 7, 8], "a"),
+    )
     multi = check_static_consistency(store)
     @test length(multi) == 2
     @test Set(g.resolution for g in multi) ==
-          Set([Millisecond(Hour(1)), Millisecond(Minute(30))])
+        Set([Millisecond(Hour(1)), Millisecond(Minute(30))])
     # Scoping to one resolution returns only that grid.
     hourly = check_static_consistency(store; resolution=Hour(1))
     @test length(hourly) == 1
     @test hourly[1].length == 4
 
     # A differing length at an existing resolution is an inconsistency.
-    add_time_series!(store, 3, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "a"))
+    add_time_series!(
+        store,
+        3,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "a"),
+    )
     @test_throws TimeSeriesStore.IntegrityError check_static_consistency(store)
     # The other resolution's grid still checks out on its own.
     ok = check_static_consistency(store; resolution=Minute(30))
@@ -639,8 +764,15 @@ end
 
     # Filtered forecast parameters.
     fstore = Store(in_memory=true)
-    add_time_series!(fstore, 1, "Generator", Component,
-        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+    add_time_series!(
+        fstore,
+        1,
+        "Generator",
+        Component,
+        Deterministic(
+            t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"
+        ),
+    )
     p = get_forecast_parameters(fstore; resolution=Hour(1), interval=Hour(1))
     @test p.horizon == Millisecond(Hour(2))
     @test p.interval == Millisecond(Hour(1))
@@ -657,13 +789,28 @@ end
     t0 = DateTime(2024, 1, 1)
     v = Float64[1, 2, 3, 4]
     # owners 1 & 2 share the static group (Generator/load/Hour(1)/length 4).
-    add_time_series!(store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load"))
-    add_time_series!(store, 2, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), Float64[9, 9, 9, 9], "load"))
-    add_time_series!(store, 1, "Generator", Component,
-        SingleTimeSeries(t0, Hour(1), v, "wind"))  # separate group (name)
-    add_time_series!(store, 1, "Generator", Component,
-        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"))
+    add_time_series!(
+        store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "load")
+    )
+    add_time_series!(
+        store,
+        2,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[9, 9, 9, 9], "load"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component, SingleTimeSeries(t0, Hour(1), v, "wind")
+    )  # separate group (name)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Deterministic(
+            t0, Hour(1), Hour(2), Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "fc"
+        ),
+    )
 
     ss = static_summary(store)
     @test length(ss) == 2
@@ -690,7 +837,8 @@ end
     # old guess-and-retry fallback.
     store = Store(in_memory=true)
     @test_throws TimeSeriesStore.NotFoundError get_time_series(
-        AbstractDeterministic, store, 999, Component, "nope")
+        AbstractDeterministic, store, 999, Component, "nope"
+    )
 
     # Two Deterministic forecasts of one variable at the same resolution but
     # different intervals (e.g. day-ahead vs intra-day). Interval is part of the
@@ -700,15 +848,24 @@ end
     res = Hour(1)
     hor = Hour(2)
     add_time_series!(
-        store, 401, "Generator", Component,
+        store,
+        401,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, Hour(1), 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
     )
     add_time_series!(
-        store, 401, "Generator", Component,
-        Deterministic(t0, res, hor, Hour(6), 2, reshape(Float64[10, 11, 12, 13], 2, 2), "dup"),
+        store,
+        401,
+        "Generator",
+        Component,
+        Deterministic(
+            t0, res, hor, Hour(6), 2, reshape(Float64[10, 11, 12, 13], 2, 2), "dup"
+        ),
     )
     @test_throws TimeSeriesStore.InvalidParameterError get_time_series(
-        Deterministic, store, 401, Component, "dup")
+        Deterministic, store, 401, Component, "dup"
+    )
     # Pinning the interval disambiguates.
     cd = get_time_series(Deterministic, store, 401, Component, "dup"; interval=Hour(6))
     @test cd isa Deterministic
@@ -724,27 +881,40 @@ end
     # Adding a Deterministic when a DST view of the same family exists is rejected.
     store = Store(in_memory=true)
     add_time_series!(
-        store, 401, "Generator", Component,
+        store,
+        401,
+        "Generator",
+        Component,
         SingleTimeSeries(t0, res, Float64[i for i in 0:7], "dup"),
     )
     transform_single_time_series!(store, hor, ivl)
     @test_throws TimeSeriesStore.InvalidParameterError add_time_series!(
-        store, 401, "Generator", Component,
+        store,
+        401,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, ivl, 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
     )
 
     # The reverse: deriving a DST when a Deterministic of the same family exists.
     store2 = Store(in_memory=true)
     add_time_series!(
-        store2, 401, "Generator", Component,
+        store2,
+        401,
+        "Generator",
+        Component,
         Deterministic(t0, res, hor, ivl, 2, reshape(Float64[0, 1, 2, 3], 2, 2), "dup"),
     )
     add_time_series!(
-        store2, 401, "Generator", Component,
+        store2,
+        401,
+        "Generator",
+        Component,
         SingleTimeSeries(t0, res, Float64[i for i in 0:7], "dup"),
     )
     @test_throws TimeSeriesStore.InvalidParameterError transform_single_time_series!(
-        store2, hor, ivl)
+        store2, hor, ivl
+    )
 end
 
 @testset "get_time_series_keys empty owner" begin
@@ -756,9 +926,14 @@ end
     store = Store(in_memory=true)
     res = Hour(1)
     feats = Dict("model_year" => 2030, "scenario" => "high", "active" => true)
-    add_time_series!(store, 500, "Generator", Component,
+    add_time_series!(
+        store,
+        500,
+        "Generator",
+        Component,
         SingleTimeSeries(DateTime(2024, 1, 1), res, collect(1.0:6.0), "load");
-        features=feats)
+        features=feats,
+    )
 
     keys = get_time_series_keys(store, 500, Component)
     @test length(keys) == 1
@@ -776,18 +951,33 @@ end
     # The key's type resolves the series, and an attribute read using the
     # recovered features matches — confirming features round-trip faithfully.
     @test get_time_series(info.time_series_type, store, keys[1]).data == collect(1.0:6.0)
-    @test get_time_series(info.time_series_type, store, info.owner_id, info.owner_category, info.name;
-                          resolution=info.resolution, features=info.features).data ==
-          collect(1.0:6.0)
+    @test get_time_series(
+        info.time_series_type,
+        store,
+        info.owner_id,
+        info.owner_category,
+        info.name;
+        resolution=info.resolution,
+        features=info.features,
+    ).data == collect(1.0:6.0)
 end
 
 @testset "get_forecast_parameters" begin
     store = Store(in_memory=true)
-    t0  = DateTime(2024, 1, 1)
-    res = Hour(1); hor = Hour(4); ivl = Hour(2); count = 3; H = 4
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1);
+    hor = Hour(4);
+    ivl = Hour(2);
+    count = 3;
+    H = 4
     data = Float64[h * 10 + c for h in 1:H, c in 1:count]
-    add_time_series!(store, 100, "Generator", Component,
-                     Deterministic(t0, res, hor, ivl, count, data, "pf"))
+    add_time_series!(
+        store,
+        100,
+        "Generator",
+        Component,
+        Deterministic(t0, res, hor, ivl, count, data, "pf"),
+    )
 
     params = get_forecast_parameters(store)
     @test params.horizon == Millisecond(hor)
@@ -804,19 +994,29 @@ end
 end
 
 @testset "compression policies round-trip" begin
-    for (compression, level, shuffle) in [(:none, 3, true), (:deflate, 9, false), (:deflate, 1, true)]
+    for (compression, level, shuffle) in
+        [(:none, 3, true), (:deflate, 9, false), (:deflate, 1, true)]
         mktempdir() do dir
             path = joinpath(dir, "store.nc")
-            let store = Store(in_memory=false, path=path;
-                              compression=compression, compression_level=level, shuffle=shuffle)
-                ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:12.0), "load")
+            let store = Store(
+                    in_memory=false,
+                    path=path;
+                    compression=compression,
+                    compression_level=level,
+                    shuffle=shuffle,
+                )
+                ts = SingleTimeSeries(
+                    DateTime(2024, 1, 1), Hour(1), collect(1.0:12.0), "load"
+                )
                 add_time_series!(store, 1, "Generator", Component, ts)
                 flush!(store)
                 TimeSeriesStore.close!(store)
             end
             # Reopen read-write and append, exercising the restored policy.
             let store = TimeSeriesStore.open_store(path; read_only=false)
-                ts2 = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(13.0:24.0), "load")
+                ts2 = SingleTimeSeries(
+                    DateTime(2024, 1, 1), Hour(1), collect(13.0:24.0), "load"
+                )
                 add_time_series!(store, 2, "Generator", Component, ts2)
                 flush!(store)
                 TimeSeriesStore.close!(store)
@@ -854,15 +1054,17 @@ end
     @test length(batch) == 0
     for i in 1:10
         ts = SingleTimeSeries(initial, resolution, collect(Float64.(i:(i + 23))), "load")
-        add_time_series!(batch, i, "Generator", Component, ts;
-                         features=Dict("scenario" => i), units="MW")
+        add_time_series!(
+            batch, i, "Generator", Component, ts; features=Dict("scenario" => i), units="MW"
+        )
     end
     # A forecast and a non-sequential series in the same batch.
     det_data = reshape(collect(1.0:12.0), 3, 4)  # canonical shape (H=3, count=4)
     det = Deterministic(initial, Hour(1), Hour(3), Hour(1), 4, det_data, "fc")
     add_time_series!(batch, 600, "Generator", Component, det)
     ns = NonSequentialTimeSeries(
-        [DateTime(2024, 1, 1), DateTime(2024, 1, 2)], Int64[1, 2], "events")
+        [DateTime(2024, 1, 1), DateTime(2024, 1, 2)], Int64[1, 2], "events"
+    )
     add_time_series!(batch, 700, "Generator", Component, ns)
     @test length(batch) == 12
 
@@ -892,7 +1094,9 @@ end
     batch = AddBatch()
     add_time_series!(batch, 800, "Generator", Component, ts)
     add_time_series!(batch, 800, "Generator", Component, ts)
-    @test_throws TimeSeriesStore.DuplicateTimeSeriesError add_time_series_bulk!(store, batch)
+    @test_throws TimeSeriesStore.DuplicateTimeSeriesError add_time_series_bulk!(
+        store, batch
+    )
     @test length(batch) == 0
     @test isempty(get_time_series_keys(store, 800, Component))
 
@@ -916,11 +1120,17 @@ end
     supp_vals = collect(100.0:123.0)
 
     comp_key = add_time_series!(
-        store, owner_id, "Generator", Component,
+        store,
+        owner_id,
+        "Generator",
+        Component,
         SingleTimeSeries(initial, resolution, comp_vals, "load"),
     )
     supp_key = add_time_series!(
-        store, owner_id, "Outage", SupplementalAttribute,
+        store,
+        owner_id,
+        "Outage",
+        SupplementalAttribute,
         SingleTimeSeries(initial, resolution, supp_vals, "load"),
     )
 
@@ -932,12 +1142,23 @@ end
     @test get_time_series(store, supp_key).data == supp_vals
 
     # ...and attribute-addressed, keyed on the category.
-    @test get_time_series(SingleTimeSeries, store, owner_id, Component, "load"; resolution=resolution).data == comp_vals
-    @test get_time_series(SingleTimeSeries, store, owner_id, SupplementalAttribute, "load"; resolution=resolution).data == supp_vals
+    @test get_time_series(
+        SingleTimeSeries, store, owner_id, Component, "load"; resolution=resolution
+    ).data == comp_vals
+    @test get_time_series(
+        SingleTimeSeries,
+        store,
+        owner_id,
+        SupplementalAttribute,
+        "load";
+        resolution=resolution,
+    ).data == supp_vals
 
     # has_time_series / get_metadata are independent per category.
     @test has_time_series(store, owner_id, Component, "load"; resolution=resolution)
-    @test has_time_series(store, owner_id, SupplementalAttribute, "load"; resolution=resolution)
+    @test has_time_series(
+        store, owner_id, SupplementalAttribute, "load"; resolution=resolution
+    )
 
     # get_time_series_keys is scoped to (owner_id, owner_category).
     comp_keys = get_time_series_keys(store, owner_id, Component)
@@ -950,7 +1171,9 @@ end
     # Removing the component series leaves the supplemental one intact.
     remove_time_series!(store, owner_id, Component, "load"; resolution=resolution)
     @test !has_time_series(store, owner_id, Component, "load"; resolution=resolution)
-    @test has_time_series(store, owner_id, SupplementalAttribute, "load"; resolution=resolution)
+    @test has_time_series(
+        store, owner_id, SupplementalAttribute, "load"; resolution=resolution
+    )
     @test get_time_series(store, supp_key).data == supp_vals
     @test isempty(get_time_series_keys(store, owner_id, Component))
     @test length(get_time_series_keys(store, owner_id, SupplementalAttribute)) == 1
@@ -960,9 +1183,27 @@ end
     store = Store(in_memory=true)
     t0 = DateTime(2031, 1, 1)
     res = Hour(1)
-    add_time_series!(store, 2, "Gen", Component, SingleTimeSeries(t0, res, [20.0, 21.0, 22.0, 23.0], "load"))
-    add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, [10.0, 11.0, 12.0, 13.0], "load"))
-    add_time_series!(store, 3, "Gen", Component, SingleTimeSeries(t0, res, Int64[100, 101, 102, 103], "count"))
+    add_time_series!(
+        store,
+        2,
+        "Gen",
+        Component,
+        SingleTimeSeries(t0, res, [20.0, 21.0, 22.0, 23.0], "load"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Gen",
+        Component,
+        SingleTimeSeries(t0, res, [10.0, 11.0, 12.0, 13.0], "load"),
+    )
+    add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        SingleTimeSeries(t0, res, Int64[100, 101, 102, 103], "count"),
+    )
     # f64 with element shape (2,): data shape (time=4, E=2).
     pair = Float64[t * 10 + e for t in 1:4, e in 1:2]
     add_time_series!(store, 5, "Gen", Component, SingleTimeSeries(t0, res, pair, "pair"))
@@ -998,8 +1239,13 @@ end
     t0 = DateTime(2031, 2, 1)
     H, count, E = 3, 2, 2
     data = Float64[h * 1000 + c * 10 + e for h in 1:H, c in 1:count, e in 1:E]
-    add_time_series!(store, 9, "Gen", Component,
-                     Deterministic(t0, Hour(1), Hour(3), Hour(3), count, data, "pf"))
+    add_time_series!(
+        store,
+        9,
+        "Gen",
+        Component,
+        Deterministic(t0, Hour(1), Hour(3), Hour(3), count, data, "pf"),
+    )
 
     r = build_forecast_reader(store, Deterministic; resolution=Hour(1))
     tl = forecast_timeline(r)
@@ -1026,7 +1272,9 @@ end
     add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, sts, "load"))
     # Deterministic whose windows match the DST: value[s, k] = sts[k + s]; shape (H=2, count=5).
     det = Float64[sts[k + s] for s in 0:1, k in 1:5]
-    add_time_series!(store, 2, "Gen", Component, Deterministic(t0, res, Hour(2), res, 5, det, "gen"))
+    add_time_series!(
+        store, 2, "Gen", Component, Deterministic(t0, res, Hour(2), res, 5, det, "gen")
+    )
     transform_single_time_series!(store, Hour(2), res)
 
     r = build_forecast_reader(store, Deterministic; resolution=res)
@@ -1056,11 +1304,17 @@ end
     # Owners 1-3 add byte-identical data (content-addressed -> one array);
     # owner 4 is distinct.
     for owner in (1, 2, 3)
-        add_time_series!(store, owner, "Gen", Component,
-                         Deterministic(t0, res, Hour(H), res, count, shared, "pf"))
+        add_time_series!(
+            store,
+            owner,
+            "Gen",
+            Component,
+            Deterministic(t0, res, Hour(H), res, count, shared, "pf"),
+        )
     end
-    add_time_series!(store, 4, "Gen", Component,
-                     Deterministic(t0, res, Hour(H), res, count, other, "pf"))
+    add_time_series!(
+        store, 4, "Gen", Component, Deterministic(t0, res, Hour(H), res, count, other, "pf")
+    )
 
     r = build_forecast_reader(store, Deterministic; resolution=res)
     ents = forecast_entries(r)
@@ -1088,7 +1342,9 @@ end
     # reader reshapes each timestep's element block back to (2, 3); cross-check
     # against get_time_series (which also reshapes dtype/shape-correctly).
     sdata = Float64[t * 100 + a * 10 + b for t in 1:4, a in 1:2, b in 1:3]
-    skey = add_time_series!(store, 1, "Gen", Component, SingleTimeSeries(t0, res, sdata, "v"))
+    skey = add_time_series!(
+        store, 1, "Gen", Component, SingleTimeSeries(t0, res, sdata, "v")
+    )
     full = get_time_series(store, skey)
     @test full.data == sdata
     r = build_static_reader(store; resolution=res)
@@ -1104,8 +1360,13 @@ end
     pstore = Store(in_memory=true)
     P, H, count = 3, 2, 4
     pdata = Float64[p * 1000 + h * 10 + c for p in 1:P, h in 1:H, c in 1:count]
-    add_time_series!(pstore, 2, "Gen", Component,
-                     Probabilistic(t0, res, Hour(H), Hour(1), count, [0.1, 0.5, 0.9], pdata, "pf"))
+    add_time_series!(
+        pstore,
+        2,
+        "Gen",
+        Component,
+        Probabilistic(t0, res, Hour(H), Hour(1), count, [0.1, 0.5, 0.9], pdata, "pf"),
+    )
     full_p = get_time_series(Probabilistic, pstore, 2, Component, "pf")
     @test full_p.data == pdata
     fr = build_forecast_reader(pstore, Probabilistic; resolution=res)
@@ -1124,22 +1385,29 @@ end
     res = Hour(1)
 
     # Non-Float64 dtype is preserved (previously forced to Float64).
-    k_i = add_time_series!(store, 1, "Gen", Component,
-                           SingleTimeSeries(t0, res, Int64[10, 20, 30], "i"))
+    k_i = add_time_series!(
+        store, 1, "Gen", Component, SingleTimeSeries(t0, res, Int64[10, 20, 30], "i")
+    )
     si = get_time_series(store, k_i)
     @test eltype(si.data) == Int64
     @test si.data == Int64[10, 20, 30]
     @test typeof(si) == SingleTimeSeries{Int64,1}
 
-    k_f = add_time_series!(store, 2, "Gen", Component,
-                           SingleTimeSeries(t0, res, Float32[1.5, 2.5, 3.5], "f"))
+    k_f = add_time_series!(
+        store, 2, "Gen", Component, SingleTimeSeries(t0, res, Float32[1.5, 2.5, 3.5], "f")
+    )
     sf = get_time_series(store, k_f)
     @test eltype(sf.data) == Float32
     @test sf.data == Float32[1.5, 2.5, 3.5]
     @test typeof(sf) == SingleTimeSeries{Float32,1}
 
-    k_b = add_time_series!(store, 3, "Gen", Component,
-                           SingleTimeSeries(t0, res, Bool[true, false, true, false], "b"))
+    k_b = add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        SingleTimeSeries(t0, res, Bool[true, false, true, false], "b"),
+    )
     sb = get_time_series(store, k_b)
     @test eltype(sb.data) == Bool
     @test sb.data == Bool[true, false, true, false]
@@ -1168,12 +1436,14 @@ end
     res = Hour(1)
 
     # Inference from the value array's eltype/ndims.
-    @test typeof(SingleTimeSeries(t0, res, Float64[1, 2, 3], "f")) == SingleTimeSeries{Float64,1}
-    @test typeof(SingleTimeSeries(t0, res, Int32[1 2; 3 4], "i")) == SingleTimeSeries{Int32,2}
+    @test typeof(SingleTimeSeries(t0, res, Float64[1, 2, 3], "f")) ==
+        SingleTimeSeries{Float64,1}
+    @test typeof(SingleTimeSeries(t0, res, Int32[1 2; 3 4], "i")) ==
+        SingleTimeSeries{Int32,2}
     @test typeof(NonSequentialTimeSeries([t0, t0 + res], Float32[1, 2], "n")) ==
-          NonSequentialTimeSeries{Float32,1}
+        NonSequentialTimeSeries{Float32,1}
     @test typeof(NonSequentialTimeSeries([t0, t0 + res], Int32[1 2; 3 4], "n2")) ==
-          NonSequentialTimeSeries{Int32,2}
+        NonSequentialTimeSeries{Int32,2}
 
     # Views/ranges/reshapes normalize to a concrete Array{T,N}.
     base = Float64[1, 2, 3, 4, 5, 6]
@@ -1184,9 +1454,19 @@ end
     @test sts_reshaped.data isa Array{Float64,2}
 
     # Forecast structs infer {T,N} too.
-    det = Deterministic(t0, res, Hour(2), Hour(1), 5, Float64[i + s for s in 0:1, i in 1:5], "d")
+    det = Deterministic(
+        t0, res, Hour(2), Hour(1), 5, Float64[i + s for s in 0:1, i in 1:5], "d"
+    )
     @test typeof(det) == Deterministic{Float64,2}
-    scen = Scenarios(t0, res, Hour(2), Hour(1), 5, Float32[v for v in 1:(3 * 2 * 5)] |> a -> reshape(a, 3, 2, 5), "s")
+    scen = Scenarios(
+        t0,
+        res,
+        Hour(2),
+        Hour(1),
+        5,
+        Float32[v for v in 1:(3 * 2 * 5)] |> a -> reshape(a, 3, 2, 5),
+        "s",
+    )
     @test typeof(scen) == Scenarios{Float32,3}
 end
 
@@ -1197,8 +1477,9 @@ end
 
     # units round-trips through get_metadata (previously write-only).
     sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
-    k = add_time_series!(store, 1, "Generator", Component, sts;
-                         units="MW", logical_type="Profile")
+    k = add_time_series!(
+        store, 1, "Generator", Component, sts; units="MW", logical_type="Profile"
+    )
     md = get_metadata(store, 1, Component, "load"; resolution=res)
     @test md.units == "MW"
     @test md.logical_type == "Profile"
@@ -1213,8 +1494,9 @@ end
     @test read_only(store) == false
 
     # A forecast so discovery has an interval + a mixed bulk read.
-    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
-                        Float64[h * 10 + c for h in 1:2, c in 1:3], "fc")
+    det = Deterministic(
+        t0, res, Hour(2), Hour(1), 3, Float64[h * 10 + c for h in 1:2, c in 1:3], "fc"
+    )
     kf = add_time_series!(store, 2, "Bus", Component, det)
 
     @test get_intervals(store) == [Hour(1)]
@@ -1231,8 +1513,16 @@ end
     @test rows[1]["dtype"] == "f64"
 
     # get_probabilistic_metadata exposes percentiles + units without a data fetch.
-    prob = Probabilistic(t0, res, Hour(2), Hour(1), 3, [0.1, 0.5, 0.9],
-                         Float64[p + h + c for p in 1:3, h in 1:2, c in 1:3], "pf")
+    prob = Probabilistic(
+        t0,
+        res,
+        Hour(2),
+        Hour(1),
+        3,
+        [0.1, 0.5, 0.9],
+        Float64[p + h + c for p in 1:3, h in 1:2, c in 1:3],
+        "pf",
+    )
     add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
     pmd = get_probabilistic_metadata(store, 3, Component, "pf")
     @test pmd.percentiles == [0.1, 0.5, 0.9]
@@ -1246,14 +1536,17 @@ end
     @test mixed[2].data == det.data
 
     # resolve_forecast_key resolves the abstract-deterministic family.
-    rk = resolve_forecast_key(store, 2, Component, "fc",
-                              TimeSeriesStore.TS_TYPE_ABSTRACT_DETERMINISTIC)
+    rk = resolve_forecast_key(
+        store, 2, Component, "fc", TimeSeriesStore.TS_TYPE_ABSTRACT_DETERMINISTIC
+    )
     @test get_time_series(Deterministic, store, rk).data == det.data
 
     # rename_time_series! moves the association.
     nk = rename_time_series!(store, k, "load2")
     @test get_metadata(store, 1, Component, "load2"; resolution=res).units == "MW"
-    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, 1, Component, "load"; resolution=res)
+    @test_throws TimeSeriesStore.NotFoundError get_metadata(
+        store, 1, Component, "load"; resolution=res
+    )
 
     # remove_by_filter! removes matching series.
     removed = remove_by_filter!(store; owner_id=3)
@@ -1284,17 +1577,27 @@ end
     # Forecast metadata carries the element shape + features too. The catalog's
     # element_shape is the stored array's trailing dims after its first axis:
     # a Deterministic with dims (H=2, count=3, E=2) reports (3, 2).
-    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
-                        reshape(collect(1.0:12.0), 2, 3, 2), "fc")
+    det = Deterministic(
+        t0, res, Hour(2), Hour(1), 3, reshape(collect(1.0:12.0), 2, 3, 2), "fc"
+    )
     add_time_series!(store, 2, "Bus", Component, det; features=feats)
-    fmd = get_forecast_metadata(store, 2, Component, "fc",
-                                TimeSeriesStore.TS_TYPE_DETERMINISTIC; features=feats)
+    fmd = get_forecast_metadata(
+        store, 2, Component, "fc", TimeSeriesStore.TS_TYPE_DETERMINISTIC; features=feats
+    )
     @test fmd.element_shape == (3, 2)
     @test fmd.features == Dict("scenario" => "high", "model_year" => 2030)
 
     # Probabilistic dims (P=2, H=2, count=3) report trailing dims (2, 3).
-    prob = Probabilistic(t0, res, Hour(2), Hour(1), 3, [0.1, 0.9],
-                         Float64[p + h + c for p in 1:2, h in 1:2, c in 1:3], "pf")
+    prob = Probabilistic(
+        t0,
+        res,
+        Hour(2),
+        Hour(1),
+        3,
+        [0.1, 0.9],
+        Float64[p + h + c for p in 1:2, h in 1:2, c in 1:3],
+        "pf",
+    )
     add_time_series!(store, 3, "Generator", Component, prob)
     pmd = get_probabilistic_metadata(store, 3, Component, "pf")
     @test pmd.element_shape == (2, 3)
@@ -1325,8 +1628,13 @@ end
     captured = Ref{Any}(nothing)
     result = Store(in_memory=true) do store
         captured[] = store
-        add_time_series!(store, 1, "Generator", Component,
-                         SingleTimeSeries(t0, res, collect(1.0:8.0), "load"))
+        add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, res, collect(1.0:8.0), "load"),
+        )
         42
     end
     @test result == 42
@@ -1342,18 +1650,33 @@ end
     k = add_time_series!(store, 1, "Generator", Component, sts)
 
     # time_range on the typed key alias and the attribute-addressed forms.
-    sliced = get_time_series(SingleTimeSeries, store, k;
-                             time_range=(t0 + Hour(2), t0 + Hour(5)))
+    sliced = get_time_series(
+        SingleTimeSeries, store, k; time_range=(t0 + Hour(2), t0 + Hour(5))
+    )
     @test sliced.data == collect(3.0:5.0)
-    sliced = get_time_series(SingleTimeSeries, store, 1, Component, "load";
-                             resolution=res, time_range=(t0 + Hour(2), t0 + Hour(5)))
+    sliced = get_time_series(
+        SingleTimeSeries,
+        store,
+        1,
+        Component,
+        "load";
+        resolution=res,
+        time_range=(t0 + Hour(2), t0 + Hour(5)),
+    )
     @test sliced.data == collect(3.0:5.0)
 
-    nsts = NonSequentialTimeSeries([t0, t0 + Hour(3), t0 + Hour(7)],
-                                   [10.0, 20.0, 30.0], "events")
+    nsts = NonSequentialTimeSeries(
+        [t0, t0 + Hour(3), t0 + Hour(7)], [10.0, 20.0, 30.0], "events"
+    )
     add_time_series!(store, 2, "Bus", Component, nsts)
-    ns_sliced = get_time_series(NonSequentialTimeSeries, store, 2, Component, "events";
-                                time_range=(t0 + Hour(1), t0 + Hour(5)))
+    ns_sliced = get_time_series(
+        NonSequentialTimeSeries,
+        store,
+        2,
+        Component,
+        "events";
+        time_range=(t0 + Hour(1), t0 + Hour(5)),
+    )
     @test ns_sliced.data == [20.0]
 
     # Key equality/hash delegate to core identity: separately-fetched keys of
@@ -1371,8 +1694,7 @@ end
     @test occursin("name=\"load\"", sprint(show, k))
     @test occursin("read_only=false", sprint(show, store))
     @test occursin("length=8", sprint(show, sts))
-    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
-                        reshape(collect(1.0:6.0), 2, 3), "fc")
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3, reshape(collect(1.0:6.0), 2, 3), "fc")
     @test occursin("count=3", sprint(show, det))
 
     # Container interface delegates to `data`; forecast length = window count.
@@ -1390,7 +1712,7 @@ end
     @test isfile(dest)
     reopened = open_store(dest; read_only=true)
     @test get_time_series(SingleTimeSeries, store, 1, Component, "load").data ==
-          get_time_series(SingleTimeSeries, reopened, 1, Component, "load").data
+        get_time_series(SingleTimeSeries, reopened, 1, Component, "load").data
     close!(reopened)
 
     # Typed IOError is part of the exception hierarchy.

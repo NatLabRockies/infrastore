@@ -19,3 +19,12 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   echo 'shellcheck not found, skipping shell script linting'
 fi
+
+if git diff --cached --name-only -- 'julia/*.jl' | grep -q .; then
+  if command -v julia >/dev/null 2>&1; then
+    echo '+julia format check'
+    julia --project=julia/formatter julia/formatter/format.jl --check
+  else
+    echo 'julia not found, skipping Julia format check'
+  fi
+fi

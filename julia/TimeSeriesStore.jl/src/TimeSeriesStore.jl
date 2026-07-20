@@ -1,32 +1,82 @@
 module TimeSeriesStore
 
 using Dates
-import JSON
+using JSON: JSON
 
-export Store, SingleTimeSeries, NonSequentialTimeSeries,
-       Deterministic, DeterministicSingleTimeSeries, AbstractDeterministic,
-       Probabilistic, Scenarios, TimeSeriesKey,
-       OwnerCategory, Component, SupplementalAttribute,
-       add_time_series!, AddBatch, add_time_series_bulk!,
-       get_time_series, bulk_read, get_time_series_keys, key_info, list_keys, list_array_groups,
-       remove_time_series!,
-       has_time_series, get_counts, counts_by_type, num_distinct_arrays,
-       time_series_counts, list_owner_ids, static_summary, forecast_summary,
-       get_forecast_parameters, check_static_consistency, get_resolutions, get_intervals,
-       get_compression, read_only,
-       verify_integrity, compact!,
-       get_metadata, get_forecast_metadata, get_probabilistic_metadata,
-       get_array_by_hash, count_array_references,
-       list_time_series, list_names, list_owner_types, remove_by_filter!,
-       rename_time_series!, resolve_forecast_key, has_for_owner,
-       open_store, flush!, clear!, replace_owner!,
-       transform_single_time_series!, has_typed, remove_typed!, copy_time_series!,
-       close!, persist!,
-       StaticReader, build_static_reader, static_grid, static_groups,
-       static_read!, static_values,
-       ForecastReader, build_forecast_reader, forecast_timeline, forecast_entries,
-       forecast_num_slots, forecast_read!, forecast_values,
-       init_logging
+export Store,
+    SingleTimeSeries,
+    NonSequentialTimeSeries,
+    Deterministic,
+    DeterministicSingleTimeSeries,
+    AbstractDeterministic,
+    Probabilistic,
+    Scenarios,
+    TimeSeriesKey,
+    OwnerCategory,
+    Component,
+    SupplementalAttribute,
+    add_time_series!,
+    AddBatch,
+    add_time_series_bulk!,
+    get_time_series,
+    bulk_read,
+    get_time_series_keys,
+    key_info,
+    list_keys,
+    list_array_groups,
+    remove_time_series!,
+    has_time_series,
+    get_counts,
+    counts_by_type,
+    num_distinct_arrays,
+    time_series_counts,
+    list_owner_ids,
+    static_summary,
+    forecast_summary,
+    get_forecast_parameters,
+    check_static_consistency,
+    get_resolutions,
+    get_intervals,
+    get_compression,
+    read_only,
+    verify_integrity,
+    compact!,
+    get_metadata,
+    get_forecast_metadata,
+    get_probabilistic_metadata,
+    get_array_by_hash,
+    count_array_references,
+    list_time_series,
+    list_names,
+    list_owner_types,
+    remove_by_filter!,
+    rename_time_series!,
+    resolve_forecast_key,
+    has_for_owner,
+    open_store,
+    flush!,
+    clear!,
+    replace_owner!,
+    transform_single_time_series!,
+    has_typed,
+    remove_typed!,
+    copy_time_series!,
+    close!,
+    persist!,
+    StaticReader,
+    build_static_reader,
+    static_grid,
+    static_groups,
+    static_read!,
+    static_values,
+    ForecastReader,
+    build_forecast_reader,
+    forecast_timeline,
+    forecast_entries,
+    forecast_num_slots,
+    forecast_read!,
+    forecast_values,
+    init_logging
 
 # ---- libtime_series_store_ffi resolution ---------------------------------
 #
@@ -46,8 +96,11 @@ function _jll_library_path()
     catch
         return ""
     end
-    return isdefined(mod, :libtime_series_store_ffi) ?
-           String(getproperty(mod, :libtime_series_store_ffi)) : ""
+    return if isdefined(mod, :libtime_series_store_ffi)
+        String(getproperty(mod, :libtime_series_store_ffi))
+    else
+        ""
+    end
 end
 
 """
@@ -73,62 +126,100 @@ end
 
 # ---- Status codes (must match crates/time-series-store-ffi/src/lib.rs) ----
 
-const TS_OK                    = Int32(0)
-const TS_ERR_NULL_POINTER      = Int32(1)
-const TS_ERR_INVALID_UTF8      = Int32(2)
+const TS_OK = Int32(0)
+const TS_ERR_NULL_POINTER = Int32(1)
+const TS_ERR_INVALID_UTF8 = Int32(2)
 const TS_ERR_INVALID_PARAMETER = Int32(3)
-const TS_ERR_NOT_FOUND         = Int32(4)
-const TS_ERR_DUPLICATE         = Int32(5)
-const TS_ERR_INTEGRITY         = Int32(6)
-const TS_ERR_READ_ONLY         = Int32(7)
-const TS_ERR_IO                = Int32(8)
+const TS_ERR_NOT_FOUND = Int32(4)
+const TS_ERR_DUPLICATE = Int32(5)
+const TS_ERR_INTEGRITY = Int32(6)
+const TS_ERR_READ_ONLY = Int32(7)
+const TS_ERR_IO = Int32(8)
 const TS_ERR_INCOMPATIBLE_FORMAT = Int32(9)
-const TS_ERR_INTERNAL          = Int32(99)
+const TS_ERR_INTERNAL = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
 
 @enum OwnerCategory begin
-    Component              = 0
-    SupplementalAttribute  = 1
+    Component = 0
+    SupplementalAttribute = 1
 end
 
 # ---- Errors ---------------------------------------------------------------
 
 abstract type TimeSeriesException <: Exception end
 
-struct NotFoundError           <: TimeSeriesException; msg::String; end
-struct DuplicateTimeSeriesError <: TimeSeriesException; msg::String; end
-struct InvalidParameterError    <: TimeSeriesException; msg::String; end
-struct IntegrityError           <: TimeSeriesException; msg::String; end
-struct ReadOnlyStoreError       <: TimeSeriesException; msg::String; end
-struct IncompatibleFormatError  <: TimeSeriesException; msg::String; end
-struct IOError                  <: TimeSeriesException; msg::String; end
-struct GenericError             <: TimeSeriesException; msg::String; code::Int32; end
+struct NotFoundError <: TimeSeriesException
+    msg::String;
+end
 
-Base.showerror(io::IO, e::TimeSeriesException) = print(io, "TimeSeriesStore.", typeof(e).name.name, ": ", e.msg)
+struct DuplicateTimeSeriesError <: TimeSeriesException
+    msg::String;
+end
+
+struct InvalidParameterError <: TimeSeriesException
+    msg::String;
+end
+
+struct IntegrityError <: TimeSeriesException
+    msg::String;
+end
+
+struct ReadOnlyStoreError <: TimeSeriesException
+    msg::String;
+end
+
+struct IncompatibleFormatError <: TimeSeriesException
+    msg::String;
+end
+
+struct IOError <: TimeSeriesException
+    msg::String;
+end
+
+struct GenericError <: TimeSeriesException
+    msg::String;
+    code::Int32;
+end
+
+function Base.showerror(io::IO, e::TimeSeriesException)
+    return print(io, "TimeSeriesStore.", typeof(e).name.name, ": ", e.msg)
+end
 
 function _last_error_message()
     needed = Ref{UInt64}(0)
-    ccall((:ts_last_error_message, lib_path()), Int32,
-          (Ptr{UInt8}, UInt64, Ptr{UInt64}),
-          C_NULL, UInt64(0), needed)
+    ccall(
+        (:ts_last_error_message, lib_path()),
+        Int32,
+        (Ptr{UInt8}, UInt64, Ptr{UInt64}),
+        C_NULL,
+        UInt64(0),
+        needed,
+    )
     n = Int(needed[])
     n == 0 && return ""
     buf = Vector{UInt8}(undef, n + 1)
-    ccall((:ts_last_error_message, lib_path()), Int32,
-          (Ptr{UInt8}, UInt64, Ptr{UInt64}),
-          buf, UInt64(n + 1), C_NULL)
+    ccall(
+        (:ts_last_error_message, lib_path()),
+        Int32,
+        (Ptr{UInt8}, UInt64, Ptr{UInt64}),
+        buf,
+        UInt64(n + 1),
+        C_NULL,
+    )
     return String(buf[1:n])
 end
 
 function _check(code::Int32)
-    code == TS_OK && return
+    code == TS_OK && return nothing
     msg = _last_error_message()
     if code == TS_ERR_NOT_FOUND
         throw(NotFoundError(msg))
     elseif code == TS_ERR_DUPLICATE
         throw(DuplicateTimeSeriesError(msg))
-    elseif code == TS_ERR_INVALID_PARAMETER || code == TS_ERR_INVALID_UTF8 || code == TS_ERR_NULL_POINTER
+    elseif code == TS_ERR_INVALID_PARAMETER ||
+        code == TS_ERR_INVALID_UTF8 ||
+        code == TS_ERR_NULL_POINTER
         throw(InvalidParameterError(msg))
     elseif code == TS_ERR_INTEGRITY
         throw(IntegrityError(msg))
@@ -148,12 +239,13 @@ end
 
 _dtype_code(::Type{Float64}) = Int32(0)
 _dtype_code(::Type{Float32}) = Int32(1)
-_dtype_code(::Type{Int64})   = Int32(2)
-_dtype_code(::Type{Int32})   = Int32(3)
-_dtype_code(::Type{UInt64})  = Int32(4)
-_dtype_code(::Type{Bool})    = Int32(5)
-_dtype_code(::Type{T}) where {T} =
-    throw(InvalidParameterError("unsupported element dtype $T"))
+_dtype_code(::Type{Int64}) = Int32(2)
+_dtype_code(::Type{Int32}) = Int32(3)
+_dtype_code(::Type{UInt64}) = Int32(4)
+_dtype_code(::Type{Bool}) = Int32(5)
+function _dtype_code(::Type{T}) where {T}
+    return throw(InvalidParameterError("unsupported element dtype $T"))
+end
 
 const _DTYPE_JULIA = (Float64, Float32, Int64, Int32, UInt64, Bool)
 _julia_dtype(code::Integer) = _DTYPE_JULIA[Int(code) + 1]
@@ -178,48 +270,63 @@ _maybe_string(s::AbstractString) = String(s)
 # ---- Single time series ---------------------------------------------------
 
 struct SingleTimeSeries{T,N}
-    initial_timestamp :: DateTime
-    resolution        :: Period
+    initial_timestamp::DateTime
+    resolution::Period
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time)."
-    data              :: Array{T,N}
+    data::Array{T,N}
     "Association name (required; the same array may be stored under different names)."
-    name              :: String
+    name::String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type      :: Union{Nothing,String}
+    logical_type::Union{Nothing,String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
 # `Array` (copy-free when already one).
-SingleTimeSeries(initial, resolution, data::AbstractArray, name::AbstractString;
-                 logical_type::Union{Nothing,AbstractString}=nothing) =
-    SingleTimeSeries{eltype(data),ndims(data)}(
-        initial, resolution, data isa Array ? data : Array(data), String(name),
-        _maybe_string(logical_type))
+function SingleTimeSeries(
+    initial,
+    resolution,
+    data::AbstractArray,
+    name::AbstractString;
+    logical_type::Union{Nothing,AbstractString}=nothing,
+)
+    return SingleTimeSeries{eltype(data),ndims(data)}(
+        initial,
+        resolution,
+        data isa Array ? data : Array(data),
+        String(name),
+        _maybe_string(logical_type),
+    )
+end
 
 # ---- Non-sequential time series -------------------------------------------
 
 struct NonSequentialTimeSeries{T,N}
-    timestamps  :: Vector{DateTime}
+    timestamps::Vector{DateTime}
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time, one entry per timestamp)."
-    data        :: Array{T,N}
+    data::Array{T,N}
     "Association name (required)."
-    name        :: String
+    name::String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type :: Union{Nothing,String}
+    logical_type::Union{Nothing,String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
 # `Array`. Timestamps are explicit and must be strictly increasing, with one entry
 # per leading-dimension row (`size(data, 1)`).
-function NonSequentialTimeSeries(timestamps, data::AbstractArray, name::AbstractString;
-        logical_type::Union{Nothing,AbstractString}=nothing)
+function NonSequentialTimeSeries(
+    timestamps,
+    data::AbstractArray,
+    name::AbstractString;
+    logical_type::Union{Nothing,AbstractString}=nothing,
+)
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
     all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
         throw(InvalidParameterError("timestamps must be strictly increasing"))
     arr = data isa Array ? data : Array(data)
     return NonSequentialTimeSeries{eltype(arr),ndims(arr)}(
-        Vector{DateTime}(timestamps), arr, String(name), _maybe_string(logical_type))
+        Vector{DateTime}(timestamps), arr, String(name), _maybe_string(logical_type)
+    )
 end
 
 # ---- Forecast types -------------------------------------------------------
@@ -245,71 +352,118 @@ the identity.
 abstract type AbstractDeterministic end
 
 struct Deterministic{T,N} <: AbstractDeterministic
-    initial_timestamp :: DateTime
-    resolution        :: Period
-    horizon           :: Period
-    interval          :: Period
-    count             :: Int
+    initial_timestamp::DateTime
+    resolution::Period
+    horizon::Period
+    interval::Period
+    count::Int
     "Values with canonical shape `(H, count, element_dims...)`."
-    data              :: Array{T,N}
+    data::Array{T,N}
     "Association name (required)."
-    name              :: String
+    name::String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type      :: Union{Nothing,String}
+    logical_type::Union{Nothing,String}
 end
 
-Deterministic(initial, resolution, horizon, interval, count, data::AbstractArray,
-              name::AbstractString;
-              logical_type::Union{Nothing,AbstractString}=nothing) =
-    Deterministic{eltype(data),ndims(data)}(
-        initial, resolution, horizon, interval, Int(count),
-        data isa Array ? data : Array(data), String(name), _maybe_string(logical_type))
+function Deterministic(
+    initial,
+    resolution,
+    horizon,
+    interval,
+    count,
+    data::AbstractArray,
+    name::AbstractString;
+    logical_type::Union{Nothing,AbstractString}=nothing,
+)
+    return Deterministic{eltype(data),ndims(data)}(
+        initial,
+        resolution,
+        horizon,
+        interval,
+        Int(count),
+        data isa Array ? data : Array(data),
+        String(name),
+        _maybe_string(logical_type),
+    )
+end
 
 struct Probabilistic{T,N}
-    initial_timestamp :: DateTime
-    resolution        :: Period
-    horizon           :: Period
-    interval          :: Period
-    count             :: Int
-    percentiles       :: Vector{Float64}
+    initial_timestamp::DateTime
+    resolution::Period
+    horizon::Period
+    interval::Period
+    count::Int
+    percentiles::Vector{Float64}
     "Values with canonical shape `(num_percentiles, H, count, element_dims...)`."
-    data              :: Array{T,N}
+    data::Array{T,N}
     "Association name (required)."
-    name              :: String
+    name::String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type      :: Union{Nothing,String}
+    logical_type::Union{Nothing,String}
 end
 
-Probabilistic(initial, resolution, horizon, interval, count, percentiles, data::AbstractArray,
-              name::AbstractString;
-              logical_type::Union{Nothing,AbstractString}=nothing) =
-    Probabilistic{eltype(data),ndims(data)}(
-        initial, resolution, horizon, interval, Int(count),
-        Vector{Float64}(percentiles), data isa Array ? data : Array(data), String(name),
-        _maybe_string(logical_type))
+function Probabilistic(
+    initial,
+    resolution,
+    horizon,
+    interval,
+    count,
+    percentiles,
+    data::AbstractArray,
+    name::AbstractString;
+    logical_type::Union{Nothing,AbstractString}=nothing,
+)
+    return Probabilistic{eltype(data),ndims(data)}(
+        initial,
+        resolution,
+        horizon,
+        interval,
+        Int(count),
+        Vector{Float64}(percentiles),
+        data isa Array ? data : Array(data),
+        String(name),
+        _maybe_string(logical_type),
+    )
+end
 
 struct Scenarios{T,N}
-    initial_timestamp :: DateTime
-    resolution        :: Period
-    horizon           :: Period
-    interval          :: Period
-    count             :: Int
-    scenario_count    :: Int
+    initial_timestamp::DateTime
+    resolution::Period
+    horizon::Period
+    interval::Period
+    count::Int
+    scenario_count::Int
     "Values with canonical shape `(scenario_count, H, count, element_dims...)`."
-    data              :: Array{T,N}
+    data::Array{T,N}
     "Association name (required)."
-    name              :: String
+    name::String
     "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type      :: Union{Nothing,String}
+    logical_type::Union{Nothing,String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
-Scenarios(initial, resolution, horizon, interval, count, data::AbstractArray,
-          name::AbstractString;
-          logical_type::Union{Nothing,AbstractString}=nothing) =
-    Scenarios{eltype(data),ndims(data)}(
-        initial, resolution, horizon, interval, Int(count), size(data, 1),
-        data isa Array ? data : Array(data), String(name), _maybe_string(logical_type))
+function Scenarios(
+    initial,
+    resolution,
+    horizon,
+    interval,
+    count,
+    data::AbstractArray,
+    name::AbstractString;
+    logical_type::Union{Nothing,AbstractString}=nothing,
+)
+    return Scenarios{eltype(data),ndims(data)}(
+        initial,
+        resolution,
+        horizon,
+        interval,
+        Int(count),
+        size(data, 1),
+        data isa Array ? data : Array(data),
+        String(name),
+        _maybe_string(logical_type),
+    )
+end
 
 """
     DeterministicSingleTimeSeries
@@ -326,11 +480,11 @@ abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
 # ---- Keys -----------------------------------------------------------------
 
 mutable struct TimeSeriesKey
-    handle :: Ptr{Cvoid}
+    handle::Ptr{Cvoid}
     function TimeSeriesKey(handle::Ptr{Cvoid})
         k = new(handle)
         finalizer(_finalize_key, k)
-        k
+        return k
     end
 end
 
@@ -344,11 +498,11 @@ end
 # ---- Store ----------------------------------------------------------------
 
 mutable struct Store
-    handle :: Ptr{Cvoid}
+    handle::Ptr{Cvoid}
     function Store(handle::Ptr{Cvoid})
         s = new(handle)
         finalizer(close!, s)
-        s
+        return s
     end
 end
 
@@ -371,22 +525,38 @@ NetCDF file on disk.
 byte `shuffle`; `:none` disables compression. The setting is ignored for
 in-memory stores and is persisted so later appends reuse it.
 """
-function Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
-               compression::Union{Symbol,AbstractString}=:deflate,
-               compression_level::Integer=3, shuffle::Bool=true)
+function Store(;
+    in_memory::Bool=true,
+    path::Union{Nothing,AbstractString}=nothing,
+    compression::Union{Symbol,AbstractString}=:deflate,
+    compression_level::Integer=3,
+    shuffle::Bool=true,
+)
     kind = Symbol(compression)
     compression_kind = if kind === :none
         UInt8(0)
     elseif kind === :deflate
         UInt8(1)
     else
-        throw(ArgumentError("unknown compression $(repr(compression)), expected :deflate or :none"))
+        throw(
+            ArgumentError(
+                "unknown compression $(repr(compression)), expected :deflate or :none"
+            ),
+        )
     end
     out = Ref{Ptr{Cvoid}}(C_NULL)
     cpath = path === nothing ? C_NULL : pointer(String(path))
-    code = ccall((:ts_store_create_with_compression, lib_path()), Int32,
-                 (Cstring, Bool, UInt8, UInt8, Bool, Ref{Ptr{Cvoid}}),
-                 cpath, in_memory, compression_kind, UInt8(compression_level), shuffle, out)
+    code = ccall(
+        (:ts_store_create_with_compression, lib_path()),
+        Int32,
+        (Cstring, Bool, UInt8, UInt8, Bool, Ref{Ptr{Cvoid}}),
+        cpath,
+        in_memory,
+        compression_kind,
+        UInt8(compression_level),
+        shuffle,
+        out,
+    )
     _check(code)
     return Store(out[])
 end
@@ -398,9 +568,14 @@ Open an existing on-disk store.
 """
 function open_store(path::AbstractString; read_only::Bool=false)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_open, lib_path()), Int32,
-                 (Cstring, Bool, Ref{Ptr{Cvoid}}),
-                 path, read_only, out)
+    code = ccall(
+        (:ts_store_open, lib_path()),
+        Int32,
+        (Cstring, Bool, Ref{Ptr{Cvoid}}),
+        path,
+        read_only,
+        out,
+    )
     _check(code)
     return Store(out[])
 end
@@ -488,17 +663,29 @@ _period_to_cstr(p) = p === nothing ? C_NULL : _period_to_iso(p)
 # Decode an ISO-8601 duration string into a Julia `Dates.Period`. Calendar units
 # (Y/M before the `T`) yield `Year`/`Month`; fixed units yield a `Millisecond`.
 function _iso_to_period(s::AbstractString)::Period
-    m = match(r"^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?)?$", s)
+    m = match(
+        r"^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?)?$",
+        s,
+    )
     m === nothing && error("invalid ISO-8601 period: $s")
     years, months, weeks, days, hours, mins, secs = m.captures
     has_cal = years !== nothing || months !== nothing
-    has_fixed = weeks !== nothing || days !== nothing || hours !== nothing ||
-                mins !== nothing || secs !== nothing
+    has_fixed =
+        weeks !== nothing ||
+        days !== nothing ||
+        hours !== nothing ||
+        mins !== nothing ||
+        secs !== nothing
     has_cal && has_fixed && error("ISO-8601 period mixes calendar and fixed units: $s")
     if has_cal
-        total_months = (years === nothing ? 0 : 12 * parse(Int, years)) +
-                       (months === nothing ? 0 : parse(Int, months))
-        return total_months % 12 == 0 ? Dates.Year(total_months ÷ 12) : Dates.Month(total_months)
+        total_months =
+            (years === nothing ? 0 : 12 * parse(Int, years)) +
+            (months === nothing ? 0 : parse(Int, months))
+        return if total_months % 12 == 0
+            Dates.Year(total_months ÷ 12)
+        else
+            Dates.Month(total_months)
+        end
     end
     ms = 0
     weeks !== nothing && (ms += parse(Int, weeks) * 604_800_000)
@@ -518,7 +705,9 @@ function _take_cstr(ptr::Ptr{Cchar})
 end
 
 # Read + free an owned ISO-8601 period C string; `nothing` if null.
-_take_period(ptr::Ptr{Cchar}) = (s = _take_cstr(ptr); s === nothing ? nothing : _iso_to_period(s))
+function _take_period(ptr::Ptr{Cchar})
+    return (s=_take_cstr(ptr); s === nothing ? nothing : _iso_to_period(s))
+end
 
 # Decode a probe-then-fetch caller buffer (`buf`, byte length `len`) written by a
 # `write_str_out`-style FFI out-param. An empty string means the field is unset,
@@ -532,16 +721,18 @@ end
 # FFI; anything beyond the buffer capacity is pathological, so fail loudly
 # rather than silently truncating a shape.
 function _take_element_shape(buf::Vector{UInt64}, len::Integer)
-    Int(len) <= length(buf) ||
-        error("element shape has $(Int(len)) dimensions, exceeding the $(length(buf))-slot buffer")
+    Int(len) <= length(buf) || error(
+        "element shape has $(Int(len)) dimensions, exceeding the $(length(buf))-slot buffer",
+    )
     return Tuple(Int(d) for d in buf[1:Int(len)])
 end
 
 # Features out-buffer: the FFI reports the full JSON byte length; a truncated
 # JSON document must never be parsed, so fail loudly if it did not fit.
 function _take_features_json(buf::Vector{UInt8}, len::Integer)
-    Int(len) < length(buf) ||
-        error("features JSON is $(Int(len)) bytes, exceeding the $(length(buf))-byte buffer")
+    Int(len) < length(buf) || error(
+        "features JSON is $(Int(len)) bytes, exceeding the $(length(buf))-byte buffer"
+    )
     n = Int(len)
     n == 0 && return Dict{String,Any}()
     return JSON.parse(String(buf[1:n]))
@@ -577,10 +768,26 @@ function add_time_series!(
 
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
-        (:ts_store_add_single, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int64, Cstring,
-         Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
-         Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        (:ts_store_add_single, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Int64,
+            Cstring,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Ptr{Cvoid}},
+        ),
         store.handle,
         Int64(owner_id),
         owner_type,
@@ -622,13 +829,41 @@ function add_time_series!(
     logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
-        (:ts_store_add_non_sequential, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Ptr{Int64}, UInt64,
-         Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
-         Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle, Int64(owner_id), owner_type, Int32(Int(owner_category)), name,
-        timestamps, UInt64(length(timestamps)), dtype, UInt64(length(dims)), dims, bytes,
-        UInt64(length(bytes)), logical_ptr, features_json, units_ptr,
+        (:ts_store_add_non_sequential, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Ptr{Int64},
+            UInt64,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Ptr{Cvoid}},
+        ),
+        store.handle,
+        Int64(owner_id),
+        owner_type,
+        Int32(Int(owner_category)),
+        name,
+        timestamps,
+        UInt64(length(timestamps)),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        logical_ptr,
+        features_json,
+        units_ptr,
         out_key,
     )
     _check(code)
@@ -672,19 +907,56 @@ function get_metadata(
     fj_buf = Vector{UInt8}(undef, 4096)
     out_fj_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring,
-         Ref{Int64}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ptr{UInt8}, Ref{Int32},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt64}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_iso, features_json,
-        out_initial, out_resolution, out_length, out_hash, out_dtype,
-        lt_buf, UInt64(length(lt_buf)), out_lt_len,
-        units_buf, UInt64(length(units_buf)), out_units_len,
-        shape_buf, UInt64(length(shape_buf)), out_shape_len,
-        fj_buf, UInt64(length(fj_buf)), out_fj_len,
+        (:ts_store_get_metadata, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Int64},
+            Ref{Ptr{Cchar}},
+            Ref{UInt64},
+            Ptr{UInt8},
+            Ref{Int32},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt64},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        resolution_iso,
+        features_json,
+        out_initial,
+        out_resolution,
+        out_length,
+        out_hash,
+        out_dtype,
+        lt_buf,
+        UInt64(length(lt_buf)),
+        out_lt_len,
+        units_buf,
+        UInt64(length(units_buf)),
+        out_units_len,
+        shape_buf,
+        UInt64(length(shape_buf)),
+        out_shape_len,
+        fj_buf,
+        UInt64(length(fj_buf)),
+        out_fj_len,
     )
     _check(code)
     resolution = _take_period(out_resolution[])
@@ -727,28 +999,80 @@ function get_forecast_metadata(
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    out_initial = Ref{Int64}(0); out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL); out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0); out_length = Ref{UInt64}(0)
+    out_initial = Ref{Int64}(0);
+    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
+    out_horizon = Ref{Ptr{Cchar}}(C_NULL);
+    out_interval = Ref{Ptr{Cchar}}(C_NULL)
+    out_count = Ref{UInt64}(0);
+    out_length = Ref{UInt64}(0)
     out_hash = Vector{UInt8}(undef, 32)
-    lt_buf = Vector{UInt8}(undef, 256); out_lt_len = Ref{UInt64}(0)
-    units_buf = Vector{UInt8}(undef, 256); out_units_len = Ref{UInt64}(0)
-    shape_buf = Vector{UInt64}(undef, 8); out_shape_len = Ref{UInt64}(0)
-    fj_buf = Vector{UInt8}(undef, 4096); out_fj_len = Ref{UInt64}(0)
+    lt_buf = Vector{UInt8}(undef, 256);
+    out_lt_len = Ref{UInt64}(0)
+    units_buf = Vector{UInt8}(undef, 256);
+    out_units_len = Ref{UInt64}(0)
+    shape_buf = Vector{UInt64}(undef, 8);
+    out_shape_len = Ref{UInt64}(0)
+    fj_buf = Vector{UInt8}(undef, 4096);
+    out_fj_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_forecast_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring,
-         Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt64}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json,
-        out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
-        lt_buf, UInt64(length(lt_buf)), out_lt_len,
-        units_buf, UInt64(length(units_buf)), out_units_len,
-        shape_buf, UInt64(length(shape_buf)), out_shape_len,
-        fj_buf, UInt64(length(fj_buf)), out_fj_len,
+        (:ts_store_get_forecast_metadata, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Int32,
+            Cstring,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Int64},
+            Ref{Ptr{Cchar}},
+            Ref{Ptr{Cchar}},
+            Ref{Ptr{Cchar}},
+            Ref{UInt64},
+            Ref{UInt64},
+            Ptr{UInt8},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt64},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        resolution_iso,
+        interval_iso,
+        features_json,
+        out_initial,
+        out_resolution,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_length,
+        out_hash,
+        lt_buf,
+        UInt64(length(lt_buf)),
+        out_lt_len,
+        units_buf,
+        UInt64(length(units_buf)),
+        out_units_len,
+        shape_buf,
+        UInt64(length(shape_buf)),
+        out_shape_len,
+        fj_buf,
+        UInt64(length(fj_buf)),
+        out_fj_len,
     )
     _check(code)
     logical_type = _take_buffer_string(lt_buf, out_lt_len[])
@@ -789,32 +1113,86 @@ function get_probabilistic_metadata(
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    out_initial = Ref{Int64}(0); out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL); out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0); out_length = Ref{UInt64}(0)
+    out_initial = Ref{Int64}(0);
+    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
+    out_horizon = Ref{Ptr{Cchar}}(C_NULL);
+    out_interval = Ref{Ptr{Cchar}}(C_NULL)
+    out_count = Ref{UInt64}(0);
+    out_length = Ref{UInt64}(0)
     out_hash = Vector{UInt8}(undef, 32)
-    out_pct = Ref{Ptr{Float64}}(C_NULL); out_pct_len = Ref{UInt64}(0)
-    units_buf = Vector{UInt8}(undef, 256); out_units_len = Ref{UInt64}(0)
-    shape_buf = Vector{UInt64}(undef, 8); out_shape_len = Ref{UInt64}(0)
-    fj_buf = Vector{UInt8}(undef, 4096); out_fj_len = Ref{UInt64}(0)
+    out_pct = Ref{Ptr{Float64}}(C_NULL);
+    out_pct_len = Ref{UInt64}(0)
+    units_buf = Vector{UInt8}(undef, 256);
+    out_units_len = Ref{UInt64}(0)
+    shape_buf = Vector{UInt64}(undef, 8);
+    out_shape_len = Ref{UInt64}(0)
+    fj_buf = Vector{UInt8}(undef, 4096);
+    out_fj_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_probabilistic_metadata, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring, Cstring,
-         Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}, Ref{UInt64}, Ptr{UInt8},
-         Ref{Ptr{Float64}}, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt64}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_iso, interval_iso, features_json,
-        out_initial, out_resolution, out_horizon, out_interval, out_count, out_length, out_hash,
-        out_pct, out_pct_len,
-        units_buf, UInt64(length(units_buf)), out_units_len,
-        shape_buf, UInt64(length(shape_buf)), out_shape_len,
-        fj_buf, UInt64(length(fj_buf)), out_fj_len,
+        (:ts_store_get_probabilistic_metadata, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Int64},
+            Ref{Ptr{Cchar}},
+            Ref{Ptr{Cchar}},
+            Ref{Ptr{Cchar}},
+            Ref{UInt64},
+            Ref{UInt64},
+            Ptr{UInt8},
+            Ref{Ptr{Float64}},
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt64},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        resolution_iso,
+        interval_iso,
+        features_json,
+        out_initial,
+        out_resolution,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_length,
+        out_hash,
+        out_pct,
+        out_pct_len,
+        units_buf,
+        UInt64(length(units_buf)),
+        out_units_len,
+        shape_buf,
+        UInt64(length(shape_buf)),
+        out_shape_len,
+        fj_buf,
+        UInt64(length(fj_buf)),
+        out_fj_len,
     )
     _check(code)
     percentiles = copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
-    ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_pct[], out_pct_len[])
+    ccall(
+        (:ts_buffer_free_f64, lib_path()),
+        Cvoid,
+        (Ptr{Float64}, UInt64),
+        out_pct[],
+        out_pct_len[],
+    )
     return (
         initial_timestamp=_from_unix_ms(out_initial[]),
         resolution=_take_period(out_resolution[]),
@@ -838,9 +1216,15 @@ Rename the series identified by `key` to `new_name`, returning the renamed key
 """
 function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::AbstractString)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_rename, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Cvoid}, Cstring, Ref{Ptr{Cvoid}}),
-                 store.handle, key.handle, String(new_name), out_key)
+    code = ccall(
+        (:ts_store_rename, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Cstring, Ref{Ptr{Cvoid}}),
+        store.handle,
+        key.handle,
+        String(new_name),
+        out_key,
+    )
     _check(code)
     return TimeSeriesKey(out_key[])
 end
@@ -867,10 +1251,30 @@ function resolve_forecast_key(
     interval_iso = _period_to_cstr(interval)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_resolve_forecast_key, lib_path()), Int32,
-                 (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring, Cstring, Int32, Ref{Ptr{Cvoid}}),
-                 store.handle, Int64(owner_id), _category_int(owner_category), name,
-                 resolution_iso, interval_iso, features_json, Int32(requested_type), out_key)
+    code = ccall(
+        (:ts_store_resolve_forecast_key, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Cstring,
+            Int32,
+            Ref{Ptr{Cvoid}},
+        ),
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        resolution_iso,
+        interval_iso,
+        features_json,
+        Int32(requested_type),
+        out_key,
+    )
     _check(code)
     return TimeSeriesKey(out_key[])
 end
@@ -882,21 +1286,30 @@ Fetch the full stored array for a 32-byte content hash, interpreting the raw
 element bytes as `T`. For multi-dimensional element shapes the result is the
 flat row-major vector; the caller reshapes using the known element shape.
 """
-function get_array_by_hash(store::Store, data_hash::Vector{UInt8}, ::Type{T}=Float64) where {T}
+function get_array_by_hash(
+    store::Store, data_hash::Vector{UInt8}, ::Type{T}=Float64
+) where {T}
     length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
     out_dtype = Ref{Int32}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_array_by_hash, lib_path()), Int32,
+        (:ts_store_get_array_by_hash, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Ptr{UInt8}, Ref{Int32}, Ref{Ptr{UInt8}}, Ref{UInt64}),
-        store.handle, data_hash, out_dtype, out_data, out_len,
+        store.handle,
+        data_hash,
+        out_dtype,
+        out_data,
+        out_len,
     )
     _check(code)
     nbytes = Int(out_len[])
     raw = unsafe_wrap(Array, out_data[], nbytes; own=false)
     bytes = copy(raw)
-    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_len[])
+    ccall(
+        (:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_len[]
+    )
     return collect(reinterpret(T, bytes))
 end
 
@@ -915,12 +1328,16 @@ function count_array_references(store::Store, data_hash::Vector{UInt8})
     out_sts = Ref{UInt64}(0)
     out_dst = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_count_array_references, lib_path()), Int32,
+        (:ts_store_count_array_references, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Ptr{UInt8}, Ref{UInt64}, Ref{UInt64}),
-        store.handle, data_hash, out_sts, out_dst,
+        store.handle,
+        data_hash,
+        out_sts,
+        out_dst,
     )
     _check(code)
-    return (sts = Int(out_sts[]), dst = Int(out_dst[]))
+    return (sts=Int(out_sts[]), dst=Int(out_dst[]))
 end
 
 """
@@ -955,9 +1372,16 @@ function has_time_series(
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out = Ref{Bool}(false)
     code = ccall(
-        (:ts_store_has_by_attrs, lib_path()), Int32,
+        (:ts_store_has_by_attrs, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring, Ref{Bool}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_iso, features_json, out,
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        resolution_iso,
+        features_json,
+        out,
     )
     _check(code)
     return out[]
@@ -980,10 +1404,15 @@ function has_for_owner(
     out = Ref{Bool}(false)
     use_type = time_series_type !== nothing
     code = ccall(
-        (:ts_store_has_for_owner, lib_path()), Int32,
+        (:ts_store_has_for_owner, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Int64, Int32, Int32, Bool, Ref{Bool}),
-        store.handle, Int64(owner_id), _category_int(owner_category),
-        Int32(use_type ? time_series_type : 0), use_type, out,
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        Int32(use_type ? time_series_type : 0),
+        use_type,
+        out,
     )
     _check(code)
     return out[]
@@ -1006,9 +1435,15 @@ function remove_time_series!(
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     code = ccall(
-        (:ts_store_remove_by_attrs, lib_path()), Int32,
+        (:ts_store_remove_by_attrs, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, resolution_iso, features_json,
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        resolution_iso,
+        features_json,
     )
     _check(code)
     return nothing
@@ -1028,26 +1463,64 @@ function get_time_series(
     out_data_len = Ref{UInt64}(0)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = ccall(
-        (:ts_store_get_single, lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Bool, Int64, Int64, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Int32},
-         Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64}),
-        store.handle, key.handle, tr_present, tr_start, tr_end, out_initial, out_resolution, out_dtype,
-        out_shape, out_shape_len, out_data, out_data_len,
+        (:ts_store_get_single, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Int64,
+            Ref{Int64},
+            Ref{Ptr{Cchar}},
+            Ref{Int32},
+            Ref{Ptr{Int64}},
+            Ref{UInt64},
+            Ref{Ptr{UInt8}},
+            Ref{UInt64},
+        ),
+        store.handle,
+        key.handle,
+        tr_present,
+        tr_start,
+        tr_end,
+        out_initial,
+        out_resolution,
+        out_dtype,
+        out_shape,
+        out_shape_len,
+        out_data,
+        out_data_len,
     )
     _check(code)
 
     # Full array shape [length, *element_shape] (row-major dims), then bytes.
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall((:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64), out_shape[], out_shape_len[])
+    ccall(
+        (:ts_buffer_free_i64, lib_path()),
+        Cvoid,
+        (Ptr{Int64}, UInt64),
+        out_shape[],
+        out_shape_len[],
+    )
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_data_len[])
+    ccall(
+        (:ts_buffer_free_u8, lib_path()),
+        Cvoid,
+        (Ptr{UInt8}, UInt64),
+        out_data[],
+        out_data_len[],
+    )
 
     T = _julia_dtype(out_dtype[])
     flat = collect(reinterpret(T, bytes))
     nd = length(dims)
     # Stored row-major → canonical column-major Julia layout (see get_array_nd).
-    data = nd <= 1 ? flat :
-           permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+    data = if nd <= 1
+        flat
+    else
+        permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+    end
 
     initial = _from_unix_ms(out_initial[])
     resolution = _take_period(out_resolution[])
@@ -1057,77 +1530,221 @@ end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot.
 function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
-    out_initial = Ref{Int64}(0); out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_dtype = Ref{Int32}(0); out_shape = Ref{Ptr{Int64}}(C_NULL); out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL); out_data_len = Ref{UInt64}(0)
-    _check(ccall((:ts_bulk_result_get_single, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Int32},
-                  Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64}),
-                 result, UInt64(idx), out_initial, out_resolution, out_dtype,
-                 out_shape, out_shape_len, out_data, out_data_len))
+    out_initial = Ref{Int64}(0);
+    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
+    out_dtype = Ref{Int32}(0);
+    out_shape = Ref{Ptr{Int64}}(C_NULL);
+    out_shape_len = Ref{UInt64}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL);
+    out_data_len = Ref{UInt64}(0)
+    _check(
+        ccall(
+            (:ts_bulk_result_get_single, lib_path()),
+            Int32,
+            (
+                Ptr{Cvoid},
+                UInt64,
+                Ref{Int64},
+                Ref{Ptr{Cchar}},
+                Ref{Int32},
+                Ref{Ptr{Int64}},
+                Ref{UInt64},
+                Ref{Ptr{UInt8}},
+                Ref{UInt64},
+            ),
+            result,
+            UInt64(idx),
+            out_initial,
+            out_resolution,
+            out_dtype,
+            out_shape,
+            out_shape_len,
+            out_data,
+            out_data_len,
+        ),
+    )
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall((:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64), out_shape[], out_shape_len[])
+    ccall(
+        (:ts_buffer_free_i64, lib_path()),
+        Cvoid,
+        (Ptr{Int64}, UInt64),
+        out_shape[],
+        out_shape_len[],
+    )
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_data_len[])
+    ccall(
+        (:ts_buffer_free_u8, lib_path()),
+        Cvoid,
+        (Ptr{UInt8}, UInt64),
+        out_data[],
+        out_data_len[],
+    )
     data = _decode_forecast_array(bytes, out_dtype[], dims)
-    return SingleTimeSeries(_from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name)
+    return SingleTimeSeries(
+        _from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name
+    )
 end
 
 # Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (no
 # logical_type: a bulk read carries array data, not the metadata row).
 function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
-    out_ts = Ref{Ptr{Int64}}(C_NULL); out_ts_len = Ref{UInt64}(0)
-    out_dtype = Ref{Int32}(0); out_shape = Ref{Ptr{Int64}}(C_NULL); out_shape_len = Ref{UInt64}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL); out_data_len = Ref{UInt64}(0)
-    _check(ccall((:ts_bulk_result_get_non_sequential, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Int32},
-                  Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64}),
-                 result, UInt64(idx), out_ts, out_ts_len, out_dtype,
-                 out_shape, out_shape_len, out_data, out_data_len))
+    out_ts = Ref{Ptr{Int64}}(C_NULL);
+    out_ts_len = Ref{UInt64}(0)
+    out_dtype = Ref{Int32}(0);
+    out_shape = Ref{Ptr{Int64}}(C_NULL);
+    out_shape_len = Ref{UInt64}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL);
+    out_data_len = Ref{UInt64}(0)
+    _check(
+        ccall(
+            (:ts_bulk_result_get_non_sequential, lib_path()),
+            Int32,
+            (
+                Ptr{Cvoid},
+                UInt64,
+                Ref{Ptr{Int64}},
+                Ref{UInt64},
+                Ref{Int32},
+                Ref{Ptr{Int64}},
+                Ref{UInt64},
+                Ref{Ptr{UInt8}},
+                Ref{UInt64},
+            ),
+            result,
+            UInt64(idx),
+            out_ts,
+            out_ts_len,
+            out_dtype,
+            out_shape,
+            out_shape_len,
+            out_data,
+            out_data_len,
+        ),
+    )
     ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
-    ccall((:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64), out_ts[], out_ts_len[])
+    ccall(
+        (:ts_buffer_free_i64, lib_path()),
+        Cvoid,
+        (Ptr{Int64}, UInt64),
+        out_ts[],
+        out_ts_len[],
+    )
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall((:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64), out_shape[], out_shape_len[])
+    ccall(
+        (:ts_buffer_free_i64, lib_path()),
+        Cvoid,
+        (Ptr{Int64}, UInt64),
+        out_shape[],
+        out_shape_len[],
+    )
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_data_len[])
+    ccall(
+        (:ts_buffer_free_u8, lib_path()),
+        Cvoid,
+        (Ptr{UInt8}, UInt64),
+        out_data[],
+        out_data_len[],
+    )
     data = _decode_forecast_array(bytes, out_dtype[], dims)
     return NonSequentialTimeSeries(_from_unix_ms.(ts_ms), data, name)
 end
 
 # Reconstruct one forecast (Deterministic / Probabilistic / Scenarios) from a
 # bulk-read result slot; `type_code` is the ts_type discriminant.
-function _bulk_forecast(result::Ptr{Cvoid}, idx::Integer, type_code::Integer, name::AbstractString)
-    out_initial = Ref{Int64}(0); out_res = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL); out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0); out_scen = Ref{UInt64}(0)
-    out_ndims = Ref{UInt64}(0); out_dims = Ref{Ptr{UInt64}}(C_NULL); out_dtype = Ref{Int32}(0)
-    out_data = Ref{Ptr{UInt8}}(C_NULL); out_byte_len = Ref{UInt64}(0)
-    out_pct = Ref{Ptr{Float64}}(C_NULL); out_pct_len = Ref{UInt64}(0)
-    _check(ccall((:ts_bulk_result_get_forecast, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}},
-                  Ref{UInt64}, Ref{UInt64}, Ref{UInt64}, Ref{Ptr{UInt64}}, Ref{Int32},
-                  Ref{Ptr{UInt8}}, Ref{UInt64}, Ref{Ptr{Float64}}, Ref{UInt64}),
-                 result, UInt64(idx), out_initial, out_res, out_horizon, out_interval,
-                 out_count, out_scen, out_ndims, out_dims, out_dtype,
-                 out_data, out_byte_len, out_pct, out_pct_len))
+function _bulk_forecast(
+    result::Ptr{Cvoid}, idx::Integer, type_code::Integer, name::AbstractString
+)
+    out_initial = Ref{Int64}(0);
+    out_res = Ref{Ptr{Cchar}}(C_NULL)
+    out_horizon = Ref{Ptr{Cchar}}(C_NULL);
+    out_interval = Ref{Ptr{Cchar}}(C_NULL)
+    out_count = Ref{UInt64}(0);
+    out_scen = Ref{UInt64}(0)
+    out_ndims = Ref{UInt64}(0);
+    out_dims = Ref{Ptr{UInt64}}(C_NULL);
+    out_dtype = Ref{Int32}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL);
+    out_byte_len = Ref{UInt64}(0)
+    out_pct = Ref{Ptr{Float64}}(C_NULL);
+    out_pct_len = Ref{UInt64}(0)
+    _check(
+        ccall(
+            (:ts_bulk_result_get_forecast, lib_path()),
+            Int32,
+            (
+                Ptr{Cvoid},
+                UInt64,
+                Ref{Int64},
+                Ref{Ptr{Cchar}},
+                Ref{Ptr{Cchar}},
+                Ref{Ptr{Cchar}},
+                Ref{UInt64},
+                Ref{UInt64},
+                Ref{UInt64},
+                Ref{Ptr{UInt64}},
+                Ref{Int32},
+                Ref{Ptr{UInt8}},
+                Ref{UInt64},
+                Ref{Ptr{Float64}},
+                Ref{UInt64},
+            ),
+            result,
+            UInt64(idx),
+            out_initial,
+            out_res,
+            out_horizon,
+            out_interval,
+            out_count,
+            out_scen,
+            out_ndims,
+            out_dims,
+            out_dtype,
+            out_data,
+            out_byte_len,
+            out_pct,
+            out_pct_len,
+        ),
+    )
     nd = Int(out_ndims[])
     dims = Int.(copy(unsafe_wrap(Array, out_dims[], nd; own=false)))
-    ccall((:ts_buffer_free_u64, lib_path()), Cvoid, (Ptr{UInt64}, UInt64), out_dims[], out_ndims[])
+    ccall(
+        (:ts_buffer_free_u64, lib_path()),
+        Cvoid,
+        (Ptr{UInt64}, UInt64),
+        out_dims[],
+        out_ndims[],
+    )
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
-    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_byte_len[])
+    ccall(
+        (:ts_buffer_free_u8, lib_path()),
+        Cvoid,
+        (Ptr{UInt8}, UInt64),
+        out_data[],
+        out_byte_len[],
+    )
     percentiles = if Int(out_pct_len[]) > 0 && out_pct[] != C_NULL
         p = copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
-        ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_pct[], out_pct_len[])
+        ccall(
+            (:ts_buffer_free_f64, lib_path()),
+            Cvoid,
+            (Ptr{Float64}, UInt64),
+            out_pct[],
+            out_pct_len[],
+        )
         p
     else
         Float64[]
     end
     data = _decode_forecast_array(bytes, out_dtype[], dims)
-    initial = _from_unix_ms(out_initial[]); resolution = _take_period(out_res[])
-    horizon = _take_period(out_horizon[]); interval = _take_period(out_interval[])
+    initial = _from_unix_ms(out_initial[]);
+    resolution = _take_period(out_res[])
+    horizon = _take_period(out_horizon[]);
+    interval = _take_period(out_interval[])
     count = Int(out_count[])
     if type_code == TS_TYPE_PROBABILISTIC
-        return Probabilistic(initial, resolution, horizon, interval, count, percentiles, data, name)
+        return Probabilistic(
+            initial, resolution, horizon, interval, count, percentiles, data, name
+        )
     elseif type_code == TS_TYPE_SCENARIOS
         return Scenarios(initial, resolution, horizon, interval, count, data, name)
     else
@@ -1144,8 +1761,11 @@ each key's stored type to the proper Julia struct (`SingleTimeSeries`,
 The packed `SingleTimeSeries` are read in a single decompress-once pass per
 dataset. Pass `time_range = (start, stop)` to slice every series to that window.
 """
-function bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
-                   time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing)
+function bulk_read(
+    store::Store,
+    keys::AbstractVector{TimeSeriesKey};
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
     n = length(keys)
     out = Vector{Any}(undef, n)
     n == 0 && return out
@@ -1154,17 +1774,32 @@ function bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = GC.@preserve keys key_handles ccall(
-        (:ts_store_bulk_read, lib_path()), Int32,
+        (:ts_store_bulk_read, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Bool, Int64, Int64, Ref{Ptr{Cvoid}}),
-        store.handle, key_handles, UInt64(n), tr_present, tr_start, tr_end, out_result,
+        store.handle,
+        key_handles,
+        UInt64(n),
+        tr_present,
+        tr_start,
+        tr_end,
+        out_result,
     )
     _check(code)
     result = out_result[]
     try
         for i in 1:n
             out_type = Ref{Int32}(0)
-            _check(ccall((:ts_bulk_result_item_type, lib_path()), Int32,
-                         (Ptr{Cvoid}, UInt64, Ref{Int32}), result, UInt64(i - 1), out_type))
+            _check(
+                ccall(
+                    (:ts_bulk_result_item_type, lib_path()),
+                    Int32,
+                    (Ptr{Cvoid}, UInt64, Ref{Int32}),
+                    result,
+                    UInt64(i - 1),
+                    out_type,
+                ),
+            )
             name = _get_association(store, keys[i]).name
             t = Int(out_type[])
             out[i] = if t == TS_TYPE_SINGLE
@@ -1198,45 +1833,85 @@ function get_time_series(
     out_lt_len = Ref{UInt64}(0)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = ccall(
-        (:ts_store_get_non_sequential, lib_path()), Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Bool, Int64, Int64, Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Int32},
-         Ref{Ptr{Int64}}, Ref{UInt64}, Ref{Ptr{UInt8}}, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, key.handle, tr_present, tr_start, tr_end, out_timestamps, out_timestamps_len, out_dtype,
-        out_shape, out_shape_len, out_data, out_data_len,
-        lt_buf, UInt64(length(lt_buf)), out_lt_len,
+        (:ts_store_get_non_sequential, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Int64,
+            Ref{Ptr{Int64}},
+            Ref{UInt64},
+            Ref{Int32},
+            Ref{Ptr{Int64}},
+            Ref{UInt64},
+            Ref{Ptr{UInt8}},
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        key.handle,
+        tr_present,
+        tr_start,
+        tr_end,
+        out_timestamps,
+        out_timestamps_len,
+        out_dtype,
+        out_shape,
+        out_shape_len,
+        out_data,
+        out_data_len,
+        lt_buf,
+        UInt64(length(lt_buf)),
+        out_lt_len,
     )
     _check(code)
 
-    timestamp_ms = copy(unsafe_wrap(
-        Array, out_timestamps[], Int(out_timestamps_len[]); own=false,
-    ))
+    timestamp_ms = copy(
+        unsafe_wrap(Array, out_timestamps[], Int(out_timestamps_len[]); own=false)
+    )
     ccall(
-        (:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64),
-        out_timestamps[], out_timestamps_len[],
+        (:ts_buffer_free_i64, lib_path()),
+        Cvoid,
+        (Ptr{Int64}, UInt64),
+        out_timestamps[],
+        out_timestamps_len[],
     )
     # Full array shape [length, *element_shape] (row-major dims), then bytes.
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
     ccall(
-        (:ts_buffer_free_i64, lib_path()), Cvoid, (Ptr{Int64}, UInt64),
-        out_shape[], out_shape_len[],
+        (:ts_buffer_free_i64, lib_path()),
+        Cvoid,
+        (Ptr{Int64}, UInt64),
+        out_shape[],
+        out_shape_len[],
     )
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
     ccall(
-        (:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64),
-        out_data[], out_data_len[],
+        (:ts_buffer_free_u8, lib_path()),
+        Cvoid,
+        (Ptr{UInt8}, UInt64),
+        out_data[],
+        out_data_len[],
     )
     T = _julia_dtype(out_dtype[])
     flat = collect(reinterpret(T, bytes))
     nd = length(dims)
     # Stored row-major → canonical column-major Julia layout (see get_array_nd).
-    data = nd <= 1 ? flat :
-           permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+    data = if nd <= 1
+        flat
+    else
+        permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
+    end
     n = min(Int(out_lt_len[]), length(lt_buf))
     logical_type = n == 0 ? nothing : String(lt_buf[1:n])
     assoc = _get_association(store, key)
     return NonSequentialTimeSeries(
-        _from_unix_ms.(timestamp_ms), data, assoc.name; logical_type=logical_type)
+        _from_unix_ms.(timestamp_ms), data, assoc.name; logical_type=logical_type
+    )
 end
 
 # ---- Attribute-addressed static reads --------------------------------------
@@ -1263,9 +1938,17 @@ function _make_key(
     features_json = _features_arg(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
-        (:ts_make_key_from_attrs, lib_path()), Int32,
+        (:ts_make_key_from_attrs, lib_path()),
+        Int32,
         (Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json, out_key,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        resolution_iso,
+        interval_iso,
+        features_json,
+        out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -1276,17 +1959,26 @@ end
 function _get_association(store::Store, key::TimeSeriesKey)
     name_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_association, lib_path()), Int32,
+        (:ts_store_get_association, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, key.handle, C_NULL, UInt64(0), name_len,
+        store.handle,
+        key.handle,
+        C_NULL,
+        UInt64(0),
+        name_len,
     )
     _check(code)
     name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
     code = ccall(
-        (:ts_store_get_association, lib_path()), Int32,
+        (:ts_store_get_association, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, key.handle,
-        name_buf, UInt64(length(name_buf)), name_len,
+        store.handle,
+        key.handle,
+        name_buf,
+        UInt64(length(name_buf)),
+        name_len,
     )
     _check(code)
     name = String(name_buf[1:Int(name_len[])])
@@ -1295,9 +1987,29 @@ end
 
 # Association attributes for an attribute-addressed read: build the matching key,
 # then look up `name`.
-_assoc_attrs(store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-             resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing, features::AbstractDict=Dict{String,Any}()) =
-    _get_association(store, _make_key(owner_id, owner_category, name, ts_type; resolution=resolution, interval=interval, features=features))
+function _assoc_attrs(
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    return _get_association(
+        store,
+        _make_key(
+            owner_id,
+            owner_category,
+            name,
+            ts_type;
+            resolution=resolution,
+            interval=interval,
+            features=features,
+        ),
+    )
+end
 
 """
     get_time_series_keys(store, owner_id, owner_category) -> Vector{TimeSeriesKey}
@@ -1309,13 +2021,20 @@ Every key associated with `(owner_id, owner_category)`, one per stored associati
 `get_time_series(Type, store, key)` readers — the way to read a transform-derived
 forecast by key.
 """
-function get_time_series_keys(store::Store, owner_id::Integer, owner_category::OwnerCategory)
+function get_time_series_keys(
+    store::Store, owner_id::Integer, owner_category::OwnerCategory
+)
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_get_time_series_keys, lib_path()), Int32,
+        (:ts_store_get_time_series_keys, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Int64, Int32, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
-        store.handle, Int64(owner_id), _category_int(owner_category), out_keys, out_len,
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        out_keys,
+        out_len,
     )
     _check(code)
     n = Int(out_len[])
@@ -1328,32 +2047,53 @@ function get_time_series_keys(store::Store, owner_id::Integer, owner_category::O
             keys[i] = TimeSeriesKey(raw[i])
         end
         ccall(
-            (:ts_keys_buffer_free, lib_path()), Cvoid, (Ptr{Ptr{Cvoid}}, UInt64),
-            out_keys[], out_len[],
+            (:ts_keys_buffer_free, lib_path()),
+            Cvoid,
+            (Ptr{Ptr{Cvoid}}, UInt64),
+            out_keys[],
+            out_len[],
         )
     end
     return keys
 end
 
 # The Julia time series type for a key's integer type code.
-_type_for_code(code::Integer) =
-    code == TS_TYPE_SINGLE                  ? SingleTimeSeries :
-    code == TS_TYPE_NON_SEQUENTIAL          ? NonSequentialTimeSeries :
-    code == TS_TYPE_DETERMINISTIC           ? Deterministic :
-    code == TS_TYPE_DETERMINISTIC_SINGLE    ? DeterministicSingleTimeSeries :
-    code == TS_TYPE_PROBABILISTIC           ? Probabilistic :
-    code == TS_TYPE_SCENARIOS               ? Scenarios :
-    throw(InvalidParameterError("unknown time series type code $code"))
+function _type_for_code(code::Integer)
+    if code == TS_TYPE_SINGLE
+        SingleTimeSeries
+    elseif code == TS_TYPE_NON_SEQUENTIAL
+        NonSequentialTimeSeries
+    elseif code == TS_TYPE_DETERMINISTIC
+        Deterministic
+    elseif code == TS_TYPE_DETERMINISTIC_SINGLE
+        DeterministicSingleTimeSeries
+    elseif code == TS_TYPE_PROBABILISTIC
+        Probabilistic
+    elseif code == TS_TYPE_SCENARIOS
+        Scenarios
+    else
+        throw(InvalidParameterError("unknown time series type code $code"))
+    end
+end
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).
-_type_for_name(name::AbstractString) =
-    name == "SingleTimeSeries"               ? SingleTimeSeries :
-    name == "NonSequentialTimeSeries"        ? NonSequentialTimeSeries :
-    name == "Deterministic"                  ? Deterministic :
-    name == "DeterministicSingleTimeSeries"  ? DeterministicSingleTimeSeries :
-    name == "Probabilistic"                  ? Probabilistic :
-    name == "Scenarios"                      ? Scenarios :
-    throw(InvalidParameterError("unknown time series type name $name"))
+function _type_for_name(name::AbstractString)
+    if name == "SingleTimeSeries"
+        SingleTimeSeries
+    elseif name == "NonSequentialTimeSeries"
+        NonSequentialTimeSeries
+    elseif name == "Deterministic"
+        Deterministic
+    elseif name == "DeterministicSingleTimeSeries"
+        DeterministicSingleTimeSeries
+    elseif name == "Probabilistic"
+        Probabilistic
+    elseif name == "Scenarios"
+        Scenarios
+    else
+        throw(InvalidParameterError("unknown time series type name $name"))
+    end
+end
 
 _row_ms(x) = x === nothing ? nothing : Millisecond(Int64(x))
 _row_period(x) = x === nothing ? nothing : _iso_to_period(String(x))
@@ -1362,17 +2102,17 @@ _row_int(x) = x === nothing ? nothing : Int(x)
 function _decode_key_row(r::AbstractDict)
     its = r["initial_timestamp_ms"]
     return (
-        owner_id = Int64(r["owner_id"]),
-        owner_category = String(r["owner_category"]),
-        time_series_type = _type_for_name(r["time_series_type"]),
-        name = String(r["name"]),
-        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
-        resolution = _row_period(r["resolution"]),
-        length = _row_int(r["length"]),
-        horizon = _row_period(r["horizon"]),
-        interval = _row_period(r["interval"]),
-        count = _row_int(r["count"]),
-        features = Dict{String, Any}(r["features"]),
+        owner_id=Int64(r["owner_id"]),
+        owner_category=String(r["owner_category"]),
+        time_series_type=_type_for_name(r["time_series_type"]),
+        name=String(r["name"]),
+        initial_timestamp=its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution=_row_period(r["resolution"]),
+        length=_row_int(r["length"]),
+        horizon=_row_period(r["horizon"]),
+        interval=_row_period(r["interval"]),
+        count=_row_int(r["count"]),
+        features=Dict{String,Any}(r["features"]),
     )
 end
 
@@ -1395,12 +2135,15 @@ Each key is a `NamedTuple` with `owner_id`, `owner_category`, `time_series_type`
 `nothing`. Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is
 not on the key — read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
 """
-function list_keys(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                   owner_category::Union{Nothing, OwnerCategory} = nothing,
-                   time_series_type::Union{Nothing, Integer} = nothing,
-                   name::Union{Nothing, AbstractString} = nothing,
-                   resolution::Union{Nothing, Period} = nothing,
-                   features::AbstractDict = Dict{String, Any}())
+function list_keys(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    time_series_type::Union{Nothing,Integer}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
@@ -1411,20 +2154,72 @@ function list_keys(store::Store; owner_id::Union{Nothing, Integer} = nothing,
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_list_keys, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring,
-                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 has_type, type_arg, name_arg, resolution_iso, features_json,
-                 C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_list_keys, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Bool,
+            Int32,
+            Bool,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        has_type,
+        type_arg,
+        name_arg,
+        resolution_iso,
+        features_json,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_list_keys, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring,
-                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 has_type, type_arg, name_arg, resolution_iso, features_json,
-                 buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_list_keys, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Bool,
+            Int32,
+            Bool,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        has_type,
+        type_arg,
+        name_arg,
+        resolution_iso,
+        features_json,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [_decode_key_row(r) for r in rows]
@@ -1450,25 +2245,59 @@ Full metadata rows matching the filter (same filters as [`list_keys`](@ref)). Ea
 row is a `Dict` with the key fields plus `data_hash` (hex), `dtype`,
 `element_shape`, `percentiles`, `units`, and `logical_type`.
 """
-function list_time_series(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                          owner_category::Union{Nothing, OwnerCategory} = nothing,
-                          time_series_type::Union{Nothing, Integer} = nothing,
-                          name::Union{Nothing, AbstractString} = nothing,
-                          resolution::Union{Nothing, Period} = nothing,
-                          features::AbstractDict = Dict{String, Any}())
-    has_owner = owner_id !== nothing; owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+function list_time_series(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    time_series_type::Union{Nothing,Integer}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    has_owner = owner_id !== nothing;
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
-    has_type = time_series_type !== nothing; type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    has_type = time_series_type !== nothing;
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    json = _filter_probe(store, (buf, cap, out_len) -> ccall(
-        (:ts_store_list_time_series, lib_path()), Int32,
-        (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring, Cstring,
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, has_owner, owner_arg, has_category, category_arg,
-        has_type, type_arg, name_arg, resolution_iso, features_json, buf, cap, out_len))
+    json = _filter_probe(
+        store,
+        (buf, cap, out_len) -> ccall(
+            (:ts_store_list_time_series, lib_path()),
+            Int32,
+            (
+                Ptr{Cvoid},
+                Bool,
+                Int64,
+                Bool,
+                Int32,
+                Bool,
+                Int32,
+                Cstring,
+                Cstring,
+                Cstring,
+                Ptr{UInt8},
+                UInt64,
+                Ref{UInt64},
+            ),
+            store.handle,
+            has_owner,
+            owner_arg,
+            has_category,
+            category_arg,
+            has_type,
+            type_arg,
+            name_arg,
+            resolution_iso,
+            features_json,
+            buf,
+            cap,
+            out_len,
+        ),
+    )
     return JSON.parse(json)
 end
 
@@ -1478,25 +2307,59 @@ end
 Distinct series names matching the filter (same filters as [`list_keys`](@ref)),
 sorted.
 """
-function list_names(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                    owner_category::Union{Nothing, OwnerCategory} = nothing,
-                    time_series_type::Union{Nothing, Integer} = nothing,
-                    name::Union{Nothing, AbstractString} = nothing,
-                    resolution::Union{Nothing, Period} = nothing,
-                    features::AbstractDict = Dict{String, Any}())
-    has_owner = owner_id !== nothing; owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+function list_names(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    time_series_type::Union{Nothing,Integer}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    has_owner = owner_id !== nothing;
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
-    has_type = time_series_type !== nothing; type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    has_type = time_series_type !== nothing;
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    json = _filter_probe(store, (buf, cap, out_len) -> ccall(
-        (:ts_store_list_names, lib_path()), Int32,
-        (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring, Cstring,
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, has_owner, owner_arg, has_category, category_arg,
-        has_type, type_arg, name_arg, resolution_iso, features_json, buf, cap, out_len))
+    json = _filter_probe(
+        store,
+        (buf, cap, out_len) -> ccall(
+            (:ts_store_list_names, lib_path()),
+            Int32,
+            (
+                Ptr{Cvoid},
+                Bool,
+                Int64,
+                Bool,
+                Int32,
+                Bool,
+                Int32,
+                Cstring,
+                Cstring,
+                Cstring,
+                Ptr{UInt8},
+                UInt64,
+                Ref{UInt64},
+            ),
+            store.handle,
+            has_owner,
+            owner_arg,
+            has_category,
+            category_arg,
+            has_type,
+            type_arg,
+            name_arg,
+            resolution_iso,
+            features_json,
+            buf,
+            cap,
+            out_len,
+        ),
+    )
     return String[String(s) for s in JSON.parse(json)]
 end
 
@@ -1506,25 +2369,59 @@ end
 Distinct owner types matching the filter (same filters as [`list_keys`](@ref)),
 sorted.
 """
-function list_owner_types(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                          owner_category::Union{Nothing, OwnerCategory} = nothing,
-                          time_series_type::Union{Nothing, Integer} = nothing,
-                          name::Union{Nothing, AbstractString} = nothing,
-                          resolution::Union{Nothing, Period} = nothing,
-                          features::AbstractDict = Dict{String, Any}())
-    has_owner = owner_id !== nothing; owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+function list_owner_types(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    time_series_type::Union{Nothing,Integer}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    has_owner = owner_id !== nothing;
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
-    has_type = time_series_type !== nothing; type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    has_type = time_series_type !== nothing;
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    json = _filter_probe(store, (buf, cap, out_len) -> ccall(
-        (:ts_store_list_owner_types, lib_path()), Int32,
-        (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring, Cstring,
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle, has_owner, owner_arg, has_category, category_arg,
-        has_type, type_arg, name_arg, resolution_iso, features_json, buf, cap, out_len))
+    json = _filter_probe(
+        store,
+        (buf, cap, out_len) -> ccall(
+            (:ts_store_list_owner_types, lib_path()),
+            Int32,
+            (
+                Ptr{Cvoid},
+                Bool,
+                Int64,
+                Bool,
+                Int32,
+                Bool,
+                Int32,
+                Cstring,
+                Cstring,
+                Cstring,
+                Ptr{UInt8},
+                UInt64,
+                Ref{UInt64},
+            ),
+            store.handle,
+            has_owner,
+            owner_arg,
+            has_category,
+            category_arg,
+            has_type,
+            type_arg,
+            name_arg,
+            resolution_iso,
+            features_json,
+            buf,
+            cap,
+            out_len,
+        ),
+    )
     return String[String(s) for s in JSON.parse(json)]
 end
 
@@ -1534,25 +2431,53 @@ end
 Remove every series matching the filter (same filters as [`list_keys`](@ref)) in
 one all-or-nothing transaction; returns the number removed (0 if none match).
 """
-function remove_by_filter!(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                           owner_category::Union{Nothing, OwnerCategory} = nothing,
-                           time_series_type::Union{Nothing, Integer} = nothing,
-                           name::Union{Nothing, AbstractString} = nothing,
-                           resolution::Union{Nothing, Period} = nothing,
-                           features::AbstractDict = Dict{String, Any}())
-    has_owner = owner_id !== nothing; owner_arg = has_owner ? Int64(owner_id) : Int64(0)
+function remove_by_filter!(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    time_series_type::Union{Nothing,Integer}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
+    has_owner = owner_id !== nothing;
+    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
-    has_type = time_series_type !== nothing; type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    has_type = time_series_type !== nothing;
+    type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_removed = Ref{UInt64}(0)
-    code = ccall((:ts_store_remove_by_filter, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring, Cstring,
-                  Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 has_type, type_arg, name_arg, resolution_iso, features_json, out_removed)
+    code = ccall(
+        (:ts_store_remove_by_filter, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Bool,
+            Int32,
+            Bool,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{UInt64},
+        ),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        has_type,
+        type_arg,
+        name_arg,
+        resolution_iso,
+        features_json,
+        out_removed,
+    )
     _check(code)
     return Int(out_removed[])
 end
@@ -1572,12 +2497,15 @@ deduplicated identical arrays and a `SingleTimeSeries` together with any
 Resolved by a single catalog query in the core (the hash is read off each metadata
 row); there are no per-row `get_metadata` round-trips.
 """
-function list_array_groups(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                           owner_category::Union{Nothing, OwnerCategory} = nothing,
-                           time_series_type::Union{Nothing, Integer} = nothing,
-                           name::Union{Nothing, AbstractString} = nothing,
-                           resolution::Union{Nothing, Period} = nothing,
-                           features::AbstractDict = Dict{String, Any}())
+function list_array_groups(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    time_series_type::Union{Nothing,Integer}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
@@ -1588,23 +2516,75 @@ function list_array_groups(store::Store; owner_id::Union{Nothing, Integer} = not
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_list_array_groups, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring,
-                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 has_type, type_arg, name_arg, resolution_iso, features_json,
-                 C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_list_array_groups, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Bool,
+            Int32,
+            Bool,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        has_type,
+        type_arg,
+        name_arg,
+        resolution_iso,
+        features_json,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_list_array_groups, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Bool, Int32, Cstring, Cstring,
-                  Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 has_type, type_arg, name_arg, resolution_iso, features_json,
-                 buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_list_array_groups, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Bool,
+            Int32,
+            Bool,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        has_type,
+        type_arg,
+        name_arg,
+        resolution_iso,
+        features_json,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [(; _decode_key_row(r)..., data_hash = String(r["data_hash"])) for r in rows]
+    return [(; _decode_key_row(r)..., data_hash=String(r["data_hash"])) for r in rows]
 end
 
 """
@@ -1629,13 +2609,32 @@ function key_info(key::TimeSeriesKey)
     # Probe the string lengths (type, resolution, owner id, and owner category are
     # filled on this call too).
     code = ccall(
-        (:ts_key_attributes, lib_path()), Int32,
-        (Ptr{Cvoid}, Ref{Int32}, Ref{Ptr{Cchar}}, Ref{Int64}, Ref{Int32},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        key.handle, out_type, out_res, out_owner, out_category,
-        C_NULL, UInt64(0), name_len,
-        C_NULL, UInt64(0), feat_len,
+        (:ts_key_attributes, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Ref{Int32},
+            Ref{Ptr{Cchar}},
+            Ref{Int64},
+            Ref{Int32},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        key.handle,
+        out_type,
+        out_res,
+        out_owner,
+        out_category,
+        C_NULL,
+        UInt64(0),
+        name_len,
+        C_NULL,
+        UInt64(0),
+        feat_len,
     )
     _check(code)
     # The probe call also allocates the resolution string; free it and re-read on
@@ -1644,33 +2643,57 @@ function key_info(key::TimeSeriesKey)
     name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
     feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
     code = ccall(
-        (:ts_key_attributes, lib_path()), Int32,
-        (Ptr{Cvoid}, Ref{Int32}, Ref{Ptr{Cchar}}, Ref{Int64}, Ref{Int32},
-         Ptr{UInt8}, UInt64, Ref{UInt64},
-         Ptr{UInt8}, UInt64, Ref{UInt64}),
-        key.handle, out_type, out_res, out_owner, out_category,
-        name_buf, UInt64(length(name_buf)), name_len,
-        feat_buf, UInt64(length(feat_buf)), feat_len,
+        (:ts_key_attributes, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Ref{Int32},
+            Ref{Ptr{Cchar}},
+            Ref{Int64},
+            Ref{Int32},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Ref{UInt64},
+        ),
+        key.handle,
+        out_type,
+        out_res,
+        out_owner,
+        out_category,
+        name_buf,
+        UInt64(length(name_buf)),
+        name_len,
+        feat_buf,
+        UInt64(length(feat_buf)),
+        feat_len,
     )
     _check(code)
     name = String(name_buf[1:Int(name_len[])])
     features = JSON.parse(String(feat_buf[1:Int(feat_len[])]))
     resolution = _take_period(out_res[])
     return (
-        owner_id         = out_owner[],
-        owner_category   = OwnerCategory(Int(out_category[])),
-        name             = name,
-        time_series_type = _type_for_code(out_type[]),
-        resolution       = resolution,
-        features         = features,
+        owner_id=out_owner[],
+        owner_category=OwnerCategory(Int(out_category[])),
+        name=name,
+        time_series_type=_type_for_code(out_type[]),
+        resolution=resolution,
+        features=features,
     )
 end
 
 # Key-based alias so `SingleTimeSeries` matches the `get_time_series(T, store, key)`
 # shape the other types use (the bare `get_time_series(store, key)` form is kept).
-get_time_series(::Type{SingleTimeSeries}, store::Store, key::TimeSeriesKey;
-                time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing) =
-    get_time_series(store, key; time_range=time_range)
+function get_time_series(
+    ::Type{SingleTimeSeries},
+    store::Store,
+    key::TimeSeriesKey;
+    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+)
+    return get_time_series(store, key; time_range=time_range)
+end
 
 """
     get_time_series(SingleTimeSeries, store, owner_id, owner_category, name; resolution, features, time_range)
@@ -1689,7 +2712,14 @@ function get_time_series(
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
-    key = _make_key(owner_id, owner_category, name, TS_TYPE_SINGLE; resolution=resolution, features=features)
+    key = _make_key(
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_SINGLE;
+        resolution=resolution,
+        features=features,
+    )
     return get_time_series(store, key; time_range=time_range)
 end
 
@@ -1711,13 +2741,25 @@ function get_time_series(
     features::AbstractDict=Dict{String,Any}(),
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
-    key = _make_key(owner_id, owner_category, name, TS_TYPE_NON_SEQUENTIAL; resolution=resolution, features=features)
+    key = _make_key(
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_NON_SEQUENTIAL;
+        resolution=resolution,
+        features=features,
+    )
     return get_time_series(NonSequentialTimeSeries, store, key; time_range=time_range)
 end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)
-    code = ccall((:ts_store_remove, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Cvoid}), store.handle, key.handle)
+    code = ccall(
+        (:ts_store_remove, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{Cvoid}),
+        store.handle,
+        key.handle,
+    )
     _check(code)
     return nothing
 end
@@ -1732,27 +2774,46 @@ removed.
 function remove_time_series!(store::Store, keys::Vector{TimeSeriesKey})
     handles = Ptr{Cvoid}[k.handle for k in keys]
     out_removed = Ref{UInt64}(0)
-    code = GC.@preserve keys ccall((:ts_store_remove_bulk, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Ref{UInt64}),
-                 store.handle, handles, UInt64(length(handles)), out_removed)
+    code = GC.@preserve keys ccall(
+        (:ts_store_remove_bulk, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Ref{UInt64}),
+        store.handle,
+        handles,
+        UInt64(length(handles)),
+        out_removed,
+    )
     _check(code)
     return Int(out_removed[])
 end
 
 function has_time_series(store::Store, key::TimeSeriesKey)
     out = Ref{Bool}(false)
-    code = ccall((:ts_store_has, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}),
-                 store.handle, key.handle, out)
+    code = ccall(
+        (:ts_store_has, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}),
+        store.handle,
+        key.handle,
+        out,
+    )
     _check(code)
     return out[]
 end
 
 function get_counts(store::Store)
-    a = Ref{Int64}(0); b = Ref{Int64}(0); c = Ref{Int64}(0)
-    code = ccall((:ts_store_counts, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-                 store.handle, a, b, c)
+    a = Ref{Int64}(0);
+    b = Ref{Int64}(0);
+    c = Ref{Int64}(0)
+    code = ccall(
+        (:ts_store_counts, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+        store.handle,
+        a,
+        b,
+        c,
+    )
     _check(code)
     return (components_with_time_series=a[], static_time_series=b[], forecasts=c[])
 end
@@ -1765,18 +2826,32 @@ NamedTuples (`time_series_type` is the Julia type). One catalog query in the cor
 """
 function counts_by_type(store::Store)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_counts_by_type, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_counts_by_type, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_counts_by_type, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_counts_by_type, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [(time_series_type=_type_for_name(r["time_series_type"]), count=Int(r["count"]))
-            for r in rows]
+    return [
+        (time_series_type=_type_for_name(r["time_series_type"]), count=Int(r["count"])) for
+        r in rows
+    ]
 end
 
 """
@@ -1787,8 +2862,13 @@ Number of distinct stored arrays (content hashes); series that share an array
 """
 function num_distinct_arrays(store::Store)
     out = Ref{Int64}(0)
-    code = ccall((:ts_store_num_distinct_arrays, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Int64}), store.handle, out)
+    code = ccall(
+        (:ts_store_num_distinct_arrays, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ref{Int64}),
+        store.handle,
+        out,
+    )
     _check(code)
     return Int(out[])
 end
@@ -1801,14 +2881,27 @@ Distinct owners per category and distinct stored arrays per kind:
 static_time_series_count, forecast_count)`. Arrays shared by content count once.
 """
 function time_series_counts(store::Store)
-    a = Ref{Int64}(0); b = Ref{Int64}(0); c = Ref{Int64}(0); d = Ref{Int64}(0)
-    code = ccall((:ts_store_counts_detailed, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-                 store.handle, a, b, c, d)
+    a = Ref{Int64}(0);
+    b = Ref{Int64}(0);
+    c = Ref{Int64}(0);
+    d = Ref{Int64}(0)
+    code = ccall(
+        (:ts_store_counts_detailed, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
+        store.handle,
+        a,
+        b,
+        c,
+        d,
+    )
     _check(code)
-    return (components_with_time_series=a[],
-            supplemental_attributes_with_time_series=b[],
-            static_time_series_count=c[], forecast_count=d[])
+    return (
+        components_with_time_series=a[],
+        supplemental_attributes_with_time_series=b[],
+        static_time_series_count=c[],
+        forecast_count=d[],
+    )
 end
 
 """
@@ -1818,22 +2911,45 @@ Distinct owner ids of `owner_category` (an `OwnerCategory`) that have a time
 series, optionally restricted by `time_series_type` (a `TS_TYPE_*` integer code)
 and/or `resolution` (a `Period`).
 """
-function list_owner_ids(store::Store, owner_category::OwnerCategory;
-                        time_series_type::Union{Nothing, Integer} = nothing,
-                        resolution::Union{Nothing, Period} = nothing)
+function list_owner_ids(
+    store::Store,
+    owner_category::OwnerCategory;
+    time_series_type::Union{Nothing,Integer}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+)
     has_type = time_series_type !== nothing
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     resolution_iso = _period_to_cstr(resolution)
     cat = _category_int(owner_category)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_list_owner_ids, lib_path()), Int32,
-                 (Ptr{Cvoid}, Int32, Bool, Int32, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, cat, has_type, type_arg, resolution_iso, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_list_owner_ids, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Int32, Bool, Int32, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        cat,
+        has_type,
+        type_arg,
+        resolution_iso,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_list_owner_ids, lib_path()), Int32,
-                 (Ptr{Cvoid}, Int32, Bool, Int32, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, cat, has_type, type_arg, resolution_iso, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_list_owner_ids, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Int32, Bool, Int32, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        cat,
+        has_type,
+        type_arg,
+        resolution_iso,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     ids = JSON.parse(String(buf[1:Int(out_len[])]))
     return Int[Int(i) for i in ids]
@@ -1842,30 +2958,30 @@ end
 function _decode_static_summary_row(r::AbstractDict)
     its = r["initial_timestamp_ms"]
     return (
-        owner_type = String(r["owner_type"]),
-        owner_category = String(r["owner_category"]),
-        time_series_type = _type_for_name(r["time_series_type"]),
-        name = String(r["name"]),
-        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
-        resolution = _row_period(r["resolution"]),
-        time_step_count = _row_int(r["time_step_count"]),
-        count = Int(r["count"]),
+        owner_type=String(r["owner_type"]),
+        owner_category=String(r["owner_category"]),
+        time_series_type=_type_for_name(r["time_series_type"]),
+        name=String(r["name"]),
+        initial_timestamp=its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution=_row_period(r["resolution"]),
+        time_step_count=_row_int(r["time_step_count"]),
+        count=Int(r["count"]),
     )
 end
 
 function _decode_forecast_summary_row(r::AbstractDict)
     its = r["initial_timestamp_ms"]
     return (
-        owner_type = String(r["owner_type"]),
-        owner_category = String(r["owner_category"]),
-        time_series_type = _type_for_name(r["time_series_type"]),
-        name = String(r["name"]),
-        initial_timestamp = its === nothing ? nothing : _from_unix_ms(Int64(its)),
-        resolution = _row_period(r["resolution"]),
-        horizon = _row_period(r["horizon"]),
-        interval = _row_period(r["interval"]),
-        window_count = _row_int(r["window_count"]),
-        count = Int(r["count"]),
+        owner_type=String(r["owner_type"]),
+        owner_category=String(r["owner_category"]),
+        time_series_type=_type_for_name(r["time_series_type"]),
+        name=String(r["name"]),
+        initial_timestamp=its === nothing ? nothing : _from_unix_ms(Int64(its)),
+        resolution=_row_period(r["resolution"]),
+        horizon=_row_period(r["horizon"]),
+        interval=_row_period(r["interval"]),
+        window_count=_row_int(r["window_count"]),
+        count=Int(r["count"]),
     )
 end
 
@@ -1880,14 +2996,26 @@ presentation table (e.g. a DataFrame).
 """
 function static_summary(store::Store)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_static_summary, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_static_summary, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_static_summary, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_static_summary, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [_decode_static_summary_row(r) for r in rows]
@@ -1902,14 +3030,26 @@ window_count)` with `count` = the number of associations in the group.
 """
 function forecast_summary(store::Store)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_forecast_summary, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_forecast_summary, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_forecast_summary, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_forecast_summary, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [_decode_forecast_summary_row(r) for r in rows]
@@ -1926,18 +3066,43 @@ durations) or `nothing`;
 `count` is an `Int` (or `nothing`); `initial_timestamp` is a `DateTime` (or
 `nothing`). Every field is `nothing` when no forecast matches.
 """
-function get_forecast_parameters(store::Store; resolution::Union{Nothing, Period} = nothing,
-                                 interval::Union{Nothing, Period} = nothing)
+function get_forecast_parameters(
+    store::Store;
+    resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
+)
     fres = _period_to_cstr(resolution)
     fivl = _period_to_cstr(interval)
     present = Ref{Bool}(false)
-    horizon_out = Ref{Ptr{Cchar}}(C_NULL); interval_out = Ref{Ptr{Cchar}}(C_NULL)
-    count = Ref{Int64}(-1); resolution_out = Ref{Ptr{Cchar}}(C_NULL); initial_out = Ref{Int64}(-1)
-    code = ccall((:ts_store_get_forecast_parameters, lib_path()), Int32,
-                 (Ptr{Cvoid}, Cstring, Cstring, Ref{Bool}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{Int64},
-                  Ref{Ptr{Cchar}}, Ref{Int64}),
-                 store.handle, fres, fivl, present, horizon_out, interval_out, count,
-                 resolution_out, initial_out)
+    horizon_out = Ref{Ptr{Cchar}}(C_NULL);
+    interval_out = Ref{Ptr{Cchar}}(C_NULL)
+    count = Ref{Int64}(-1);
+    resolution_out = Ref{Ptr{Cchar}}(C_NULL);
+    initial_out = Ref{Int64}(-1)
+    code = ccall(
+        (:ts_store_get_forecast_parameters, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Cstring,
+            Cstring,
+            Ref{Bool},
+            Ref{Ptr{Cchar}},
+            Ref{Ptr{Cchar}},
+            Ref{Int64},
+            Ref{Ptr{Cchar}},
+            Ref{Int64},
+        ),
+        store.handle,
+        fres,
+        fivl,
+        present,
+        horizon_out,
+        interval_out,
+        count,
+        resolution_out,
+        initial_out,
+    )
     _check(code)
     return (
         horizon=_take_period(horizon_out[]),
@@ -1960,17 +3125,31 @@ within a resolution; pass `resolution` (a `Period`) to scope the check to one
 grid. Throws `IntegrityError` when the `SingleTimeSeries` at a single
 resolution disagree on their `(initial_timestamp, length)`. One catalog query.
 """
-function check_static_consistency(store::Store; resolution::Union{Nothing, Period} = nothing)
+function check_static_consistency(store::Store; resolution::Union{Nothing,Period}=nothing)
     fres = _period_to_cstr(resolution)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_check_static_consistency, lib_path()), Int32,
-                 (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, fres, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_check_static_consistency, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        fres,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_check_static_consistency, lib_path()), Int32,
-                 (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, fres, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_check_static_consistency, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        fres,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return [
@@ -1990,18 +3169,34 @@ order. When `time_series_type` (a
 `TS_TYPE_*` integer code) is given the result is restricted to that type. This is
 a single catalog query in the core rather than a scan of every association.
 """
-function get_resolutions(store::Store; time_series_type::Union{Nothing, Integer} = nothing)
+function get_resolutions(store::Store; time_series_type::Union{Nothing,Integer}=nothing)
     has_type = time_series_type !== nothing
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_get_resolutions, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_type, type_arg, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_get_resolutions, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        has_type,
+        type_arg,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_get_resolutions, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_type, type_arg, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_get_resolutions, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        has_type,
+        type_arg,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     isos = JSON.parse(String(buf[1:Int(out_len[])]))
     return Period[_iso_to_period(String(s)) for s in isos]
@@ -2015,18 +3210,34 @@ interval analog of [`get_resolutions`](@ref). When `time_series_type` (a
 `TS_TYPE_*` code) is given the result is restricted to that type; non-forecast
 types return an empty vector.
 """
-function get_intervals(store::Store; time_series_type::Union{Nothing, Integer} = nothing)
+function get_intervals(store::Store; time_series_type::Union{Nothing,Integer}=nothing)
     has_type = time_series_type !== nothing
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     out_len = Ref{UInt64}(0)
-    code = ccall((:ts_store_get_intervals, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_type, type_arg, C_NULL, UInt64(0), out_len)
+    code = ccall(
+        (:ts_store_get_intervals, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        has_type,
+        type_arg,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall((:ts_store_get_intervals, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-                 store.handle, has_type, type_arg, buf, UInt64(length(buf)), out_len)
+    code = ccall(
+        (:ts_store_get_intervals, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        has_type,
+        type_arg,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
     _check(code)
     isos = JSON.parse(String(buf[1:Int(out_len[])]))
     return Period[_iso_to_period(String(s)) for s in isos]
@@ -2039,8 +3250,9 @@ Whether the store was opened read-only.
 """
 function read_only(store::Store)
     out = Ref{Bool}(false)
-    code = ccall((:ts_store_read_only, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Bool}), store.handle, out)
+    code = ccall(
+        (:ts_store_read_only, lib_path()), Int32, (Ptr{Cvoid}, Ref{Bool}), store.handle, out
+    )
     _check(code)
     return out[]
 end
@@ -2054,26 +3266,37 @@ apply to DEFLATE. For a store opened from disk this reflects the policy it was
 created with; in-memory stores report `:none`.
 """
 function get_compression(store::Store)
-    kind = Ref{UInt8}(0); level = Ref{UInt8}(0); shuffle = Ref{Bool}(false)
-    code = ccall((:ts_store_get_compression, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{UInt8}, Ref{UInt8}, Ref{Bool}),
-                 store.handle, kind, level, shuffle)
+    kind = Ref{UInt8}(0);
+    level = Ref{UInt8}(0);
+    shuffle = Ref{Bool}(false)
+    code = ccall(
+        (:ts_store_get_compression, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ref{UInt8}, Ref{UInt8}, Ref{Bool}),
+        store.handle,
+        kind,
+        level,
+        shuffle,
+    )
     _check(code)
-    return kind[] == 0 ? (compression=:none, level=Int(level[]), shuffle=shuffle[]) :
-           (compression=:deflate, level=Int(level[]), shuffle=shuffle[])
+    return if kind[] == 0
+        (compression=:none, level=Int(level[]), shuffle=shuffle[])
+    else
+        (compression=:deflate, level=Int(level[]), shuffle=shuffle[])
+    end
 end
 
 function verify_integrity(store::Store)
     out = Ref{UInt64}(0)
-    code = ccall((:ts_store_verify, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{UInt64}), store.handle, out)
+    code = ccall(
+        (:ts_store_verify, lib_path()), Int32, (Ptr{Cvoid}, Ref{UInt64}), store.handle, out
+    )
     _check(code)
     return Int(out[])
 end
 
 function compact!(store::Store)
-    code = ccall((:ts_store_compact, lib_path()), Int32,
-                 (Ptr{Cvoid},), store.handle)
+    code = ccall((:ts_store_compact, lib_path()), Int32, (Ptr{Cvoid},), store.handle)
     _check(code)
     return nothing
 end
@@ -2085,8 +3308,7 @@ Flush pending writes (NetCDF arrays + SQLite metadata) to disk. After this the
 on-disk `<path>.nc` and `<path>.sqlite` artifacts can be copied for persistence.
 """
 function flush!(store::Store)
-    code = ccall((:ts_store_flush, lib_path()), Int32,
-                 (Ptr{Cvoid},), store.handle)
+    code = ccall((:ts_store_flush, lib_path()), Int32, (Ptr{Cvoid},), store.handle)
     _check(code)
     return nothing
 end
@@ -2098,8 +3320,9 @@ Persist the store to `path` (NetCDF) and `\$path.sqlite` (metadata), materializi
 an in-memory store to disk. Existing target files are overwritten.
 """
 function persist!(store::Store, path::AbstractString)
-    code = ccall((:ts_store_persist, lib_path()), Int32,
-                 (Ptr{Cvoid}, Cstring), store.handle, path)
+    code = ccall(
+        (:ts_store_persist, lib_path()), Int32, (Ptr{Cvoid}, Cstring), store.handle, path
+    )
     _check(code)
     return nothing
 end
@@ -2112,17 +3335,26 @@ to a single owner. An owner is the pair `(owner_id, owner_category)`, so to scop
 the clear to one owner pass both `owner_id` and `owner_category` (an
 `OwnerCategory`). With neither given the whole store is cleared.
 """
-function clear!(store::Store; owner_id::Union{Nothing, Integer} = nothing,
-                owner_category::Union{Nothing, OwnerCategory} = nothing)
+function clear!(
+    store::Store;
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+)
     has_owner = owner_id !== nothing
     if has_owner && owner_category === nothing
         throw(ArgumentError("clear! with owner_id also requires owner_category"))
     end
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     category_arg = has_owner ? _category_int(owner_category) : Int32(0)
-    code = ccall((:ts_store_clear, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Int32),
-                 store.handle, has_owner, owner_arg, category_arg)
+    code = ccall(
+        (:ts_store_clear, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Bool, Int64, Int32),
+        store.handle,
+        has_owner,
+        owner_arg,
+        category_arg,
+    )
     _check(code)
     return nothing
 end
@@ -2136,13 +3368,23 @@ Reassign every time series owned by `(old_owner_id, owner_category)` to
 content-addressed and shared, so only the association records change. Returns the
 number of associations updated.
 """
-function replace_owner!(store::Store, old_owner_id::Integer,
-                        new_owner_id::Integer, owner_category::OwnerCategory)
+function replace_owner!(
+    store::Store,
+    old_owner_id::Integer,
+    new_owner_id::Integer,
+    owner_category::OwnerCategory,
+)
     out = Ref{UInt64}(0)
-    code = ccall((:ts_store_replace_owner, lib_path()), Int32,
-                 (Ptr{Cvoid}, Int64, Int64, Int32, Ref{UInt64}),
-                 store.handle, Int64(old_owner_id), Int64(new_owner_id),
-                 _category_int(owner_category), out)
+    code = ccall(
+        (:ts_store_replace_owner, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Int64, Int64, Int32, Ref{UInt64}),
+        store.handle,
+        Int64(old_owner_id),
+        Int64(new_owner_id),
+        _category_int(owner_category),
+        out,
+    )
     _check(code)
     return Int(out[])
 end
@@ -2150,17 +3392,17 @@ end
 # ---- Forecasts -------------------------------------------------------------
 #
 # TimeSeriesType integer codes (must match the Rust `TimeSeriesType` enum):
-const TS_TYPE_SINGLE                       = 0
-const TS_TYPE_NON_SEQUENTIAL               = 1
-const TS_TYPE_DETERMINISTIC                = 2
-const TS_TYPE_DETERMINISTIC_SINGLE         = 3
-const TS_TYPE_PROBABILISTIC                = 4
-const TS_TYPE_SCENARIOS                    = 5
+const TS_TYPE_SINGLE = 0
+const TS_TYPE_NON_SEQUENTIAL = 1
+const TS_TYPE_DETERMINISTIC = 2
+const TS_TYPE_DETERMINISTIC_SINGLE = 3
+const TS_TYPE_PROBABILISTIC = 4
+const TS_TYPE_SCENARIOS = 5
 # Request-only family sentinel (never a stored type): matches a stored
 # `Deterministic` or `DeterministicSingleTimeSeries`. The Rust core resolves it
 # and reports the concrete type that matched. Must match `TS_TYPE_ABSTRACT_DETERMINISTIC`
 # in the C ABI.
-const TS_TYPE_ABSTRACT_DETERMINISTIC       = 100
+const TS_TYPE_ABSTRACT_DETERMINISTIC = 100
 
 _features_arg(features) = isempty(features) ? C_NULL : JSON.json(features)
 _category_int(c::OwnerCategory) = Int32(Int(c))
@@ -2183,9 +3425,21 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     return _add_dense_forecast!(
-        store, owner_id, owner_type, owner_category, ts.name, TS_TYPE_DETERMINISTIC,
-        ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
-        features=features, units=units, logical_type=logical_type,
+        store,
+        owner_id,
+        owner_type,
+        owner_category,
+        ts.name,
+        TS_TYPE_DETERMINISTIC,
+        ts.initial_timestamp,
+        ts.resolution,
+        ts.horizon,
+        ts.interval,
+        ts.count,
+        ts.data;
+        features=features,
+        units=units,
+        logical_type=logical_type,
     )
 end
 
@@ -2200,9 +3454,21 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     return _add_dense_forecast!(
-        store, owner_id, owner_type, owner_category, ts.name, TS_TYPE_SCENARIOS,
-        ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
-        features=features, units=units, logical_type=logical_type,
+        store,
+        owner_id,
+        owner_type,
+        owner_category,
+        ts.name,
+        TS_TYPE_SCENARIOS,
+        ts.initial_timestamp,
+        ts.resolution,
+        ts.horizon,
+        ts.interval,
+        ts.count,
+        ts.data;
+        features=features,
+        units=units,
+        logical_type=logical_type,
     )
 end
 
@@ -2233,15 +3499,50 @@ function _add_dense_forecast!(
     bytes = _row_major_bytes(data)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
-        (:ts_store_add_forecast, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int32, Int64, Cstring, Cstring, Cstring,
-         UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring,
-         Ref{Ptr{Cvoid}}),
-        store.handle, Int64(owner_id), owner_type, _category_int(owner_category), name,
-        Int32(ts_type), _to_unix_ms(initial_timestamp), _period_to_iso(resolution),
-        _period_to_iso(horizon), _period_to_iso(interval), UInt64(count),
-        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        logical_ptr, features_json, units_ptr, out_key,
+        (:ts_store_add_forecast, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Int32,
+            Int64,
+            Cstring,
+            Cstring,
+            Cstring,
+            UInt64,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Ptr{Cvoid}},
+        ),
+        store.handle,
+        Int64(owner_id),
+        owner_type,
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        _to_unix_ms(initial_timestamp),
+        _period_to_iso(resolution),
+        _period_to_iso(horizon),
+        _period_to_iso(interval),
+        UInt64(count),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        logical_ptr,
+        features_json,
+        units_ptr,
+        out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -2260,17 +3561,24 @@ otherwise every category is. When `resolution` is given only series at that
 resolution are transformed. Returns the number of series transformed.
 """
 function transform_single_time_series!(
-    store::Store, horizon::Period, interval::Period;
-    owner_category::Union{Nothing, OwnerCategory} = nothing,
-    resolution::Union{Nothing, Period} = nothing,
+    store::Store,
+    horizon::Period,
+    interval::Period;
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
 )
     cat = owner_category === nothing ? Int32(-1) : Int32(Int(owner_category))
     res_iso = _period_to_cstr(resolution)
     out_count = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_transform_single_time_series, lib_path()), Int32,
+        (:ts_store_transform_single_time_series, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Ref{UInt64}),
-        store.handle, _period_to_iso(horizon), _period_to_iso(interval), cat, res_iso,
+        store.handle,
+        _period_to_iso(horizon),
+        _period_to_iso(interval),
+        cat,
+        res_iso,
         out_count,
     )
     _check(code)
@@ -2281,8 +3589,13 @@ end
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`)."""
 function has_typed(
-    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
@@ -2290,9 +3603,18 @@ function has_typed(
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
     code = ccall(
-        (:ts_store_has_typed, lib_path()), Int32,
+        (:ts_store_has_typed, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Bool}),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json, out,
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        resolution_iso,
+        interval_iso,
+        features_json,
+        out,
     )
     _check(code)
     return out[]
@@ -2301,17 +3623,30 @@ end
 """Remove a time series of `ts_type` by attributes. `owner_category` is the
 owner's `OwnerCategory` (`Component` or `SupplementalAttribute`)."""
 function remove_typed!(
-    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    ts_type::Integer;
+    resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     code = ccall(
-        (:ts_store_remove_typed, lib_path()), Int32,
+        (:ts_store_remove_typed, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type), resolution_iso, interval_iso, features_json,
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        resolution_iso,
+        interval_iso,
+        features_json,
     )
     _check(code)
     return nothing
@@ -2335,10 +3670,16 @@ The copy keeps the source's `owner_category`. Throws if the destination already
 holds a matching series.
 """
 function copy_time_series!(
-    store::Store, owner_id::Integer, owner_category::OwnerCategory, name::AbstractString, ts_type::Integer,
-    dst_owner_id::Integer, dst_owner_type::AbstractString;
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString,
+    ts_type::Integer,
+    dst_owner_id::Integer,
+    dst_owner_type::AbstractString;
     new_name::Union{Nothing,AbstractString}=nothing,
-    resolution::Union{Nothing,Period}=nothing, interval::Union{Nothing,Period}=nothing,
+    resolution::Union{Nothing,Period}=nothing,
+    interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
@@ -2346,10 +3687,32 @@ function copy_time_series!(
     features_json = _features_arg(features)
     renamed = new_name === nothing ? C_NULL : new_name
     code = ccall(
-        (:ts_store_copy_time_series, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Int64, Cstring, Cstring),
-        store.handle, Int64(owner_id), _category_int(owner_category), name, Int32(ts_type),
-        resolution_iso, interval_iso, features_json, Int64(dst_owner_id), dst_owner_type, renamed,
+        (:ts_store_copy_time_series, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Int32,
+            Cstring,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Int64,
+            Cstring,
+            Cstring,
+        ),
+        store.handle,
+        Int64(owner_id),
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        resolution_iso,
+        interval_iso,
+        features_json,
+        Int64(dst_owner_id),
+        dst_owner_type,
+        renamed,
     )
     _check(code)
     return nothing
@@ -2387,16 +3750,52 @@ function add_time_series!(
     bytes = _row_major_bytes(data)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
-        (:ts_store_add_probabilistic, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int64, Cstring, Cstring, Cstring, UInt64,
-         Ptr{Float64}, UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring,
-         Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle, Int64(owner_id), owner_type, _category_int(owner_category), name,
-        _to_unix_ms(initial_timestamp), _period_to_iso(resolution),
-        _period_to_iso(horizon), _period_to_iso(interval), UInt64(count),
-        percentiles, UInt64(length(percentiles)),
-        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        logical_ptr, features_json, units_ptr, out_key,
+        (:ts_store_add_probabilistic, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Int64,
+            Cstring,
+            Cstring,
+            Cstring,
+            UInt64,
+            Ptr{Float64},
+            UInt64,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Ptr{Cvoid}},
+        ),
+        store.handle,
+        Int64(owner_id),
+        owner_type,
+        _category_int(owner_category),
+        name,
+        _to_unix_ms(initial_timestamp),
+        _period_to_iso(resolution),
+        _period_to_iso(horizon),
+        _period_to_iso(interval),
+        UInt64(count),
+        percentiles,
+        UInt64(length(percentiles)),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        logical_ptr,
+        features_json,
+        units_ptr,
+        out_key,
     )
     _check(code)
     return TimeSeriesKey(out_key[])
@@ -2418,13 +3817,13 @@ place of the `Store`. The batch is drained by `add_time_series_bulk!` and may
 be reused afterwards.
 """
 mutable struct AddBatch
-    handle :: Ptr{Cvoid}
-    count :: Int
+    handle::Ptr{Cvoid}
+    count::Int
     function AddBatch()
         handle = ccall((:ts_batch_new, lib_path()), Ptr{Cvoid}, ())
         batch = new(handle, 0)
         finalizer(_finalize_batch, batch)
-        batch
+        return batch
     end
 end
 
@@ -2433,7 +3832,7 @@ function _finalize_batch(b::AddBatch)
         ccall((:ts_batch_free, lib_path()), Cvoid, (Ptr{Cvoid},), b.handle)
         b.handle = C_NULL
     end
-    nothing
+    return nothing
 end
 
 Base.length(b::AddBatch) = b.count
@@ -2454,13 +3853,40 @@ function add_time_series!(
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = ccall(
-        (:ts_batch_add_single, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int64, Cstring,
-         Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring),
-        batch.handle, Int64(owner_id), owner_type, _category_int(owner_category), ts.name,
-        _to_unix_ms(ts.initial_timestamp), _period_to_iso(ts.resolution),
-        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        _opt_string_arg(logical_type), _features_arg(features), _opt_string_arg(units),
+        (:ts_batch_add_single, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Int64,
+            Cstring,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+        ),
+        batch.handle,
+        Int64(owner_id),
+        owner_type,
+        _category_int(owner_category),
+        ts.name,
+        _to_unix_ms(ts.initial_timestamp),
+        _period_to_iso(ts.resolution),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        _opt_string_arg(logical_type),
+        _features_arg(features),
+        _opt_string_arg(units),
     )
     _check(code)
     batch.count += 1
@@ -2482,13 +3908,40 @@ function add_time_series!(
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = ccall(
-        (:ts_batch_add_non_sequential, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Ptr{Int64}, UInt64,
-         Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring),
-        batch.handle, Int64(owner_id), owner_type, _category_int(owner_category), ts.name,
-        timestamps, UInt64(length(timestamps)), dtype, UInt64(length(dims)), dims, bytes,
+        (:ts_batch_add_non_sequential, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Ptr{Int64},
+            UInt64,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+        ),
+        batch.handle,
+        Int64(owner_id),
+        owner_type,
+        _category_int(owner_category),
+        ts.name,
+        timestamps,
+        UInt64(length(timestamps)),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
         UInt64(length(bytes)),
-        _opt_string_arg(logical_type), _features_arg(features), _opt_string_arg(units),
+        _opt_string_arg(logical_type),
+        _features_arg(features),
+        _opt_string_arg(units),
     )
     _check(code)
     batch.count += 1
@@ -2506,9 +3959,21 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     return _batch_add_dense_forecast!(
-        batch, owner_id, owner_type, owner_category, ts.name, TS_TYPE_DETERMINISTIC,
-        ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
-        features=features, units=units, logical_type=logical_type,
+        batch,
+        owner_id,
+        owner_type,
+        owner_category,
+        ts.name,
+        TS_TYPE_DETERMINISTIC,
+        ts.initial_timestamp,
+        ts.resolution,
+        ts.horizon,
+        ts.interval,
+        ts.count,
+        ts.data;
+        features=features,
+        units=units,
+        logical_type=logical_type,
     )
 end
 
@@ -2523,9 +3988,21 @@ function add_time_series!(
     logical_type::Union{Nothing,AbstractString}=ts.logical_type,
 )
     return _batch_add_dense_forecast!(
-        batch, owner_id, owner_type, owner_category, ts.name, TS_TYPE_SCENARIOS,
-        ts.initial_timestamp, ts.resolution, ts.horizon, ts.interval, ts.count, ts.data;
-        features=features, units=units, logical_type=logical_type,
+        batch,
+        owner_id,
+        owner_type,
+        owner_category,
+        ts.name,
+        TS_TYPE_SCENARIOS,
+        ts.initial_timestamp,
+        ts.resolution,
+        ts.horizon,
+        ts.interval,
+        ts.count,
+        ts.data;
+        features=features,
+        units=units,
+        logical_type=logical_type,
     )
 end
 
@@ -2550,14 +4027,48 @@ function _batch_add_dense_forecast!(
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
     code = ccall(
-        (:ts_batch_add_forecast, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int32, Int64, Cstring, Cstring, Cstring,
-         UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64, Cstring, Cstring, Cstring),
-        batch.handle, Int64(owner_id), owner_type, _category_int(owner_category), name,
-        Int32(ts_type), _to_unix_ms(initial_timestamp), _period_to_iso(resolution),
-        _period_to_iso(horizon), _period_to_iso(interval), UInt64(count),
-        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        _opt_string_arg(logical_type), _features_arg(features), _opt_string_arg(units),
+        (:ts_batch_add_forecast, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Int32,
+            Int64,
+            Cstring,
+            Cstring,
+            Cstring,
+            UInt64,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+        ),
+        batch.handle,
+        Int64(owner_id),
+        owner_type,
+        _category_int(owner_category),
+        name,
+        Int32(ts_type),
+        _to_unix_ms(initial_timestamp),
+        _period_to_iso(resolution),
+        _period_to_iso(horizon),
+        _period_to_iso(interval),
+        UInt64(count),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        _opt_string_arg(logical_type),
+        _features_arg(features),
+        _opt_string_arg(units),
     )
     _check(code)
     batch.count += 1
@@ -2578,16 +4089,50 @@ function add_time_series!(
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = ccall(
-        (:ts_batch_add_probabilistic, lib_path()), Int32,
-        (Ptr{Cvoid}, Int64, Cstring, Int32, Cstring, Int64, Cstring, Cstring, Cstring, UInt64,
-         Ptr{Float64}, UInt64, Int32, UInt64, Ptr{UInt64}, Ptr{UInt8}, UInt64,
-         Cstring, Cstring, Cstring),
-        batch.handle, Int64(owner_id), owner_type, _category_int(owner_category), ts.name,
-        _to_unix_ms(ts.initial_timestamp), _period_to_iso(ts.resolution),
-        _period_to_iso(ts.horizon), _period_to_iso(ts.interval), UInt64(ts.count),
-        ts.percentiles, UInt64(length(ts.percentiles)),
-        dtype, UInt64(length(dims)), dims, bytes, UInt64(length(bytes)),
-        _opt_string_arg(logical_type), _features_arg(features), _opt_string_arg(units),
+        (:ts_batch_add_probabilistic, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Int64,
+            Cstring,
+            Int32,
+            Cstring,
+            Int64,
+            Cstring,
+            Cstring,
+            Cstring,
+            UInt64,
+            Ptr{Float64},
+            UInt64,
+            Int32,
+            UInt64,
+            Ptr{UInt64},
+            Ptr{UInt8},
+            UInt64,
+            Cstring,
+            Cstring,
+            Cstring,
+        ),
+        batch.handle,
+        Int64(owner_id),
+        owner_type,
+        _category_int(owner_category),
+        ts.name,
+        _to_unix_ms(ts.initial_timestamp),
+        _period_to_iso(ts.resolution),
+        _period_to_iso(ts.horizon),
+        _period_to_iso(ts.interval),
+        UInt64(ts.count),
+        ts.percentiles,
+        UInt64(length(ts.percentiles)),
+        dtype,
+        UInt64(length(dims)),
+        dims,
+        bytes,
+        UInt64(length(bytes)),
+        _opt_string_arg(logical_type),
+        _features_arg(features),
+        _opt_string_arg(units),
     )
     _check(code)
     batch.count += 1
@@ -2605,9 +4150,13 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = ccall(
-        (:ts_store_add_batch, lib_path()), Int32,
+        (:ts_store_add_batch, lib_path()),
+        Int32,
         (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
-        store.handle, batch.handle, out_keys, out_len,
+        store.handle,
+        batch.handle,
+        out_keys,
+        out_len,
     )
     batch.count = 0
     _check(code)
@@ -2621,8 +4170,11 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
             keys[i] = TimeSeriesKey(raw[i])
         end
         ccall(
-            (:ts_keys_buffer_free, lib_path()), Cvoid, (Ptr{Ptr{Cvoid}}, UInt64),
-            out_keys[], out_len[],
+            (:ts_keys_buffer_free, lib_path()),
+            Cvoid,
+            (Ptr{Ptr{Cvoid}}, UInt64),
+            out_keys[],
+            out_len[],
         )
     end
     return keys
@@ -2661,50 +4213,53 @@ function _get_forecast_raw(
 
     time_range_present = time_range !== nothing
     range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
-    range_end_ms   = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
+    range_end_ms = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
 
-    out_initial   = Ref{Int64}(0)
-    out_res       = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon   = Ref{Ptr{Cchar}}(C_NULL)
-    out_interval  = Ref{Ptr{Cchar}}(C_NULL)
-    out_count     = Ref{UInt64}(0)
-    out_scen      = Ref{UInt64}(0)
-    out_ndims     = Ref{UInt64}(0)
-    out_dims      = Ref{Ptr{UInt64}}(C_NULL)
-    out_dtype     = Ref{Int32}(0)
-    out_data      = Ref{Ptr{UInt8}}(C_NULL)
-    out_byte_len  = Ref{UInt64}(0)
-    out_pct       = Ref{Ptr{Float64}}(C_NULL)
-    out_pct_len   = Ref{UInt64}(0)
-    out_matched   = Ref{Int32}(0)
+    out_initial = Ref{Int64}(0)
+    out_res = Ref{Ptr{Cchar}}(C_NULL)
+    out_horizon = Ref{Ptr{Cchar}}(C_NULL)
+    out_interval = Ref{Ptr{Cchar}}(C_NULL)
+    out_count = Ref{UInt64}(0)
+    out_scen = Ref{UInt64}(0)
+    out_ndims = Ref{UInt64}(0)
+    out_dims = Ref{Ptr{UInt64}}(C_NULL)
+    out_dtype = Ref{Int32}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_byte_len = Ref{UInt64}(0)
+    out_pct = Ref{Ptr{Float64}}(C_NULL)
+    out_pct_len = Ref{UInt64}(0)
+    out_matched = Ref{Int32}(0)
 
     code = ccall(
-        (:ts_store_get_forecast, lib_path()), Int32,
-        (Ptr{Cvoid},   # handle
-         Int64,        # owner_id
-         Int32,        # owner_category
-         Cstring,      # name
-         Int32,        # ts_type
-         Cstring,      # resolution (ISO-8601)
-         Cstring,      # interval (ISO-8601)
-         Cstring,      # features_json
-         Bool,         # time_range_present
-         Int64,        # time_range_start_ms
-         Int64,        # time_range_end_ms
-         Ref{Int64},   # out_initial_ts_unix_ms
-         Ref{Ptr{Cchar}},   # out_resolution
-         Ref{Ptr{Cchar}},   # out_horizon
-         Ref{Ptr{Cchar}},   # out_interval
-         Ref{UInt64},  # out_count
-         Ref{UInt64},  # out_scenario_count
-         Ref{UInt64},  # out_ndims
-         Ref{Ptr{UInt64}},  # out_dims
-         Ref{Int32},   # out_dtype
-         Ref{Ptr{UInt8}},   # out_data
-         Ref{UInt64},  # out_data_byte_len
-         Ref{Ptr{Float64}}, # out_percentiles
-         Ref{UInt64},  # out_percentiles_len
-         Ref{Int32}),  # out_matched_type
+        (:ts_store_get_forecast, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},   # handle
+            Int64,        # owner_id
+            Int32,        # owner_category
+            Cstring,      # name
+            Int32,        # ts_type
+            Cstring,      # resolution (ISO-8601)
+            Cstring,      # interval (ISO-8601)
+            Cstring,      # features_json
+            Bool,         # time_range_present
+            Int64,        # time_range_start_ms
+            Int64,        # time_range_end_ms
+            Ref{Int64},   # out_initial_ts_unix_ms
+            Ref{Ptr{Cchar}},   # out_resolution
+            Ref{Ptr{Cchar}},   # out_horizon
+            Ref{Ptr{Cchar}},   # out_interval
+            Ref{UInt64},  # out_count
+            Ref{UInt64},  # out_scenario_count
+            Ref{UInt64},  # out_ndims
+            Ref{Ptr{UInt64}},  # out_dims
+            Ref{Int32},   # out_dtype
+            Ref{Ptr{UInt8}},   # out_data
+            Ref{UInt64},  # out_data_byte_len
+            Ref{Ptr{Float64}}, # out_percentiles
+            Ref{UInt64},  # out_percentiles_len
+            Ref{Int32},
+        ),  # out_matched_type
         store.handle,
         Int64(owner_id),
         _category_int(owner_category),
@@ -2734,8 +4289,19 @@ function _get_forecast_raw(
     _check(code)
 
     return _decode_forecast_outputs(
-        out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
-        out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+        out_initial,
+        out_res,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_scen,
+        out_ndims,
+        out_dims,
+        out_dtype,
+        out_data,
+        out_byte_len,
+        out_pct,
+        out_pct_len,
         out_matched,
     )
 end
@@ -2744,44 +4310,73 @@ end
 # `ts_store_get_forecast_by_key` into the common named tuple, copying then
 # freeing every FFI-owned buffer.
 function _decode_forecast_outputs(
-    out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
-    out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+    out_initial,
+    out_res,
+    out_horizon,
+    out_interval,
+    out_count,
+    out_scen,
+    out_ndims,
+    out_dims,
+    out_dtype,
+    out_data,
+    out_byte_len,
+    out_pct,
+    out_pct_len,
     out_matched,
 )
     # Copy dims and free FFI buffer.
     nd = Int(out_ndims[])
     dims_raw = unsafe_wrap(Array, out_dims[], nd; own=false)
     dims = Int.(copy(dims_raw))
-    ccall((:ts_buffer_free_u64, lib_path()), Cvoid, (Ptr{UInt64}, UInt64), out_dims[], out_ndims[])
+    ccall(
+        (:ts_buffer_free_u64, lib_path()),
+        Cvoid,
+        (Ptr{UInt64}, UInt64),
+        out_dims[],
+        out_ndims[],
+    )
 
     # Copy data bytes and free FFI buffer.
     n_bytes = Int(out_byte_len[])
     bytes_raw = unsafe_wrap(Array, out_data[], n_bytes; own=false)
     bytes = copy(bytes_raw)
-    ccall((:ts_buffer_free_u8, lib_path()), Cvoid, (Ptr{UInt8}, UInt64), out_data[], out_byte_len[])
+    ccall(
+        (:ts_buffer_free_u8, lib_path()),
+        Cvoid,
+        (Ptr{UInt8}, UInt64),
+        out_data[],
+        out_byte_len[],
+    )
 
     # Percentiles (Probabilistic only; null for others).
     np = Int(out_pct_len[])
     percentiles = if np > 0 && out_pct[] != C_NULL
         p = copy(unsafe_wrap(Array, out_pct[], np; own=false))
-        ccall((:ts_buffer_free_f64, lib_path()), Cvoid, (Ptr{Float64}, UInt64), out_pct[], out_pct_len[])
+        ccall(
+            (:ts_buffer_free_f64, lib_path()),
+            Cvoid,
+            (Ptr{Float64}, UInt64),
+            out_pct[],
+            out_pct_len[],
+        )
         p
     else
         Float64[]
     end
 
     return (
-        initial_timestamp = _from_unix_ms(out_initial[]),
-        resolution        = _take_period(out_res[]),
-        horizon           = _take_period(out_horizon[]),
-        interval          = _take_period(out_interval[]),
-        count             = Int(out_count[]),
-        scenario_count    = Int(out_scen[]),
-        dims              = dims,
-        bytes             = bytes,
-        dtype_code        = out_dtype[],
-        percentiles       = percentiles,
-        matched_type      = Int(out_matched[]),
+        initial_timestamp=_from_unix_ms(out_initial[]),
+        resolution=_take_period(out_res[]),
+        horizon=_take_period(out_horizon[]),
+        interval=_take_period(out_interval[]),
+        count=Int(out_count[]),
+        scenario_count=Int(out_scen[]),
+        dims=dims,
+        bytes=bytes,
+        dtype_code=out_dtype[],
+        percentiles=percentiles,
+        matched_type=Int(out_matched[]),
     )
 end
 
@@ -2794,44 +4389,47 @@ function _get_forecast_raw(
 )
     time_range_present = time_range !== nothing
     range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
-    range_end_ms   = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
+    range_end_ms = time_range_present ? _to_unix_ms(time_range[2]) : Int64(0)
 
-    out_initial   = Ref{Int64}(0)
-    out_res       = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon   = Ref{Ptr{Cchar}}(C_NULL)
-    out_interval  = Ref{Ptr{Cchar}}(C_NULL)
-    out_count     = Ref{UInt64}(0)
-    out_scen      = Ref{UInt64}(0)
-    out_ndims     = Ref{UInt64}(0)
-    out_dims      = Ref{Ptr{UInt64}}(C_NULL)
-    out_dtype     = Ref{Int32}(0)
-    out_data      = Ref{Ptr{UInt8}}(C_NULL)
-    out_byte_len  = Ref{UInt64}(0)
-    out_pct       = Ref{Ptr{Float64}}(C_NULL)
-    out_pct_len   = Ref{UInt64}(0)
-    out_matched   = Ref{Int32}(0)
+    out_initial = Ref{Int64}(0)
+    out_res = Ref{Ptr{Cchar}}(C_NULL)
+    out_horizon = Ref{Ptr{Cchar}}(C_NULL)
+    out_interval = Ref{Ptr{Cchar}}(C_NULL)
+    out_count = Ref{UInt64}(0)
+    out_scen = Ref{UInt64}(0)
+    out_ndims = Ref{UInt64}(0)
+    out_dims = Ref{Ptr{UInt64}}(C_NULL)
+    out_dtype = Ref{Int32}(0)
+    out_data = Ref{Ptr{UInt8}}(C_NULL)
+    out_byte_len = Ref{UInt64}(0)
+    out_pct = Ref{Ptr{Float64}}(C_NULL)
+    out_pct_len = Ref{UInt64}(0)
+    out_matched = Ref{Int32}(0)
 
     code = ccall(
-        (:ts_store_get_forecast_by_key, lib_path()), Int32,
-        (Ptr{Cvoid},   # handle
-         Ptr{Cvoid},   # key
-         Bool,         # time_range_present
-         Int64,        # time_range_start_ms
-         Int64,        # time_range_end_ms
-         Ref{Int64},   # out_initial_ts_unix_ms
-         Ref{Ptr{Cchar}},   # out_resolution
-         Ref{Ptr{Cchar}},   # out_horizon
-         Ref{Ptr{Cchar}},   # out_interval
-         Ref{UInt64},  # out_count
-         Ref{UInt64},  # out_scenario_count
-         Ref{UInt64},  # out_ndims
-         Ref{Ptr{UInt64}},  # out_dims
-         Ref{Int32},   # out_dtype
-         Ref{Ptr{UInt8}},   # out_data
-         Ref{UInt64},  # out_data_byte_len
-         Ref{Ptr{Float64}}, # out_percentiles
-         Ref{UInt64},  # out_percentiles_len
-         Ref{Int32}),  # out_matched_type
+        (:ts_store_get_forecast_by_key, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},   # handle
+            Ptr{Cvoid},   # key
+            Bool,         # time_range_present
+            Int64,        # time_range_start_ms
+            Int64,        # time_range_end_ms
+            Ref{Int64},   # out_initial_ts_unix_ms
+            Ref{Ptr{Cchar}},   # out_resolution
+            Ref{Ptr{Cchar}},   # out_horizon
+            Ref{Ptr{Cchar}},   # out_interval
+            Ref{UInt64},  # out_count
+            Ref{UInt64},  # out_scenario_count
+            Ref{UInt64},  # out_ndims
+            Ref{Ptr{UInt64}},  # out_dims
+            Ref{Int32},   # out_dtype
+            Ref{Ptr{UInt8}},   # out_data
+            Ref{UInt64},  # out_data_byte_len
+            Ref{Ptr{Float64}}, # out_percentiles
+            Ref{UInt64},  # out_percentiles_len
+            Ref{Int32},
+        ),  # out_matched_type
         store.handle,
         key.handle,
         time_range_present,
@@ -2855,8 +4453,19 @@ function _get_forecast_raw(
     _check(code)
 
     return _decode_forecast_outputs(
-        out_initial, out_res, out_horizon, out_interval, out_count, out_scen,
-        out_ndims, out_dims, out_dtype, out_data, out_byte_len, out_pct, out_pct_len,
+        out_initial,
+        out_res,
+        out_horizon,
+        out_interval,
+        out_count,
+        out_scen,
+        out_ndims,
+        out_dims,
+        out_dtype,
+        out_data,
+        out_byte_len,
+        out_pct,
+        out_pct_len,
         out_matched,
     )
 end
@@ -2899,13 +4508,30 @@ function get_time_series(
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, owner_category, name, TS_TYPE_ABSTRACT_DETERMINISTIC;
-        resolution=resolution, interval=interval, features=features, time_range=time_range,
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_ABSTRACT_DETERMINISTIC;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+        time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, r.matched_type; resolution=resolution, interval=interval, features=features)
-    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name)
+    a = _assoc_attrs(
+        store,
+        owner_id,
+        owner_category,
+        name,
+        r.matched_type;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+    )
+    return Deterministic(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+    )
 end
 
 """
@@ -2931,14 +4557,30 @@ function get_time_series(
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
-        resolution=resolution, interval=interval, features=features, time_range=time_range,
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_DETERMINISTIC;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+        time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC;
-                     resolution=resolution, interval=interval, features=features)
-    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name)
+    a = _assoc_attrs(
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_DETERMINISTIC;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+    )
+    return Deterministic(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+    )
 end
 
 """
@@ -2961,14 +4603,30 @@ function get_time_series(
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
-        resolution=resolution, interval=interval, features=features, time_range=time_range,
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_DETERMINISTIC_SINGLE;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+        time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_DETERMINISTIC_SINGLE;
-                     resolution=resolution, interval=interval, features=features)
-    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name)
+    a = _assoc_attrs(
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_DETERMINISTIC_SINGLE;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+    )
+    return Deterministic(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+    )
 end
 
 """
@@ -2990,14 +4648,35 @@ function get_time_series(
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, owner_category, name, TS_TYPE_PROBABILISTIC;
-        resolution=resolution, interval=interval, features=features, time_range=time_range,
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_PROBABILISTIC;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+        time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_PROBABILISTIC;
-                     resolution=resolution, interval=interval, features=features)
+    a = _assoc_attrs(
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_PROBABILISTIC;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+    )
     return Probabilistic(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
+        r.initial_timestamp,
+        r.resolution,
+        r.horizon,
+        r.interval,
+        r.count,
+        r.percentiles,
+        data,
         a.name,
     )
 end
@@ -3021,15 +4700,31 @@ function get_time_series(
     time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
 )
     r = _get_forecast_raw(
-        store, owner_id, owner_category, name, TS_TYPE_SCENARIOS;
-        resolution=resolution, interval=interval, features=features, time_range=time_range,
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_SCENARIOS;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+        time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(store, owner_id, owner_category, name, TS_TYPE_SCENARIOS;
-                     resolution=resolution, interval=interval, features=features)
+    a = _assoc_attrs(
+        store,
+        owner_id,
+        owner_category,
+        name,
+        TS_TYPE_SCENARIOS;
+        resolution=resolution,
+        interval=interval,
+        features=features,
+    )
     # `scenario_count` is the leading axis of the decoded data.
-    return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                     a.name)
+    return Scenarios(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+    )
 end
 
 # ---- Key-based forecast reads ----------------------------------------------
@@ -3056,8 +4751,9 @@ function get_time_series(
     r = _get_forecast_raw(store, key; time_range=time_range)
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _get_association(store, key)
-    return Deterministic(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                         a.name)
+    return Deterministic(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+    )
 end
 
 """
@@ -3091,7 +4787,13 @@ function get_time_series(
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _get_association(store, key)
     return Probabilistic(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, r.percentiles, data,
+        r.initial_timestamp,
+        r.resolution,
+        r.horizon,
+        r.interval,
+        r.count,
+        r.percentiles,
+        data,
         a.name,
     )
 end
@@ -3110,10 +4812,10 @@ function get_time_series(
     r = _get_forecast_raw(store, key; time_range=time_range)
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
     a = _get_association(store, key)
-    return Scenarios(r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data,
-                     a.name)
+    return Scenarios(
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+    )
 end
-
 
 # ---- Tracing ---------------------------------------------------------------
 
@@ -3171,14 +4873,16 @@ _int_for_type(::Type{Deterministic}) = TS_TYPE_DETERMINISTIC
 _int_for_type(::Type{DeterministicSingleTimeSeries}) = TS_TYPE_DETERMINISTIC_SINGLE
 _int_for_type(::Type{Probabilistic}) = TS_TYPE_PROBABILISTIC
 _int_for_type(::Type{Scenarios}) = TS_TYPE_SCENARIOS
-_int_for_type(::Type{T}) where {T} =
-    throw(InvalidParameterError("$T is not a forecast type"))
+function _int_for_type(::Type{T}) where {T}
+    return throw(InvalidParameterError("$T is not a forecast type"))
+end
 
 # Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the
 # stored row-major `dims` to canonical column-major Julia layout. The pointer is
 # reader-owned (valid only until the next read), so we always copy.
-function _reader_values(ptr::Ptr{UInt8}, byte_len::UInt64, ::Type{T},
-                        dims::AbstractVector{<:Integer}) where {T}
+function _reader_values(
+    ptr::Ptr{UInt8}, byte_len::UInt64, ::Type{T}, dims::AbstractVector{<:Integer}
+) where {T}
     n = byte_len == 0 ? 0 : Int(byte_len) ÷ sizeof(T)
     flat = Vector{T}(undef, n)
     if n > 0
@@ -3196,9 +4900,9 @@ One `(dtype, element_shape)` columnar group of a [`StaticReader`]. `keys[j]`
 identifies column `j` of the values matrix returned by [`static_values`].
 """
 struct StaticGroup
-    dtype         :: DataType
-    element_shape :: Vector{Int}
-    keys          :: Vector{TimeSeriesKey}
+    dtype::DataType
+    element_shape::Vector{Int}
+    keys::Vector{TimeSeriesKey}
 end
 
 """
@@ -3208,9 +4912,9 @@ each group's values with [`static_values`]. Inspect the layout via
 [`static_groups`] / [`static_grid`].
 """
 mutable struct StaticReader
-    handle :: Ptr{Cvoid}
-    store  :: Store
-    groups :: Vector{StaticGroup}
+    handle::Ptr{Cvoid}
+    store::Store
+    groups::Vector{StaticGroup}
     function StaticReader(handle::Ptr{Cvoid}, store::Store, groups::Vector{StaticGroup})
         r = new(handle, store, groups)
         finalizer(_finalize_static_reader, r)
@@ -3229,24 +4933,47 @@ function _static_group_layout(handle::Ptr{Cvoid}, gi::Integer)
     out_dtype = Ref{Int32}(0)
     out_ncols = Ref{UInt64}(0)
     out_shape_len = Ref{UInt64}(0)
-    code = ccall((:ts_static_reader_group_info, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
-                 handle, UInt64(gi), out_dtype, out_ncols, C_NULL, UInt64(0), out_shape_len)
+    code = ccall(
+        (:ts_static_reader_group_info, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
+        handle,
+        UInt64(gi),
+        out_dtype,
+        out_ncols,
+        C_NULL,
+        UInt64(0),
+        out_shape_len,
+    )
     _check(code)
     shape = Vector{Int64}(undef, Int(out_shape_len[]))
     if out_shape_len[] > 0
-        code = ccall((:ts_static_reader_group_info, lib_path()), Int32,
-                     (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
-                     handle, UInt64(gi), out_dtype, out_ncols,
-                     shape, UInt64(length(shape)), out_shape_len)
+        code = ccall(
+            (:ts_static_reader_group_info, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
+            handle,
+            UInt64(gi),
+            out_dtype,
+            out_ncols,
+            shape,
+            UInt64(length(shape)),
+            out_shape_len,
+        )
         _check(code)
     end
     keys = Vector{TimeSeriesKey}(undef, Int(out_ncols[]))
     for col in 0:(Int(out_ncols[]) - 1)
         out_key = Ref{Ptr{Cvoid}}(C_NULL)
-        code = ccall((:ts_static_reader_group_key, lib_path()), Int32,
-                     (Ptr{Cvoid}, UInt64, UInt64, Ref{Ptr{Cvoid}}),
-                     handle, UInt64(gi), UInt64(col), out_key)
+        code = ccall(
+            (:ts_static_reader_group_key, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, UInt64, Ref{Ptr{Cvoid}}),
+            handle,
+            UInt64(gi),
+            UInt64(col),
+            out_key,
+        )
         _check(code)
         keys[col + 1] = TimeSeriesKey(out_key[])
     end
@@ -3261,11 +4988,14 @@ Build a [`StaticReader`] over the `SingleTimeSeries` matching the filter.
 `resolution` (a `Period`) is required — one resolution per reader. The matched
 series must share one grid (`initial_timestamp` + `length`).
 """
-function build_static_reader(store::Store; resolution::Period,
-                             owner_id::Union{Nothing, Integer} = nothing,
-                             owner_category::Union{Nothing, OwnerCategory} = nothing,
-                             name::Union{Nothing, AbstractString} = nothing,
-                             features::AbstractDict = Dict{String, Any}())
+function build_static_reader(
+    store::Store;
+    resolution::Period,
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
@@ -3274,16 +5004,32 @@ function build_static_reader(store::Store; resolution::Period,
     resolution_iso = _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_build_static_reader, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Cstring, Cstring, Cstring,
-                  Ref{Ptr{Cvoid}}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 name_arg, resolution_iso, features_arg, out)
+    code = ccall(
+        (:ts_store_build_static_reader, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        name_arg,
+        resolution_iso,
+        features_arg,
+        out,
+    )
     _check(code)
     handle = out[]
     out_n = Ref{UInt64}(0)
-    _check(ccall((:ts_static_reader_num_groups, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{UInt64}), handle, out_n))
+    _check(
+        ccall(
+            (:ts_static_reader_num_groups, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ref{UInt64}),
+            handle,
+            out_n,
+        ),
+    )
     groups = [_static_group_layout(handle, gi) for gi in 0:(Int(out_n[]) - 1)]
     return StaticReader(handle, store, groups)
 end
@@ -3299,12 +5045,22 @@ function static_grid(reader::StaticReader)
     out_initial = Ref{Int64}(0)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    _check(ccall((:ts_static_reader_grid, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{UInt64}),
-                 reader.handle, out_initial, out_res, out_len))
-    return (initial_timestamp = _from_unix_ms(out_initial[]),
-            resolution = _take_period(out_res[]),
-            length = Int(out_len[]))
+    _check(
+        ccall(
+            (:ts_static_reader_grid, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{UInt64}),
+            reader.handle,
+            out_initial,
+            out_res,
+            out_len,
+        ),
+    )
+    return (
+        initial_timestamp=_from_unix_ms(out_initial[]),
+        resolution=_take_period(out_res[]),
+        length=Int(out_len[]),
+    )
 end
 
 """
@@ -3322,9 +5078,16 @@ Read the value of every series at `t`, filling the reader's buffers. Throws if
 `t` is off the reader's grid. Follow with [`static_values`] per group.
 """
 function static_read!(reader::StaticReader, t::DateTime)
-    _check(ccall((:ts_static_reader_read, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
-                 reader.handle, reader.store.handle, _to_unix_ms(t)))
+    _check(
+        ccall(
+            (:ts_static_reader_read, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
+            reader.handle,
+            reader.store.handle,
+            _to_unix_ms(t),
+        ),
+    )
     return reader
 end
 
@@ -3339,9 +5102,17 @@ function static_values(reader::StaticReader, group_index::Integer)
     group = reader.groups[group_index]
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    _check(ccall((:ts_static_reader_group_values, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
-                 reader.handle, UInt64(group_index - 1), out_ptr, out_len))
+    _check(
+        ccall(
+            (:ts_static_reader_group_values, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
+            reader.handle,
+            UInt64(group_index - 1),
+            out_ptr,
+            out_len,
+        ),
+    )
     dims = vcat(length(group.keys), group.element_shape)
     return _reader_values(out_ptr[], out_len[], group.dtype, dims)
 end
@@ -3358,10 +5129,10 @@ components referencing one shared forecast) report the same `slot`, so the
 materialize each unique window only once.
 """
 struct ForecastEntry
-    dtype        :: DataType
-    window_shape :: Vector{Int}
-    key          :: TimeSeriesKey
-    slot         :: Int
+    dtype::DataType
+    window_shape::Vector{Int}
+    key::TimeSeriesKey
+    slot::Int
 end
 
 """
@@ -3370,11 +5141,12 @@ with [`build_forecast_reader`], read a timestamp with [`forecast_read!`], then
 pull each entry's window with [`forecast_values`].
 """
 mutable struct ForecastReader
-    handle  :: Ptr{Cvoid}
-    store   :: Store
-    entries :: Vector{ForecastEntry}
-    function ForecastReader(handle::Ptr{Cvoid}, store::Store,
-                            entries::Vector{ForecastEntry})
+    handle::Ptr{Cvoid}
+    store::Store
+    entries::Vector{ForecastEntry}
+    function ForecastReader(
+        handle::Ptr{Cvoid}, store::Store, entries::Vector{ForecastEntry}
+    )
         r = new(handle, store, entries)
         finalizer(_finalize_forecast_reader, r)
         return r
@@ -3391,25 +5163,58 @@ end
 function _forecast_entry_layout(handle::Ptr{Cvoid}, ei::Integer)
     out_dtype = Ref{Int32}(0)
     out_shape_len = Ref{UInt64}(0)
-    code = ccall((:ts_forecast_reader_entry_info, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
-                 handle, UInt64(ei), out_dtype, C_NULL, UInt64(0), out_shape_len)
+    code = ccall(
+        (:ts_forecast_reader_entry_info, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
+        handle,
+        UInt64(ei),
+        out_dtype,
+        C_NULL,
+        UInt64(0),
+        out_shape_len,
+    )
     _check(code)
     shape = Vector{Int64}(undef, Int(out_shape_len[]))
     if out_shape_len[] > 0
-        code = ccall((:ts_forecast_reader_entry_info, lib_path()), Int32,
-                     (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
-                     handle, UInt64(ei), out_dtype, shape, UInt64(length(shape)), out_shape_len)
+        code = ccall(
+            (:ts_forecast_reader_entry_info, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
+            handle,
+            UInt64(ei),
+            out_dtype,
+            shape,
+            UInt64(length(shape)),
+            out_shape_len,
+        )
         _check(code)
     end
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    _check(ccall((:ts_forecast_reader_entry_key, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Ptr{Cvoid}}), handle, UInt64(ei), out_key))
+    _check(
+        ccall(
+            (:ts_forecast_reader_entry_key, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, Ref{Ptr{Cvoid}}),
+            handle,
+            UInt64(ei),
+            out_key,
+        ),
+    )
     out_slot = Ref{UInt64}(0)
-    _check(ccall((:ts_forecast_reader_entry_slot, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{UInt64}), handle, UInt64(ei), out_slot))
-    return ForecastEntry(_julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]),
-                         Int(out_slot[]))
+    _check(
+        ccall(
+            (:ts_forecast_reader_entry_slot, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, Ref{UInt64}),
+            handle,
+            UInt64(ei),
+            out_slot,
+        ),
+    )
+    return ForecastEntry(
+        _julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]), Int(out_slot[])
+    )
 end
 
 """
@@ -3423,11 +5228,15 @@ A `Deterministic` reader is abstract — it also includes
 `resolution` (a `Period`) is required; matched forecasts must share one window
 timeline.
 """
-function build_forecast_reader(store::Store, time_series_type::Type; resolution::Period,
-                               owner_id::Union{Nothing, Integer} = nothing,
-                               owner_category::Union{Nothing, OwnerCategory} = nothing,
-                               name::Union{Nothing, AbstractString} = nothing,
-                               features::AbstractDict = Dict{String, Any}())
+function build_forecast_reader(
+    store::Store,
+    time_series_type::Type;
+    resolution::Period,
+    owner_id::Union{Nothing,Integer}=nothing,
+    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    name::Union{Nothing,AbstractString}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
+)
     type_code = _int_for_type(time_series_type)
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
@@ -3437,16 +5246,44 @@ function build_forecast_reader(store::Store, time_series_type::Type; resolution:
     resolution_iso = _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall((:ts_store_build_forecast_reader, lib_path()), Int32,
-                 (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Int32, Cstring, Cstring, Cstring,
-                  Ref{Ptr{Cvoid}}),
-                 store.handle, has_owner, owner_arg, has_category, category_arg,
-                 Int32(type_code), name_arg, resolution_iso, features_arg, out)
+    code = ccall(
+        (:ts_store_build_forecast_reader, lib_path()),
+        Int32,
+        (
+            Ptr{Cvoid},
+            Bool,
+            Int64,
+            Bool,
+            Int32,
+            Int32,
+            Cstring,
+            Cstring,
+            Cstring,
+            Ref{Ptr{Cvoid}},
+        ),
+        store.handle,
+        has_owner,
+        owner_arg,
+        has_category,
+        category_arg,
+        Int32(type_code),
+        name_arg,
+        resolution_iso,
+        features_arg,
+        out,
+    )
     _check(code)
     handle = out[]
     out_n = Ref{UInt64}(0)
-    _check(ccall((:ts_forecast_reader_num_entries, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{UInt64}), handle, out_n))
+    _check(
+        ccall(
+            (:ts_forecast_reader_num_entries, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ref{UInt64}),
+            handle,
+            out_n,
+        ),
+    )
     entries = [_forecast_entry_layout(handle, ei) for ei in 0:(Int(out_n[]) - 1)]
     return ForecastReader(handle, store, entries)
 end
@@ -3463,13 +5300,24 @@ function forecast_timeline(reader::ForecastReader)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
     out_interval = Ref{Ptr{Cchar}}(C_NULL)
     out_count = Ref{UInt64}(0)
-    _check(ccall((:ts_forecast_reader_timeline, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}),
-                 reader.handle, out_initial, out_res, out_interval, out_count))
-    return (initial_timestamp = _from_unix_ms(out_initial[]),
-            resolution = _take_period(out_res[]),
-            interval = _take_period(out_interval[]),
-            count = Int(out_count[]))
+    _check(
+        ccall(
+            (:ts_forecast_reader_timeline, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}),
+            reader.handle,
+            out_initial,
+            out_res,
+            out_interval,
+            out_count,
+        ),
+    )
+    return (
+        initial_timestamp=_from_unix_ms(out_initial[]),
+        resolution=_take_period(out_res[]),
+        interval=_take_period(out_interval[]),
+        count=Int(out_count[]),
+    )
 end
 
 """
@@ -3490,8 +5338,15 @@ plan collapse to one slot, so this is `≤ length(forecast_entries(reader))`.
 """
 function forecast_num_slots(reader::ForecastReader)
     out_n = Ref{UInt64}(0)
-    _check(ccall((:ts_forecast_reader_num_slots, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{UInt64}), reader.handle, out_n))
+    _check(
+        ccall(
+            (:ts_forecast_reader_num_slots, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ref{UInt64}),
+            reader.handle,
+            out_n,
+        ),
+    )
     return Int(out_n[])
 end
 
@@ -3502,9 +5357,16 @@ Read the forecast window at `t` for every entry, filling the reader's buffers.
 Throws if `t` is off the window timeline. Follow with [`forecast_values`].
 """
 function forecast_read!(reader::ForecastReader, t::DateTime)
-    _check(ccall((:ts_forecast_reader_read, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
-                 reader.handle, reader.store.handle, _to_unix_ms(t)))
+    _check(
+        ccall(
+            (:ts_forecast_reader_read, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
+            reader.handle,
+            reader.store.handle,
+            _to_unix_ms(t),
+        ),
+    )
     return reader
 end
 
@@ -3518,9 +5380,17 @@ function forecast_values(reader::ForecastReader, entry_index::Integer)
     entry = reader.entries[entry_index]
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    _check(ccall((:ts_forecast_reader_entry_values, lib_path()), Int32,
-                 (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
-                 reader.handle, UInt64(entry_index - 1), out_ptr, out_len))
+    _check(
+        ccall(
+            (:ts_forecast_reader_entry_values, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
+            reader.handle,
+            UInt64(entry_index - 1),
+            out_ptr,
+            out_len,
+        ),
+    )
     return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape)
 end
 
@@ -3537,26 +5407,51 @@ features), delegated to the Rust core. Consistent with `hash`, so keys work as
 """
 function Base.:(==)(a::TimeSeriesKey, b::TimeSeriesKey)
     out = Ref{Bool}(false)
-    _check(ccall((:ts_key_eq, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}), a.handle, b.handle, out))
+    _check(
+        ccall(
+            (:ts_key_eq, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}),
+            a.handle,
+            b.handle,
+            out,
+        ),
+    )
     return out[]
 end
 
 function Base.hash(k::TimeSeriesKey, h::UInt)
     out = Ref{UInt64}(0)
-    _check(ccall((:ts_key_identity_hash, lib_path()), Int32,
-                 (Ptr{Cvoid}, Ref{UInt64}), k.handle, out))
+    _check(
+        ccall(
+            (:ts_key_identity_hash, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ref{UInt64}),
+            k.handle,
+            out,
+        ),
+    )
     return hash(out[], h)
 end
 
 function Base.show(io::IO, k::TimeSeriesKey)
     if k.handle == C_NULL
         print(io, "TimeSeriesKey(freed)")
-        return
+        return nothing
     end
     info = key_info(k)
-    print(io, "TimeSeriesKey(", info.time_series_type, " name=", repr(info.name),
-          " owner_id=", info.owner_id, " owner_category=", info.owner_category, ")")
+    return print(
+        io,
+        "TimeSeriesKey(",
+        info.time_series_type,
+        " name=",
+        repr(info.name),
+        " owner_id=",
+        info.owner_id,
+        " owner_category=",
+        info.owner_category,
+        ")",
+    )
 end
 
 function Base.show(io::IO, s::Store)
@@ -3568,21 +5463,58 @@ function Base.show(io::IO, s::Store)
 end
 
 function Base.show(io::IO, ts::SingleTimeSeries{T,N}) where {T,N}
-    print(io, "SingleTimeSeries{", T, ",", N, "}(name=", repr(ts.name),
-          " length=", size(ts.data, 1), " initial_timestamp=", ts.initial_timestamp,
-          " resolution=", ts.resolution, ")")
+    return print(
+        io,
+        "SingleTimeSeries{",
+        T,
+        ",",
+        N,
+        "}(name=",
+        repr(ts.name),
+        " length=",
+        size(ts.data, 1),
+        " initial_timestamp=",
+        ts.initial_timestamp,
+        " resolution=",
+        ts.resolution,
+        ")",
+    )
 end
 
 function Base.show(io::IO, ts::NonSequentialTimeSeries{T,N}) where {T,N}
-    print(io, "NonSequentialTimeSeries{", T, ",", N, "}(name=", repr(ts.name),
-          " length=", size(ts.data, 1), ")")
+    return print(
+        io,
+        "NonSequentialTimeSeries{",
+        T,
+        ",",
+        N,
+        "}(name=",
+        repr(ts.name),
+        " length=",
+        size(ts.data, 1),
+        ")",
+    )
 end
 
 for FT in (:Deterministic, :Probabilistic, :Scenarios)
     @eval function Base.show(io::IO, ts::$FT{T,N}) where {T,N}
-        print(io, $(string(FT)), "{", T, ",", N, "}(name=", repr(ts.name),
-              " count=", ts.count, " horizon=", ts.horizon,
-              " interval=", ts.interval, ")")
+        print(
+            io,
+            $(string(FT)),
+            "{",
+            T,
+            ",",
+            N,
+            "}(name=",
+            repr(ts.name),
+            " count=",
+            ts.count,
+            " horizon=",
+            ts.horizon,
+            " interval=",
+            ts.interval,
+            ")",
+        )
     end
 end
 
