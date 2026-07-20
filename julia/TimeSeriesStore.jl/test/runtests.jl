@@ -1189,3 +1189,74 @@ end
     scen = Scenarios(t0, res, Hour(2), Hour(1), 5, Float32[v for v in 1:(3 * 2 * 5)] |> a -> reshape(a, 3, 2, 5), "s")
     @test typeof(scen) == Scenarios{Float32,3}
 end
+
+@testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    # units round-trips through get_metadata (previously write-only).
+    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
+    k = add_time_series!(store, 1, "Generator", Component, sts;
+                         units="MW", logical_type="Profile")
+    md = get_metadata(store, 1, Component, "load"; resolution=res)
+    @test md.units == "MW"
+    @test md.logical_type == "Profile"
+
+    # time_range slicing on the SingleTimeSeries get path matches a full read.
+    full = get_time_series(store, k)
+    sliced = get_time_series(store, k; time_range=(t0 + Hour(2), t0 + Hour(5)))
+    @test sliced.data == full.data[3:5]
+    @test sliced.initial_timestamp == t0 + Hour(2)
+
+    # read_only reflects the store mode.
+    @test read_only(store) == false
+
+    # A forecast so discovery has an interval + a mixed bulk read.
+    det = Deterministic(t0, res, Hour(2), Hour(1), 3,
+                        Float64[h * 10 + c for h in 1:2, c in 1:3], "fc")
+    kf = add_time_series!(store, 2, "Bus", Component, det)
+
+    @test get_intervals(store) == [Hour(1)]
+    @test isempty(get_intervals(store; time_series_type=TimeSeriesStore.TS_TYPE_SINGLE))
+    @test sort(list_names(store)) == ["fc", "load"]
+    @test list_names(store; owner_id=1) == ["load"]
+    @test sort(list_owner_types(store)) == ["Bus", "Generator"]
+
+    # Full metadata rows include units + logical_type.
+    rows = list_time_series(store; owner_id=1)
+    @test length(rows) == 1
+    @test rows[1]["units"] == "MW"
+    @test rows[1]["logical_type"] == "Profile"
+    @test rows[1]["dtype"] == "f64"
+
+    # get_probabilistic_metadata exposes percentiles + units without a data fetch.
+    prob = Probabilistic(t0, res, Hour(2), Hour(1), 3, [0.1, 0.5, 0.9],
+                         Float64[p + h + c for p in 1:3, h in 1:2, c in 1:3], "pf")
+    add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
+    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    @test pmd.percentiles == [0.1, 0.5, 0.9]
+    @test pmd.units == "MWp"
+
+    # bulk_read dispatches on stored type.
+    mixed = bulk_read(store, TimeSeriesKey[k, kf])
+    @test mixed[1] isa SingleTimeSeries
+    @test mixed[1].data == full.data
+    @test mixed[2] isa Deterministic
+    @test mixed[2].data == det.data
+
+    # resolve_forecast_key resolves the abstract-deterministic family.
+    rk = resolve_forecast_key(store, 2, Component, "fc",
+                              TimeSeriesStore.TS_TYPE_ABSTRACT_DETERMINISTIC)
+    @test get_time_series(Deterministic, store, rk).data == det.data
+
+    # rename_time_series! moves the association.
+    nk = rename_time_series!(store, k, "load2")
+    @test get_metadata(store, 1, Component, "load2"; resolution=res).units == "MW"
+    @test_throws TimeSeriesStore.NotFoundError get_metadata(store, 1, Component, "load"; resolution=res)
+
+    # remove_by_filter! removes matching series.
+    removed = remove_by_filter!(store; owner_id=3)
+    @test removed == 1
+    @test isempty(list_names(store; owner_id=3))
+end
