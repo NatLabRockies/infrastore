@@ -294,7 +294,7 @@ async fn forecast_parameters_over_grpc() {
     let addr = spawn_server(store).await;
     let client = RemoteClient::connect(addr).await.unwrap();
 
-    let params = client.get_forecast_parameters().await.unwrap();
+    let params = client.get_forecast_parameters(None, None).await.unwrap();
     assert_eq!(params.horizon, Some(Period::Fixed(Duration::hours(4))));
     assert_eq!(params.interval, Some(Period::Fixed(Duration::hours(2))));
     assert_eq!(params.count, Some(6));
@@ -308,7 +308,7 @@ async fn forecast_parameters_empty_store_over_grpc() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     // No forecasts: every field comes back absent.
-    let params = client.get_forecast_parameters().await.unwrap();
+    let params = client.get_forecast_parameters(None, None).await.unwrap();
     assert_eq!(params.horizon, None);
     assert_eq!(params.interval, None);
     assert_eq!(params.count, None);

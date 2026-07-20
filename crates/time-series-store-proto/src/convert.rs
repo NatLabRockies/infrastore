@@ -173,25 +173,22 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         time_series_type: pb::TimeSeriesType::from(m.time_series_type) as i32,
         name: m.name.clone(),
         data_hash: m.data_hash.to_vec(),
-        initial_timestamp_rfc3339: m
-            .initial_timestamp
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_default(),
-        resolution: period_to_iso(m.resolution),
-        length: m.length.unwrap_or(0) as u64,
-        horizon: period_to_iso(m.horizon),
-        interval: period_to_iso(m.interval),
-        count: m.count.unwrap_or(0) as u64,
+        initial_timestamp_rfc3339: m.initial_timestamp.map(|t| t.to_rfc3339()),
+        resolution: m.resolution.map(|p| p.to_iso8601()),
+        length: m.length.map(|l| l as u64),
+        horizon: m.horizon.map(|p| p.to_iso8601()),
+        interval: m.interval.map(|p| p.to_iso8601()),
+        count: m.count.map(|c| c as u64),
         timestamps_rfc3339: m
             .timestamps
             .as_ref()
             .map(|ts| ts.iter().map(|t| t.to_rfc3339()).collect())
             .unwrap_or_default(),
         features: Some(features_to_pb(&m.features)),
-        units: m.units.clone().unwrap_or_default(),
+        units: m.units.clone(),
         dtype: m.dtype.code(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
-        logical_type: m.logical_type.clone().unwrap_or_default(),
+        logical_type: m.logical_type.clone(),
         percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
@@ -214,7 +211,10 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
     let mut data_hash = [0u8; 32];
     data_hash.copy_from_slice(&m.data_hash);
 
-    let initial_timestamp = parse_optional_rfc3339(&m.initial_timestamp_rfc3339)?;
+    let initial_timestamp = match &m.initial_timestamp_rfc3339 {
+        Some(s) => Some(DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?),
+        None => None,
+    };
     let timestamps = if m.timestamps_rfc3339.is_empty() {
         None
     } else {
@@ -238,22 +238,27 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         name: m.name,
         data_hash,
         initial_timestamp,
-        resolution: optional_period(&m.resolution)?,
-        length: optional_usize(m.length),
-        horizon: optional_period(&m.horizon)?,
-        interval: optional_period(&m.interval)?,
-        count: optional_usize(m.count),
+        resolution: opt_period(m.resolution.as_deref())?,
+        length: m.length.map(|l| l as usize),
+        horizon: opt_period(m.horizon.as_deref())?,
+        interval: opt_period(m.interval.as_deref())?,
+        count: m.count.map(|c| c as usize),
         timestamps,
         features,
-        units: optional_string(m.units),
+        units: m.units,
         percentiles: if m.percentiles.is_empty() {
             None
         } else {
             Some(m.percentiles)
         },
-        dtype: Dtype::from_code(m.dtype).unwrap_or(Dtype::F64),
+        // Error on an unknown dtype (matching the data-decode path) rather than
+        // silently coercing to F64.
+        dtype: Dtype::from_code(m.dtype).ok_or(ConvertError::InvalidValue {
+            field: "dtype",
+            message: format!("unknown dtype code {}", m.dtype),
+        })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
-        logical_type: optional_string(m.logical_type),
+        logical_type: m.logical_type,
     })
 }
 
@@ -459,7 +464,8 @@ fn period_to_iso(p: Option<Period>) -> String {
     p.map(|p| p.to_iso8601()).unwrap_or_default()
 }
 
-/// Decode an ISO-8601 period string; empty -> `None`.
+/// Decode an ISO-8601 period string; empty -> `None`. Used by the key message,
+/// whose resolution/interval remain empty-string-sentinel `string` fields.
 fn optional_period(s: &str) -> Result<Option<Period>, ConvertError> {
     if s.is_empty() {
         Ok(None)
@@ -473,30 +479,25 @@ fn optional_period(s: &str) -> Result<Option<Period>, ConvertError> {
     }
 }
 
+/// Decode an optional ISO-8601 period from a proto3 `optional string` field.
+fn opt_period(s: Option<&str>) -> Result<Option<Period>, ConvertError> {
+    match s {
+        Some(s) => Period::from_iso8601(s)
+            .map(Some)
+            .map_err(|e| ConvertError::InvalidValue {
+                field: "period",
+                message: e.to_string(),
+            }),
+        None => Ok(None),
+    }
+}
+
 /// Decode a required ISO-8601 period string.
 fn period_from_iso(s: &str) -> Result<Period, ConvertError> {
     Period::from_iso8601(s).map_err(|e| ConvertError::InvalidValue {
         field: "period",
         message: e.to_string(),
     })
-}
-
-fn optional_usize(v: u64) -> Option<usize> {
-    if v == 0 { None } else { Some(v as usize) }
-}
-
-fn optional_string(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
-}
-
-fn parse_optional_rfc3339(s: &str) -> Result<Option<DateTime<Utc>>, ConvertError> {
-    if s.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(
-            DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc))?,
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -525,6 +526,54 @@ mod tests {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         TypedArray::new(Dtype::I64, shape, bytes).unwrap()
+    }
+
+    // ---- Metadata wire-fidelity (proto3 optional) ----
+
+    fn base_pb_metadata() -> pb::TimeSeriesMetadata {
+        pb::TimeSeriesMetadata {
+            owner_id: 1,
+            owner_type: "Generator".into(),
+            owner_category: pb::OwnerCategory::Component as i32,
+            time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
+            name: "load".into(),
+            data_hash: vec![0u8; 32],
+            initial_timestamp_rfc3339: Some(make_ts().to_rfc3339()),
+            resolution: Some("PT1H".into()),
+            length: Some(0),
+            horizon: None,
+            interval: None,
+            count: None,
+            timestamps_rfc3339: Vec::new(),
+            features: Some(pb::Features::default()),
+            units: None,
+            dtype: Dtype::F64.code(),
+            element_shape: Vec::new(),
+            logical_type: None,
+            percentiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn length_zero_decodes_as_present() {
+        // A genuine length == 0 must decode as Some(0), not None (the old
+        // sentinel encoding coerced 0 to absent).
+        let m = metadata_from_pb(base_pb_metadata()).unwrap();
+        assert_eq!(m.length, Some(0));
+        // And it round-trips back to Some(0) on the wire.
+        let pb = metadata_to_pb(&m);
+        assert_eq!(pb.length, Some(0));
+    }
+
+    #[test]
+    fn unknown_dtype_in_metadata_errors() {
+        let mut pb = base_pb_metadata();
+        pb.dtype = 99; // not a valid Dtype code
+        let err = metadata_from_pb(pb).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::InvalidValue { field: "dtype", .. }
+        ));
     }
 
     // ---- Deterministic ----

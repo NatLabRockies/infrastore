@@ -67,20 +67,22 @@ message TimeSeriesMetadata {
   TimeSeriesType  time_series_type               = 4;
   string          name                           = 5;
   bytes           data_hash                      = 6;        // 32 bytes
-  // Temporal — populated when applicable to the time series type.
-  string          initial_timestamp_rfc3339      = 7;
-  string          resolution                     = 8;        // ISO-8601 duration
-  uint64          length                         = 9;
-  string          horizon                        = 10;       // ISO-8601 duration
-  string          interval                       = 11;       // ISO-8601 duration
-  uint64          count                          = 12;
+  // Temporal — populated when applicable to the time series type. `optional`
+  // (rather than an empty-string / zero sentinel) so genuinely-present values
+  // like length == 0 decode correctly.
+  optional string initial_timestamp_rfc3339      = 7;
+  optional string resolution                     = 8;        // ISO-8601 duration
+  optional uint64 length                         = 9;
+  optional string horizon                        = 10;       // ISO-8601 duration
+  optional string interval                       = 11;       // ISO-8601 duration
+  optional uint64 count                          = 12;
   repeated string timestamps_rfc3339             = 13;
   Features        features                       = 14;
-  string          units                          = 16;
+  optional string units                          = 16;
   // Element typing.
   int32           dtype                          = 17;       // Dtype code
   repeated uint64 element_shape                  = 18;       // per-step trailing dims
-  string          logical_type                   = 19;       // opaque reconstruction tag
+  optional string logical_type                   = 19;       // opaque reconstruction tag
   repeated double percentiles                    = 20;        // Probabilistic only
 }
 
@@ -157,14 +159,18 @@ message CountsResp {
 
 // ---- GetForecastParameters ----
 
-message ForecastParamsReq {}
+message ForecastParamsReq {
+  optional string resolution = 1;       // ISO-8601 duration filter
+  optional string interval   = 2;       // ISO-8601 duration filter
+}
 // All fields optional: absent when the store holds no forecasts (or that
 // particular field is not populated for the forecast type found).
 message ForecastParamsResp {
-  optional string horizon    = 1;       // ISO-8601 duration
-  optional string interval   = 2;       // ISO-8601 duration
-  optional uint64 count      = 3;
-  optional string resolution = 4;       // ISO-8601 duration
+  optional string horizon                   = 1;   // ISO-8601 duration
+  optional string interval                  = 2;   // ISO-8601 duration
+  optional uint64 count                     = 3;
+  optional string resolution                = 4;   // ISO-8601 duration
+  optional string initial_timestamp_rfc3339 = 5;
 }
 
 // ---- HasTimeSeries ----

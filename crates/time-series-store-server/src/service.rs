@@ -203,15 +203,21 @@ impl TimeSeriesStoreSvc for TimeSeriesStoreService {
 
     async fn get_forecast_parameters(
         &self,
-        _request: Request<ForecastParamsReq>,
+        request: Request<ForecastParamsReq>,
     ) -> Result<Response<ForecastParamsResp>, Status> {
+        let req = request.into_inner();
+        let resolution = req.resolution.as_deref().map(parse_period).transpose()?;
+        let interval = req.interval.as_deref().map(parse_period).transpose()?;
         let store = self.store.lock().await;
-        let params = store.get_forecast_parameters(None, None).map_err(map_err)?;
+        let params = store
+            .get_forecast_parameters(resolution, interval)
+            .map_err(map_err)?;
         Ok(Response::new(ForecastParamsResp {
             horizon: params.horizon.map(|p| p.to_iso8601()),
             interval: params.interval.map(|p| p.to_iso8601()),
             count: params.count.map(|c| c as u64),
             resolution: params.resolution.map(|p| p.to_iso8601()),
+            initial_timestamp_rfc3339: params.initial_timestamp.map(|t| t.to_rfc3339()),
         }))
     }
 

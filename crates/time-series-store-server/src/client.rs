@@ -1,8 +1,9 @@
 //! Typed Rust client for the read-only gRPC service.
 //!
-//! Mirrors the read methods of [`time_series_store_core::Store`] over the wire.
-//! Returned by `time_series_store_core::connect()` once that thin wrapper is
-//! exposed (via `RemoteStore`).
+//! [`RemoteClient`] mirrors the read methods of [`time_series_store_core::Store`]
+//! over the wire. Construct it with [`RemoteClient::connect`]; a unifying
+//! `Store`/client trait is deliberately out of scope (the store is sync, the
+//! client async).
 
 use chrono::{DateTime, Utc};
 use time_series_store_core::{
@@ -188,21 +189,32 @@ impl RemoteClient {
 
     pub async fn get_forecast_parameters(
         &self,
+        resolution: Option<Period>,
+        interval: Option<Period>,
     ) -> CoreResult<time_series_store_core::ForecastParameters> {
         let mut inner = self.inner.lock().await;
         let resp = inner
-            .get_forecast_parameters(ForecastParamsReq {})
+            .get_forecast_parameters(ForecastParamsReq {
+                resolution: resolution.map(|p| p.to_iso8601()),
+                interval: interval.map(|p| p.to_iso8601()),
+            })
             .await
             .map_err(Self::map_status)?
             .into_inner();
+        let initial_timestamp = match resp.initial_timestamp_rfc3339 {
+            Some(s) => Some(
+                DateTime::parse_from_rfc3339(&s)
+                    .map_err(|e| TimeSeriesError::ConnectionError(e.to_string()))?
+                    .with_timezone(&Utc),
+            ),
+            None => None,
+        };
         Ok(time_series_store_core::ForecastParameters {
             horizon: opt_iso_to_period(resp.horizon)?,
             interval: opt_iso_to_period(resp.interval)?,
             count: resp.count.map(|c| c as usize),
             resolution: opt_iso_to_period(resp.resolution)?,
-            // The forecast-parameters gRPC message does not carry the initial
-            // timestamp; it is not part of the read-only wire contract.
-            initial_timestamp: None,
+            initial_timestamp,
         })
     }
 
