@@ -30,6 +30,9 @@ pub const TS_ERR_IO: i32 = 8;
 /// The store on disk was written in a different, incompatible on-disk format
 /// than this build reads. There is no in-place upgrade.
 pub const TS_ERR_INCOMPATIBLE_FORMAT: i32 = 9;
+/// The endpoint pair of an association is already associated. Distinct from
+/// `TS_ERR_DUPLICATE`, which is about time-series identity.
+pub const TS_ERR_DUPLICATE_ASSOCIATION: i32 = 10;
 pub const TS_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -49,6 +52,7 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
     let code = match &e {
         E::NotFound => TS_ERR_NOT_FOUND,
         E::DuplicateTimeSeries => TS_ERR_DUPLICATE,
+        E::DuplicateAssociation(_) => TS_ERR_DUPLICATE_ASSOCIATION,
         E::InvalidParameter(_) => TS_ERR_INVALID_PARAMETER,
         E::IntegrityError(_) => TS_ERR_INTEGRITY,
         E::ReadOnlyStore => TS_ERR_READ_ONLY,
@@ -5601,6 +5605,800 @@ pub unsafe extern "C" fn ts_store_replace_owner(
             if !out_updated.is_null() {
                 unsafe { *out_updated = updated as u64 };
             }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+// ---- Association catalogs -------------------------------------------------
+//
+// Two catalogs, kept apart on purpose: `supplemental_attribute_*` records which
+// attributes are attached to which components; `parent_child_*` records directed
+// edges between components (a generator connected to a bus, say). Neither has
+// anything to do with time series.
+//
+// Predicates cross the boundary as one JSON object rather than positional
+// arguments, the same way `features_json` already does: a filter has four
+// optional fields, two of which are string lists, and spreading that over eight
+// arguments is unreadable from the caller side. Result sets come back through
+// the probe-then-fetch JSON convention used by the other list-returning exports,
+// so no new deallocator is introduced.
+
+/// Parse a filter from a JSON object, or the default (match-everything) filter
+/// from a null or empty string. Unknown fields are rejected so a typo in a
+/// binding surfaces as an error instead of silently widening the query.
+unsafe fn assoc_filter_from_json<T: serde::de::DeserializeOwned + Default>(
+    p: *const c_char,
+) -> Result<T, i32> {
+    let s = unsafe { cstr_to_optional_string(p)? };
+    match s {
+        None => Ok(T::default()),
+        Some(s) if s.trim().is_empty() => Ok(T::default()),
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            set_error(format!("invalid association filter JSON: {e}"));
+            TS_ERR_INVALID_PARAMETER
+        }),
+    }
+}
+
+/// Parse a JSON array of association rows for the bulk-add exports.
+unsafe fn assoc_rows_from_json<T: serde::de::DeserializeOwned>(
+    p: *const c_char,
+) -> Result<Vec<T>, i32> {
+    let json = unsafe { cstr_to_str(p)? };
+    serde_json::from_str(json).map_err(|e| {
+        set_error(format!("invalid associations JSON: {e}"));
+        TS_ERR_INVALID_PARAMETER
+    })
+}
+
+/// Serialize a result set and write it into the caller's buffer.
+unsafe fn write_json_out<T: serde::Serialize>(
+    value: &T,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    match serde_json::to_string(value) {
+        Ok(json) => {
+            unsafe { write_str_out(&json, buf, cap, out_len) };
+            TS_OK
+        }
+        Err(e) => {
+            set_error(e.to_string());
+            TS_ERR_INTERNAL
+        }
+    }
+}
+
+// ---- Supplemental-attribute associations ----------------------------------
+
+/// Attach supplemental attribute `(attribute_id, attribute_type)` to component
+/// `(component_id, component_type)`. Returns `TS_ERR_DUPLICATE_ASSOCIATION` if
+/// that component already carries that attribute, whatever type names are
+/// supplied.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `component_type` and
+/// `attribute_type` must point to valid, null-terminated UTF-8 strings that stay
+/// valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_add_supplemental_attribute_association(
+    handle: *mut TsStoreHandle,
+    component_id: i64,
+    component_type: *const c_char,
+    attribute_id: i64,
+    attribute_type: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let component_type = match unsafe { cstr_to_str(component_type) } {
+        Ok(s) => s.to_string(),
+        Err(c) => return c,
+    };
+    let attribute_type = match unsafe { cstr_to_str(attribute_type) } {
+        Ok(s) => s.to_string(),
+        Err(c) => return c,
+    };
+    match store.inner.add_supplemental_attribute_association(
+        core_lib::SupplementalAttributeAssociation {
+            component_id,
+            component_type,
+            attribute_id,
+            attribute_type,
+        },
+    ) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Attach many in one all-or-nothing transaction, from a JSON array of objects
+/// with `component_id`, `component_type`, `attribute_id`, and `attribute_type`.
+/// This is the import half of the bulk round trip whose export is
+/// `ts_store_list_supplemental_attribute_associations` with a null filter. When
+/// non-null, `out_added` receives the number inserted.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `associations_json` a valid,
+/// null-terminated UTF-8 string. When non-null, `out_added` must point to
+/// writable `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_add_supplemental_attribute_associations(
+    handle: *mut TsStoreHandle,
+    associations_json: *const c_char,
+    out_added: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let assocs: Vec<core_lib::SupplementalAttributeAssociation> =
+        match unsafe { assoc_rows_from_json(associations_json) } {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+    match store.inner.add_supplemental_attribute_associations(assocs) {
+        Ok(n) => {
+            if !out_added.is_null() {
+                unsafe { *out_added = n as u64 };
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Whether any attachment matches `filter_json`. Recognized filter fields, all
+/// optional: `component_id`, `component_types`, `attribute_id`,
+/// `attribute_types`. A null or empty string matches everything; an empty type
+/// list matches nothing.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, `filter_json` null or valid
+/// null-terminated UTF-8, and `out_found` valid for writing one `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_has_supplemental_attribute_association(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    out_found: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_found.is_null() {
+        set_error("out_found is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::SupplementalAttributeFilter =
+        match unsafe { assoc_filter_from_json(filter_json) } {
+            Ok(f) => f,
+            Err(c) => return c,
+        };
+    match store.inner.has_supplemental_attribute_association(&filter) {
+        Ok(found) => {
+            unsafe { *out_found = found };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Attachments matching `filter_json` as a JSON array, in insertion order. Each
+/// object carries `component_id`, `component_type`, `attribute_id`, and
+/// `attribute_type`. Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `filter_json` null or valid
+/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+/// valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_supplemental_attribute_associations(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::SupplementalAttributeFilter =
+        match unsafe { assoc_filter_from_json(filter_json) } {
+            Ok(f) => f,
+            Err(c) => return c,
+        };
+    match store
+        .inner
+        .list_supplemental_attribute_associations(&filter)
+    {
+        Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Distinct attribute ids matching `filter_json`, ascending, as a JSON array —
+/// the attributes attached to a component when `component_id` is set.
+/// Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `filter_json` null or valid
+/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+/// valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_supplemental_attribute_ids(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::SupplementalAttributeFilter =
+        match unsafe { assoc_filter_from_json(filter_json) } {
+            Ok(f) => f,
+            Err(c) => return c,
+        };
+    match store.inner.list_supplemental_attribute_ids(&filter) {
+        Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Distinct component ids matching `filter_json`, ascending, as a JSON array —
+/// the components carrying an attribute when `attribute_id` is set.
+/// Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `filter_json` null or valid
+/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+/// valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_components_with_attributes(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::SupplementalAttributeFilter =
+        match unsafe { assoc_filter_from_json(filter_json) } {
+            Ok(f) => f,
+            Err(c) => return c,
+        };
+    match store.inner.list_components_with_attributes(&filter) {
+        Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Remove every attachment matching `filter_json`. When non-null, `out_removed`
+/// receives the number removed; removing nothing is success, not an error.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `filter_json` null or valid
+/// null-terminated UTF-8. When non-null, `out_removed` must point to writable
+/// `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_remove_supplemental_attribute_associations(
+    handle: *mut TsStoreHandle,
+    filter_json: *const c_char,
+    out_removed: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let filter: core_lib::SupplementalAttributeFilter =
+        match unsafe { assoc_filter_from_json(filter_json) } {
+            Ok(f) => f,
+            Err(c) => return c,
+        };
+    match store
+        .inner
+        .remove_supplemental_attribute_associations(&filter)
+    {
+        Ok(n) => {
+            if !out_removed.is_null() {
+                unsafe { *out_removed = n as u64 };
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Move every attachment from component `old_id` to `new_id`. When non-null,
+/// `out_updated` receives the rows changed. Returns
+/// `TS_ERR_DUPLICATE_ASSOCIATION` if `new_id` already carries one of the
+/// attributes being moved.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. When non-null, `out_updated`
+/// must point to writable `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_replace_supplemental_attribute_component_id(
+    handle: *mut TsStoreHandle,
+    old_id: i64,
+    new_id: i64,
+    out_updated: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    match store
+        .inner
+        .replace_supplemental_attribute_component_id(old_id, new_id)
+    {
+        Ok(n) => {
+            if !out_updated.is_null() {
+                unsafe { *out_updated = n as u64 };
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Attachment counts through `out_count`. `kind` selects what is counted: `0` =
+/// rows matching the filter, `1` = distinct attributes among them, `2` =
+/// distinct components among them.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, `filter_json` null or valid
+/// null-terminated UTF-8, and `out_count` valid for writing one `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_count_supplemental_attribute_associations(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    kind: i32,
+    out_count: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_count.is_null() {
+        set_error("out_count is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::SupplementalAttributeFilter =
+        match unsafe { assoc_filter_from_json(filter_json) } {
+            Ok(f) => f,
+            Err(c) => return c,
+        };
+    let counted = match kind {
+        0 => store
+            .inner
+            .count_supplemental_attribute_associations(&filter),
+        1 => store.inner.count_supplemental_attributes(&filter),
+        2 => store.inner.count_components_with_attributes(&filter),
+        other => {
+            set_error(format!("invalid count kind {other}, expected 0, 1, or 2"));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    match counted {
+        Ok(n) => {
+            unsafe { *out_count = n };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Attachment counts grouped by attribute type as a JSON array of
+/// `{"type": …, "count": …}` objects, ordered by type. Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must
+/// be null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_supplemental_attribute_counts_by_type(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let counts = match store.inner.supplemental_attribute_counts_by_type() {
+        Ok(c) => c,
+        Err(e) => return map_core_error(e),
+    };
+    let arr: Vec<Value> = counts
+        .into_iter()
+        .map(|(ty, count)| {
+            let mut o = serde_json::Map::new();
+            o.insert("type".into(), Value::from(ty));
+            o.insert("count".into(), Value::from(count));
+            Value::Object(o)
+        })
+        .collect();
+    let json = Value::Array(arr).to_string();
+    unsafe { write_str_out(&json, buf, cap, out_len) };
+    TS_OK
+}
+
+/// Attachment counts grouped by both type names as a JSON array of
+/// `{"component_type": …, "attribute_type": …, "count": …}` objects, ordered by
+/// attribute type then component type. Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_len` must be writable; `buf` must
+/// be null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_supplemental_attribute_summary(
+    handle: *const TsStoreHandle,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    match store.inner.supplemental_attribute_summary() {
+        Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
+        Err(e) => map_core_error(e),
+    }
+}
+
+// ---- Parent/child associations --------------------------------------------
+
+/// Record a directed edge from component `(parent_id, parent_type)` to component
+/// `(child_id, child_type)`. Returns `TS_ERR_DUPLICATE_ASSOCIATION` if that
+/// ordered pair is already related; the reversed pair is a different edge.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. `parent_type` and `child_type`
+/// must point to valid, null-terminated UTF-8 strings that stay valid for the
+/// call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_add_parent_child_association(
+    handle: *mut TsStoreHandle,
+    parent_id: i64,
+    parent_type: *const c_char,
+    child_id: i64,
+    child_type: *const c_char,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let parent_type = match unsafe { cstr_to_str(parent_type) } {
+        Ok(s) => s.to_string(),
+        Err(c) => return c,
+    };
+    let child_type = match unsafe { cstr_to_str(child_type) } {
+        Ok(s) => s.to_string(),
+        Err(c) => return c,
+    };
+    match store
+        .inner
+        .add_parent_child_association(core_lib::ParentChildAssociation {
+            parent_id,
+            parent_type,
+            child_id,
+            child_type,
+        }) {
+        Ok(()) => TS_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Record many edges in one all-or-nothing transaction, from a JSON array of
+/// objects with `parent_id`, `parent_type`, `child_id`, and `child_type`. When
+/// non-null, `out_added` receives the number inserted.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `associations_json` a valid,
+/// null-terminated UTF-8 string. When non-null, `out_added` must point to
+/// writable `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_add_parent_child_associations(
+    handle: *mut TsStoreHandle,
+    associations_json: *const c_char,
+    out_added: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let assocs: Vec<core_lib::ParentChildAssociation> =
+        match unsafe { assoc_rows_from_json(associations_json) } {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+    match store.inner.add_parent_child_associations(assocs) {
+        Ok(n) => {
+            if !out_added.is_null() {
+                unsafe { *out_added = n as u64 };
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Whether any edge matches `filter_json`. Recognized filter fields, all
+/// optional: `parent_id`, `parent_types`, `child_id`, `child_types`. A null or
+/// empty string matches everything; an empty type list matches nothing.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, `filter_json` null or valid
+/// null-terminated UTF-8, and `out_found` valid for writing one `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_has_parent_child_association(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    out_found: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_found.is_null() {
+        set_error("out_found is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    match store.inner.has_parent_child_association(&filter) {
+        Ok(found) => {
+            unsafe { *out_found = found };
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Edges matching `filter_json` as a JSON array, in insertion order. Each object
+/// carries `parent_id`, `parent_type`, `child_id`, and `child_type`.
+/// Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `filter_json` null or valid
+/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+/// valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_parent_child_associations(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    match store.inner.list_parent_child_associations(&filter) {
+        Ok(rows) => unsafe { write_json_out(&rows, buf, cap, out_len) },
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Distinct ids on one end of the edges matching `filter_json`, ascending, as a
+/// JSON array. `endpoint` is `0` for parents and `1` for children — so
+/// `endpoint = 1` with `parent_id` set is "the children of this component".
+/// Probe-then-fetch.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle and `filter_json` null or valid
+/// null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+/// valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_list_parent_child_ids(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    endpoint: i32,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    let ids = match endpoint {
+        0 => store.inner.list_parents(&filter),
+        1 => store.inner.list_children(&filter),
+        other => {
+            set_error(format!(
+                "invalid endpoint {other}, expected 0 (parent) or 1 (child)"
+            ));
+            return TS_ERR_INVALID_PARAMETER;
+        }
+    };
+    match ids {
+        Ok(ids) => unsafe { write_json_out(&ids, buf, cap, out_len) },
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Remove every edge matching `filter_json`. When non-null, `out_removed`
+/// receives the number removed; removing nothing is success, not an error.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and `filter_json` null or valid
+/// null-terminated UTF-8. When non-null, `out_removed` must point to writable
+/// `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_remove_parent_child_associations(
+    handle: *mut TsStoreHandle,
+    filter_json: *const c_char,
+    out_removed: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    match store.inner.remove_parent_child_associations(&filter) {
+        Ok(n) => {
+            if !out_removed.is_null() {
+                unsafe { *out_removed = n as u64 };
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Rewrite component `old_id` to `new_id` on both ends of every edge. When
+/// non-null, `out_updated` receives the rows changed. Returns
+/// `TS_ERR_DUPLICATE_ASSOCIATION` if the rewrite would duplicate an edge
+/// `new_id` already has.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle. When non-null, `out_updated`
+/// must point to writable `u64` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_replace_parent_child_component_id(
+    handle: *mut TsStoreHandle,
+    old_id: i64,
+    new_id: i64,
+    out_updated: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_mut() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    match store
+        .inner
+        .replace_parent_child_component_id(old_id, new_id)
+    {
+        Ok(n) => {
+            if !out_updated.is_null() {
+                unsafe { *out_updated = n as u64 };
+            }
+            TS_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Number of edges matching `filter_json`, through `out_count`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle, `filter_json` null or valid
+/// null-terminated UTF-8, and `out_count` valid for writing one `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ts_store_count_parent_child_associations(
+    handle: *const TsStoreHandle,
+    filter_json: *const c_char,
+    out_count: *mut i64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return TS_ERR_NULL_POINTER,
+    };
+    if out_count.is_null() {
+        set_error("out_count is null");
+        return TS_ERR_NULL_POINTER;
+    }
+    let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    match store.inner.count_parent_child_associations(&filter) {
+        Ok(n) => {
+            unsafe { *out_count = n };
             TS_OK
         }
         Err(e) => map_core_error(e),

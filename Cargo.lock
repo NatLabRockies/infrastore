@@ -1645,6 +1645,7 @@ dependencies = [
  "cbindgen",
  "chrono",
  "ndarray",
+ "serde",
  "serde_json",
  "time-series-store-core",
  "tracing-subscriber",

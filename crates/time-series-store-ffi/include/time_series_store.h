@@ -34,6 +34,12 @@
  */
 #define TS_ERR_INCOMPATIBLE_FORMAT 9
 
+/**
+ * The endpoint pair of an association is already associated. Distinct from
+ * `TS_ERR_DUPLICATE`, which is about time-series identity.
+ */
+#define TS_ERR_DUPLICATE_ASSOCIATION 10
+
 #define TS_ERR_INTERNAL 99
 
 /**
@@ -1801,6 +1807,305 @@ int32_t ts_store_replace_owner(struct TsStore *handle,
                                int64_t new_owner_id,
                                int32_t owner_category,
                                uint64_t *out_updated);
+
+/**
+ * Attach supplemental attribute `(attribute_id, attribute_type)` to component
+ * `(component_id, component_type)`. Returns `TS_ERR_DUPLICATE_ASSOCIATION` if
+ * that component already carries that attribute, whatever type names are
+ * supplied.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `component_type` and
+ * `attribute_type` must point to valid, null-terminated UTF-8 strings that stay
+ * valid for the call.
+ */
+int32_t ts_store_add_supplemental_attribute_association(struct TsStore *handle,
+                                                        int64_t component_id,
+                                                        const char *component_type,
+                                                        int64_t attribute_id,
+                                                        const char *attribute_type);
+
+/**
+ * Attach many in one all-or-nothing transaction, from a JSON array of objects
+ * with `component_id`, `component_type`, `attribute_id`, and `attribute_type`.
+ * This is the import half of the bulk round trip whose export is
+ * `ts_store_list_supplemental_attribute_associations` with a null filter. When
+ * non-null, `out_added` receives the number inserted.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `associations_json` a valid,
+ * null-terminated UTF-8 string. When non-null, `out_added` must point to
+ * writable `u64` storage.
+ */
+int32_t ts_store_add_supplemental_attribute_associations(struct TsStore *handle,
+                                                         const char *associations_json,
+                                                         uint64_t *out_added);
+
+/**
+ * Whether any attachment matches `filter_json`. Recognized filter fields, all
+ * optional: `component_id`, `component_types`, `attribute_id`,
+ * `attribute_types`. A null or empty string matches everything; an empty type
+ * list matches nothing.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle, `filter_json` null or valid
+ * null-terminated UTF-8, and `out_found` valid for writing one `bool`.
+ */
+int32_t ts_store_has_supplemental_attribute_association(const struct TsStore *handle,
+                                                        const char *filter_json,
+                                                        bool *out_found);
+
+/**
+ * Attachments matching `filter_json` as a JSON array, in insertion order. Each
+ * object carries `component_id`, `component_type`, `attribute_id`, and
+ * `attribute_type`. Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `filter_json` null or valid
+ * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+ * valid for `cap` bytes.
+ */
+int32_t ts_store_list_supplemental_attribute_associations(const struct TsStore *handle,
+                                                          const char *filter_json,
+                                                          char *buf,
+                                                          uint64_t cap,
+                                                          uint64_t *out_len);
+
+/**
+ * Distinct attribute ids matching `filter_json`, ascending, as a JSON array —
+ * the attributes attached to a component when `component_id` is set.
+ * Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `filter_json` null or valid
+ * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+ * valid for `cap` bytes.
+ */
+int32_t ts_store_list_supplemental_attribute_ids(const struct TsStore *handle,
+                                                 const char *filter_json,
+                                                 char *buf,
+                                                 uint64_t cap,
+                                                 uint64_t *out_len);
+
+/**
+ * Distinct component ids matching `filter_json`, ascending, as a JSON array —
+ * the components carrying an attribute when `attribute_id` is set.
+ * Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `filter_json` null or valid
+ * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+ * valid for `cap` bytes.
+ */
+int32_t ts_store_list_components_with_attributes(const struct TsStore *handle,
+                                                 const char *filter_json,
+                                                 char *buf,
+                                                 uint64_t cap,
+                                                 uint64_t *out_len);
+
+/**
+ * Remove every attachment matching `filter_json`. When non-null, `out_removed`
+ * receives the number removed; removing nothing is success, not an error.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `filter_json` null or valid
+ * null-terminated UTF-8. When non-null, `out_removed` must point to writable
+ * `u64` storage.
+ */
+int32_t ts_store_remove_supplemental_attribute_associations(struct TsStore *handle,
+                                                            const char *filter_json,
+                                                            uint64_t *out_removed);
+
+/**
+ * Move every attachment from component `old_id` to `new_id`. When non-null,
+ * `out_updated` receives the rows changed. Returns
+ * `TS_ERR_DUPLICATE_ASSOCIATION` if `new_id` already carries one of the
+ * attributes being moved.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. When non-null, `out_updated`
+ * must point to writable `u64` storage.
+ */
+int32_t ts_store_replace_supplemental_attribute_component_id(struct TsStore *handle,
+                                                             int64_t old_id,
+                                                             int64_t new_id,
+                                                             uint64_t *out_updated);
+
+/**
+ * Attachment counts through `out_count`. `kind` selects what is counted: `0` =
+ * rows matching the filter, `1` = distinct attributes among them, `2` =
+ * distinct components among them.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle, `filter_json` null or valid
+ * null-terminated UTF-8, and `out_count` valid for writing one `i64`.
+ */
+int32_t ts_store_count_supplemental_attribute_associations(const struct TsStore *handle,
+                                                           const char *filter_json,
+                                                           int32_t kind,
+                                                           int64_t *out_count);
+
+/**
+ * Attachment counts grouped by attribute type as a JSON array of
+ * `{"type": …, "count": …}` objects, ordered by type. Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must
+ * be null or valid for `cap` bytes.
+ */
+int32_t ts_store_supplemental_attribute_counts_by_type(const struct TsStore *handle,
+                                                       char *buf,
+                                                       uint64_t cap,
+                                                       uint64_t *out_len);
+
+/**
+ * Attachment counts grouped by both type names as a JSON array of
+ * `{"component_type": …, "attribute_type": …, "count": …}` objects, ordered by
+ * attribute type then component type. Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_len` must be writable; `buf` must
+ * be null or valid for `cap` bytes.
+ */
+int32_t ts_store_supplemental_attribute_summary(const struct TsStore *handle,
+                                                char *buf,
+                                                uint64_t cap,
+                                                uint64_t *out_len);
+
+/**
+ * Record a directed edge from component `(parent_id, parent_type)` to component
+ * `(child_id, child_type)`. Returns `TS_ERR_DUPLICATE_ASSOCIATION` if that
+ * ordered pair is already related; the reversed pair is a different edge.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. `parent_type` and `child_type`
+ * must point to valid, null-terminated UTF-8 strings that stay valid for the
+ * call.
+ */
+int32_t ts_store_add_parent_child_association(struct TsStore *handle,
+                                              int64_t parent_id,
+                                              const char *parent_type,
+                                              int64_t child_id,
+                                              const char *child_type);
+
+/**
+ * Record many edges in one all-or-nothing transaction, from a JSON array of
+ * objects with `parent_id`, `parent_type`, `child_id`, and `child_type`. When
+ * non-null, `out_added` receives the number inserted.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `associations_json` a valid,
+ * null-terminated UTF-8 string. When non-null, `out_added` must point to
+ * writable `u64` storage.
+ */
+int32_t ts_store_add_parent_child_associations(struct TsStore *handle,
+                                               const char *associations_json,
+                                               uint64_t *out_added);
+
+/**
+ * Whether any edge matches `filter_json`. Recognized filter fields, all
+ * optional: `parent_id`, `parent_types`, `child_id`, `child_types`. A null or
+ * empty string matches everything; an empty type list matches nothing.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle, `filter_json` null or valid
+ * null-terminated UTF-8, and `out_found` valid for writing one `bool`.
+ */
+int32_t ts_store_has_parent_child_association(const struct TsStore *handle,
+                                              const char *filter_json,
+                                              bool *out_found);
+
+/**
+ * Edges matching `filter_json` as a JSON array, in insertion order. Each object
+ * carries `parent_id`, `parent_type`, `child_id`, and `child_type`.
+ * Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `filter_json` null or valid
+ * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+ * valid for `cap` bytes.
+ */
+int32_t ts_store_list_parent_child_associations(const struct TsStore *handle,
+                                                const char *filter_json,
+                                                char *buf,
+                                                uint64_t cap,
+                                                uint64_t *out_len);
+
+/**
+ * Distinct ids on one end of the edges matching `filter_json`, ascending, as a
+ * JSON array. `endpoint` is `0` for parents and `1` for children — so
+ * `endpoint = 1` with `parent_id` set is "the children of this component".
+ * Probe-then-fetch.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle and `filter_json` null or valid
+ * null-terminated UTF-8. `out_len` must be writable; `buf` must be null or
+ * valid for `cap` bytes.
+ */
+int32_t ts_store_list_parent_child_ids(const struct TsStore *handle,
+                                       const char *filter_json,
+                                       int32_t endpoint,
+                                       char *buf,
+                                       uint64_t cap,
+                                       uint64_t *out_len);
+
+/**
+ * Remove every edge matching `filter_json`. When non-null, `out_removed`
+ * receives the number removed; removing nothing is success, not an error.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle and `filter_json` null or valid
+ * null-terminated UTF-8. When non-null, `out_removed` must point to writable
+ * `u64` storage.
+ */
+int32_t ts_store_remove_parent_child_associations(struct TsStore *handle,
+                                                  const char *filter_json,
+                                                  uint64_t *out_removed);
+
+/**
+ * Rewrite component `old_id` to `new_id` on both ends of every edge. When
+ * non-null, `out_updated` receives the rows changed. Returns
+ * `TS_ERR_DUPLICATE_ASSOCIATION` if the rewrite would duplicate an edge
+ * `new_id` already has.
+ *
+ * # Safety
+ *
+ * `handle` must be a live mutable store handle. When non-null, `out_updated`
+ * must point to writable `u64` storage.
+ */
+int32_t ts_store_replace_parent_child_component_id(struct TsStore *handle,
+                                                   int64_t old_id,
+                                                   int64_t new_id,
+                                                   uint64_t *out_updated);
+
+/**
+ * Number of edges matching `filter_json`, through `out_count`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle, `filter_json` null or valid
+ * null-terminated UTF-8, and `out_count` valid for writing one `i64`.
+ */
+int32_t ts_store_count_parent_child_associations(const struct TsStore *handle,
+                                                 const char *filter_json,
+                                                 int64_t *out_count);
 
 /**
  * Release a key handle returned by this library.

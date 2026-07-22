@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, SeriesFamily,
-    references_to_in_tx,
+    AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, ParentChildAssociation,
+    ParentChildFilter, SeriesFamily, SupplementalAttributeAssociation, SupplementalAttributeFilter,
+    SupplementalAttributeSummaryRow, references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader, WindowRead};
 use crate::storage::{
@@ -1712,6 +1713,249 @@ impl Store {
     /// configuration, with the association count).
     pub fn forecast_summary(&self) -> Result<Vec<crate::metadata::ForecastSummaryRow>> {
         self.metadata.forecast_summary()
+    }
+
+    // ---- Supplemental-attribute associations ------------------------------
+    //
+    // Which supplemental attributes are attached to which components. The store
+    // holds the relationship only: the attributes and components themselves live
+    // in the consumer's object graph. Attachments are independent of time series
+    // in both directions — removing a component's series leaves its attachments
+    // alone, and vice versa.
+
+    /// Attach a supplemental attribute to a component. Fails with
+    /// [`TimeSeriesError::DuplicateAssociation`] if that component already
+    /// carries that attribute, whatever type names are supplied.
+    pub fn add_supplemental_attribute_association(
+        &mut self,
+        assoc: SupplementalAttributeAssociation,
+    ) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Attach many in one all-or-nothing transaction, returning the number
+    /// inserted. A duplicate anywhere in the batch rolls the whole batch back.
+    /// This is the import half of the bulk round trip whose export is
+    /// [`Self::list_supplemental_attribute_associations`] with a default filter.
+    pub fn add_supplemental_attribute_associations(
+        &mut self,
+        assocs: Vec<SupplementalAttributeAssociation>,
+    ) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        for assoc in &assocs {
+            MetadataStore::insert_supplemental_attribute_association(&tx, assoc)?;
+        }
+        tx.commit()?;
+        Ok(assocs.len())
+    }
+
+    /// Whether any attachment matches `filter`.
+    pub fn has_supplemental_attribute_association(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<bool> {
+        self.metadata.has_supplemental_attribute_association(filter)
+    }
+
+    /// Full attachment rows matching `filter`, in insertion order. The default
+    /// filter exports the whole table.
+    pub fn list_supplemental_attribute_associations(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<SupplementalAttributeAssociation>> {
+        self.metadata
+            .list_supplemental_attribute_associations(filter)
+    }
+
+    /// Distinct attribute ids matching `filter`, ascending — the attributes
+    /// attached to a component when `filter.component_id` is set.
+    pub fn list_supplemental_attribute_ids(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<i64>> {
+        self.metadata.list_supplemental_attribute_ids(filter)
+    }
+
+    /// Distinct component ids matching `filter`, ascending — the components
+    /// carrying an attribute when `filter.attribute_id` is set.
+    pub fn list_components_with_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<i64>> {
+        self.metadata.list_components_with_attributes(filter)
+    }
+
+    /// Remove every attachment matching `filter`, returning the number removed.
+    /// Matching nothing is `Ok(0)`: the store has no view of whether the caller
+    /// expected a hit, so the count is the caller's to assert on.
+    pub fn remove_supplemental_attribute_associations(
+        &mut self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let removed = MetadataStore::delete_supplemental_attribute_associations(&tx, filter)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Move every attachment from component `old_id` to `new_id`, returning the
+    /// rows updated. Fails with [`TimeSeriesError::DuplicateAssociation`] if
+    /// `new_id` already carries one of the attributes being moved.
+    pub fn replace_supplemental_attribute_component_id(
+        &mut self,
+        old_id: i64,
+        new_id: i64,
+    ) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let updated =
+            MetadataStore::replace_supplemental_attribute_component_id(&tx, old_id, new_id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Number of attachments matching `filter`.
+    pub fn count_supplemental_attribute_associations(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64> {
+        self.metadata
+            .count_supplemental_attribute_associations(filter)
+    }
+
+    /// Number of *distinct* attributes among the attachments matching `filter`.
+    pub fn count_supplemental_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64> {
+        self.metadata.count_supplemental_attributes(filter)
+    }
+
+    /// Number of *distinct* components among the attachments matching `filter`.
+    pub fn count_components_with_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64> {
+        self.metadata.count_components_with_attributes(filter)
+    }
+
+    /// Attachment counts grouped by attribute type.
+    pub fn supplemental_attribute_counts_by_type(&self) -> Result<Vec<(String, i64)>> {
+        self.metadata.supplemental_attribute_counts_by_type()
+    }
+
+    /// Attachment counts grouped by both type names, ordered by attribute type
+    /// then component type.
+    pub fn supplemental_attribute_summary(&self) -> Result<Vec<SupplementalAttributeSummaryRow>> {
+        self.metadata.supplemental_attribute_summary()
+    }
+
+    // ---- Parent/child associations ----------------------------------------
+    //
+    // Directed edges between components — a generator (parent) connected to a
+    // bus (child), say. Same independence from time series as attachments above.
+
+    /// Record a parent/child edge. Fails with
+    /// [`TimeSeriesError::DuplicateAssociation`] if that ordered pair is already
+    /// related.
+    pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        MetadataStore::insert_parent_child_association(&tx, &assoc)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record many edges in one all-or-nothing transaction, returning the number
+    /// inserted.
+    pub fn add_parent_child_associations(
+        &mut self,
+        assocs: Vec<ParentChildAssociation>,
+    ) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        for assoc in &assocs {
+            MetadataStore::insert_parent_child_association(&tx, assoc)?;
+        }
+        tx.commit()?;
+        Ok(assocs.len())
+    }
+
+    /// Whether any edge matches `filter`.
+    pub fn has_parent_child_association(&self, filter: &ParentChildFilter) -> Result<bool> {
+        self.metadata.has_parent_child_association(filter)
+    }
+
+    /// Full edge rows matching `filter`, in insertion order.
+    pub fn list_parent_child_associations(
+        &self,
+        filter: &ParentChildFilter,
+    ) -> Result<Vec<ParentChildAssociation>> {
+        self.metadata.list_parent_child_associations(filter)
+    }
+
+    /// Distinct child ids matching `filter`, ascending — the children of a
+    /// component when `filter.parent_id` is set.
+    pub fn list_children(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
+        self.metadata.list_children(filter)
+    }
+
+    /// Distinct parent ids matching `filter`, ascending — the parents of a
+    /// component when `filter.child_id` is set.
+    pub fn list_parents(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
+        self.metadata.list_parents(filter)
+    }
+
+    /// Remove every edge matching `filter`, returning the number removed.
+    /// Matching nothing is `Ok(0)`.
+    pub fn remove_parent_child_associations(
+        &mut self,
+        filter: &ParentChildFilter,
+    ) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let removed = MetadataStore::delete_parent_child_associations(&tx, filter)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Rewrite component `old_id` to `new_id` on both ends of every edge,
+    /// returning the rows updated. Fails with
+    /// [`TimeSeriesError::DuplicateAssociation`] if the rewrite would duplicate
+    /// an edge `new_id` already has.
+    pub fn replace_parent_child_component_id(&mut self, old_id: i64, new_id: i64) -> Result<usize> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let tx = self.metadata.transaction()?;
+        let updated = MetadataStore::replace_parent_child_component_id(&tx, old_id, new_id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Number of edges matching `filter`.
+    pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64> {
+        self.metadata.count_parent_child_associations(filter)
     }
 
     /// Reclaim space in both halves of the artifact: reusable packed slots and

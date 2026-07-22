@@ -1721,3 +1721,139 @@ end
     close!(store)
     @test occursin("closed", sprint(show, store))
 end
+
+@testset "Supplemental-attribute associations" begin
+    store = Store(in_memory=true)
+
+    attach(component_id, attribute_id) = SupplementalAttributeAssociation(
+        component_id, "Generator", attribute_id, "GeographicInfo"
+    )
+
+    add_supplemental_attribute_association!(store, attach(1, 100))
+    add_supplemental_attribute_association!(store, attach(2, 100))
+    @test count_supplemental_attribute_associations(store) == 2
+    @test list_supplemental_attribute_associations(store) ==
+        [attach(1, 100), attach(2, 100)]
+
+    # Identity is the (component, attribute) pair: re-attaching it under
+    # different type names is still a duplicate.
+    @test_throws TimeSeriesStore.DuplicateAssociationError add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(1, "Load", 100, "Outage")
+    )
+
+    add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(1, "Generator", 101, "Outage")
+    )
+
+    # Filters, including the multi-type IN list IS3 renders after expanding an
+    # abstract type, and the empty list that deliberately matches nothing.
+    @test length(list_supplemental_attribute_associations(store; component_id=1)) == 2
+    @test length(
+        list_supplemental_attribute_associations(
+            store; attribute_types=["GeographicInfo", "Outage"]
+        ),
+    ) == 3
+    @test isempty(list_supplemental_attribute_associations(store; attribute_types=String[]))
+    @test has_supplemental_attribute_association(store; component_id=1, attribute_id=100)
+    @test !has_supplemental_attribute_association(store; component_id=7)
+
+    # Distinct ids on either side, and the counts built on them.
+    @test list_supplemental_attribute_ids(store; component_id=1) == [100, 101]
+    @test list_components_with_attributes(store; attribute_id=100) == [1, 2]
+    @test count_supplemental_attributes(store) == 2
+    @test count_components_with_attributes(store) == 2
+
+    @test supplemental_attribute_counts_by_type(store) ==
+        [(type="GeographicInfo", count=2), (type="Outage", count=1)]
+    summary = supplemental_attribute_summary(store)
+    @test (component_type="Generator", attribute_type="GeographicInfo", count=2) in summary
+    @test sum(r.count for r in summary) == 3
+
+    # Component rewrite, and the collision it can hit.
+    @test remove_supplemental_attribute_associations!(store; component_id=2) == 1
+    @test replace_supplemental_attribute_component_id!(store, 1, 5) == 2
+    @test list_components_with_attributes(store) == [5]
+    add_supplemental_attribute_association!(store, attach(6, 100))
+    @test_throws TimeSeriesStore.DuplicateAssociationError replace_supplemental_attribute_component_id!(
+        store, 6, 5
+    )
+
+    # Removing nothing is a count of zero, not an error.
+    @test remove_supplemental_attribute_associations!(store; component_id=999) == 0
+
+    # Bulk import/export round trip (IS3's from_records/to_records).
+    exported = list_supplemental_attribute_associations(store)
+    target = Store(in_memory=true)
+    @test add_supplemental_attribute_associations!(target, exported) == length(exported)
+    @test list_supplemental_attribute_associations(target) == exported
+
+    # Base overloads: structural equality, hash, compact show.
+    @test attach(1, 100) == attach(1, 100)
+    @test hash(attach(1, 100)) == hash(attach(1, 100))
+    @test attach(1, 100) != attach(2, 100)
+    @test occursin("Generator 1 <- GeographicInfo 100", sprint(show, attach(1, 100)))
+
+    close!(target)
+    close!(store)
+end
+
+@testset "Parent/child associations" begin
+    store = Store(in_memory=true)
+
+    edge(parent_id, child_id) =
+        ParentChildAssociation(parent_id, "Generator", child_id, "Bus")
+
+    add_parent_child_association!(store, edge(1, 7))
+    add_parent_child_association!(store, edge(2, 7))
+    @test count_parent_child_associations(store) == 2
+    @test list_parent_child_associations(store) == [edge(1, 7), edge(2, 7)]
+
+    # Identity is the ordered pair, so the reverse is a different edge but a
+    # repeat under different type names is not.
+    @test_throws TimeSeriesStore.DuplicateAssociationError add_parent_child_association!(
+        store, ParentChildAssociation(1, "Load", 7, "Area")
+    )
+    add_parent_child_association!(store, ParentChildAssociation(7, "Bus", 1, "Generator"))
+    @test count_parent_child_associations(store) == 3
+
+    add_parent_child_association!(store, edge(1, 8))
+    @test list_children(store; parent_id=1) == [7, 8]
+    @test list_parents(store; child_id=7) == [1, 2]
+    @test has_parent_child_association(store; parent_id=1, child_id=8)
+    @test !has_parent_child_association(store; parent_id=99)
+    @test length(list_parent_child_associations(store; parent_types=["Bus"])) == 1
+    @test isempty(list_parent_child_associations(store; child_types=String[]))
+
+    # Rewriting a component id touches both ends of every edge.
+    @test remove_parent_child_associations!(store; parent_types=["Bus"]) == 1
+    @test replace_parent_child_component_id!(store, 1, 5) == 2
+    @test list_parents(store) == [2, 5]
+    @test remove_parent_child_associations!(store; parent_id=999) == 0
+
+    # Bulk round trip and the show/equality overloads.
+    exported = list_parent_child_associations(store)
+    target = Store(in_memory=true)
+    @test add_parent_child_associations!(target, exported) == length(exported)
+    @test list_parent_child_associations(target) == exported
+    @test hash(edge(1, 7)) == hash(edge(1, 7))
+    @test occursin("Generator 1 -> Bus 7", sprint(show, edge(1, 7)))
+
+    # Both catalogs survive persist!/open_store, and a read-only store rejects
+    # writes while still serving reads.
+    add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(5, "Generator", 100, "GeographicInfo")
+    )
+    dir = mktempdir()
+    dest = joinpath(dir, "assoc.nc")
+    persist!(store, dest)
+    reopened = open_store(dest; read_only=true)
+    @test list_parent_child_associations(reopened) == exported
+    @test count_supplemental_attribute_associations(reopened) == 1
+    @test_throws TimeSeriesStore.ReadOnlyStoreError add_parent_child_association!(
+        reopened, edge(9, 900)
+    )
+    close!(reopened)
+
+    close!(target)
+    close!(store)
+end

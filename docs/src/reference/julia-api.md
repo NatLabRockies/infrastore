@@ -14,14 +14,24 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `AddBatch`, `add_time_series_bulk!`, `get_time_series`, `bulk_read`, `get_time_series_keys`,
 `key_info`, `list_keys`, `list_array_groups`, `remove_time_series!`, `has_time_series`,
 `get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
-`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
-`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
-`get_forecast_metadata`, `get_array_by_hash`, `count_array_references`, `open_store`, `flush!`,
-`clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`,
-`copy_time_series!`, `close!`, `persist!`, `StaticReader`, `build_static_reader`, `static_grid`,
-`static_groups`, `static_read!`, `static_values`, `ForecastReader`, `build_forecast_reader`,
-`forecast_timeline`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_values`,
-`init_logging`.
+`static_summary`, `forecast_summary`, `SupplementalAttributeAssociation`,
+`add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
+`has_supplemental_attribute_association`, `list_supplemental_attribute_associations`,
+`list_supplemental_attribute_ids`, `list_components_with_attributes`,
+`remove_supplemental_attribute_associations!`, `replace_supplemental_attribute_component_id!`,
+`count_supplemental_attribute_associations`, `count_supplemental_attributes`,
+`count_components_with_attributes`, `supplemental_attribute_counts_by_type`,
+`supplemental_attribute_summary`, `ParentChildAssociation`, `add_parent_child_association!`,
+`add_parent_child_associations!`, `has_parent_child_association`, `list_parent_child_associations`,
+`list_children`, `list_parents`, `remove_parent_child_associations!`,
+`replace_parent_child_component_id!`, `count_parent_child_associations`, `get_forecast_parameters`,
+`check_static_consistency`, `get_resolutions`, `get_compression`, `verify_integrity`, `compact!`,
+`get_metadata`, `get_forecast_metadata`, `get_array_by_hash`, `count_array_references`,
+`open_store`, `flush!`, `clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`,
+`remove_typed!`, `copy_time_series!`, `close!`, `persist!`, `StaticReader`, `build_static_reader`,
+`static_grid`, `static_groups`, `static_read!`, `static_values`, `ForecastReader`,
+`build_forecast_reader`, `forecast_timeline`, `forecast_entries`, `forecast_num_slots`,
+`forecast_read!`, `forecast_values`, `init_logging`.
 
 ## Constructors
 
@@ -610,20 +620,162 @@ off each metadata row); there are no per-row `get_metadata` round-trips.
 Because a DST shares its backing `SingleTimeSeries` array, a caller uses these counts to decide
 whether removing a `SingleTimeSeries` would orphan a derived DST.
 
+## Associations
+
+Two catalogs of relationships between entities the store does not otherwise model, replacing the
+association tables IS3.jl used to keep itself. Both are **independent of time series**: there are no
+foreign keys and no cascade (both endpoints live in the caller's object graph, so a cascade could
+never fire), so removing a time series never removes an association and vice versa; a caller that
+wants both makes both calls.
+
+Every query in a family takes that family's four optional keyword filters, ANDed; with none set they
+match every row, which is what makes a bare `list_*` call a whole-catalog export that the matching
+`add_*!` re-imports unchanged. The `*_types` keywords take a vector of **concrete** type names,
+matched as SQL `IN (…)`: expanding an abstract type into its subtypes stays on the Julia side, where
+the type hierarchy lives, and an empty vector matches nothing, unlike omitting the keyword, which
+matches everything. Every `remove_*!` returns the number of rows removed; removing nothing is `0`,
+not an error.
+
+### Supplemental-attribute associations
+
+Which supplemental attributes are attached to which components. One attribute may be attached to
+many components.
+
+```julia
+struct SupplementalAttributeAssociation
+    component_id::Int64
+    component_type::String
+    attribute_id::Int64
+    attribute_type::String
+end
+```
+
+`SupplementalAttributeAssociation` overloads `==`, `hash`, and `show` (a compact
+`SupplementalAttributeAssociation(Generator 1 <- GeographicInfo 100)`), so attachments work as
+`Dict`/`Set` members. In the **catalog**, identity is only the `(component_id, attribute_id)` pair —
+the type names are denormalized labels carried for filtering — so re-attaching the same pair under
+different type names throws `DuplicateAssociationError`.
+
+```julia
+add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -> Nothing
+add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -> Int
+                                  # one all-or-nothing transaction; count inserted
+has_supplemental_attribute_association(store; filters...) -> Bool
+list_supplemental_attribute_associations(store; filters...) -> Vector{SupplementalAttributeAssociation}
+                                  # insertion order
+list_supplemental_attribute_ids(store; filters...) -> Vector{Int}
+                                  # distinct attribute ids, ascending
+list_components_with_attributes(store; filters...) -> Vector{Int}
+                                  # distinct component ids, ascending
+remove_supplemental_attribute_associations!(store; filters...) -> Int   # count removed
+replace_supplemental_attribute_component_id!(store, old_id, new_id) -> Int   # rows updated
+count_supplemental_attribute_associations(store; filters...) -> Int
+count_supplemental_attributes(store; filters...) -> Int
+count_components_with_attributes(store; filters...) -> Int
+supplemental_attribute_counts_by_type(store) -> Vector{NamedTuple}   # (type, count), by type
+supplemental_attribute_summary(store) -> Vector{NamedTuple}
+                                  # (component_type, attribute_type, count), by attribute then component type
+```
+
+The four keyword filters are `component_id`, `component_types`, `attribute_id`, and
+`attribute_types`.
+
+`list_supplemental_attribute_ids` is "the attributes attached to this component" when `component_id`
+is set; `list_components_with_attributes` is the other end, "the components carrying this attribute"
+when `attribute_id` is set. `count_supplemental_attributes` and `count_components_with_attributes`
+are those two queries counted, and `count_supplemental_attribute_associations` counts the matching
+rows themselves.
+
+`replace_supplemental_attribute_component_id!` moves every attachment from component `old_id` to
+`new_id`, and throws `DuplicateAssociationError` if `new_id` already carries one of the attributes
+being moved.
+
+```julia
+store = Store(in_memory=true)
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo"))
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo"))
+
+list_supplemental_attribute_ids(store; component_id=1)     # [100]
+list_components_with_attributes(store; attribute_id=100)   # [1, 2]
+
+remove_supplemental_attribute_associations!(store; component_id=1)
+# 1; component 1's time series are untouched
+```
+
+### Parent/child associations
+
+Directed edges between components — a generator (parent) wired to a bus (child), say. Both endpoints
+are always components; an attribute cannot appear here.
+
+```julia
+struct ParentChildAssociation
+    parent_id::Int64
+    parent_type::String
+    child_id::Int64
+    child_type::String
+end
+```
+
+`ParentChildAssociation` overloads `==`, `hash`, and `show` (a compact
+`ParentChildAssociation(Generator 1 -> Bus 7)`) the same way. In the **catalog**, identity is the
+_ordered_ `(parent_id, child_id)` pair, so the reversed pair is a different edge, while repeating
+the same ordered pair under different type names throws `DuplicateAssociationError`. There is no
+relationship-kind column, so one ordered pair may be related at most once.
+
+This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.
+
+```julia
+add_parent_child_association!(store, association::ParentChildAssociation) -> Nothing
+add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -> Int
+                                  # one all-or-nothing transaction; count inserted
+has_parent_child_association(store; filters...) -> Bool
+list_parent_child_associations(store; filters...) -> Vector{ParentChildAssociation}
+                                  # insertion order
+list_children(store; filters...) -> Vector{Int}   # distinct child ids, ascending
+list_parents(store; filters...) -> Vector{Int}    # distinct parent ids, ascending
+remove_parent_child_associations!(store; filters...) -> Int   # count removed
+replace_parent_child_component_id!(store, old_id, new_id) -> Int   # rows updated
+count_parent_child_associations(store; filters...) -> Int
+```
+
+The four keyword filters are `parent_id`, `parent_types`, `child_id`, and `child_types`.
+
+`replace_parent_child_component_id!` rewrites `old_id` to `new_id` on **both** ends of every edge,
+and throws `DuplicateAssociationError` if the rewrite would duplicate an edge `new_id` already has.
+
+```julia
+store = Store(in_memory=true)
+add_parent_child_association!(store, ParentChildAssociation(1, "Generator", 7, "Bus"))
+# The reversed pair is a different edge, not a duplicate.
+add_parent_child_association!(store, ParentChildAssociation(7, "Bus", 1, "Generator"))
+
+list_children(store; parent_id=1)   # [7]
+list_parents(store; child_id=7)     # [1]
+
+remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
+```
+
+Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
+[`tss` CLI](./cli.md).
+
 ## Errors
 
 All subtype `TimeSeriesException`:
 
-| Type                       | Mapped from FFI code                                                       |
-| -------------------------- | -------------------------------------------------------------------------- |
-| `NotFoundError`            | `TS_ERR_NOT_FOUND`                                                         |
-| `DuplicateTimeSeriesError` | `TS_ERR_DUPLICATE`                                                         |
-| `InvalidParameterError`    | `TS_ERR_INVALID_PARAMETER` / `TS_ERR_INVALID_UTF8` / `TS_ERR_NULL_POINTER` |
-| `IntegrityError`           | `TS_ERR_INTEGRITY`                                                         |
-| `ReadOnlyStoreError`       | `TS_ERR_READ_ONLY`                                                         |
-| `IncompatibleFormatError`  | `TS_ERR_INCOMPATIBLE_FORMAT`                                               |
-| `IOError`                  | `TS_ERR_IO`                                                                |
-| `GenericError`             | Any other non-zero code (carries the numeric `code`)                       |
+| Type                        | Mapped from FFI code                                                       |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `NotFoundError`             | `TS_ERR_NOT_FOUND`                                                         |
+| `DuplicateTimeSeriesError`  | `TS_ERR_DUPLICATE`                                                         |
+| `DuplicateAssociationError` | `TS_ERR_DUPLICATE_ASSOCIATION`                                             |
+| `InvalidParameterError`     | `TS_ERR_INVALID_PARAMETER` / `TS_ERR_INVALID_UTF8` / `TS_ERR_NULL_POINTER` |
+| `IntegrityError`            | `TS_ERR_INTEGRITY`                                                         |
+| `ReadOnlyStoreError`        | `TS_ERR_READ_ONLY`                                                         |
+| `IncompatibleFormatError`   | `TS_ERR_INCOMPATIBLE_FORMAT`                                               |
+| `IOError`                   | `TS_ERR_IO`                                                                |
+| `GenericError`              | Any other non-zero code (carries the numeric `code`)                       |
 
 The message text comes from the FFI layer's thread-local error buffer.
 

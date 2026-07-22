@@ -11,6 +11,17 @@ pub enum TimeSeriesError {
     #[error("a time series with the same key already exists")]
     DuplicateTimeSeries,
 
+    /// An association with the same identity already exists: the
+    /// `(component_id, attribute_id)` pair for a supplemental-attribute
+    /// attachment, or the ordered `(parent_id, child_id)` pair for a
+    /// parent/child edge. Type names are not part of either identity, so the
+    /// same pair under different type names still collides.
+    ///
+    /// The payload names the offending pair in that relationship's own
+    /// vocabulary; it is a human-readable message, not a parseable encoding.
+    #[error("duplicate association: {0}")]
+    DuplicateAssociation(String),
+
     #[error("invalid parameter: {0}")]
     InvalidParameter(String),
 

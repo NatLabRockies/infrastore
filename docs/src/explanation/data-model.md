@@ -204,3 +204,56 @@ Each association can also carry:
   reconstructing a domain object on read. The store never interprets it.
 
 These are recorded in metadata and returned on read, but they do not affect identity or storage.
+
+## Associations Between Entities
+
+Beyond owning time series, catalog entities can be related to each other. The catalog records two
+such relationships, in two separate tables, because they are not the same kind of thing: attaching
+an attribute to a component and wiring one component to another have different identities and
+different query patterns.
+
+### Supplemental attributes attached to components
+
+| Field                            | Meaning                                  |
+| -------------------------------- | ---------------------------------------- |
+| `component_id`, `component_type` | The component carrying the attribute     |
+| `attribute_id`, `attribute_type` | The supplemental attribute being carried |
+
+**Identity is the `(component_id, attribute_id)` pair.** The type names are denormalized labels, not
+part of identity: re-attaching the same pair under different type names is a duplicate and is
+rejected. One attribute may be attached to many components, and one component may carry many
+attributes; only the exact pair is constrained.
+
+### Parent/child edges between components
+
+| Field                      | Meaning                                          |
+| -------------------------- | ------------------------------------------------ |
+| `parent_id`, `parent_type` | The parent component, e.g. a generator           |
+| `child_id`, `child_type`   | The child component, e.g. the bus it connects to |
+
+Both endpoints are always components, so unlike time-series owners there is no category to
+disambiguate. **Identity is the ordered `(parent_id, child_id)` pair** — the reversed pair is a
+different edge. There is no relationship-kind column, so a given pair may be related at most once.
+
+### Properties shared by both
+
+Two consequences of the deliberate absence of foreign keys and cascades:
+
+- **Associations and time series are independent in both directions.** Removing a component's time
+  series does not remove its attribute attachments or its edges, and removing either does not touch
+  any series. A consumer that wants both effects makes both calls.
+- **The store never observes a deletion it did not perform.** Components and attributes live in the
+  consumer's object graph, so a cascade could never fire; consumers call the matching `remove_*`
+  with the appropriate filter instead.
+
+Filtering takes lists of **concrete** type names, rendered into SQL `IN (…)`. Expanding an abstract
+type into its subtypes stays in the calling language, where the type hierarchy lives.
+
+> Terminology: rows of the `time_series_associations` table — the owner-to-time-series records
+> described above — are also called "associations" throughout this documentation and the code. They
+> are unrelated to the entity-to-entity tables described in this section.
+
+Both are available in the Rust core, the C ABI, Julia, and Python; neither is exposed over gRPC or
+the `tss` CLI. The supplemental-attribute surface is the wider of the two (it carries counts and a
+grouped summary) because each of its operations is driven by an existing consumer; the parent/child
+surface is deliberately narrower for now.

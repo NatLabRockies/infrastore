@@ -10,6 +10,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 
 use crate::types::period::Period;
 
@@ -22,6 +23,15 @@ use crate::types::time_series::TimeSeriesType;
 pub struct MetadataStore {
     conn: Connection,
     read_only: bool,
+    /// Whether the two association tables exist on this connection.
+    ///
+    /// The DDL creates them on every writable open, so they are always present
+    /// for a writable store. A read-only open of a store written before they
+    /// existed cannot run DDL, and must degrade to empty reads rather than
+    /// erroring — a table can never appear or vanish under a live connection, so
+    /// this is resolved once at open.
+    has_supplemental_attribute_table: bool,
+    has_parent_child_table: bool,
 }
 
 /// One grouped row of the static-series summary: a distinct
@@ -55,6 +65,256 @@ pub struct ForecastSummaryRow {
     pub interval: Option<Period>,
     pub window_count: Option<i64>,
     pub count: i64,
+}
+
+// ---- Association catalogs --------------------------------------------------
+//
+// Two tables, one shape. Both record a relationship between two catalog
+// entities as a pair of `(id, type)` endpoints, so the SQL is written once
+// against an [`AssocTable`] descriptor and each table supplies its own column
+// names. The public types below are per-table and fully named, because the
+// relationships are not interchangeable: a call site should never have to
+// remember whether "from" means a component or an attribute.
+
+/// Column layout of one association table. Every field is a `&'static str`
+/// chosen in this module, never caller text, so interpolating them into SQL is
+/// safe by construction.
+#[derive(Debug, Clone, Copy)]
+struct AssocTable {
+    name: &'static str,
+    left_id: &'static str,
+    left_type: &'static str,
+    right_id: &'static str,
+    right_type: &'static str,
+}
+
+const SUPPLEMENTAL_ATTRIBUTE_TABLE: AssocTable = AssocTable {
+    name: "supplemental_attribute_associations",
+    left_id: "component_id",
+    left_type: "component_type",
+    right_id: "attribute_id",
+    right_type: "attribute_type",
+};
+
+const PARENT_CHILD_TABLE: AssocTable = AssocTable {
+    name: "parent_child_associations",
+    left_id: "parent_id",
+    left_type: "parent_type",
+    right_id: "child_id",
+    right_type: "child_type",
+};
+
+/// Which endpoint of an association a shared query addresses. Internal: the
+/// public API names both endpoints outright (`list_children`,
+/// `list_supplemental_attribute_ids`) rather than making callers pass a side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Left,
+    Right,
+}
+
+impl AssocTable {
+    fn id_column(self, endpoint: Endpoint) -> &'static str {
+        match endpoint {
+            Endpoint::Left => self.left_id,
+            Endpoint::Right => self.right_id,
+        }
+    }
+
+    fn type_column(self, endpoint: Endpoint) -> &'static str {
+        match endpoint {
+            Endpoint::Left => self.left_type,
+            Endpoint::Right => self.right_type,
+        }
+    }
+}
+
+/// Table-agnostic predicate over an association table's four columns. Public
+/// filters convert into this; it is never exposed.
+#[derive(Debug, Default, Clone)]
+struct EndpointFilter {
+    left_id: Option<i64>,
+    left_types: Option<Vec<String>>,
+    right_id: Option<i64>,
+    right_types: Option<Vec<String>>,
+}
+
+impl EndpointFilter {
+    /// Render as a `WHERE` clause plus its bound parameters, so every query over
+    /// either table (select, count, delete) shares one predicate builder.
+    fn to_sql(&self, table: AssocTable) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut sql = String::from("WHERE 1=1");
+        let mut params = Vec::new();
+        push_eq(&mut sql, &mut params, table.left_id, self.left_id);
+        push_eq(&mut sql, &mut params, table.right_id, self.right_id);
+        push_type_list(&mut sql, &mut params, table.left_type, &self.left_types);
+        push_type_list(&mut sql, &mut params, table.right_type, &self.right_types);
+        (sql, params)
+    }
+}
+
+/// One row of `supplemental_attribute_associations`: a supplemental attribute
+/// attached to a component.
+///
+/// Identity is the `(component_id, attribute_id)` pair. The type names are
+/// denormalized labels carried for filtering and reporting, so re-attaching the
+/// same pair under different type names is still a duplicate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SupplementalAttributeAssociation {
+    pub component_id: i64,
+    pub component_type: String,
+    pub attribute_id: i64,
+    pub attribute_type: String,
+}
+
+/// One row of `parent_child_associations`: a directed edge between two
+/// components, e.g. a generator (parent) connected to a bus (child).
+///
+/// Identity is the `(parent_id, child_id)` pair. Both endpoints are always
+/// components — an attribute cannot appear here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ParentChildAssociation {
+    pub parent_id: i64,
+    pub parent_type: String,
+    pub child_id: i64,
+    pub child_type: String,
+}
+
+/// One grouped row of the supplemental-attribute summary: a distinct
+/// `(attribute_type, component_type)` pair and how many attachments share it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupplementalAttributeSummaryRow {
+    pub component_type: String,
+    pub attribute_type: String,
+    pub count: i64,
+}
+
+/// Predicate over `supplemental_attribute_associations`. All set fields are
+/// ANDed; the default filter matches every row, which is what makes bulk export
+/// a plain `list_supplemental_attribute_associations(&Default::default())`.
+///
+/// Serde-serializable so a binding can hand the whole predicate across a
+/// boundary as one JSON value instead of four positional arguments; every field
+/// is optional, so a partial object deserializes fine.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupplementalAttributeFilter {
+    pub component_id: Option<i64>,
+    /// Concrete type names, rendered as SQL `IN (…)`. Expanding an abstract type
+    /// into its concrete subtypes stays with the caller, where the type
+    /// hierarchy lives. `Some(vec![])` is an empty allow-list and matches
+    /// nothing.
+    pub component_types: Option<Vec<String>>,
+    pub attribute_id: Option<i64>,
+    pub attribute_types: Option<Vec<String>>,
+}
+
+impl SupplementalAttributeFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn component_id(mut self, id: i64) -> Self {
+        self.component_id = Some(id);
+        self
+    }
+    pub fn component_types(mut self, types: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.component_types = Some(types.into_iter().map(Into::into).collect());
+        self
+    }
+    pub fn attribute_id(mut self, id: i64) -> Self {
+        self.attribute_id = Some(id);
+        self
+    }
+    pub fn attribute_types(mut self, types: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.attribute_types = Some(types.into_iter().map(Into::into).collect());
+        self
+    }
+
+    fn endpoints(&self) -> EndpointFilter {
+        EndpointFilter {
+            left_id: self.component_id,
+            left_types: self.component_types.clone(),
+            right_id: self.attribute_id,
+            right_types: self.attribute_types.clone(),
+        }
+    }
+}
+
+/// Predicate over `parent_child_associations`, with the same semantics as
+/// [`SupplementalAttributeFilter`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentChildFilter {
+    pub parent_id: Option<i64>,
+    pub parent_types: Option<Vec<String>>,
+    pub child_id: Option<i64>,
+    pub child_types: Option<Vec<String>>,
+}
+
+impl ParentChildFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn parent_id(mut self, id: i64) -> Self {
+        self.parent_id = Some(id);
+        self
+    }
+    pub fn parent_types(mut self, types: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.parent_types = Some(types.into_iter().map(Into::into).collect());
+        self
+    }
+    pub fn child_id(mut self, id: i64) -> Self {
+        self.child_id = Some(id);
+        self
+    }
+    pub fn child_types(mut self, types: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.child_types = Some(types.into_iter().map(Into::into).collect());
+        self
+    }
+
+    fn endpoints(&self) -> EndpointFilter {
+        EndpointFilter {
+            left_id: self.parent_id,
+            left_types: self.parent_types.clone(),
+            right_id: self.child_id,
+            right_types: self.child_types.clone(),
+        }
+    }
+}
+
+/// Append an equality predicate for a set optional value. Every `column` in this
+/// module is a literal chosen here, never caller text.
+fn push_eq<T: rusqlite::ToSql + 'static>(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    column: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        sql.push_str(&format!(" AND {column} = ?"));
+        params.push(Box::new(value));
+    }
+}
+
+/// Append an `IN (…)` predicate for a type allow-list.
+fn push_type_list(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    column: &str,
+    types: &Option<Vec<String>>,
+) {
+    let Some(types) = types else { return };
+    if types.is_empty() {
+        // An empty allow-list selects nothing. SQLite rejects `IN ()`, so say it
+        // with a false constant instead.
+        sql.push_str(" AND 0");
+        return;
+    }
+    let placeholders = vec!["?"; types.len()].join(", ");
+    sql.push_str(&format!(" AND {column} IN ({placeholders})"));
+    for t in types {
+        params.push(Box::new(t.clone()));
+    }
 }
 
 fn parse_opt_rfc3339(s: Option<String>) -> Result<Option<DateTime<Utc>>> {
@@ -95,7 +355,7 @@ pub struct MetadataFilter {
     /// Subset match: rows must contain at least these key/value pairs.
     pub features: Option<Features>,
     /// Exact features-set match by precomputed hash. When set, this is pushed
-    /// into the SQL WHERE so the `uq_assoc` unique index can pinpoint the row,
+    /// into the SQL WHERE so the `uq_ts_assoc` unique index can pinpoint the row,
     /// avoiding a feature fetch+compare for siblings that share the other key
     /// columns. Distinct from `features` (an in-memory subset filter).
     pub features_hash: Option<[u8; 32]>,
@@ -201,9 +461,14 @@ impl MetadataStore {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::init(&conn)?;
+        let has_supplemental_attribute_table =
+            table_exists(&conn, "supplemental_attribute_associations")?;
+        let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
         Ok(Self {
             conn,
             read_only: false,
+            has_supplemental_attribute_table,
+            has_parent_child_table,
         })
     }
 
@@ -225,7 +490,15 @@ impl MetadataStore {
             Connection::open(path)?
         };
         Self::init(&conn)?;
-        Ok(Self { conn, read_only })
+        let has_supplemental_attribute_table =
+            table_exists(&conn, "supplemental_attribute_associations")?;
+        let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
+        Ok(Self {
+            conn,
+            read_only,
+            has_supplemental_attribute_table,
+            has_parent_child_table,
+        })
     }
 
     fn init(conn: &Connection) -> Result<()> {
@@ -1020,6 +1293,443 @@ impl MetadataStore {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    // ---- Association catalogs ---------------------------------------------
+    //
+    // The `assoc_*` helpers are the shared engine: one implementation per query
+    // shape, parameterized by an [`AssocTable`]. The typed wrappers below them
+    // are what `Store` calls.
+    //
+    // Every read short-circuits when its table is absent, which happens only for
+    // a read-only open of a store last written before these tables existed.
+    // Returning the empty answer keeps that store readable rather than turning a
+    // purely additive schema change into a hard failure; see the DDL comment in
+    // `schema.rs`. Writes need no such guard: a writable open always ran the DDL.
+
+    fn assoc_present(&self, table: AssocTable) -> bool {
+        match table.name {
+            "supplemental_attribute_associations" => self.has_supplemental_attribute_table,
+            _ => self.has_parent_child_table,
+        }
+    }
+
+    /// Both endpoint pairs of every matching row, in insertion order.
+    fn assoc_list(
+        &self,
+        table: AssocTable,
+        filter: &EndpointFilter,
+    ) -> Result<Vec<(i64, String, i64, String)>> {
+        if !self.assoc_present(table) {
+            return Ok(Vec::new());
+        }
+        let (where_clause, params) = filter.to_sql(table);
+        let param_refs = to_param_refs(&params);
+        // Ordered by rowid so a bulk export/import round trip preserves the
+        // order the caller inserted in.
+        let sql = format!(
+            "SELECT {}, {}, {}, {} FROM {} {where_clause} ORDER BY id",
+            table.left_id, table.left_type, table.right_id, table.right_type, table.name
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn assoc_has(&self, table: AssocTable, filter: &EndpointFilter) -> Result<bool> {
+        if !self.assoc_present(table) {
+            return Ok(false);
+        }
+        let (where_clause, params) = filter.to_sql(table);
+        let param_refs = to_param_refs(&params);
+        let sql = format!("SELECT 1 FROM {} {where_clause} LIMIT 1", table.name);
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let found: Option<i64> = stmt
+            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Distinct ids at `endpoint` among the matching rows, ascending.
+    fn assoc_ids(
+        &self,
+        table: AssocTable,
+        filter: &EndpointFilter,
+        endpoint: Endpoint,
+    ) -> Result<Vec<i64>> {
+        if !self.assoc_present(table) {
+            return Ok(Vec::new());
+        }
+        let (where_clause, params) = filter.to_sql(table);
+        let param_refs = to_param_refs(&params);
+        let id_col = table.id_column(endpoint);
+        let sql = format!(
+            "SELECT DISTINCT {id_col} FROM {} {where_clause} ORDER BY {id_col}",
+            table.name
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |r| r.get::<_, i64>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Shared body of the counting queries: `projection` is a literal aggregate
+    /// built from a fixed column name, never caller text.
+    fn assoc_count(
+        &self,
+        table: AssocTable,
+        filter: &EndpointFilter,
+        projection: &str,
+    ) -> Result<i64> {
+        if !self.assoc_present(table) {
+            return Ok(0);
+        }
+        let (where_clause, params) = filter.to_sql(table);
+        let param_refs = to_param_refs(&params);
+        let sql = format!("SELECT {projection} FROM {} {where_clause}", table.name);
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        Ok(stmt.query_row(param_refs.as_slice(), |r| r.get(0))?)
+    }
+
+    /// Row counts grouped by the type label at `endpoint`, ordered by type.
+    fn assoc_counts_by_type(
+        &self,
+        table: AssocTable,
+        endpoint: Endpoint,
+    ) -> Result<Vec<(String, i64)>> {
+        if !self.assoc_present(table) {
+            return Ok(Vec::new());
+        }
+        let type_col = table.type_column(endpoint);
+        let sql = format!(
+            "SELECT {type_col}, COUNT(*) FROM {} GROUP BY {type_col} ORDER BY {type_col}",
+            table.name
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn assoc_insert(
+        tx: &Transaction<'_>,
+        table: AssocTable,
+        left_id: i64,
+        left_type: &str,
+        right_id: i64,
+        right_type: &str,
+        detail: &str,
+    ) -> Result<i64> {
+        let sql = format!(
+            "INSERT INTO {} ({}, {}, {}, {}) VALUES (?1, ?2, ?3, ?4)",
+            table.name, table.left_id, table.left_type, table.right_id, table.right_type
+        );
+        let mut stmt = tx.prepare_cached(&sql)?;
+        stmt.execute(params![left_id, left_type, right_id, right_type])
+            .map_err(|e| map_association_violation(e, detail))?;
+        Ok(tx.last_insert_rowid())
+    }
+
+    fn assoc_delete(
+        tx: &Transaction<'_>,
+        table: AssocTable,
+        filter: &EndpointFilter,
+    ) -> Result<usize> {
+        let (where_clause, params) = filter.to_sql(table);
+        let param_refs = to_param_refs(&params);
+        let sql = format!("DELETE FROM {} {where_clause}", table.name);
+        Ok(tx.execute(&sql, param_refs.as_slice())?)
+    }
+
+    // ---- Supplemental-attribute associations ------------------------------
+
+    pub fn insert_supplemental_attribute_association(
+        tx: &Transaction<'_>,
+        assoc: &SupplementalAttributeAssociation,
+    ) -> Result<i64> {
+        Self::assoc_insert(
+            tx,
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            assoc.component_id,
+            &assoc.component_type,
+            assoc.attribute_id,
+            &assoc.attribute_type,
+            &format!(
+                "attribute {} is already attached to component {}",
+                assoc.attribute_id, assoc.component_id
+            ),
+        )
+    }
+
+    pub fn delete_supplemental_attribute_associations(
+        tx: &Transaction<'_>,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<usize> {
+        Self::assoc_delete(tx, SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
+    }
+
+    /// Rewrite `old_id` to `new_id` wherever it names a component, e.g. after a
+    /// component is replaced by one that inherits its attachments.
+    pub fn replace_supplemental_attribute_component_id(
+        tx: &Transaction<'_>,
+        old_id: i64,
+        new_id: i64,
+    ) -> Result<usize> {
+        tx.execute(
+            "UPDATE supplemental_attribute_associations
+             SET component_id = ?1 WHERE component_id = ?2",
+            params![new_id, old_id],
+        )
+        .map_err(|e| {
+            map_association_violation(
+                e,
+                &format!(
+                    "component {new_id} already carries an attribute that component \
+                     {old_id} carries"
+                ),
+            )
+        })
+    }
+
+    pub fn list_supplemental_attribute_associations(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<SupplementalAttributeAssociation>> {
+        Ok(self
+            .assoc_list(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())?
+            .into_iter()
+            .map(
+                |(component_id, component_type, attribute_id, attribute_type)| {
+                    SupplementalAttributeAssociation {
+                        component_id,
+                        component_type,
+                        attribute_id,
+                        attribute_type,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    pub fn has_supplemental_attribute_association(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<bool> {
+        self.assoc_has(SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
+    }
+
+    /// Distinct attribute ids matching `filter` — the attributes attached to a
+    /// component when `filter.component_id` is set.
+    pub fn list_supplemental_attribute_ids(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<i64>> {
+        self.assoc_ids(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            Endpoint::Right,
+        )
+    }
+
+    /// Distinct component ids matching `filter` — the components carrying an
+    /// attribute when `filter.attribute_id` is set.
+    pub fn list_components_with_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<i64>> {
+        self.assoc_ids(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            Endpoint::Left,
+        )
+    }
+
+    pub fn count_supplemental_attribute_associations(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64> {
+        self.assoc_count(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            "COUNT(*)",
+        )
+    }
+
+    pub fn count_supplemental_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64> {
+        self.assoc_count(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            "COUNT(DISTINCT attribute_id)",
+        )
+    }
+
+    pub fn count_components_with_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64> {
+        self.assoc_count(
+            SUPPLEMENTAL_ATTRIBUTE_TABLE,
+            &filter.endpoints(),
+            "COUNT(DISTINCT component_id)",
+        )
+    }
+
+    /// Attachment counts grouped by attribute type.
+    pub fn supplemental_attribute_counts_by_type(&self) -> Result<Vec<(String, i64)>> {
+        self.assoc_counts_by_type(SUPPLEMENTAL_ATTRIBUTE_TABLE, Endpoint::Right)
+    }
+
+    /// Attachment counts grouped by both type labels.
+    pub fn supplemental_attribute_summary(&self) -> Result<Vec<SupplementalAttributeSummaryRow>> {
+        if !self.has_supplemental_attribute_table {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT attribute_type, component_type, COUNT(*)
+             FROM supplemental_attribute_associations
+             GROUP BY attribute_type, component_type
+             ORDER BY attribute_type, component_type",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SupplementalAttributeSummaryRow {
+                attribute_type: r.get(0)?,
+                component_type: r.get(1)?,
+                count: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    // ---- Parent/child associations ----------------------------------------
+
+    pub fn insert_parent_child_association(
+        tx: &Transaction<'_>,
+        assoc: &ParentChildAssociation,
+    ) -> Result<i64> {
+        Self::assoc_insert(
+            tx,
+            PARENT_CHILD_TABLE,
+            assoc.parent_id,
+            &assoc.parent_type,
+            assoc.child_id,
+            &assoc.child_type,
+            &format!(
+                "component {} is already the parent of component {}",
+                assoc.parent_id, assoc.child_id
+            ),
+        )
+    }
+
+    pub fn delete_parent_child_associations(
+        tx: &Transaction<'_>,
+        filter: &ParentChildFilter,
+    ) -> Result<usize> {
+        Self::assoc_delete(tx, PARENT_CHILD_TABLE, &filter.endpoints())
+    }
+
+    /// Rewrite `old_id` to `new_id` wherever it names a component, on either end
+    /// of an edge. Done in one statement rather than one per column so a
+    /// self-edge (`parent_id = child_id = old_id`) is counted once, not twice.
+    pub fn replace_parent_child_component_id(
+        tx: &Transaction<'_>,
+        old_id: i64,
+        new_id: i64,
+    ) -> Result<usize> {
+        tx.execute(
+            "UPDATE parent_child_associations
+             SET parent_id = CASE WHEN parent_id = ?2 THEN ?1 ELSE parent_id END,
+                 child_id  = CASE WHEN child_id  = ?2 THEN ?1 ELSE child_id  END
+             WHERE parent_id = ?2 OR child_id = ?2",
+            params![new_id, old_id],
+        )
+        .map_err(|e| {
+            map_association_violation(
+                e,
+                &format!("rewriting component {old_id} to {new_id} would duplicate an edge"),
+            )
+        })
+    }
+
+    pub fn list_parent_child_associations(
+        &self,
+        filter: &ParentChildFilter,
+    ) -> Result<Vec<ParentChildAssociation>> {
+        Ok(self
+            .assoc_list(PARENT_CHILD_TABLE, &filter.endpoints())?
+            .into_iter()
+            .map(
+                |(parent_id, parent_type, child_id, child_type)| ParentChildAssociation {
+                    parent_id,
+                    parent_type,
+                    child_id,
+                    child_type,
+                },
+            )
+            .collect())
+    }
+
+    pub fn has_parent_child_association(&self, filter: &ParentChildFilter) -> Result<bool> {
+        self.assoc_has(PARENT_CHILD_TABLE, &filter.endpoints())
+    }
+
+    /// Distinct child ids matching `filter` — the children of a component when
+    /// `filter.parent_id` is set.
+    pub fn list_children(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
+        self.assoc_ids(PARENT_CHILD_TABLE, &filter.endpoints(), Endpoint::Right)
+    }
+
+    /// Distinct parent ids matching `filter` — the parents of a component when
+    /// `filter.child_id` is set.
+    pub fn list_parents(&self, filter: &ParentChildFilter) -> Result<Vec<i64>> {
+        self.assoc_ids(PARENT_CHILD_TABLE, &filter.endpoints(), Endpoint::Left)
+    }
+
+    pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64> {
+        self.assoc_count(PARENT_CHILD_TABLE, &filter.endpoints(), "COUNT(*)")
+    }
+}
+
+/// Borrow a boxed parameter list as rusqlite's slice-of-trait-objects form.
+fn to_param_refs(params: &[Box<dyn rusqlite::ToSql>]) -> Vec<&dyn rusqlite::ToSql> {
+    params
+        .iter()
+        .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+        .collect()
+}
+
+/// Whether `name` is a table in the main schema. Consulted once per connection
+/// at open for each association table.
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Map a constraint violation on an association table to
+/// [`TimeSeriesError::DuplicateAssociation`], passing every other error through.
+/// The unique index on the endpoint-id pair is the only constraint either table
+/// carries, so a violation can mean nothing else. `detail` names the offending
+/// pair in the relationship's own vocabulary.
+fn map_association_violation(e: rusqlite::Error, detail: &str) -> TimeSeriesError {
+    match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            TimeSeriesError::DuplicateAssociation(detail.to_string())
+        }
+        other => other.into(),
     }
 }
 

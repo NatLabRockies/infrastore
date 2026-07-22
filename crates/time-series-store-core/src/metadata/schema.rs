@@ -1,4 +1,9 @@
-/// SQLite DDL applied at store creation. Idempotent (`CREATE TABLE IF NOT EXISTS`).
+/// SQLite DDL applied on every writable open, not just at creation. Idempotent
+/// (`CREATE TABLE IF NOT EXISTS` / `CREATE ... INDEX IF NOT EXISTS`), which is
+/// what lets a purely additive table land without a `DATA_FORMAT_VERSION` bump:
+/// an older store picks the new table up the first time it is opened for
+/// writing. Read-only opens skip the DDL entirely, so any table added this way
+/// must be optional on the read path.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
@@ -65,12 +70,12 @@ CREATE TABLE IF NOT EXISTS feature_sets (
 -- for static types (Single/NonSequential), which never carry an interval.
 -- Two indexes are required to enforce and serve it, and BOTH must be kept:
 --
---   * uq_assoc indexes resolution and interval as plain columns. It serves the
---     equality/IS NULL lookups in get_by_key/list/delete_by_key (an expression
---     index cannot be used for those), but it does NOT enforce uniqueness when
---     resolution or interval IS NULL, because SQLite treats NULLs as distinct in
---     a UNIQUE index.
---   * uq_assoc_coalesced closes that gap by COALESCE-ing NULL resolutions and
+--   * uq_ts_assoc indexes resolution and interval as plain columns. It serves
+--     the equality/IS NULL lookups in get_by_key/list/delete_by_key (an
+--     expression index cannot be used for those), but it does NOT enforce
+--     uniqueness when resolution or interval IS NULL, because SQLite treats
+--     NULLs as distinct in a UNIQUE index.
+--   * uq_ts_assoc_coalesced closes that gap by COALESCE-ing NULL resolutions and
 --     intervals to a sentinel, so NULL-resolution/NULL-interval types (e.g.
 --     NonSequentialTimeSeries, and any static series) also get the uniqueness
 --     guarantee. The sentinel is the empty string, which is never a valid
@@ -80,12 +85,24 @@ CREATE TABLE IF NOT EXISTS feature_sets (
 -- 'P1M', 'P1Y') so calendar (irregular) periods are distinguishable from fixed
 -- ones.
 --
--- Do not "deduplicate" these into one index: dropping uq_assoc loses the query
--- index; dropping uq_assoc_coalesced loses NULL-resolution/NULL-interval
--- uniqueness.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc ON time_series_associations
+-- Do not "deduplicate" these into one index: dropping uq_ts_assoc loses the
+-- query index; dropping uq_ts_assoc_coalesced loses NULL-resolution/
+-- NULL-interval uniqueness.
+--
+-- These two carried the shorter names uq_assoc / uq_assoc_coalesced until the
+-- association tables below arrived and made a bare "assoc" ambiguous. The DROPs
+-- rename them in place on an existing store: without them, `CREATE ... IF NOT
+-- EXISTS` would add the new pair and leave the old pair behind, so every insert
+-- would maintain four indexes instead of two. Both are no-ops on a fresh store,
+-- and re-creating a UNIQUE index cannot fail here because the index being
+-- dropped enforced the very same constraint. Index names are not part of the
+-- on-disk contract, so this needs no DATA_FORMAT_VERSION bump; an older build
+-- opening the store would simply re-create the old names alongside.
+DROP INDEX IF EXISTS uq_assoc;
+DROP INDEX IF EXISTS uq_assoc_coalesced;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc ON time_series_associations
     (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_assoc_coalesced ON time_series_associations
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc_coalesced ON time_series_associations
     (owner_id, owner_category, time_series_type, name,
      COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
 
@@ -94,4 +111,71 @@ CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_id, o
 CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+
+-- The two association tables below record relationships between catalog
+-- entities, independent of time series. They are deliberately separate rather
+-- than one generic endpoint table: attaching an attribute to a component and
+-- wiring a component to another component are different relationships, and
+-- naming the columns after them keeps every query and error message
+-- self-describing. Both are the same *shape* — a pair of (id, type) endpoints —
+-- so the Rust side renders their SQL from one table descriptor.
+--
+-- Properties shared by both, and by neither the caller's nor SQLite's default:
+--
+--   * NO foreign keys and NO cascade. The endpoints live in the consumer's own
+--     object graph, so this store never observes a component or an attribute
+--     being deleted and a cascade could never fire. Consumers call the matching
+--     `remove_*` explicitly instead.
+--   * Independent of `time_series_associations`. Removing a time series never
+--     touches these rows and vice versa; a consumer wanting both effects makes
+--     both calls.
+--   * Added additively, without bumping DATA_FORMAT_VERSION. The DDL is
+--     idempotent, so an older store gains both tables on its first writable
+--     open and older code ignores them. A read-only open of an older store
+--     cannot run DDL, so every read of these tables tolerates the table being
+--     absent (see `MetadataStore::has_supplemental_attribute_table` and
+--     `has_parent_child_table`).
+
+-- Which supplemental attributes are attached to which components. Columns match
+-- infrasys' table of the same name, whose logic this replaces (IS3.jl kept an
+-- equivalent table under a different name).
+--
+-- Identity is the (component_id, attribute_id) pair; the type columns are
+-- denormalized labels carried for filtering, not part of identity. One
+-- component may carry an attribute at most once.
+CREATE TABLE IF NOT EXISTS supplemental_attribute_associations (
+    id             INTEGER PRIMARY KEY,
+    component_id   INTEGER NOT NULL,
+    component_type TEXT    NOT NULL,
+    attribute_id   INTEGER NOT NULL,
+    attribute_type TEXT    NOT NULL
+);
+
+-- uq_sa_assoc doubles as the by-component query index; the reverse direction
+-- ("which components carry this attribute") needs its own.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sa_assoc
+    ON supplemental_attribute_associations(component_id, attribute_id);
+CREATE INDEX IF NOT EXISTS ix_sa_assoc_attribute
+    ON supplemental_attribute_associations(attribute_id, component_id, component_type);
+
+-- Directed parent/child edges between components — e.g. a generator (parent)
+-- connected to a bus (child). Both endpoints are always components, which is
+-- why there is no category column: a supplemental attribute cannot appear here
+-- by construction.
+--
+-- Identity is the (parent_id, child_id) pair. One pair is related at most once;
+-- there is no relationship-kind column, so a second kind of edge between the
+-- same two components would need one added (and the unique index widened).
+CREATE TABLE IF NOT EXISTS parent_child_associations (
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER NOT NULL,
+    parent_type TEXT    NOT NULL,
+    child_id    INTEGER NOT NULL,
+    child_type  TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_parent_child
+    ON parent_child_associations(parent_id, child_id);
+CREATE INDEX IF NOT EXISTS ix_parent_child_child
+    ON parent_child_associations(child_id, parent_id, parent_type);
 "#;

@@ -34,9 +34,14 @@ and Python. The discovery/maintenance surface (`get_intervals`, `list_names`, `l
 name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_filter`,
 `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
 preserving `logical_type`, and serde on the core types) is available in the Rust core and threaded
-through the C ABI/Julia and Python bindings. Metadata getters surface `element_shape` and `features`
-in every binding. Python ships type stubs (`time_series_store.pyi` + a pytest drift guard), a full
-exception hierarchy, and keyword-only optional arguments; Julia overloads `Base`
+through the C ABI/Julia and Python bindings. Two **association catalogs** are available in the Rust
+core, C ABI, Julia, and Python, but not over gRPC or the CLI: `supplemental_attribute_associations`
+(component ↔ supplemental attribute, the wider surface — counts, counts-by-type, grouped summary)
+and `parent_child_associations` (directed component ↔ component edges, e.g. a generator connected to
+a bus, deliberately narrower until a consumer needs more). Both are independent of time series in
+both directions, and of each other. Metadata getters surface `element_shape` and `features` in every
+binding. Python ships type stubs (`time_series_store.pyi` + a pytest drift guard), a full exception
+hierarchy, and keyword-only optional arguments; Julia overloads `Base`
 (`==`/`hash`/`show`/`length`/`iterate`) and offers do-block `Store`/`open_store` forms. A stored
 `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
 design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI

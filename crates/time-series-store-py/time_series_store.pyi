@@ -26,6 +26,7 @@ __version__: str
 class TimeSeriesError(Exception): ...
 class NotFoundError(TimeSeriesError): ...
 class DuplicateTimeSeriesError(TimeSeriesError): ...
+class DuplicateAssociationError(TimeSeriesError): ...
 class InvalidParameterError(TimeSeriesError): ...
 class IntegrityError(TimeSeriesError): ...
 class ReadOnlyStoreError(TimeSeriesError): ...
@@ -210,6 +211,48 @@ class TimeSeriesKey:
     def interval(self) -> str | None: ...
     @property
     def features(self) -> dict[str, int | float | bool | str]: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+
+# ---- Associations ----------------------------------------------------------
+
+@final
+class SupplementalAttributeAssociation:
+    def __init__(
+        self,
+        component_id: int,
+        component_type: str,
+        attribute_id: int,
+        attribute_type: str,
+    ) -> None: ...
+    @property
+    def component_id(self) -> int: ...
+    @property
+    def component_type(self) -> str: ...
+    @property
+    def attribute_id(self) -> int: ...
+    @property
+    def attribute_type(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
+
+@final
+class ParentChildAssociation:
+    def __init__(
+        self,
+        parent_id: int,
+        parent_type: str,
+        child_id: int,
+        child_type: str,
+    ) -> None: ...
+    @property
+    def parent_id(self) -> int: ...
+    @property
+    def parent_type(self) -> str: ...
+    @property
+    def child_id(self) -> int: ...
+    @property
+    def child_type(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...
 
@@ -474,5 +517,139 @@ class TimeSeriesStore:
         self, resolution: Period | None = None
     ) -> list[dict[str, Any]]: ...
     def verify_integrity(self) -> dict[str, Any]: ...
+
+    # -- supplemental-attribute associations --
+    def add_supplemental_attribute_association(
+        self, association: SupplementalAttributeAssociation
+    ) -> None: ...
+    def add_supplemental_attribute_associations(
+        self, associations: list[SupplementalAttributeAssociation]
+    ) -> int: ...
+    def has_supplemental_attribute_association(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> bool: ...
+    def list_supplemental_attribute_associations(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> list[SupplementalAttributeAssociation]: ...
+    def list_supplemental_attribute_ids(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> list[int]: ...
+    def list_components_with_attributes(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> list[int]: ...
+    def remove_supplemental_attribute_associations(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> int: ...
+    def replace_supplemental_attribute_component_id(
+        self, old_id: int, new_id: int
+    ) -> int: ...
+    def count_supplemental_attribute_associations(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> int: ...
+    def count_supplemental_attributes(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> int: ...
+    def count_components_with_attributes(
+        self,
+        *,
+        component_id: int | None = None,
+        component_types: list[str] | None = None,
+        attribute_id: int | None = None,
+        attribute_types: list[str] | None = None,
+    ) -> int: ...
+    def supplemental_attribute_counts_by_type(self) -> list[tuple[str, int]]: ...
+    def supplemental_attribute_summary(self) -> list[dict[str, Any]]: ...
+
+    # -- parent/child associations --
+    def add_parent_child_association(
+        self, association: ParentChildAssociation
+    ) -> None: ...
+    def add_parent_child_associations(
+        self, associations: list[ParentChildAssociation]
+    ) -> int: ...
+    def has_parent_child_association(
+        self,
+        *,
+        parent_id: int | None = None,
+        parent_types: list[str] | None = None,
+        child_id: int | None = None,
+        child_types: list[str] | None = None,
+    ) -> bool: ...
+    def list_parent_child_associations(
+        self,
+        *,
+        parent_id: int | None = None,
+        parent_types: list[str] | None = None,
+        child_id: int | None = None,
+        child_types: list[str] | None = None,
+    ) -> list[ParentChildAssociation]: ...
+    def list_children(
+        self,
+        *,
+        parent_id: int | None = None,
+        parent_types: list[str] | None = None,
+        child_id: int | None = None,
+        child_types: list[str] | None = None,
+    ) -> list[int]: ...
+    def list_parents(
+        self,
+        *,
+        parent_id: int | None = None,
+        parent_types: list[str] | None = None,
+        child_id: int | None = None,
+        child_types: list[str] | None = None,
+    ) -> list[int]: ...
+    def remove_parent_child_associations(
+        self,
+        *,
+        parent_id: int | None = None,
+        parent_types: list[str] | None = None,
+        child_id: int | None = None,
+        child_types: list[str] | None = None,
+    ) -> int: ...
+    def replace_parent_child_component_id(self, old_id: int, new_id: int) -> int: ...
+    def count_parent_child_associations(
+        self,
+        *,
+        parent_id: int | None = None,
+        parent_types: list[str] | None = None,
+        child_id: int | None = None,
+        child_types: list[str] | None = None,
+    ) -> int: ...
 
 def init_tracing(filter: str) -> None: ...

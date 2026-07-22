@@ -21,7 +21,10 @@ pub use error::{Result, TimeSeriesError};
 // The two hashing utilities a binding genuinely needs: `array_hash` to
 // content-address an array and `hash_hex` to render a 32-byte hash as hex.
 pub use hash::{array_hash, hash_hex};
-pub use metadata::{ForecastSummaryRow, StaticSummaryRow};
+pub use metadata::{
+    ForecastSummaryRow, ParentChildAssociation, ParentChildFilter, StaticSummaryRow,
+    SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
+};
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{CompactionReport, Compression, IntegrityReport};
 pub use store::{

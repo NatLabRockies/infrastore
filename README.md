@@ -28,6 +28,14 @@ Spec:
   `list_owner_types`, name-pattern filtering (`ListFilter::name_glob`, SQLite `GLOB` semantics),
   filtered/bulk delete (`remove_by_filter`, `remove_time_series_bulk`), `rename_time_series`,
   time-sliced `bulk_read`, and serde on the core types.
+- **Association catalogs**: two tables recording relationships between catalog entities,
+  independently of time series, so consumers no longer keep a SQLite database of their own for them.
+  `supplemental_attribute_associations` records which attributes are attached to which components
+  (the wider surface: add, bulk add, `has_`, `list_`, both id directions, remove, three counts,
+  counts-by-type, a grouped summary, and a component rewrite). `parent_child_associations` records
+  directed edges between components — a generator connected to a bus, say — with a narrower surface
+  (`list_children` / `list_parents`, remove, count, rewrite). Both are available in the Rust core, C
+  ABI, Julia, and Python; neither is exposed over gRPC or the CLI.
 - Language-idiomatic bindings: the Python wheel ships type stubs (`.pyi`), a full exception
   hierarchy, keyword-only optional arguments, and `__eq__`/`__len__` on the value classes; the Julia
   package overloads `Base` (`==`/`hash` on keys via the core identity, `show`,
@@ -194,7 +202,10 @@ contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash 
 empty string marks a free slot. Standalone arrays are stored as `arr_{hex_hash}`.
 
 Metadata lives in a catalog SQLite file at `<path>.sqlite`. Two artifacts ship together; an
-`archive` helper that bundles them is post-v0.
+`archive` helper that bundles them is post-v0. The catalog also holds the two association tables,
+which were added additively — a store written before they existed gains them on its first writable
+open, and a read-only open of such a store reports no associations rather than failing, so no
+`data_format_version` bump was needed.
 
 ## Open questions resolved for v0
 

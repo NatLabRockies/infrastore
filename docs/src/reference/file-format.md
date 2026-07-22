@@ -22,7 +22,9 @@ compression         = "deflate:3:shuffle"
 
 `data_format_version` is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when
 the NetCDF layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md)
-changes in a backward-incompatible way.
+changes in a backward-incompatible way. A purely additive SQLite table does not qualify: it costs
+old readers nothing and old stores pick it up from the idempotent DDL on their first writable open.
+The [`associations`](#associations) table landed that way.
 
 `compression` records the filter policy the store was created with, so that appends made after
 reopening reuse the same filter. It is **not** part of the compatibility contract — see
@@ -244,6 +246,85 @@ deletion semantics as the NetCDF side's unreachable standalone variables. `Store
 unreachable sets and reports the count as `feature_sets_reclaimed`; clearing a store drops them all
 outright.
 
+### `supplemental_attribute_associations`
+
+Which supplemental attributes are attached to which components. Columns match infrasys' table of the
+same name, whose logic this replaces. See
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities) for the
+data model.
+
+```sql
+CREATE TABLE supplemental_attribute_associations (
+    id             INTEGER PRIMARY KEY,
+    component_id   INTEGER NOT NULL,
+    component_type TEXT    NOT NULL,
+    attribute_id   INTEGER NOT NULL,
+    attribute_type TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX uq_sa_assoc
+    ON supplemental_attribute_associations(component_id, attribute_id);
+CREATE INDEX ix_sa_assoc_attribute
+    ON supplemental_attribute_associations(attribute_id, component_id, component_type);
+```
+
+`uq_sa_assoc` makes the `(component_id, attribute_id)` pair the row's identity — the type columns
+are denormalized labels for filtering, so the same pair under different type names is a duplicate
+and surfaces as `DuplicateAssociation`. That index also serves lookups keyed on the component;
+`ix_sa_assoc_attribute` serves the reverse direction ("which components carry this attribute").
+
+One attribute may be attached to many components; one component may carry many attributes. Only the
+exact pair is constrained.
+
+### `parent_child_associations`
+
+Directed edges between components — a generator (parent) connected to a bus (child), say. Both
+endpoints are always components, which is why there is no category column: a supplemental attribute
+cannot appear here by construction.
+
+```sql
+CREATE TABLE parent_child_associations (
+    id          INTEGER PRIMARY KEY,
+    parent_id   INTEGER NOT NULL,
+    parent_type TEXT    NOT NULL,
+    child_id    INTEGER NOT NULL,
+    child_type  TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX uq_parent_child
+    ON parent_child_associations(parent_id, child_id);
+CREATE INDEX ix_parent_child_child
+    ON parent_child_associations(child_id, parent_id, parent_type);
+```
+
+Identity is the **ordered** `(parent_id, child_id)` pair, so the reversed pair is a different edge.
+There is no relationship-kind column: two components may be related at most once. Recording a second
+kind of edge between the same pair would need such a column added and `uq_parent_child` widened —
+which is a format change, unlike the tables themselves.
+
+### Properties shared by both association tables
+
+Neither table has a **foreign key** — to `time_series_associations` or anywhere else — and neither
+cascades. The endpoints live in the consumer's object graph, not in this store, so the store never
+observes a component or attribute being deleted and a cascade could never fire. Removing a time
+series therefore leaves both tables untouched, and vice versa; consumers issue both calls when they
+want both effects.
+
+Both are also independent of each other: the same integer may name a row in each without collision.
+
+#### Compatibility
+
+Both tables were added **without** bumping `data_format_version`, which is why a `0.10.0` store may
+or may not contain them:
+
+- Opening a store for writing applies the full DDL, which is idempotent, so a store written before
+  they existed gains both on first writable open.
+- Opening read-only cannot run DDL. Reads of a missing table return empty results (`0`, `false`, no
+  rows) rather than failing.
+
+The version gate is exact equality with no upgrade path, so bumping for purely additive tables would
+have made every existing store unreadable in exchange for nothing.
+
 ### `schema_version`
 
 ```sql
@@ -258,9 +339,9 @@ value `open` validates.
 ### Indexes
 
 ```sql
-CREATE UNIQUE INDEX uq_assoc ON time_series_associations
+CREATE UNIQUE INDEX uq_ts_assoc ON time_series_associations
     (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);
-CREATE UNIQUE INDEX uq_assoc_coalesced ON time_series_associations
+CREATE UNIQUE INDEX uq_ts_assoc_coalesced ON time_series_associations
     (owner_id, owner_category, time_series_type, name,
      COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
 
@@ -274,10 +355,16 @@ violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category
 key, so a component and a supplemental attribute that share an `owner_id` are independent owners.
 `interval` is part of the key, so two forecasts of one variable at the same resolution but different
 intervals are distinct series. SQLite treats `NULL` values as distinct in a `UNIQUE` index, so
-`uq_assoc` does not constrain rows with a `NULL` `resolution` or `interval` (e.g.
-`NonSequentialTimeSeries`, or any static series, which carry no interval). `uq_assoc_coalesced`
+`uq_ts_assoc` does not constrain rows with a `NULL` `resolution` or `interval` (e.g.
+`NonSequentialTimeSeries`, or any static series, which carry no interval). `uq_ts_assoc_coalesced`
 covers that case by folding `NULL` to the empty-string sentinel via `COALESCE` before enforcing
 uniqueness (the empty string is never a valid ISO-8601 period).
+
+These two were named `uq_assoc` and `uq_assoc_coalesced` before the association tables above existed
+and made a bare "assoc" ambiguous. The DDL drops the old names before creating the new ones, so a
+store written by an earlier build is renamed in place on its first writable open rather than
+accumulating two equivalent index pairs. Index names are not part of the on-disk contract, so this
+carries no `data_format_version` change.
 
 ## Field Encoding Notes
 
@@ -297,6 +384,9 @@ ncdump -h system.nc                      # groups, variables, dtypes, shapes
 sqlite3 system.nc.sqlite '.schema'
 sqlite3 system.nc.sqlite \
   'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_associations;'
+# Both association tables are absent in stores written before they existed.
+sqlite3 system.nc.sqlite 'SELECT * FROM supplemental_attribute_associations;'
+sqlite3 system.nc.sqlite 'SELECT * FROM parent_child_associations;'
 ```
 
 To map an association to its values: read its `data_hash`. For a packed array, hex-encode it and

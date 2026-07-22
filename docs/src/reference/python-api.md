@@ -8,8 +8,9 @@ from time_series_store import (
     TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
+    SupplementalAttributeAssociation, ParentChildAssociation,
     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError,
-    InvalidParameterError, IntegrityError, ReadOnlyStoreError,
+    DuplicateAssociationError, InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 ```
 
@@ -344,6 +345,184 @@ Same properties as `Deterministic`, plus:
 forecast.scenario_count -> int
 ```
 
+## Associations
+
+Two catalogs of relationships between entities the store does not otherwise model. Both are
+independent of time series: removing a time series never removes an association, and vice versa
+(there are no foreign keys and no cascade — both endpoints live in the caller's object graph, so a
+cascade could never fire), so a caller that wants both makes both calls.
+
+Every query in both families takes the same keyword-only filter arguments as its family's `has_*`
+method. All are optional and ANDed; with none set they match every row, which is what makes a
+no-filter export and an `add_*` import a round trip. The `*_types` arguments are lists of
+**concrete** type names, matched as SQL `IN (…)`: expanding an abstract type into its subtypes stays
+in Python, where the type hierarchy lives, and an empty list matches nothing — unlike omitting the
+argument, which matches everything. Every `remove_*` returns the number removed; removing nothing
+returns `0` rather than raising.
+
+### Supplemental-attribute associations
+
+Which supplemental attributes are attached to which components. One attribute may be attached to
+many components.
+
+```python
+SupplementalAttributeAssociation(
+    component_id: int,
+    component_type: str,
+    attribute_id: int,
+    attribute_type: str,
+)
+```
+
+Read-only properties: `component_id`, `component_type`, `attribute_id`, `attribute_type`. The object
+is hashable and compares structurally, so attachments work in sets and as dict keys. In the
+**catalog**, though, identity is only the `(component_id, attribute_id)` pair — the type names are
+denormalized labels carried for filtering — so re-attaching the same pair under different type names
+raises `DuplicateAssociationError`.
+
+```python
+def add_supplemental_attribute_association(
+    self, association: SupplementalAttributeAssociation
+) -> None: ...
+def add_supplemental_attribute_associations(
+    self, associations: list[SupplementalAttributeAssociation]
+) -> int: ...
+# All-or-nothing: a duplicate anywhere in the batch rolls the whole batch back.
+# Returns the number inserted; the import half of the round trip whose export is
+# list_supplemental_attribute_associations() with no filter.
+
+def has_supplemental_attribute_association(
+    self,
+    *,
+    component_id: int | None = None,
+    component_types: list[str] | None = None,
+    attribute_id: int | None = None,
+    attribute_types: list[str] | None = None,
+) -> bool: ...
+
+def list_supplemental_attribute_associations(
+    self, *, ...
+) -> list[SupplementalAttributeAssociation]: ...
+def list_supplemental_attribute_ids(self, *, ...) -> list[int]: ...
+def list_components_with_attributes(self, *, ...) -> list[int]: ...
+def remove_supplemental_attribute_associations(self, *, ...) -> int: ...
+def count_supplemental_attribute_associations(self, *, ...) -> int: ...
+def count_supplemental_attributes(self, *, ...) -> int: ...
+def count_components_with_attributes(self, *, ...) -> int: ...
+# Every `...` above is the same keyword-only filter as has_supplemental_attribute_association.
+
+def replace_supplemental_attribute_component_id(self, old_id: int, new_id: int) -> int: ...
+
+def supplemental_attribute_counts_by_type(self) -> list[tuple[str, int]]: ...
+def supplemental_attribute_summary(self) -> list[dict]: ...
+```
+
+- **`list_supplemental_attribute_associations`** returns rows in insertion order, so exporting with
+  no filter and importing the result with `add_supplemental_attribute_associations` is a round trip.
+- **`list_supplemental_attribute_ids`** returns the distinct attribute ids of the matching rows,
+  ascending — the attributes attached to component `c` with `component_id=c`.
+  **`list_components_with_attributes`** is the other end: the components carrying attribute `a` with
+  `attribute_id=a`. **`count_supplemental_attributes`** and **`count_components_with_attributes`**
+  are those two queries counted, and **`count_supplemental_attribute_associations`** counts the
+  matching rows themselves.
+- **`replace_supplemental_attribute_component_id`** moves every attachment from component `old_id`
+  to `new_id`, returning the rows updated, and raises `DuplicateAssociationError` if `new_id`
+  already carries one of the attributes being moved.
+- **`supplemental_attribute_counts_by_type`** returns `[(attribute_type, count), …]` ordered by
+  type; **`supplemental_attribute_summary`** returns one dict per distinct pair with keys
+  `component_type`, `attribute_type`, `count`, ordered by attribute type then component type.
+
+```python
+from time_series_store import SupplementalAttributeAssociation, TimeSeriesStore
+
+store = TimeSeriesStore.create(in_memory=True)
+store.add_supplemental_attribute_association(
+    SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo")
+)
+store.add_supplemental_attribute_association(
+    SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo")
+)
+
+store.list_supplemental_attribute_ids(component_id=1)     # -> [100]
+store.list_components_with_attributes(attribute_id=100)   # -> [1, 2]
+
+store.remove_supplemental_attribute_associations(component_id=1)
+# -> 1; any time series of component 1 are untouched
+```
+
+### Parent/child associations
+
+Directed edges between components — a generator (parent) wired to a bus (child), say. Both endpoints
+are always components; an attribute cannot appear here.
+
+```python
+ParentChildAssociation(
+    parent_id: int,
+    parent_type: str,
+    child_id: int,
+    child_type: str,
+)
+```
+
+Read-only properties: `parent_id`, `parent_type`, `child_id`, `child_type`; hashable and
+structurally comparable like the attachment object. In the **catalog**, identity is the _ordered_
+`(parent_id, child_id)` pair, so the reversed pair is a different edge, while repeating the same
+ordered pair under different type names raises `DuplicateAssociationError`. There is no
+relationship-kind column, so one ordered pair may be related at most once.
+
+This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.
+
+```python
+def add_parent_child_association(self, association: ParentChildAssociation) -> None: ...
+def add_parent_child_associations(self, associations: list[ParentChildAssociation]) -> int: ...
+# All-or-nothing, like the supplemental bulk add; returns the number inserted.
+
+def has_parent_child_association(
+    self,
+    *,
+    parent_id: int | None = None,
+    parent_types: list[str] | None = None,
+    child_id: int | None = None,
+    child_types: list[str] | None = None,
+) -> bool: ...
+
+def list_parent_child_associations(self, *, ...) -> list[ParentChildAssociation]: ...
+def list_children(self, *, ...) -> list[int]: ...
+def list_parents(self, *, ...) -> list[int]: ...
+def remove_parent_child_associations(self, *, ...) -> int: ...
+def count_parent_child_associations(self, *, ...) -> int: ...
+# Every `...` above is the same keyword-only filter as has_parent_child_association.
+
+def replace_parent_child_component_id(self, old_id: int, new_id: int) -> int: ...
+```
+
+- **`list_parent_child_associations`** returns rows in insertion order, so a no-filter export and an
+  `add_parent_child_associations` import round-trip.
+- **`list_children`** returns the distinct child ids of the matching edges, ascending — the children
+  of component `p` with `parent_id=p`; **`list_parents`** is the other end, the parents of component
+  `c` with `child_id=c`.
+- **`replace_parent_child_component_id`** rewrites `old_id` to `new_id` on **both** ends of every
+  edge, returning the rows updated, and raises `DuplicateAssociationError` if the rewrite would
+  duplicate an edge `new_id` already has.
+
+```python
+from time_series_store import ParentChildAssociation, TimeSeriesStore
+
+store = TimeSeriesStore.create(in_memory=True)
+store.add_parent_child_association(ParentChildAssociation(1, "Generator", 7, "Bus"))
+# The reversed pair is a different edge, not a duplicate.
+store.add_parent_child_association(ParentChildAssociation(7, "Bus", 1, "Generator"))
+
+store.list_children(parent_id=1)   # -> [7]
+store.list_parents(child_id=7)     # -> [1]
+
+store.remove_parent_child_associations(parent_types=["Bus"])   # -> 1
+```
+
+Neither association catalog is exposed over the [gRPC server](grpc-api.md) or the
+[`tss` CLI](cli.md).
+
 ## Exceptions
 
 All inherit from `TimeSeriesError`:
@@ -352,6 +531,7 @@ All inherit from `TimeSeriesError`:
 | --------------------------- | ----------------------------------------------------- |
 | `NotFoundError`             | A key or array does not exist                         |
 | `DuplicateTimeSeriesError`  | Adding a series whose key already exists              |
+| `DuplicateAssociationError` | Re-adding an attachment or edge that already exists   |
 | `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …) |
 | `IntegrityError`            | On-disk inconsistency detected                        |
 | `ReadOnlyStoreError`        | A write on a read-only store                          |

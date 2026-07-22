@@ -6,9 +6,11 @@
 //! from time_series_store import (
 //!     TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
 //!     TimeSeriesType, OwnerCategory,
+//!     SupplementalAttributeAssociation, ParentChildAssociation,
 //!     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError, InvalidParameterError,
 //!     IntegrityError, ReadOnlyStoreError, IoError, ConnectionError,
 //!     IncompatibleFormatError, IncompatibleForecastError, StorageError,
+//!     DuplicateAssociationError,
 //! )
 //! ```
 
@@ -27,6 +29,11 @@ use time_series_store_core as core_lib;
 create_exception!(time_series_store, TimeSeriesError, PyException);
 create_exception!(time_series_store, NotFoundError, TimeSeriesError);
 create_exception!(time_series_store, DuplicateTimeSeriesError, TimeSeriesError);
+create_exception!(
+    time_series_store,
+    DuplicateAssociationError,
+    TimeSeriesError
+);
 create_exception!(time_series_store, InvalidParameterError, TimeSeriesError);
 create_exception!(time_series_store, IntegrityError, TimeSeriesError);
 create_exception!(time_series_store, ReadOnlyStoreError, TimeSeriesError);
@@ -47,6 +54,7 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
         E::DuplicateTimeSeries => {
             DuplicateTimeSeriesError::new_err("a time series with that key already exists")
         }
+        E::DuplicateAssociation(m) => DuplicateAssociationError::new_err(m),
         E::InvalidParameter(m) => InvalidParameterError::new_err(m),
         E::IntegrityError(m) => IntegrityError::new_err(m),
         E::ReadOnlyStore => ReadOnlyStoreError::new_err("store is read-only"),
@@ -814,6 +822,171 @@ impl PyTimeSeriesKey {
         self.inner.hash(&mut hasher);
         hasher.finish()
     }
+}
+
+// ---- Associations ---------------------------------------------------------
+
+/// One attachment of a supplemental attribute to a component.
+///
+/// Identity is the `(component_id, attribute_id)` pair; the type names are
+/// denormalized filtering aids, so re-attaching the same pair under different
+/// type names is still a duplicate and the second `add` raises
+/// `DuplicateAssociationError`.
+#[pyclass(
+    name = "SupplementalAttributeAssociation",
+    module = "time_series_store",
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PySupplementalAttributeAssociation {
+    inner: core_lib::SupplementalAttributeAssociation,
+}
+
+#[pymethods]
+impl PySupplementalAttributeAssociation {
+    #[new]
+    #[pyo3(signature = (component_id, component_type, attribute_id, attribute_type))]
+    fn new(
+        component_id: i64,
+        component_type: String,
+        attribute_id: i64,
+        attribute_type: String,
+    ) -> Self {
+        Self {
+            inner: core_lib::SupplementalAttributeAssociation {
+                component_id,
+                component_type,
+                attribute_id,
+                attribute_type,
+            },
+        }
+    }
+
+    #[getter]
+    fn component_id(&self) -> i64 {
+        self.inner.component_id
+    }
+
+    #[getter]
+    fn component_type(&self) -> String {
+        self.inner.component_type.clone()
+    }
+
+    #[getter]
+    fn attribute_id(&self) -> i64 {
+        self.inner.attribute_id
+    }
+
+    #[getter]
+    fn attribute_type(&self) -> String {
+        self.inner.attribute_type.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SupplementalAttributeAssociation(component_id={}, component_type={:?}, \
+             attribute_id={}, attribute_type={:?})",
+            self.inner.component_id,
+            self.inner.component_type,
+            self.inner.attribute_id,
+            self.inner.attribute_type,
+        )
+    }
+
+    /// Structural equality over all four fields — stricter than the table's
+    /// notion of identity, so that a round-tripped row compares equal only when
+    /// its type names survived too.
+    fn __eq__(&self, other: &PySupplementalAttributeAssociation) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Consistent with `__eq__`, so attachments work in sets and as dict keys
+    /// (bulk export/import comparisons rely on this).
+    fn __hash__(&self) -> u64 {
+        hash_of(&self.inner)
+    }
+}
+
+/// One directed edge between two components — a generator (parent) connected to
+/// a bus (child), say.
+///
+/// Identity is the ordered `(parent_id, child_id)` pair, so the reversed pair is
+/// a different edge. As above, the type names are denormalized filtering aids
+/// and do not enter identity.
+#[pyclass(
+    name = "ParentChildAssociation",
+    module = "time_series_store",
+    from_py_object
+)]
+#[derive(Clone)]
+pub struct PyParentChildAssociation {
+    inner: core_lib::ParentChildAssociation,
+}
+
+#[pymethods]
+impl PyParentChildAssociation {
+    #[new]
+    #[pyo3(signature = (parent_id, parent_type, child_id, child_type))]
+    fn new(parent_id: i64, parent_type: String, child_id: i64, child_type: String) -> Self {
+        Self {
+            inner: core_lib::ParentChildAssociation {
+                parent_id,
+                parent_type,
+                child_id,
+                child_type,
+            },
+        }
+    }
+
+    #[getter]
+    fn parent_id(&self) -> i64 {
+        self.inner.parent_id
+    }
+
+    #[getter]
+    fn parent_type(&self) -> String {
+        self.inner.parent_type.clone()
+    }
+
+    #[getter]
+    fn child_id(&self) -> i64 {
+        self.inner.child_id
+    }
+
+    #[getter]
+    fn child_type(&self) -> String {
+        self.inner.child_type.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ParentChildAssociation(parent_id={}, parent_type={:?}, child_id={}, \
+             child_type={:?})",
+            self.inner.parent_id,
+            self.inner.parent_type,
+            self.inner.child_id,
+            self.inner.child_type,
+        )
+    }
+
+    /// Structural equality over all four fields; see
+    /// [`PySupplementalAttributeAssociation::__eq__`].
+    fn __eq__(&self, other: &PyParentChildAssociation) -> bool {
+        self.inner == other.inner
+    }
+
+    /// Consistent with `__eq__`.
+    fn __hash__(&self) -> u64 {
+        hash_of(&self.inner)
+    }
+}
+
+/// `__hash__` body shared by the two association pyclasses.
+fn hash_of<T: std::hash::Hash>(value: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Extract a required key from a bulk-add item dict, with a uniform error.
@@ -2116,6 +2289,381 @@ impl PyStore {
             inner: k.identity().clone(),
         })
     }
+
+    // ---- Supplemental-attribute associations ------------------------------
+    //
+    // Which supplemental attributes are attached to which components. The store
+    // holds the relationship only. Attachments are independent of time series in
+    // both directions: removing a time series never removes an attachment, and
+    // vice versa.
+
+    /// Attach a supplemental attribute to a component. Raises
+    /// `DuplicateAssociationError` if that component already carries that
+    /// attribute, whatever type names are supplied.
+    fn add_supplemental_attribute_association(
+        &mut self,
+        association: &PySupplementalAttributeAssociation,
+    ) -> PyResult<()> {
+        self.store_mut()?
+            .add_supplemental_attribute_association(association.inner.clone())
+            .map_err(map_err)
+    }
+
+    /// Attach many in one all-or-nothing transaction, returning the number
+    /// inserted. A duplicate anywhere in the batch rolls the batch back. This is
+    /// the import half of the bulk round trip whose export is
+    /// `list_supplemental_attribute_associations()` with no filter.
+    fn add_supplemental_attribute_associations(
+        &mut self,
+        associations: Vec<PySupplementalAttributeAssociation>,
+    ) -> PyResult<usize> {
+        let assocs = associations.into_iter().map(|a| a.inner).collect();
+        self.store_mut()?
+            .add_supplemental_attribute_associations(assocs)
+            .map_err(map_err)
+    }
+
+    /// Whether any attachment matches the filter.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn has_supplemental_attribute_association(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<bool> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store()?
+            .has_supplemental_attribute_association(&filter)
+            .map_err(map_err)
+    }
+
+    /// Full attachment rows matching the filter, in insertion order. Passing no
+    /// filter exports the whole table.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn list_supplemental_attribute_associations(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<Vec<PySupplementalAttributeAssociation>> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        Ok(self
+            .store()?
+            .list_supplemental_attribute_associations(&filter)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|inner| PySupplementalAttributeAssociation { inner })
+            .collect())
+    }
+
+    /// Distinct attribute ids matching the filter, ascending — the attributes
+    /// attached to one component when `component_id` is given.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn list_supplemental_attribute_ids(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<Vec<i64>> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store()?
+            .list_supplemental_attribute_ids(&filter)
+            .map_err(map_err)
+    }
+
+    /// Distinct component ids matching the filter, ascending — the components
+    /// carrying one attribute when `attribute_id` is given.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn list_components_with_attributes(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<Vec<i64>> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store()?
+            .list_components_with_attributes(&filter)
+            .map_err(map_err)
+    }
+
+    /// Remove every attachment matching the filter, returning how many were
+    /// removed. Matching nothing returns 0 rather than raising: only the caller
+    /// knows whether a hit was expected.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn remove_supplemental_attribute_associations(
+        &mut self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<usize> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store_mut()?
+            .remove_supplemental_attribute_associations(&filter)
+            .map_err(map_err)
+    }
+
+    /// Move every attachment from component `old_id` to `new_id`, returning the
+    /// rows updated. Raises `DuplicateAssociationError` if `new_id` already
+    /// carries one of the attributes being moved.
+    fn replace_supplemental_attribute_component_id(
+        &mut self,
+        old_id: i64,
+        new_id: i64,
+    ) -> PyResult<usize> {
+        self.store_mut()?
+            .replace_supplemental_attribute_component_id(old_id, new_id)
+            .map_err(map_err)
+    }
+
+    /// Number of attachments matching the filter.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn count_supplemental_attribute_associations(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<i64> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store()?
+            .count_supplemental_attribute_associations(&filter)
+            .map_err(map_err)
+    }
+
+    /// Number of *distinct* attributes among the attachments matching the
+    /// filter.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn count_supplemental_attributes(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<i64> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store()?
+            .count_supplemental_attributes(&filter)
+            .map_err(map_err)
+    }
+
+    /// Number of *distinct* components among the attachments matching the
+    /// filter.
+    #[pyo3(signature = (*, component_id=None, component_types=None, attribute_id=None, attribute_types=None))]
+    fn count_components_with_attributes(
+        &self,
+        component_id: Option<i64>,
+        component_types: Option<Vec<String>>,
+        attribute_id: Option<i64>,
+        attribute_types: Option<Vec<String>>,
+    ) -> PyResult<i64> {
+        let filter = build_supplemental_attribute_filter(
+            component_id,
+            component_types,
+            attribute_id,
+            attribute_types,
+        );
+        self.store()?
+            .count_components_with_attributes(&filter)
+            .map_err(map_err)
+    }
+
+    /// Attachment counts grouped by attribute type, as `[(type_name, count), …]`.
+    fn supplemental_attribute_counts_by_type(&self) -> PyResult<Vec<(String, i64)>> {
+        self.store()?
+            .supplemental_attribute_counts_by_type()
+            .map_err(map_err)
+    }
+
+    /// Attachment counts grouped by both type names: one dict per distinct pair
+    /// with keys `component_type`, `attribute_type`, `count`.
+    fn supplemental_attribute_summary<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.store()?
+            .supplemental_attribute_summary()
+            .map_err(map_err)?
+            .iter()
+            .map(|r| {
+                let d = PyDict::new(py);
+                d.set_item("component_type", &r.component_type)?;
+                d.set_item("attribute_type", &r.attribute_type)?;
+                d.set_item("count", r.count)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
+    // ---- Parent/child associations ----------------------------------------
+    //
+    // Directed edges between components. Same independence from time series as
+    // the attachments above.
+
+    /// Record a parent/child edge. Raises `DuplicateAssociationError` if that
+    /// ordered pair is already related; the reversed pair is a different edge.
+    fn add_parent_child_association(
+        &mut self,
+        association: &PyParentChildAssociation,
+    ) -> PyResult<()> {
+        self.store_mut()?
+            .add_parent_child_association(association.inner.clone())
+            .map_err(map_err)
+    }
+
+    /// Record many edges in one all-or-nothing transaction, returning the number
+    /// inserted.
+    fn add_parent_child_associations(
+        &mut self,
+        associations: Vec<PyParentChildAssociation>,
+    ) -> PyResult<usize> {
+        let assocs = associations.into_iter().map(|a| a.inner).collect();
+        self.store_mut()?
+            .add_parent_child_associations(assocs)
+            .map_err(map_err)
+    }
+
+    /// Whether any edge matches the filter.
+    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
+    fn has_parent_child_association(
+        &self,
+        parent_id: Option<i64>,
+        parent_types: Option<Vec<String>>,
+        child_id: Option<i64>,
+        child_types: Option<Vec<String>>,
+    ) -> PyResult<bool> {
+        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
+        self.store()?
+            .has_parent_child_association(&filter)
+            .map_err(map_err)
+    }
+
+    /// Full edge rows matching the filter, in insertion order. Passing no filter
+    /// exports the whole table.
+    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
+    fn list_parent_child_associations(
+        &self,
+        parent_id: Option<i64>,
+        parent_types: Option<Vec<String>>,
+        child_id: Option<i64>,
+        child_types: Option<Vec<String>>,
+    ) -> PyResult<Vec<PyParentChildAssociation>> {
+        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
+        Ok(self
+            .store()?
+            .list_parent_child_associations(&filter)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|inner| PyParentChildAssociation { inner })
+            .collect())
+    }
+
+    /// Distinct child ids matching the filter, ascending — the children of one
+    /// component when `parent_id` is given.
+    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
+    fn list_children(
+        &self,
+        parent_id: Option<i64>,
+        parent_types: Option<Vec<String>>,
+        child_id: Option<i64>,
+        child_types: Option<Vec<String>>,
+    ) -> PyResult<Vec<i64>> {
+        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
+        self.store()?.list_children(&filter).map_err(map_err)
+    }
+
+    /// Distinct parent ids matching the filter, ascending — the parents of one
+    /// component when `child_id` is given.
+    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
+    fn list_parents(
+        &self,
+        parent_id: Option<i64>,
+        parent_types: Option<Vec<String>>,
+        child_id: Option<i64>,
+        child_types: Option<Vec<String>>,
+    ) -> PyResult<Vec<i64>> {
+        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
+        self.store()?.list_parents(&filter).map_err(map_err)
+    }
+
+    /// Remove every edge matching the filter, returning how many were removed.
+    /// Matching nothing returns 0 rather than raising.
+    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
+    fn remove_parent_child_associations(
+        &mut self,
+        parent_id: Option<i64>,
+        parent_types: Option<Vec<String>>,
+        child_id: Option<i64>,
+        child_types: Option<Vec<String>>,
+    ) -> PyResult<usize> {
+        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
+        self.store_mut()?
+            .remove_parent_child_associations(&filter)
+            .map_err(map_err)
+    }
+
+    /// Rewrite component `old_id` to `new_id` on both ends of every edge,
+    /// returning the rows updated. Raises `DuplicateAssociationError` if the
+    /// rewrite would duplicate an edge `new_id` already has.
+    fn replace_parent_child_component_id(&mut self, old_id: i64, new_id: i64) -> PyResult<usize> {
+        self.store_mut()?
+            .replace_parent_child_component_id(old_id, new_id)
+            .map_err(map_err)
+    }
+
+    /// Number of edges matching the filter.
+    #[pyo3(signature = (*, parent_id=None, parent_types=None, child_id=None, child_types=None))]
+    fn count_parent_child_associations(
+        &self,
+        parent_id: Option<i64>,
+        parent_types: Option<Vec<String>>,
+        child_id: Option<i64>,
+        child_types: Option<Vec<String>>,
+    ) -> PyResult<i64> {
+        let filter = build_parent_child_filter(parent_id, parent_types, child_id, child_types);
+        self.store()?
+            .count_parent_child_associations(&filter)
+            .map_err(map_err)
+    }
 }
 
 // ---- period helpers -------------------------------------------------------
@@ -2197,6 +2745,57 @@ fn build_list_filter(
         filter = filter.features(features_from_dict(Some(f))?);
     }
     Ok(filter)
+}
+
+/// Build a core [`SupplementalAttributeFilter`](core_lib::SupplementalAttributeFilter)
+/// from the keyword-only filter arguments every supplemental-attribute method
+/// takes. An omitted argument leaves the field unconstrained; an empty type list
+/// is an empty allow-list and matches nothing (the core's rule, preserved here).
+fn build_supplemental_attribute_filter(
+    component_id: Option<i64>,
+    component_types: Option<Vec<String>>,
+    attribute_id: Option<i64>,
+    attribute_types: Option<Vec<String>>,
+) -> core_lib::SupplementalAttributeFilter {
+    let mut filter = core_lib::SupplementalAttributeFilter::new();
+    if let Some(id) = component_id {
+        filter = filter.component_id(id);
+    }
+    if let Some(t) = component_types {
+        filter = filter.component_types(t);
+    }
+    if let Some(id) = attribute_id {
+        filter = filter.attribute_id(id);
+    }
+    if let Some(t) = attribute_types {
+        filter = filter.attribute_types(t);
+    }
+    filter
+}
+
+/// Build a core [`ParentChildFilter`](core_lib::ParentChildFilter) from the
+/// keyword-only filter arguments every parent/child method takes. Same
+/// omitted-vs-empty rules as [`build_supplemental_attribute_filter`].
+fn build_parent_child_filter(
+    parent_id: Option<i64>,
+    parent_types: Option<Vec<String>>,
+    child_id: Option<i64>,
+    child_types: Option<Vec<String>>,
+) -> core_lib::ParentChildFilter {
+    let mut filter = core_lib::ParentChildFilter::new();
+    if let Some(id) = parent_id {
+        filter = filter.parent_id(id);
+    }
+    if let Some(t) = parent_types {
+        filter = filter.parent_types(t);
+    }
+    if let Some(id) = child_id {
+        filter = filter.child_id(id);
+    }
+    if let Some(t) = child_types {
+        filter = filter.child_types(t);
+    }
+    filter
 }
 
 /// Build the full metadata dict for one association row (shared by
@@ -2285,6 +2884,8 @@ fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTimeSeriesKey>()?;
     m.add_class::<PyTimeSeriesType>()?;
     m.add_class::<PyOwnerCategory>()?;
+    m.add_class::<PySupplementalAttributeAssociation>()?;
+    m.add_class::<PyParentChildAssociation>()?;
     m.add_class::<PyStaticReader>()?;
     m.add_class::<PyForecastReader>()?;
 
@@ -2293,6 +2894,10 @@ fn time_series_store(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "DuplicateTimeSeriesError",
         py.get_type::<DuplicateTimeSeriesError>(),
+    )?;
+    m.add(
+        "DuplicateAssociationError",
+        py.get_type::<DuplicateAssociationError>(),
     )?;
     m.add(
         "InvalidParameterError",

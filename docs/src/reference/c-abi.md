@@ -37,19 +37,20 @@ consumer.
 
 ## Status Codes
 
-| Macro                        | Value | Meaning                                                                                                                        |
-| ---------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `TS_OK`                      | 0     | Success                                                                                                                        |
-| `TS_ERR_NULL_POINTER`        | 1     | A required pointer was `NULL`                                                                                                  |
-| `TS_ERR_INVALID_UTF8`        | 2     | A string argument was not UTF-8                                                                                                |
-| `TS_ERR_INVALID_PARAMETER`   | 3     | A bad argument value                                                                                                           |
-| `TS_ERR_NOT_FOUND`           | 4     | No matching series / array                                                                                                     |
-| `TS_ERR_DUPLICATE`           | 5     | Key already exists                                                                                                             |
-| `TS_ERR_INTEGRITY`           | 6     | On-disk inconsistency                                                                                                          |
-| `TS_ERR_READ_ONLY`           | 7     | Write on a read-only store                                                                                                     |
-| `TS_ERR_IO`                  | 8     | I/O failure                                                                                                                    |
-| `TS_ERR_INCOMPATIBLE_FORMAT` | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade. |
-| `TS_ERR_INTERNAL`            | 99    | Unexpected internal error                                                                                                      |
+| Macro                          | Value | Meaning                                                                                                                                          |
+| ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TS_OK`                        | 0     | Success                                                                                                                                          |
+| `TS_ERR_NULL_POINTER`          | 1     | A required pointer was `NULL`                                                                                                                    |
+| `TS_ERR_INVALID_UTF8`          | 2     | A string argument was not UTF-8                                                                                                                  |
+| `TS_ERR_INVALID_PARAMETER`     | 3     | A bad argument value                                                                                                                             |
+| `TS_ERR_NOT_FOUND`             | 4     | No matching series / array                                                                                                                       |
+| `TS_ERR_DUPLICATE`             | 5     | Key already exists                                                                                                                               |
+| `TS_ERR_INTEGRITY`             | 6     | On-disk inconsistency                                                                                                                            |
+| `TS_ERR_READ_ONLY`             | 7     | Write on a read-only store                                                                                                                       |
+| `TS_ERR_IO`                    | 8     | I/O failure                                                                                                                                      |
+| `TS_ERR_INCOMPATIBLE_FORMAT`   | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.                   |
+| `TS_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `TS_ERR_DUPLICATE`, which is about time-series identity. |
+| `TS_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                        |
 
 ## Lifecycle
 
@@ -668,6 +669,204 @@ int32_t ts_store_list_array_groups(const struct TsStore *handle,
                                    const char *name, const char *resolution, const char *features_json,
                                    char *buf, uint64_t cap, uint64_t *out_len);
 ```
+
+## Associations
+
+Two catalogs of relationships between entities the store does not otherwise model. Both are
+independent of time series: there are no foreign keys and no cascade (both endpoints live in the
+caller's object graph, so a cascade could never fire), so removing a time series never removes an
+association and vice versa; a caller that wants both makes both calls.
+
+Each family's query predicate crosses the boundary as **one JSON object string** rather than a set
+of positional arguments, because half its fields are string lists. Every field is optional and the
+set ones are ANDed:
+
+```json
+{ "component_id": 1, "component_types": ["Generator", "Load"],
+  "attribute_id": 100, "attribute_types": ["GeographicInfo"] }
+
+{ "parent_id": 1, "parent_types": ["Generator"],
+  "child_id": 7, "child_types": ["Bus"] }
+```
+
+A `NULL` (or empty) `filter_json` is the empty filter and matches **every** row — which is what
+makes a bulk export/import round trip one call each way. The `*_types` lists hold **concrete** type
+names, rendered as SQL `IN (…)`; expanding an abstract type into its subtypes stays in the calling
+language, and an empty list matches nothing. An unknown field or malformed JSON is
+`TS_ERR_INVALID_PARAMETER`. Every remove function reports its count through `out_removed` and treats
+removing nothing as success, not an error.
+
+The list functions follow the same probe-then-fetch convention as `ts_store_list_keys`: call with
+`buf = NULL, cap = 0` to learn the length via `out_len`, then again with a `len + 1`-byte buffer.
+
+### Supplemental-attribute associations
+
+Which supplemental attributes are attached to which components. Identity is the
+`(component_id, attribute_id)` pair; the type names are denormalized labels, so re-attaching the
+same pair under different type names is still a duplicate. One attribute may be attached to many
+components.
+
+```c
+/* Attach supplemental attribute (attribute_id, attribute_type) to component
+   (component_id, component_type). TS_ERR_DUPLICATE_ASSOCIATION if that component
+   already carries that attribute, whatever type names are supplied. */
+int32_t ts_store_add_supplemental_attribute_association(struct TsStore *handle,
+                                                        int64_t component_id,
+                                                        const char *component_type,
+                                                        int64_t attribute_id,
+                                                        const char *attribute_type);
+
+/* Attach many in one all-or-nothing transaction, from a JSON array of objects with
+   component_id, component_type, attribute_id, and attribute_type. The import half
+   of the round trip whose export is ts_store_list_supplemental_attribute_associations
+   with a NULL filter. *out_added (when non-NULL) receives the number inserted. */
+int32_t ts_store_add_supplemental_attribute_associations(struct TsStore *handle,
+                                                         const char *associations_json,
+                                                         uint64_t *out_added);
+
+/* Whether any attachment matches filter_json (NULL = any). */
+int32_t ts_store_has_supplemental_attribute_association(const struct TsStore *handle,
+                                                        const char *filter_json,
+                                                        bool *out_found);
+
+/* Matching attachments as a JSON array, in insertion order; each object carries
+   component_id, component_type, attribute_id, attribute_type. Probe-then-fetch. */
+int32_t ts_store_list_supplemental_attribute_associations(const struct TsStore *handle,
+                                                          const char *filter_json,
+                                                          char *buf, uint64_t cap,
+                                                          uint64_t *out_len);
+
+/* Distinct attribute ids of the matching rows, ascending, as a JSON array — the
+   attributes attached to a component when component_id is set. Probe-then-fetch. */
+int32_t ts_store_list_supplemental_attribute_ids(const struct TsStore *handle,
+                                                 const char *filter_json,
+                                                 char *buf, uint64_t cap,
+                                                 uint64_t *out_len);
+
+/* Distinct component ids of the matching rows, ascending, as a JSON array — the
+   components carrying an attribute when attribute_id is set. Probe-then-fetch. */
+int32_t ts_store_list_components_with_attributes(const struct TsStore *handle,
+                                                 const char *filter_json,
+                                                 char *buf, uint64_t cap,
+                                                 uint64_t *out_len);
+
+/* Remove every matching attachment; *out_removed (when non-NULL) receives the
+   count. Removing nothing is success, not an error. */
+int32_t ts_store_remove_supplemental_attribute_associations(struct TsStore *handle,
+                                                            const char *filter_json,
+                                                            uint64_t *out_removed);
+
+/* Move every attachment from component old_id to new_id; *out_updated (when
+   non-NULL) receives the rows changed. TS_ERR_DUPLICATE_ASSOCIATION if new_id
+   already carries one of the attributes being moved. */
+int32_t ts_store_replace_supplemental_attribute_component_id(struct TsStore *handle,
+                                                             int64_t old_id, int64_t new_id,
+                                                             uint64_t *out_updated);
+
+/* Attachment counts through out_count. kind selects what is counted:
+   0 = rows matching the filter, 1 = distinct attributes among them,
+   2 = distinct components among them. */
+int32_t ts_store_count_supplemental_attribute_associations(const struct TsStore *handle,
+                                                           const char *filter_json,
+                                                           int32_t kind, int64_t *out_count);
+
+/* Grouped counts as JSON arrays: by attribute type, as {"type": …, "count": …}
+   ordered by type; and by both type names, as
+   {"component_type": …, "attribute_type": …, "count": …} ordered by attribute type
+   then component type. Probe-then-fetch. */
+int32_t ts_store_supplemental_attribute_counts_by_type(const struct TsStore *handle,
+                                                       char *buf, uint64_t cap,
+                                                       uint64_t *out_len);
+int32_t ts_store_supplemental_attribute_summary(const struct TsStore *handle,
+                                                char *buf, uint64_t cap,
+                                                uint64_t *out_len);
+```
+
+```c
+/* The attribute ids attached to component 1. */
+const char *filter = "{\"component_id\":1}";
+uint64_t len = 0;
+ts_store_list_supplemental_attribute_ids(store, filter, NULL, 0, &len);
+char *json = malloc(len + 1);
+ts_store_list_supplemental_attribute_ids(store, filter, json, len + 1, &len); /* e.g. "[100]" */
+free(json);
+```
+
+### Parent/child associations
+
+Directed edges between components — a generator (parent) connected to a bus (child), say. Both
+endpoints are always components. Identity is the _ordered_ `(parent_id, child_id)` pair, so the
+reversed pair is a different edge, and with no relationship-kind column one ordered pair may be
+related at most once.
+
+This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.
+
+```c
+/* Record a directed edge from component (parent_id, parent_type) to component
+   (child_id, child_type). TS_ERR_DUPLICATE_ASSOCIATION if that ordered pair is
+   already related; the reversed pair is a different edge. */
+int32_t ts_store_add_parent_child_association(struct TsStore *handle,
+                                              int64_t parent_id, const char *parent_type,
+                                              int64_t child_id, const char *child_type);
+
+/* Record many edges in one all-or-nothing transaction, from a JSON array of objects
+   with parent_id, parent_type, child_id, and child_type. *out_added (when non-NULL)
+   receives the number inserted. */
+int32_t ts_store_add_parent_child_associations(struct TsStore *handle,
+                                               const char *associations_json,
+                                               uint64_t *out_added);
+
+/* Whether any edge matches filter_json (NULL = any). */
+int32_t ts_store_has_parent_child_association(const struct TsStore *handle,
+                                              const char *filter_json,
+                                              bool *out_found);
+
+/* Matching edges as a JSON array, in insertion order; each object carries
+   parent_id, parent_type, child_id, child_type. Probe-then-fetch. */
+int32_t ts_store_list_parent_child_associations(const struct TsStore *handle,
+                                                const char *filter_json,
+                                                char *buf, uint64_t cap,
+                                                uint64_t *out_len);
+
+/* Distinct ids on one end of the matching edges, ascending, as a JSON array.
+   endpoint is 0 for parents and 1 for children — so endpoint = 1 with parent_id
+   set is "the children of this component". Probe-then-fetch. */
+int32_t ts_store_list_parent_child_ids(const struct TsStore *handle,
+                                       const char *filter_json, int32_t endpoint,
+                                       char *buf, uint64_t cap, uint64_t *out_len);
+
+/* Remove every matching edge; *out_removed (when non-NULL) receives the count.
+   Removing nothing is success, not an error. */
+int32_t ts_store_remove_parent_child_associations(struct TsStore *handle,
+                                                  const char *filter_json,
+                                                  uint64_t *out_removed);
+
+/* Rewrite component old_id to new_id on BOTH ends of every edge; *out_updated
+   (when non-NULL) receives the rows changed. TS_ERR_DUPLICATE_ASSOCIATION if the
+   rewrite would duplicate an edge new_id already has. */
+int32_t ts_store_replace_parent_child_component_id(struct TsStore *handle,
+                                                   int64_t old_id, int64_t new_id,
+                                                   uint64_t *out_updated);
+
+/* Number of edges matching filter_json, through out_count. */
+int32_t ts_store_count_parent_child_associations(const struct TsStore *handle,
+                                                 const char *filter_json,
+                                                 int64_t *out_count);
+```
+
+```c
+/* The children of component 1. */
+const char *filter = "{\"parent_id\":1}";
+uint64_t len = 0;
+ts_store_list_parent_child_ids(store, filter, 1 /* children */, NULL, 0, &len);
+char *json = malloc(len + 1);
+ts_store_list_parent_child_ids(store, filter, 1, json, len + 1, &len);   /* e.g. "[7]" */
+free(json);
+```
+
+Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
+[`tss` CLI](./cli.md).
 
 ## Error Messages
 
