@@ -32,9 +32,9 @@ method = "none"
 ## 3. Launch
 
 ```sh
-cargo run -p time-series-store-server -- --config my_server.toml
+cargo run -p castore-server -- --config my_server.toml
 # or a release build:
-./target/release/time-series-store-server --config my_server.toml
+./target/release/castore-server --config my_server.toml
 ```
 
 Add `RUST_LOG=debug` for verbose logging.
@@ -56,7 +56,7 @@ startup.
 From Rust:
 
 ```rust
-use time_series_store_server::client::RemoteClient;
+use castore_server::client::RemoteClient;
 
 let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
 println!("{:?}", client.get_counts().await?);
@@ -65,8 +65,8 @@ println!("{:?}", client.get_counts().await?);
 Or with [`grpcurl`](https://github.com/fullstorydev/grpcurl) using the proto file:
 
 ```sh
-grpcurl -plaintext -proto proto/time_series_store/v1/store.proto \
-  127.0.0.1:50051 time_series_store.v1.TimeSeriesStore/GetCounts
+grpcurl -plaintext -proto proto/castore/v1/store.proto \
+  127.0.0.1:50051 castore.v1.CatalogStore/GetCounts
 ```
 
 (Add `-H 'x-api-key: replace-me-with-a-secret'` when authentication is enabled.)

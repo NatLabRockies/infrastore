@@ -8,11 +8,11 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from time_series_store import (
+from castore import (
     Deterministic,
     OwnerCategory,
     SingleTimeSeries,
-    TimeSeriesStore,
+    Store,
     TimeSeriesType,
 )
 
@@ -33,7 +33,7 @@ def _det(name: str) -> Deterministic:
 
 
 def test_add_logical_type_and_get_metadata():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
         time_series=_sts("load", 10.0), units="MW", logical_type="Profile",
@@ -47,7 +47,7 @@ def test_add_logical_type_and_get_metadata():
 
 
 def test_bulk_read_time_range():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
                               owner_category=OwnerCategory.Component, time_series=_sts("load", 100.0))
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
@@ -60,7 +60,7 @@ def test_bulk_read_time_range():
 
 
 def test_discovery_and_removal_and_rename():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
     store.add_time_series(owner_id=2, owner_type="Bus",
@@ -86,7 +86,7 @@ def test_discovery_and_removal_and_rename():
 
 
 def test_transform_with_params_and_forecast_parameters():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 5.0, length=5))
     n = store.transform_single_time_series(
@@ -99,7 +99,7 @@ def test_transform_with_params_and_forecast_parameters():
 
 
 def test_keys_usable_in_sets():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
                                owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
@@ -112,7 +112,7 @@ def test_keys_usable_in_sets():
 
 
 def test_static_reader():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 10.0, length=4))
     store.add_time_series(owner_id=2, owner_type="Generator",
@@ -140,7 +140,7 @@ def test_static_reader():
 
 
 def test_forecast_reader():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_det("fc"))
     reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
@@ -158,7 +158,7 @@ def test_forecast_reader():
 
 
 def test_list_time_series_new_fields_and_interval_filter():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_det("fc"))
     rows = store.list_time_series(interval=timedelta(hours=1))
@@ -173,7 +173,7 @@ def test_list_time_series_new_fields_and_interval_filter():
 
 
 def test_close_and_repr():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(
         owner_id=1, owner_type="Generator",
         owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0),
@@ -193,7 +193,7 @@ def test_close_and_repr():
 
 def test_context_manager_reopen(tmp_path):
     path = tmp_path / "s.nc"
-    with TimeSeriesStore.create(path=str(path)) as store:
+    with Store.create(path=str(path)) as store:
         store.add_time_series(
             owner_id=1, owner_type="Generator",
             owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0),
@@ -204,7 +204,7 @@ def test_context_manager_reopen(tmp_path):
         store.list_names()
 
     # Reopen read-only via the context manager and read the data back.
-    with TimeSeriesStore.open(str(path), read_only=True) as ro:
+    with Store.open(str(path), read_only=True) as ro:
         assert ro.read_only is True
         assert str(path) in repr(ro)
         assert ro.list_names() == ["load"]

@@ -1,8 +1,8 @@
 [book]
-authors = ["time-series-store Contributors"]
+authors = ["castore Contributors"]
 language = "en"
 src = "src"
-title = "time-series-store Documentation"
+title = "castore Documentation"
 description = "Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings"
 
 [build]
@@ -12,9 +12,9 @@ create-missing = true
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/NatLabRockies/time-series-store"
-edit-url-template = "https://github.com/NatLabRockies/time-series-store/edit/main/docs/{path}"
-site-url = "/time-series-store/"
+git-repository-url = "https://github.com/NatLabRockies/castore"
+edit-url-template = "https://github.com/NatLabRockies/castore/edit/main/docs/{path}"
+site-url = "/castore/"
 cname = ""
 additional-css = ["custom.css", "pagetoc.css"]
 additional-js = ["mermaid.min.js", "mermaid-init.js", "pagetoc.js"]

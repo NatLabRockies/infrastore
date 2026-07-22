@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from time_series_store import (
+from castore import (
     DuplicateTimeSeriesError,
     InvalidParameterError,
     NotFoundError,
@@ -15,7 +15,7 @@ from time_series_store import (
     ReadOnlyStoreError,
     SingleTimeSeries,
     NonSequentialTimeSeries,
-    TimeSeriesStore,
+    Store,
     TimeSeriesType,
 )
 
@@ -33,7 +33,7 @@ def make_series(
 
 
 def test_in_memory_round_trip():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     s = make_series()
     key = store.add_time_series(
         owner_id=42,
@@ -57,7 +57,7 @@ def test_persistent_round_trip(tmp_path):
     path = tmp_path / "store.nc"
     s = make_series(2024, 12, 1.0)
 
-    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    store = Store.create(path=str(path), in_memory=False)
     key = store.add_time_series(
         owner_id=1,
         owner_type="Generator",
@@ -67,7 +67,7 @@ def test_persistent_round_trip(tmp_path):
     store.flush()
     del store  # drop file handle
 
-    reopened = TimeSeriesStore.open(path=str(path), read_only=True)
+    reopened = Store.open(path=str(path), read_only=True)
     keys = reopened.get_time_series_keys(1, OwnerCategory.Component)
     assert len(keys) == 1
     assert keys[0].owner_category == OwnerCategory.Component
@@ -92,12 +92,12 @@ def test_compression_round_trip(tmp_path, kwargs):
     path = tmp_path / "store.nc"
     s = make_series(2024, 12, 1.0)
 
-    store = TimeSeriesStore.create(path=str(path), in_memory=False, **kwargs)
+    store = Store.create(path=str(path), in_memory=False, **kwargs)
     store.add_time_series(1, "Generator", OwnerCategory.Component, s)
     store.flush()
     del store
 
-    reopened = TimeSeriesStore.open(path=str(path), read_only=True)
+    reopened = Store.open(path=str(path), read_only=True)
     # The persisted policy is restored on open.
     comp = reopened.get_compression()
     expected = kwargs.get("compression", "deflate")
@@ -112,22 +112,22 @@ def test_compression_round_trip(tmp_path, kwargs):
 
 
 def test_get_compression_in_memory_is_none():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     assert store.get_compression()["compression"] == "none"
 
 
 def test_invalid_compression_rejected(tmp_path):
     path = tmp_path / "store.nc"
     with pytest.raises(InvalidParameterError):
-        TimeSeriesStore.create(path=str(path), in_memory=False, compression="lz4")
+        Store.create(path=str(path), in_memory=False, compression="lz4")
     with pytest.raises(InvalidParameterError):
-        TimeSeriesStore.create(
+        Store.create(
             path=str(path), in_memory=False, compression="deflate", compression_level=99
         )
 
 
 def test_features_disambiguate_keys():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     s1 = make_series(base=1.0)
     s2 = make_series(base=100.0)
 
@@ -155,7 +155,7 @@ def test_features_disambiguate_keys():
 
 
 def test_duplicate_key_raises():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     s = make_series()
     store.add_time_series(1, "Generator", OwnerCategory.Component, s)
     with pytest.raises(DuplicateTimeSeriesError):
@@ -163,7 +163,7 @@ def test_duplicate_key_raises():
 
 
 def test_missing_key_raises_not_found():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     s = make_series()
     key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
     store.remove_time_series(key)
@@ -172,7 +172,7 @@ def test_missing_key_raises_not_found():
 
 
 def test_time_range_slicing():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     resolution = timedelta(hours=1)
     data = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
@@ -189,19 +189,19 @@ def test_time_range_slicing():
 
 def test_read_only_blocks_writes(tmp_path):
     path = tmp_path / "store.nc"
-    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    store = Store.create(path=str(path), in_memory=False)
     store.add_time_series(1, "Generator", OwnerCategory.Component, make_series())
     store.flush()
     del store
 
-    ro = TimeSeriesStore.open(path=str(path), read_only=True)
+    ro = Store.open(path=str(path), read_only=True)
     assert ro.read_only is True
     with pytest.raises(ReadOnlyStoreError):
         ro.add_time_series(2, "Generator", OwnerCategory.Component, make_series())
 
 
 def test_invalid_feature_value_raises():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     with pytest.raises(InvalidParameterError):
         store.add_time_series(
             1, "Generator", OwnerCategory.Component, make_series(),
@@ -210,7 +210,7 @@ def test_invalid_feature_value_raises():
 
 
 def test_counts_and_resolutions():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     data = np.array([1.0, 2.0, 3.0])
 
@@ -229,7 +229,7 @@ def test_counts_and_resolutions():
 
 def test_numpy_array_received_as_ndarray():
     """Sanity check: data round-tripped is a numpy ndarray, with the original dtype."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     s = make_series()
     key = store.add_time_series(1, "Generator", OwnerCategory.Component, s)
     got = store.get_time_series(key)
@@ -240,7 +240,7 @@ def test_numpy_array_received_as_ndarray():
 
 
 def test_non_sequential_round_trip_and_slice():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     timestamps = [
         initial,
@@ -276,7 +276,7 @@ def test_non_sequential_rejects_invalid_timestamps():
 
 def test_dtype_round_trip():
     """Non-float64 numpy dtypes round-trip with their dtype preserved."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
     res = timedelta(hours=1)
 
@@ -291,7 +291,7 @@ def test_dtype_round_trip():
 def test_add_time_series_bulk(tmp_path):
     """Bulk add commits all series in one transaction and returns keys in order."""
     path = tmp_path / "bulk.nc"
-    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    store = Store.create(path=str(path), in_memory=False)
     items = [
         {
             "owner_id": i,
@@ -316,7 +316,7 @@ def test_add_time_series_bulk(tmp_path):
 def test_bulk_read(tmp_path):
     """bulk_read returns a full series per key, in order, matching get_time_series."""
     path = tmp_path / "bulkread.nc"
-    store = TimeSeriesStore.create(path=str(path), in_memory=False)
+    store = Store.create(path=str(path), in_memory=False)
     items = [
         {
             "owner_id": i,
@@ -344,7 +344,7 @@ def test_bulk_read(tmp_path):
 
 def test_add_time_series_bulk_rolls_back_on_error():
     """A duplicate in the batch rolls back every item."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     dup = {
         "owner_id": 1,
         "owner_type": "Generator",
@@ -357,7 +357,7 @@ def test_add_time_series_bulk_rolls_back_on_error():
 
 
 def test_add_time_series_bulk_rejects_missing_keys():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     with pytest.raises(InvalidParameterError, match="owner_id"):
         store.add_time_series_bulk([{"owner_type": "Generator"}])
 
@@ -378,7 +378,7 @@ def _add_for_category(store, owner_id, category, name):
 
 def test_owner_pair_distinguishes_same_id_across_categories():
     """The same owner_id under different categories are distinct owners."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     comp_key = _add_for_category(store, 7, OwnerCategory.Component, "comp")
     supp_key = _add_for_category(store, 7, OwnerCategory.SupplementalAttribute, "supp")
 
@@ -394,7 +394,7 @@ def test_owner_pair_distinguishes_same_id_across_categories():
 
 
 def test_list_time_series_emits_and_filters_owner_category():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     _add_for_category(store, 1, OwnerCategory.Component, "comp")
     _add_for_category(store, 1, OwnerCategory.SupplementalAttribute, "supp")
 
@@ -414,7 +414,7 @@ def test_list_time_series_emits_and_filters_owner_category():
 
 
 def test_clear_time_series_for_owner_pair():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     _add_for_category(store, 1, OwnerCategory.Component, "comp")
     _add_for_category(store, 1, OwnerCategory.SupplementalAttribute, "supp")
 
@@ -427,7 +427,7 @@ def test_clear_time_series_for_owner_pair():
 
 
 def test_clear_time_series_all():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     _add_for_category(store, 1, OwnerCategory.Component, "comp")
     _add_for_category(store, 2, OwnerCategory.SupplementalAttribute, "supp")
 
@@ -437,7 +437,7 @@ def test_clear_time_series_all():
 
 
 def test_clear_time_series_requires_both_or_neither():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     with pytest.raises(InvalidParameterError):
         store.clear_time_series(owner_id=1)
     with pytest.raises(InvalidParameterError):
@@ -445,7 +445,7 @@ def test_clear_time_series_requires_both_or_neither():
 
 
 def test_replace_owner():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     _add_for_category(store, 1, OwnerCategory.Component, "comp")
 
     updated = store.replace_owner(1, 2, OwnerCategory.Component)
@@ -458,6 +458,6 @@ def test_replace_owner():
 
 
 def test_key_repr_includes_owner_category():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     key = _add_for_category(store, 1, OwnerCategory.Component, "comp")
     assert "owner_category" in repr(key)

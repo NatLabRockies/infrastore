@@ -1,7 +1,7 @@
 # Explanation
 
-This section explains how time-series-store is put together and why. It is understanding-oriented:
-read it to build a mental model, not to accomplish a specific task. For step-by-step recipes see the
+This section explains how castore is put together and why. It is understanding-oriented: read it to
+build a mental model, not to accomplish a specific task. For step-by-step recipes see the
 [How-To Guides](../how-to/index.md); for exhaustive listings see the
 [Reference](../reference/index.md).
 

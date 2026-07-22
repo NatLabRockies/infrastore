@@ -1,23 +1,22 @@
 # Julia Developer Guide
 
-This guide covers building on `TimeSeriesStore.jl`, the Julia package that wraps the
+This guide covers building on `Castore.jl`, the Julia package that wraps the
 [C ABI](../reference/c-abi.md). For exact signatures see the
 [Julia API reference](../reference/julia-api.md); to set up the package and the native library, see
 [Integrate with Julia](../how-to/integrate-julia.md).
 
 ## Load the Package
 
-`TimeSeriesStore.jl` resolves the native library from the `TIME_SERIES_STORE_LIB` environment
-variable (or the `TimeSeriesStore_jll` package when installed). Build the cdylib and point at it
-before `using TimeSeriesStore`:
+`Castore.jl` resolves the native library from the `CASTORE_LIB` environment variable (or the
+`Castore_jll` package when installed). Build the cdylib and point at it before `using Castore`:
 
 ```sh
-cargo build -p time-series-store-ffi --release
-export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
+cargo build -p castore-ffi --release
+export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
 ```
 
 ```julia
-using Dates, TimeSeriesStore
+using Dates, Castore
 ```
 
 Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
@@ -85,8 +84,8 @@ series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}, all SingleTim
 
 ## Attribute-Based Lookups
 
-Beyond key handles, `TimeSeriesStore.jl` can resolve a series directly from its attributes —
-convenient when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):
+Beyond key handles, `Castore.jl` can resolve a series directly from its attributes — convenient when
+a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):
 
 ```julia
 meta = get_metadata(
@@ -115,9 +114,9 @@ interchangeable for every time series type, static or forecast.
 
 ## Forecasts
 
-`TimeSeriesStore.jl` exposes `Deterministic`, `Probabilistic`, and `Scenarios` structs that wrap a
-native `AbstractArray` in the type's logical shape (the wrapper derives the dtype and dims and
-serializes the buffer row-major). Construct one and add it through the generic `add_time_series!`:
+`Castore.jl` exposes `Deterministic`, `Probabilistic`, and `Scenarios` structs that wrap a native
+`AbstractArray` in the type's logical shape (the wrapper derives the dtype and dims and serializes
+the buffer row-major). Construct one and add it through the generic `add_time_series!`:
 
 ```julia
 data = zeros(Float64, 24, 7)   # (horizon_count, count)
@@ -316,7 +315,7 @@ try
     add_supplemental_attribute_association!(
         store, SupplementalAttributeAssociation(42, "Load", 100, "Outage"))
 catch e
-    e isa TimeSeriesStore.DuplicateAssociationError || rethrow()
+    e isa Castore.DuplicateAssociationError || rethrow()
     @info e.msg   # attribute 100 is already attached to component 42
 end
 
@@ -341,7 +340,7 @@ replace_parent_child_component_id!(store, 42, 99)   # 1
 list_parents(store; child_id=7)                     # [43, 99]
 ```
 
-Neither table is reachable over gRPC or the `tss` CLI.
+Neither table is reachable over gRPC or the `cas` CLI.
 
 ## Persist to Disk
 
@@ -353,14 +352,14 @@ Keep the `.nc` and `.nc.sqlite` files together.
 
 ## Error Handling
 
-Errors subtype `TimeSeriesStore.TimeSeriesException`. The exception types are not exported, so
-reference them module-qualified. Catch broadly or narrowly:
+Errors subtype `Castore.TimeSeriesException`. The exception types are not exported, so reference
+them module-qualified. Catch broadly or narrowly:
 
 ```julia
 try
     add_time_series!(store, 42, "Generator", Component, ts)
 catch e
-    if e isa TimeSeriesStore.DuplicateTimeSeriesError
+    if e isa Castore.DuplicateTimeSeriesError
         @warn "already present"
     else
         rethrow()
@@ -368,11 +367,10 @@ catch e
 end
 ```
 
-The available types are `TimeSeriesStore.NotFoundError`, `TimeSeriesStore.DuplicateTimeSeriesError`,
-`TimeSeriesStore.InvalidParameterError`, `TimeSeriesStore.IntegrityError`,
-`TimeSeriesStore.ReadOnlyStoreError`, `TimeSeriesStore.IncompatibleFormatError` (the on-disk store
-was written by an incompatible data format version), and `TimeSeriesStore.GenericError` (which
-carries the raw FFI status `code`).
+The available types are `Castore.NotFoundError`, `Castore.DuplicateTimeSeriesError`,
+`Castore.InvalidParameterError`, `Castore.IntegrityError`, `Castore.ReadOnlyStoreError`,
+`Castore.IncompatibleFormatError` (the on-disk store was written by an incompatible data format
+version), and `Castore.GenericError` (which carries the raw FFI status `code`).
 
 ## InfrastructureSystems.jl Integration Notes
 
@@ -406,16 +404,16 @@ hook calls `init_logging("")` automatically, which reads `RUST_LOG` if set:
 
 ```sh
 # shell
-export RUST_LOG=time_series_store_core=debug
+export RUST_LOG=castore_core=debug
 julia --project=. myscript.jl
 ```
 
 **Programmatically** — call `init_logging` with a filter directive string:
 
 ```julia
-using TimeSeriesStore
+using Castore
 
-init_logging("time_series_store_core=debug")
+init_logging("castore_core=debug")
 
 store = Store(in_memory=true)
 add_time_series!(store, ...)   # spans appear on stderr
@@ -425,6 +423,6 @@ add_time_series!(store, ...)   # spans appear on stderr
 `RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
 bare level such as `"debug"` to match everything. Useful targets:
 
-| Target                   | What it covers                                               |
-| ------------------------ | ------------------------------------------------------------ |
-| `time_series_store_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |
+| Target         | What it covers                                               |
+| -------------- | ------------------------------------------------------------ |
+| `castore_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |

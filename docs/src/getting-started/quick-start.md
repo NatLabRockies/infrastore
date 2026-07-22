@@ -8,7 +8,7 @@ shortest path to a working round-trip. For Python or Julia, see the
 
 ```rust
 use chrono::{Duration, TimeZone, Utc};
-use time_series_store_core::{
+use castore_core::{
     Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
 };
 
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 This is the `examples/basic_rust.rs` program (comments added here). Run it with:
 
 ```sh
-cargo run --manifest-path crates/time-series-store-core/Cargo.toml --example basic
+cargo run --manifest-path crates/castore-core/Cargo.toml --example basic
 ```
 
 ## What Just Happened

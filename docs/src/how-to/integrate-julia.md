@@ -1,6 +1,6 @@
 # Integrate with Julia
 
-Wire `TimeSeriesStore.jl` to the native library. For API usage once it loads, see the
+Wire `Castore.jl` to the native library. For API usage once it loads, see the
 [Julia Developer Guide](../guides/julia.md).
 
 ## Prerequisites
@@ -10,36 +10,36 @@ Wire `TimeSeriesStore.jl` to the native library. For API usage once it loads, se
 
 ## 1. Build the Native Library
 
-`TimeSeriesStore.jl` calls into the C ABI cdylib, so build it first:
+`Castore.jl` calls into the C ABI cdylib, so build it first:
 
 ```sh
-cargo build -p time-series-store-ffi --release
+cargo build -p castore-ffi --release
 ```
 
 ## 2. Point Julia at the Library
 
-`TimeSeriesStore.jl` resolves the cdylib at first use, in this order:
+`Castore.jl` resolves the cdylib at first use, in this order:
 
-1. The `TIME_SERIES_STORE_LIB` environment variable — the development override, pointing at a build
-   from step 1.
-2. The `TimeSeriesStore_jll` binary package, if it is installed in the active environment.
+1. The `CASTORE_LIB` environment variable — the development override, pointing at a build from
+   step 1.
+2. The `Castore_jll` binary package, if it is installed in the active environment.
 
 For a development build, export the variable (add it to your shell profile to make it permanent):
 
 ```sh
-export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
+export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
 ```
 
-`using TimeSeriesStore` always works; the resolution happens on the first call that reaches the
-native library. If neither source yields a path, that call errors (see
-[Troubleshooting](#troubleshooting)). With `TimeSeriesStore_jll` installed you can skip the export
-entirely — set `TIME_SERIES_STORE_LIB` only when you want your local build to win over the JLL.
+`using Castore` always works; the resolution happens on the first call that reaches the native
+library. If neither source yields a path, that call errors (see
+[Troubleshooting](#troubleshooting)). With `Castore_jll` installed you can skip the export entirely
+— set `CASTORE_LIB` only when you want your local build to win over the JLL.
 
 ## 3. Instantiate and Test the Package
 
 ```sh
-julia --project=julia/TimeSeriesStore.jl -e 'using Pkg; Pkg.instantiate()'
-julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.jl
+julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
 ```
 
 ## 4. Use It From Your Project
@@ -48,13 +48,13 @@ Develop the package into your own environment, then activate it with the library
 
 ```julia
 using Pkg
-Pkg.develop(path="/path/to/time-series-store/julia/TimeSeriesStore.jl")
+Pkg.develop(path="/path/to/castore/julia/Castore.jl")
 ```
 
 ## Smoke Test
 
 ```julia
-using Dates, TimeSeriesStore
+using Dates, Castore
 
 store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
@@ -75,10 +75,10 @@ println("ok")
 
 ## Troubleshooting
 
-- **`Could not locate libtime_series_store_ffi. Set the TIME_SERIES_STORE_LIB environment variable to
-  a built cdylib, or install TimeSeriesStore_jll.`**
+- **`Could not locate libcastore_ffi. Set the CASTORE_LIB environment variable to
+  a built cdylib, or install Castore_jll.`**
   — Neither resolution path produced a library. Export the variable (step 2) before the first store
-  call, in the same shell that launched Julia, or add `TimeSeriesStore_jll` to the environment.
+  call, in the same shell that launched Julia, or add `Castore_jll` to the environment.
 - **`could not load library`** — Check the path exists and has the right extension for your OS
   (`.dylib` on macOS, `.so` on Linux, `.dll` on Windows), and that you built with `--release` if
   your variable points at `target/release`.

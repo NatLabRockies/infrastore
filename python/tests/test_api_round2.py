@@ -4,11 +4,11 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
-import time_series_store as tss
-from time_series_store import (
+import castore as cas
+from castore import (
     OwnerCategory,
     SingleTimeSeries,
-    TimeSeriesStore,
+    Store,
 )
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -20,7 +20,7 @@ def sts(name, base=0.0, length=8):
 
 
 def populated():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     for owner, name, base in [
         (1, "wind_speed", 1.0),
         (1, "wind_dir", 2.0),
@@ -40,11 +40,11 @@ class TestExceptions:
             "IncompatibleForecastError",
             "StorageError",
         ):
-            exc = getattr(tss, name)
-            assert issubclass(exc, tss.TimeSeriesError)
+            exc = getattr(cas, name)
+            assert issubclass(exc, cas.TimeSeriesError)
 
     def test_bad_period_string_raises_invalid_parameter(self):
-        with pytest.raises(tss.InvalidParameterError):
+        with pytest.raises(cas.InvalidParameterError):
             SingleTimeSeries(T0, "not-a-period", np.zeros(4), "x")
 
     def test_wrong_period_type_raises_type_error(self):
@@ -54,8 +54,8 @@ class TestExceptions:
     def test_storage_error_on_unopenable_path(self):
         # A missing parent directory fails in the catalog layer, staying
         # inside the library's exception hierarchy.
-        with pytest.raises(tss.StorageError):
-            TimeSeriesStore.open("/nonexistent/dir/x.nc")
+        with pytest.raises(cas.StorageError):
+            Store.open("/nonexistent/dir/x.nc")
 
 
 class TestDunders:
@@ -68,14 +68,14 @@ class TestDunders:
         assert len(a) == 8
 
     def test_round_tripped_series_equal(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         original = sts("load")
         key = store.add_time_series(1, "Gen", OwnerCategory.Component, original)
         fetched = store.get_time_series(key)
         assert fetched == original
 
     def test_forecast_len_is_count(self):
-        from time_series_store import Deterministic
+        from castore import Deterministic
 
         data = np.arange(6, dtype=np.float64).reshape(2, 3)
         det = Deterministic(T0, HOUR, timedelta(hours=2), HOUR, 3, data, "fc")
@@ -118,7 +118,7 @@ class TestKeywordOnly:
             store.list_names(1)  # owner_id positionally
 
     def test_add_time_series_options_are_keyword_only(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         with pytest.raises(TypeError):
             store.add_time_series(
                 1, "Gen", OwnerCategory.Component, sts("load"), {"scenario": "high"}

@@ -1,11 +1,11 @@
 # Python API
 
-The PyO3 binding is importable as the `time_series_store` module (package `time-series-store`). It
-is built as an `abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
+The PyO3 binding is importable as the `castore` module (package `castore`). It is built as an
+`abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
 
 ```python
-from time_series_store import (
-    TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
+from castore import (
+    Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
     SupplementalAttributeAssociation, ParentChildAssociation,
@@ -14,13 +14,13 @@ from time_series_store import (
 )
 ```
 
-`time_series_store.__version__` reports the wheel version.
+`castore.__version__` reports the wheel version.
 
 > **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, `int64`,
 > `int32`, `uint64`, or `bool`; whatever dtype is given round-trips unchanged. Multi-dimensional
 > arrays (a per-step element shape) are supported via the NumPy array's shape.
 
-## `TimeSeriesStore`
+## `Store`
 
 ### Constructors
 
@@ -33,10 +33,10 @@ def create(
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
-) -> TimeSeriesStore: ...
+) -> Store: ...
 
 @classmethod
-def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
+def open(cls, path: str, read_only: bool = False) -> Store: ...
 ```
 
 - `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
@@ -47,7 +47,7 @@ def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
   `InvalidParameterError`.
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
 
-The store is also a context manager: `with TimeSeriesStore.create(...) as store:` closes it on exit.
+The store is also a context manager: `with Store.create(...) as store:` closes it on exit.
 `store.close()` drops the underlying handle and releases its files; subsequent operations raise
 `TimeSeriesError` (it is idempotent). `repr(store)` shows the path (or `in-memory`), the read-only
 flag, and `closed` once closed.
@@ -150,8 +150,8 @@ def flush(self) -> None: ...
 
 > **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
 > marker): filter kwargs, `features=`/`units=`/`logical_type=` on the add paths, `time_range=` on
-> the read paths, and so on. Positional use raises `TypeError`. The wheel ships a
-> `time_series_store.pyi` stub, so IDEs and type checkers see the full signatures.
+> the read paths, and so on. Positional use raises `TypeError`. The wheel ships a `castore.pyi`
+> stub, so IDEs and type checkers see the full signatures.
 
 #### Return shapes
 
@@ -433,9 +433,9 @@ def supplemental_attribute_summary(self) -> list[dict]: ...
   `component_type`, `attribute_type`, `count`, ordered by attribute type then component type.
 
 ```python
-from time_series_store import SupplementalAttributeAssociation, TimeSeriesStore
+from castore import SupplementalAttributeAssociation, Store
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 store.add_supplemental_attribute_association(
     SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo")
 )
@@ -507,9 +507,9 @@ def replace_parent_child_component_id(self, old_id: int, new_id: int) -> int: ..
   duplicate an edge `new_id` already has.
 
 ```python
-from time_series_store import ParentChildAssociation, TimeSeriesStore
+from castore import ParentChildAssociation, Store
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 store.add_parent_child_association(ParentChildAssociation(1, "Generator", 7, "Bus"))
 # The reversed pair is a different edge, not a duplicate.
 store.add_parent_child_association(ParentChildAssociation(7, "Bus", 1, "Generator"))
@@ -521,7 +521,7 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -> 1
 ```
 
 Neither association catalog is exposed over the [gRPC server](grpc-api.md) or the
-[`tss` CLI](cli.md).
+[`cas` CLI](cli.md).
 
 ## Exceptions
 
@@ -560,8 +560,8 @@ directive string. Examples:
 
 ```python
 init_tracing("debug")                            # all targets at DEBUG
-init_tracing("time_series_store_core=debug")     # store core only
-init_tracing("warn,time_series_store_core=trace") # warn globally, trace the core
+init_tracing("castore_core=debug")     # store core only
+init_tracing("warn,castore_core=trace") # warn globally, trace the core
 ```
 
 Silently no-ops if a subscriber is already registered (including the one auto-initialized from

@@ -6,11 +6,11 @@ class and a final pair of tests pins the fact that they do not interfere.
 """
 
 import pytest
-import time_series_store as tss
-from time_series_store import (
+import castore as cas
+from castore import (
     ParentChildAssociation,
     SupplementalAttributeAssociation,
-    TimeSeriesStore,
+    Store,
 )
 
 
@@ -37,14 +37,14 @@ def edge_typed(parent_id, parent_type, child_id, child_type):
 
 
 def store_with_attachments(*associations):
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     if associations:
         store.add_supplemental_attribute_associations(list(associations))
     return store
 
 
 def store_with_edges(*associations):
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     if associations:
         store.add_parent_child_associations(list(associations))
     return store
@@ -78,7 +78,7 @@ class TestSupplementalAttributeObject:
 
 class TestSupplementalAttributeRoundTrip:
     def test_add_list_remove(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         store.add_supplemental_attribute_association(attached(1, 100))
         store.add_supplemental_attribute_association(attached(2, 100))
         assert store.list_supplemental_attribute_associations() == [
@@ -90,7 +90,7 @@ class TestSupplementalAttributeRoundTrip:
         assert store.list_supplemental_attribute_associations() == [attached(2, 100)]
 
     def test_removing_nothing_is_not_an_error(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         assert store.remove_supplemental_attribute_associations(component_id=999) == 0
 
     def test_independent_of_time_series(self):
@@ -110,14 +110,14 @@ class TestSupplementalAttributeRoundTrip:
 class TestSupplementalAttributeUniqueness:
     def test_duplicate_pair_rejected_regardless_of_type_names(self):
         store = store_with_attachments(attached(1, 100))
-        with pytest.raises(tss.DuplicateAssociationError):
+        with pytest.raises(cas.DuplicateAssociationError):
             store.add_supplemental_attribute_association(
                 attached_typed(1, "Load", 100, "Outage")
             )
         assert store.count_supplemental_attribute_associations() == 1
 
     def test_duplicate_error_is_in_the_hierarchy(self):
-        assert issubclass(tss.DuplicateAssociationError, tss.TimeSeriesError)
+        assert issubclass(cas.DuplicateAssociationError, cas.TimeSeriesError)
 
     def test_swapped_ids_are_a_different_row(self):
         # Component and attribute id streams are independent, so the same two
@@ -233,7 +233,7 @@ class TestSupplementalAttributeIdsAndCounts:
         ]
 
     def test_summary_of_an_empty_table(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         assert store.supplemental_attribute_summary() == []
         assert store.supplemental_attribute_counts_by_type() == []
 
@@ -249,7 +249,7 @@ class TestSupplementalAttributeReplaceComponentId:
 
     def test_collision_rolls_back(self):
         store = store_with_attachments(attached(1, 100), attached(2, 100))
-        with pytest.raises(tss.DuplicateAssociationError):
+        with pytest.raises(cas.DuplicateAssociationError):
             store.replace_supplemental_attribute_component_id(1, 2)
         assert store.list_supplemental_attribute_associations() == [
             attached(1, 100),
@@ -275,18 +275,18 @@ class TestSupplementalAttributeBulk:
             attached_typed(1, "Generator", 101, "Outage"),
             attached_typed(2, "Load", 100, "GeographicInfo"),
         ]
-        source = TimeSeriesStore.create(in_memory=True)
+        source = Store.create(in_memory=True)
         assert source.add_supplemental_attribute_associations(records) == len(records)
         exported = source.list_supplemental_attribute_associations()
         assert exported == records
 
-        target = TimeSeriesStore.create(in_memory=True)
+        target = Store.create(in_memory=True)
         target.add_supplemental_attribute_associations(exported)
         assert target.list_supplemental_attribute_associations() == exported
 
     def test_all_or_nothing(self):
-        store = TimeSeriesStore.create(in_memory=True)
-        with pytest.raises(tss.DuplicateAssociationError):
+        store = Store.create(in_memory=True)
+        with pytest.raises(cas.DuplicateAssociationError):
             store.add_supplemental_attribute_associations(
                 [attached(1, 100), attached(2, 100), attached(1, 100)]
             )
@@ -319,7 +319,7 @@ class TestParentChildObject:
 
 class TestParentChildRoundTrip:
     def test_add_list_remove(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         store.add_parent_child_association(edge(1, 10))
         store.add_parent_child_association(edge(2, 10))
         assert store.list_parent_child_associations() == [edge(1, 10), edge(2, 10)]
@@ -328,7 +328,7 @@ class TestParentChildRoundTrip:
         assert store.list_parent_child_associations() == [edge(2, 10)]
 
     def test_removing_nothing_is_not_an_error(self):
-        store = TimeSeriesStore.create(in_memory=True)
+        store = Store.create(in_memory=True)
         assert store.remove_parent_child_associations(parent_id=999) == 0
 
     def test_independent_of_time_series(self):
@@ -347,7 +347,7 @@ class TestParentChildDirection:
 
     def test_duplicate_ordered_pair_rejected_regardless_of_type_names(self):
         store = store_with_edges(edge(1, 10))
-        with pytest.raises(tss.DuplicateAssociationError):
+        with pytest.raises(cas.DuplicateAssociationError):
             store.add_parent_child_association(edge_typed(1, "Load", 10, "Area"))
         assert store.count_parent_child_associations() == 1
 
@@ -435,7 +435,7 @@ class TestParentChildReplaceComponentId:
 
     def test_collision_rolls_back(self):
         store = store_with_edges(edge(1, 10), edge(2, 10))
-        with pytest.raises(tss.DuplicateAssociationError):
+        with pytest.raises(cas.DuplicateAssociationError):
             store.replace_parent_child_component_id(1, 2)
         assert store.list_parent_child_associations() == [edge(1, 10), edge(2, 10)]
 
@@ -451,18 +451,18 @@ class TestParentChildBulk:
             edge_typed(1, "Generator", 11, "Area"),
             edge_typed(2, "Load", 10, "Bus"),
         ]
-        source = TimeSeriesStore.create(in_memory=True)
+        source = Store.create(in_memory=True)
         assert source.add_parent_child_associations(records) == len(records)
         exported = source.list_parent_child_associations()
         assert exported == records
 
-        target = TimeSeriesStore.create(in_memory=True)
+        target = Store.create(in_memory=True)
         target.add_parent_child_associations(exported)
         assert target.list_parent_child_associations() == exported
 
     def test_all_or_nothing(self):
-        store = TimeSeriesStore.create(in_memory=True)
-        with pytest.raises(tss.DuplicateAssociationError):
+        store = Store.create(in_memory=True)
+        with pytest.raises(cas.DuplicateAssociationError):
             store.add_parent_child_associations([edge(1, 10), edge(2, 10), edge(1, 10)])
         assert store.count_parent_child_associations() == 0
 
@@ -478,7 +478,7 @@ class TestPersistence:
         store.persist_to(str(path))
         store.close()
 
-        reopened = TimeSeriesStore.open(str(path), read_only=True)
+        reopened = Store.open(str(path), read_only=True)
         assert reopened.list_supplemental_attribute_associations() == [
             attached(1, 100),
             attached(2, 101),
@@ -488,18 +488,18 @@ class TestPersistence:
 
     def test_read_only_store_rejects_attachment_writes(self, tmp_path):
         path = tmp_path / "attach_ro.nc"
-        store = TimeSeriesStore.create(str(path))
+        store = Store.create(str(path))
         store.add_supplemental_attribute_association(attached(1, 100))
         store.close()
 
-        ro = TimeSeriesStore.open(str(path), read_only=True)
-        with pytest.raises(tss.ReadOnlyStoreError):
+        ro = Store.open(str(path), read_only=True)
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.add_supplemental_attribute_association(attached(2, 100))
-        with pytest.raises(tss.ReadOnlyStoreError):
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.add_supplemental_attribute_associations([attached(2, 100)])
-        with pytest.raises(tss.ReadOnlyStoreError):
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.remove_supplemental_attribute_associations()
-        with pytest.raises(tss.ReadOnlyStoreError):
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.replace_supplemental_attribute_component_id(1, 2)
         # Reads still work.
         assert ro.list_supplemental_attribute_associations() == [attached(1, 100)]
@@ -507,18 +507,18 @@ class TestPersistence:
 
     def test_read_only_store_rejects_edge_writes(self, tmp_path):
         path = tmp_path / "edge_ro.nc"
-        store = TimeSeriesStore.create(str(path))
+        store = Store.create(str(path))
         store.add_parent_child_association(edge(1, 10))
         store.close()
 
-        ro = TimeSeriesStore.open(str(path), read_only=True)
-        with pytest.raises(tss.ReadOnlyStoreError):
+        ro = Store.open(str(path), read_only=True)
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.add_parent_child_association(edge(2, 10))
-        with pytest.raises(tss.ReadOnlyStoreError):
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.add_parent_child_associations([edge(2, 10)])
-        with pytest.raises(tss.ReadOnlyStoreError):
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.remove_parent_child_associations()
-        with pytest.raises(tss.ReadOnlyStoreError):
+        with pytest.raises(cas.ReadOnlyStoreError):
             ro.replace_parent_child_component_id(1, 2)
         assert ro.list_parent_child_associations() == [edge(1, 10)]
         ro.close()

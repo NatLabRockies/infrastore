@@ -1,0 +1,36 @@
+[package]
+name = "castore-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types, storage, and metadata for castore"
+
+[dependencies]
+chrono = { workspace = true }
+ndarray = { workspace = true }
+netcdf = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# `asm` selects hand-written SHA-256 kernels (and the ARMv8 crypto extensions
+# on aarch64), ~5x faster than the portable fallback for content hashing on
+# Apple Silicon. sha2-asm does not build under MSVC, so Windows MSVC keeps the
+# portable implementation (x86_64 still auto-detects SHA-NI at runtime).
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }
+
+[target.'cfg(target_env = "msvc")'.dependencies]
+sha2 = { workspace = true }
+
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "user-hooks"] }
+tempfile = "3"
+
+[[example]]
+name = "basic"
+path = "../../examples/basic_rust.rs"

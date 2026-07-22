@@ -1,7 +1,7 @@
-# time-series-store Documentation
+# castore Documentation
 
-This directory contains the source files for the time-series-store user and developer documentation,
-built with [mdBook](https://rust-lang.github.io/mdBook/).
+This directory contains the source files for the castore user and developer documentation, built
+with [mdBook](https://rust-lang.github.io/mdBook/).
 
 ## Building the Documentation
 

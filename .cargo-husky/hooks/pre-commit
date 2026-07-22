@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Pre-commit hook for time-series-store.
+# Pre-commit hook for castore.
 
 set -e
 

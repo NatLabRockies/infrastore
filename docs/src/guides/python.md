@@ -1,18 +1,18 @@
 # Python Developer Guide
 
-This guide covers building on the `time_series_store` PyO3 module. For exact signatures and return
-shapes, see the [Python API reference](../reference/python-api.md). To install the wheel into your
-environment, see [Integrate with Python](../how-to/integrate-python.md).
+This guide covers building on the `castore` PyO3 module. For exact signatures and return shapes, see
+the [Python API reference](../reference/python-api.md). To install the wheel into your environment,
+see [Integrate with Python](../how-to/integrate-python.md).
 
 ## Import
 
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory, TimeSeriesType
+from castore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
-The module exposes `TimeSeriesStore`; the static series classes `SingleTimeSeries` and
+The module exposes `Store`; the static series classes `SingleTimeSeries` and
 `NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
 `TimeSeriesKey`; the `TimeSeriesType` and `OwnerCategory` enums; the `init_tracing` function; and an
 exception hierarchy rooted at `TimeSeriesError`.
@@ -21,13 +21,13 @@ exception hierarchy rooted at `TimeSeriesError`.
 
 ```python
 # In-memory: no filesystem I/O.
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 
 # On disk: writes system.nc and system.nc.sqlite.
-store = TimeSeriesStore.create(path="system.nc")
+store = Store.create(path="system.nc")
 
 # Reopen read-only.
-store = TimeSeriesStore.open("system.nc", read_only=True)
+store = Store.open("system.nc", read_only=True)
 ```
 
 ## Build a Series
@@ -147,7 +147,7 @@ vice versa — see
 Filter arguments are keyword-only, all optional, and ANDed; passing none matches everything.
 
 ```python
-from time_series_store import (
+from castore import (
     SupplementalAttributeAssociation,
     ParentChildAssociation,
     DuplicateAssociationError,
@@ -215,7 +215,7 @@ assert store.replace_parent_child_component_id(42, 99) == 1
 assert store.list_parents(child_id=7) == [43, 99]
 ```
 
-Neither table is reachable over gRPC or the `tss` CLI.
+Neither table is reachable over gRPC or the `cas` CLI.
 
 ## Persist to Disk
 
@@ -230,7 +230,7 @@ Keep the two files together — the `.nc` and `.nc.sqlite` pair is a single logi
 The store's own exceptions inherit from `TimeSeriesError`, so you can catch broadly or narrowly:
 
 ```python
-from time_series_store import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
+from castore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
 
 try:
     store.add_time_series(...)
@@ -253,9 +253,9 @@ first, so `True`/`False` feature values are stored as booleans (not as `1`/`0` i
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory
+from castore import Store, SingleTimeSeries, OwnerCategory
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
@@ -284,17 +284,17 @@ subscriber on import when this variable is set:
 ```sh
 RUST_LOG=debug python myscript.py
 # or, to limit output to the store core only:
-RUST_LOG=time_series_store_core=debug python myscript.py
+RUST_LOG=castore_core=debug python myscript.py
 ```
 
 **Programmatically** — call `init_tracing` with a filter directive string:
 
 ```python
-from time_series_store import init_tracing
+from castore import init_tracing
 
-init_tracing("time_series_store_core=debug")
+init_tracing("castore_core=debug")
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 store.add_time_series(...)   # spans appear on stderr
 ```
 
@@ -302,6 +302,6 @@ store.add_time_series(...)   # spans appear on stderr
 `RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
 bare level such as `"debug"` to match everything. Useful targets:
 
-| Target                   | What it covers                                               |
-| ------------------------ | ------------------------------------------------------------ |
-| `time_series_store_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |
+| Target         | What it covers                                               |
+| -------------- | ------------------------------------------------------------ |
+| `castore_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |

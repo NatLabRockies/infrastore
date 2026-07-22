@@ -13,14 +13,14 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from time_series_store import (
+from castore import (
     Deterministic,
     InvalidParameterError,
     OwnerCategory,
     Probabilistic,
     Scenarios,
     SingleTimeSeries,
-    TimeSeriesStore,
+    Store,
     TimeSeriesType,
 )
 
@@ -41,7 +41,7 @@ INTERVAL_12H = timedelta(hours=12)  # 12-hour window spacing
 
 def test_deterministic_scalar_round_trip():
     """Write a Deterministic forecast [H=6, count=4] and read it back."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
 
@@ -65,7 +65,7 @@ def test_deterministic_scalar_round_trip():
 
 def test_deterministic_multidim_element():
     """Deterministic with per-step element shape [H=4, count=3, E=2] round-trips."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C, E = 4, 3, 2
     horizon = timedelta(hours=H)
     data = np.arange(H * C * E, dtype=np.float32).reshape(H, C, E)
@@ -85,7 +85,7 @@ def test_deterministic_multidim_element():
 
 def test_deterministic_window_selection():
     """Select a middle sub-range of Deterministic windows via time_range."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 6  # 6 windows
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
 
@@ -109,7 +109,7 @@ def test_deterministic_window_selection():
 
 def test_deterministic_int64_dtype():
     """Deterministic with int64 data round-trips the dtype exactly."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 4, 3
     horizon = timedelta(hours=H)
     data = np.arange(H * C, dtype=np.int64).reshape(H, C) * 100
@@ -132,7 +132,7 @@ def test_deterministic_int64_dtype():
 
 def test_probabilistic_round_trip():
     """Write a Probabilistic forecast [P=3, H=6, count=4] and read it back."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     P, H, C = 3, 6, 4
     percentiles = [0.1, 0.5, 0.9]
     data = np.arange(P * H * C, dtype=np.float64).reshape(P, H, C)
@@ -159,7 +159,7 @@ def test_probabilistic_round_trip():
 
 def test_probabilistic_window_selection():
     """Select windows 1..3 (exclusive) from a Probabilistic forecast."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     P, H, C = 3, 6, 5
     percentiles = [0.25, 0.5, 0.75]
     data = np.arange(P * H * C, dtype=np.float64).reshape(P, H, C)
@@ -190,7 +190,7 @@ def test_probabilistic_window_selection():
 
 def test_scenarios_round_trip():
     """Write a Scenarios forecast [S=4, H=6, count=3] and read it back."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     S, H, C = 4, 6, 3
     data = np.arange(S * H * C, dtype=np.float64).reshape(S, H, C)
 
@@ -216,7 +216,7 @@ def test_scenarios_round_trip():
 
 def test_scenarios_window_selection():
     """Select windows 2..5 (exclusive) from a Scenarios forecast."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     S, H, C = 4, 6, 6
     data = np.arange(S * H * C, dtype=np.float64).reshape(S, H, C)
 
@@ -241,7 +241,7 @@ def test_scenarios_window_selection():
 
 def test_scenarios_int64_dtype():
     """Scenarios with int64 data preserves dtype through round-trip."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     S, H, C = 2, 4, 3
     horizon = timedelta(hours=H)
     data = np.arange(S * H * C, dtype=np.int64).reshape(S, H, C) * 7
@@ -264,7 +264,7 @@ def test_scenarios_int64_dtype():
 
 def test_transform_single_time_series_to_dst():
     """A stored SingleTimeSeries transforms into a DST, read back as Deterministic."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     # total_len=8, H=4 (horizon=4h, res=1h), interval=2h => interval_steps=2.
     # count = (8 - 4) / 2 + 1 = 3.
     horizon = timedelta(hours=4)
@@ -306,7 +306,7 @@ def test_transform_single_time_series_to_dst():
 
 def test_misaligned_window_start_raises():
     """A time_range start not on a window boundary raises InvalidParameterError."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
     key = store.add_time_series(
@@ -323,7 +323,7 @@ def test_misaligned_window_start_raises():
 
 def test_end_before_start_raises():
     """time_range with end < start raises InvalidParameterError."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
     key = store.add_time_series(
@@ -340,7 +340,7 @@ def test_end_before_start_raises():
 
 def test_start_past_last_window_raises():
     """A time_range whose aligned start is past the last window raises."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 4
     data = np.zeros((H, C), dtype=np.float64)
     key = store.add_time_series(
@@ -356,7 +356,7 @@ def test_start_past_last_window_raises():
 
 def test_empty_window_range():
     """A time_range selecting zero windows returns count=0 array."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
     key = store.add_time_series(
@@ -381,7 +381,7 @@ def test_empty_window_range():
 
 def test_get_forecast_parameters():
     """A store with a forecast reports its horizon/interval/count/resolution."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 4
     data = np.arange(H * C, dtype=np.float64).reshape(H, C)
     store.add_time_series(
@@ -399,7 +399,7 @@ def test_get_forecast_parameters():
 
 def test_get_forecast_parameters_no_forecasts():
     """Without forecasts, every parameter is None."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     params = store.get_forecast_parameters()
     assert params == {
         "horizon": None,
@@ -417,7 +417,7 @@ def test_get_forecast_parameters_no_forecasts():
 
 def test_repr_smoke():
     """__repr__ returns a non-empty string without raising."""
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     H, C = 6, 3
 
     det_data = np.zeros((H, C), dtype=np.float64)

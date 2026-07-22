@@ -225,6 +225,113 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b02b629252fe8ef6460461409564e2c21d0c8e77e0944f3d189ff06c4e932ad"
 
 [[package]]
+name = "castore-bench"
+version = "0.1.0"
+dependencies = [
+ "castore-core",
+ "chrono",
+ "clap",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "castore-cli"
+version = "0.1.0"
+dependencies = [
+ "castore-core",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "csv",
+ "serde",
+ "serde_json",
+ "tabled",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "castore-core"
+version = "0.1.0"
+dependencies = [
+ "cargo-husky",
+ "chrono",
+ "ndarray",
+ "netcdf",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "castore-ffi"
+version = "0.1.0"
+dependencies = [
+ "castore-core",
+ "cbindgen",
+ "chrono",
+ "ndarray",
+ "serde",
+ "serde_json",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "castore-proto"
+version = "0.1.0"
+dependencies = [
+ "castore-core",
+ "chrono",
+ "ndarray",
+ "prost",
+ "prost-types",
+ "thiserror",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "castore-py"
+version = "0.1.0"
+dependencies = [
+ "castore-core",
+ "chrono",
+ "ndarray",
+ "numpy",
+ "pyo3",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "castore-server"
+version = "0.1.0"
+dependencies = [
+ "castore-core",
+ "castore-proto",
+ "chrono",
+ "clap",
+ "ndarray",
+ "prost",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "toml 0.8.23",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cbindgen"
 version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1590,113 +1697,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "time-series-store-bench"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "tempfile",
- "time-series-store-core",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "time-series-store-cli"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "clap_complete",
- "csv",
- "serde",
- "serde_json",
- "tabled",
- "tempfile",
- "time-series-store-core",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "time-series-store-core"
-version = "0.1.0"
-dependencies = [
- "cargo-husky",
- "chrono",
- "ndarray",
- "netcdf",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "time-series-store-ffi"
-version = "0.1.0"
-dependencies = [
- "cbindgen",
- "chrono",
- "ndarray",
- "serde",
- "serde_json",
- "time-series-store-core",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "time-series-store-proto"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ndarray",
- "prost",
- "prost-types",
- "thiserror",
- "time-series-store-core",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
-name = "time-series-store-py"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ndarray",
- "numpy",
- "pyo3",
- "time-series-store-core",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "time-series-store-server"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "ndarray",
- "prost",
- "serde",
- "tempfile",
- "thiserror",
- "time-series-store-core",
- "time-series-store-proto",
- "tokio",
- "tokio-stream",
- "toml 0.8.23",
- "tonic",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

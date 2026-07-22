@@ -1,11 +1,11 @@
 # Julia API
 
-The Julia package is **`TimeSeriesStore.jl`** (module `TimeSeriesStore`); it wraps the
-[C ABI](./c-abi.md) cdylib. The library is resolved from the `TIME_SERIES_STORE_LIB` environment
-variable (development builds), or from the `TimeSeriesStore_jll` binary package when installed.
+The Julia package is **`Castore.jl`** (module `Castore`); it wraps the [C ABI](./c-abi.md) cdylib.
+The library is resolved from the `CASTORE_LIB` environment variable (development builds), or from
+the `Castore_jll` binary package when installed.
 
 ```julia
-using TimeSeriesStore
+using Castore
 ```
 
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
@@ -596,8 +596,9 @@ descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `i
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
-- `time_series_type` — a `TS_TYPE_*` **integer code** (`0 = SingleTimeSeries` … `5 = Scenarios`),
-  not a Julia type. (The `time_series_type` field on a returned row _is_ the Julia type.)
+- `time_series_type` — a `CASTORE_TYPE_*` **integer code** (`0 = SingleTimeSeries` …
+  `5 = Scenarios`), not a Julia type. (The `time_series_type` field on a returned row _is_ the Julia
+  type.)
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `features` — match keys whose features include all the given entries (subset match).
@@ -759,23 +760,23 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 ```
 
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
-[`tss` CLI](./cli.md).
+[`cas` CLI](./cli.md).
 
 ## Errors
 
 All subtype `TimeSeriesException`:
 
-| Type                        | Mapped from FFI code                                                       |
-| --------------------------- | -------------------------------------------------------------------------- |
-| `NotFoundError`             | `TS_ERR_NOT_FOUND`                                                         |
-| `DuplicateTimeSeriesError`  | `TS_ERR_DUPLICATE`                                                         |
-| `DuplicateAssociationError` | `TS_ERR_DUPLICATE_ASSOCIATION`                                             |
-| `InvalidParameterError`     | `TS_ERR_INVALID_PARAMETER` / `TS_ERR_INVALID_UTF8` / `TS_ERR_NULL_POINTER` |
-| `IntegrityError`            | `TS_ERR_INTEGRITY`                                                         |
-| `ReadOnlyStoreError`        | `TS_ERR_READ_ONLY`                                                         |
-| `IncompatibleFormatError`   | `TS_ERR_INCOMPATIBLE_FORMAT`                                               |
-| `IOError`                   | `TS_ERR_IO`                                                                |
-| `GenericError`              | Any other non-zero code (carries the numeric `code`)                       |
+| Type                        | Mapped from FFI code                                                                      |
+| --------------------------- | ----------------------------------------------------------------------------------------- |
+| `NotFoundError`             | `CASTORE_ERR_NOT_FOUND`                                                                   |
+| `DuplicateTimeSeriesError`  | `CASTORE_ERR_DUPLICATE`                                                                   |
+| `DuplicateAssociationError` | `CASTORE_ERR_DUPLICATE_ASSOCIATION`                                                       |
+| `InvalidParameterError`     | `CASTORE_ERR_INVALID_PARAMETER` / `CASTORE_ERR_INVALID_UTF8` / `CASTORE_ERR_NULL_POINTER` |
+| `IntegrityError`            | `CASTORE_ERR_INTEGRITY`                                                                   |
+| `ReadOnlyStoreError`        | `CASTORE_ERR_READ_ONLY`                                                                   |
+| `IncompatibleFormatError`   | `CASTORE_ERR_INCOMPATIBLE_FORMAT`                                                         |
+| `IOError`                   | `CASTORE_ERR_IO`                                                                          |
+| `GenericError`              | Any other non-zero code (carries the numeric `code`)                                      |
 
 The message text comes from the FFI layer's thread-local error buffer.
 
@@ -815,23 +816,23 @@ init_logging(level::AbstractString = "") -> Int32  # the FFI status code
 
 Initialize the Rust tracing subscriber. `level` is an
 [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
-directive string such as `"debug"` or `"time_series_store_core=debug"`. Pass an empty string (the
-default) to read `RUST_LOG`; if that variable is also unset, no output is produced.
+directive string such as `"debug"` or `"castore_core=debug"`. Pass an empty string (the default) to
+read `RUST_LOG`; if that variable is also unset, no output is produced.
 
 The subscriber is initialized at most once per process — subsequent calls are no-ops. The module's
 `__init__` hook calls `init_logging("")` automatically when `RUST_LOG` is set, so the common case
 requires no code change:
 
 ```sh
-export RUST_LOG=time_series_store_core=debug
+export RUST_LOG=castore_core=debug
 julia --project=. myscript.jl
 ```
 
 For programmatic control without environment variables:
 
 ```julia
-using TimeSeriesStore
-init_logging("time_series_store_core=debug")
+using Castore
+init_logging("castore_core=debug")
 ```
 
 See [Julia developer guide](../guides/julia.md#diagnostics-and-tracing) for usage examples and a

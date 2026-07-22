@@ -1,0 +1,19 @@
+[package]
+name = "castore-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Performance benchmarks for castore"
+
+[[bin]]
+name = "cas-bench"
+path = "src/main.rs"
+
+[dependencies]
+castore-core = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["env", "color"] }
+tempfile = "3"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -33,13 +33,13 @@ files.
 3. Launch:
 
    ```sh
-   cargo run -p time-series-store-server -- --config my_server.toml
+   cargo run -p castore-server -- --config my_server.toml
    # or, from a release build:
-   ./target/release/time-series-store-server --config my_server.toml
+   ./target/release/castore-server --config my_server.toml
    ```
 
 On startup the server validates the auth section, opens the first `[data].files` entry read-only,
-and serves the `TimeSeriesStore` service on `host:port`. Set `RUST_LOG=debug` for verbose logs.
+and serves the `CatalogStore` service on `host:port`. Set `RUST_LOG=debug` for verbose logs.
 
 ## The Rust Client
 
@@ -48,8 +48,8 @@ codes are mapped back onto `TimeSeriesError`, so remote and local calls surface 
 taxonomy.
 
 ```rust
-use time_series_store_core::OwnerCategory;
-use time_series_store_server::client::RemoteClient;
+use castore_core::OwnerCategory;
+use castore_server::client::RemoteClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -93,14 +93,14 @@ rejected without a byte-wise compare, on the assumption that length is not secre
 generated client with an interceptor that injects the header:
 
 ```rust
-use time_series_store_proto::pb::time_series_store_client::TimeSeriesStoreClient;
-use time_series_store_proto::pb::CountsReq;
+use castore_proto::pb::catalog_store_client::CatalogStoreClient;
+use castore_proto::pb::CountsReq;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
 let channel = Channel::from_shared("http://127.0.0.1:50051")?.connect().await?;
 let key: MetadataValue<_> = "replace-me-with-a-secret-1".parse()?;
-let mut client = TimeSeriesStoreClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+let mut client = CatalogStoreClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
     req.metadata_mut().insert("x-api-key", key.clone());
     Ok(req)
 });
@@ -110,6 +110,6 @@ let counts = client.get_counts(CountsReq {}).await?.into_inner();
 
 ## Clients in Other Languages
 
-The proto file at `proto/time_series_store/v1/store.proto` is a standard proto3 definition. Generate
-a client for any gRPC-supported language from it, sending the `x-api-key` metadata header when the
-server requires authentication.
+The proto file at `proto/castore/v1/store.proto` is a standard proto3 definition. Generate a client
+for any gRPC-supported language from it, sending the `x-api-key` metadata header when the server
+requires authentication.
