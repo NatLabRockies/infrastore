@@ -270,6 +270,79 @@ nerr   = verify_integrity(store)  # 0 == intact
 compact!(store)
 ```
 
+## Associations
+
+Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities).
+
+Filter keywords are all optional and ANDed; passing none matches everything.
+
+```julia
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(42, "Generator", 100, "GeographicInfo"))
+
+# Bulk add is one all-or-nothing transaction.
+add_supplemental_attribute_associations!(store, [
+    SupplementalAttributeAssociation(43, "Generator", 100, "GeographicInfo"),
+    SupplementalAttributeAssociation(43, "Generator", 101, "Outage"),
+])
+
+# Queries run in both directions, returning distinct ids in ascending order.
+list_supplemental_attribute_ids(store; component_id=43)      # [100, 101]
+list_components_with_attributes(store; attribute_id=100)     # [42, 43]
+has_supplemental_attribute_association(store; component_id=42, attribute_id=100)  # true
+
+# `*_types` filters take CONCRETE type names, so expand an abstract type yourself —
+# `get_all_subtype_names` in InfrastructureSystems.jl is the usual source. An empty
+# vector is a deliberate "none of these" and matches nothing.
+list_supplemental_attribute_ids(store; component_id=43, attribute_types=["Outage"])  # [101]
+
+count_supplemental_attributes(store)         # 2, distinct attributes
+count_components_with_attributes(store)      # 2, distinct components
+supplemental_attribute_counts_by_type(store)
+# [(type = "GeographicInfo", count = 2), (type = "Outage", count = 1)]
+supplemental_attribute_summary(store)
+# [(component_type = "Generator", attribute_type = "GeographicInfo", count = 2), ...]
+```
+
+Identity is the `(component_id, attribute_id)` pair. The type names ride along for filtering and are
+not part of it, so re-attaching the same pair under different type names is still a duplicate:
+
+```julia
+try
+    add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(42, "Load", 100, "Outage"))
+catch e
+    e isa TimeSeriesStore.DuplicateAssociationError || rethrow()
+    @info e.msg   # attribute 100 is already attached to component 42
+end
+
+# Removal returns a count. Matching nothing returns 0 rather than throwing, so assert on
+# the count yourself if you expected a hit.
+remove_supplemental_attribute_associations!(store; component_id=43)   # 2
+```
+
+Parent/child edges work the same way, except that identity is the **ordered** pair — the reverse of
+an edge is a different edge — and both endpoints are always components:
+
+```julia
+add_parent_child_association!(store, ParentChildAssociation(42, "Generator", 7, "Bus"))
+add_parent_child_associations!(store, [ParentChildAssociation(43, "Generator", 7, "Bus")])
+
+list_children(store; parent_id=42)      # [7]
+list_parents(store; child_id=7)         # [42, 43]
+count_parent_child_associations(store)  # 2
+
+# Renumbering a component rewrites both ends of every edge.
+replace_parent_child_component_id!(store, 42, 99)   # 1
+list_parents(store; child_id=7)                     # [43, 99]
+```
+
+Neither table is reachable over gRPC or the `tss` CLI.
+
 ## Persist to Disk
 
 ```julia

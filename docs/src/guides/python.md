@@ -136,6 +136,87 @@ report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped
 errors = store.verify_integrity()   # [] when intact
 ```
 
+## Associations
+
+Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities).
+
+Filter arguments are keyword-only, all optional, and ANDed; passing none matches everything.
+
+```python
+from time_series_store import (
+    SupplementalAttributeAssociation,
+    ParentChildAssociation,
+    DuplicateAssociationError,
+)
+
+store.add_supplemental_attribute_association(
+    SupplementalAttributeAssociation(42, "Generator", 100, "GeographicInfo")
+)
+
+# Bulk add is one all-or-nothing transaction.
+store.add_supplemental_attribute_associations([
+    SupplementalAttributeAssociation(43, "Generator", 100, "GeographicInfo"),
+    SupplementalAttributeAssociation(43, "Generator", 101, "Outage"),
+])
+
+# Queries run in both directions, returning distinct ids in ascending order.
+assert store.list_supplemental_attribute_ids(component_id=43) == [100, 101]
+assert store.list_components_with_attributes(attribute_id=100) == [42, 43]
+assert store.has_supplemental_attribute_association(component_id=42, attribute_id=100)
+
+# `*_types` filters take CONCRETE type names. Expanding an abstract type into its
+# subtypes is the caller's job — the store has no type hierarchy. An empty list is a
+# deliberate "none of these" and matches nothing.
+assert store.list_supplemental_attribute_ids(
+    component_id=43, attribute_types=["Outage"]
+) == [101]
+
+assert store.count_supplemental_attributes() == 2        # distinct attributes
+assert store.count_components_with_attributes() == 2     # distinct components
+store.supplemental_attribute_counts_by_type()
+# [('GeographicInfo', 2), ('Outage', 1)]
+store.supplemental_attribute_summary()
+# [{'component_type': 'Generator', 'attribute_type': 'GeographicInfo', 'count': 2}, ...]
+```
+
+Identity is the `(component_id, attribute_id)` pair. The type names ride along for filtering and are
+not part of it, so re-attaching the same pair under different type names is still a duplicate:
+
+```python
+try:
+    store.add_supplemental_attribute_association(
+        SupplementalAttributeAssociation(42, "Load", 100, "Outage")
+    )
+except DuplicateAssociationError as e:
+    print(e)   # attribute 100 is already attached to component 42
+
+# Removal returns a count. Matching nothing returns 0 rather than raising, so assert on
+# the count yourself if you expected a hit.
+assert store.remove_supplemental_attribute_associations(component_id=43) == 2
+```
+
+Parent/child edges work the same way, except that identity is the **ordered** pair — the reverse of
+an edge is a different edge — and both endpoints are always components:
+
+```python
+store.add_parent_child_association(ParentChildAssociation(42, "Generator", 7, "Bus"))
+store.add_parent_child_associations([ParentChildAssociation(43, "Generator", 7, "Bus")])
+
+assert store.list_children(parent_id=42) == [7]
+assert store.list_parents(child_id=7) == [42, 43]
+assert store.count_parent_child_associations() == 2
+
+# Renumbering a component rewrites both ends of every edge.
+assert store.replace_parent_child_component_id(42, 99) == 1
+assert store.list_parents(child_id=7) == [43, 99]
+```
+
+Neither table is reachable over gRPC or the `tss` CLI.
+
 ## Persist to Disk
 
 ```python

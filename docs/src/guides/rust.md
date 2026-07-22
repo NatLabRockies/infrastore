@@ -320,6 +320,93 @@ a shared array survives until its last referencing key is gone. `count_array_ref
 returns the `(SingleTimeSeries, DeterministicSingleTimeSeries)` association counts on one array,
 which is how you tell whether removing a `SingleTimeSeries` would orphan a forecast derived from it.
 
+## Associations
+
+Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities).
+
+Attachments are keyed on the `(component_id, attribute_id)` pair. The type names ride along for
+filtering and are not part of identity, so re-attaching the same pair under different type names is
+a duplicate and fails with `DuplicateAssociation`:
+
+```rust
+use time_series_store_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+
+store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
+    component_id: 42,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+})?;
+
+// Bulk add is one all-or-nothing transaction.
+store.add_supplemental_attribute_associations(vec![SupplementalAttributeAssociation {
+    component_id: 43,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+}])?;
+```
+
+Filters are all-optional and ANDed; the default matches everything, which is what makes a bulk
+export/import round trip. Queries run in both directions:
+
+```rust
+// The attributes on one component...
+let attrs =
+    store.list_supplemental_attribute_ids(&SupplementalAttributeFilter::new().component_id(42))?;
+assert_eq!(attrs, vec![100]);
+
+// ...and the components carrying one attribute.
+let owners =
+    store.list_components_with_attributes(&SupplementalAttributeFilter::new().attribute_id(100))?;
+assert_eq!(owners, vec![42, 43]);
+
+// `*_types` filters take CONCRETE type names, rendered as SQL `IN (…)`. Expanding an
+// abstract type into its subtypes is the caller's job — the store has no type hierarchy.
+// An empty list is a deliberate "none of these" and matches nothing.
+let geo = SupplementalAttributeFilter::new().attribute_types(["GeographicInfo"]);
+assert_eq!(store.count_supplemental_attributes(&geo)?, 1);   // distinct attributes
+assert_eq!(store.count_components_with_attributes(&geo)?, 2); // distinct components
+
+for row in store.supplemental_attribute_summary()? {
+    println!("{} on {}: {}", row.attribute_type, row.component_type, row.count);
+}
+
+// Removal returns a count. Matching nothing is `Ok(0)`, not an error: assert on the
+// count yourself if you expected a hit.
+let removed = store
+    .remove_supplemental_attribute_associations(&SupplementalAttributeFilter::new().component_id(43))?;
+assert_eq!(removed, 1);
+```
+
+Parent/child edges work the same way, except that identity is the **ordered** pair — the reverse of
+an edge is a different edge — and both endpoints are always components, so there is no category:
+
+```rust
+use time_series_store_core::{ParentChildAssociation, ParentChildFilter};
+
+store.add_parent_child_association(ParentChildAssociation {
+    parent_id: 42,
+    parent_type: "Generator".into(),
+    child_id: 7,
+    child_type: "Bus".into(),
+})?;
+
+assert_eq!(store.list_children(&ParentChildFilter::new().parent_id(42))?, vec![7]);
+assert_eq!(store.list_parents(&ParentChildFilter::new().child_id(7))?, vec![42]);
+
+// Renumbering a component rewrites both ends of every edge in one statement, so an
+// edge that names it twice is counted once.
+let updated = store.replace_parent_child_component_id(42, 99)?;
+assert_eq!(updated, 1);
+```
+
+Neither table is reachable over gRPC or the `tss` CLI.
+
 ## Persist to Disk
 
 The NetCDF backend buffers writes. Call `flush` before copying the files for backup:
