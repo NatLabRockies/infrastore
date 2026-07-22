@@ -112,8 +112,7 @@ directly and supports both reads and writes. Its shape:
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
   (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
   JSON. All six dtypes and all five writable types are supported, forecasts included.
-- **Output mirrors `torc`.** A global `-f/--format` selects `table` (default), `json`, or `csv`,
-  matching the conventions of the sibling `torc` CLI.
+- **A global `-f/--format` selects `table` (default), `json`, or `csv`.
 - **Store access is isolated.** All store opening lives behind one module, so a future remote/gRPC
   mode can be added without touching the command handlers; today there is no remote mode.
 

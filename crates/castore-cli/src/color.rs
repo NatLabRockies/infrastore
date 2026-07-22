@@ -1,4 +1,4 @@
-//! Tiny ANSI color helpers, mirroring the `../torc` CLI palette (green bold for
+//! Tiny ANSI color helpers (green bold for
 //! headers/success, cyan for literals, dim for secondary notes).
 //!
 //! Color is emitted only when stdout is a terminal and `NO_COLOR` is unset, so
@@ -28,12 +28,12 @@ fn paint(code: &str, s: &str) -> String {
     }
 }
 
-/// Section/table headers and success messages: green + bold (torc's header color).
+/// Section/table headers and success messages: green + bold.
 pub fn header(s: &str) -> String {
     paint(GREEN_BOLD, s)
 }
 
-/// Literals / field labels: cyan (torc's literal color).
+/// Literals / field labels: cyan.
 pub fn label(s: &str) -> String {
     paint(CYAN, s)
 }

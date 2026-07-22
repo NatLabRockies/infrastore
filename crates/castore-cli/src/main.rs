@@ -1,6 +1,5 @@
 //! `cas` — a command-line tool for loading and inspecting a castore store
-//! directly on disk (NetCDF + SQLite). Output conventions mirror the sibling
-//! `torc` CLI: a global `-f/--format table|json|csv`.
+//! directly on disk (NetCDF + SQLite).
 
 mod color;
 mod commands;
@@ -19,7 +18,7 @@ use clap::{Parser, Subcommand};
 use output::Format;
 use select::SelectorArgs;
 
-/// Help styling matching the `../torc` CLI: green bold headers/usage, cyan literals.
+/// Help styling: green bold headers/usage, cyan literals.
 const HELP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().bold())
     .usage(AnsiColor::Green.on_default().bold())

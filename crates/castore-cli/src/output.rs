@@ -1,7 +1,3 @@
-//! Console output helpers mirroring torc's `output` / `table_format` modules:
-//! a `table` (default), `json`, or `csv` rendering selected by the global
-//! `-f/--format` flag.
-
 use std::io::Write;
 
 use serde::Serialize;
@@ -27,7 +23,7 @@ impl std::fmt::Display for Format {
 }
 
 /// Render a header + rows as a rounded console table. Header cells are colored
-/// green + bold (matching `../torc`) when stdout is a color-capable terminal.
+/// green + bold when stdout is a color-capable terminal.
 pub fn display_table_dyn(headers: &[String], rows: &[Vec<String>]) {
     if rows.is_empty() {
         println!("{}", crate::color::dim("(no results)"));
@@ -76,7 +72,7 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
     write_line(&text)
 }
 
-/// Print a list of values wrapped as `{"items": [...]}`, matching torc.
+/// Print a list of values wrapped as `{"items": [...]}`.
 pub fn print_json_wrapped<T: Serialize>(items: &[T]) -> Result<(), String> {
     let wrapped = serde_json::json!({ "items": items });
     print_json(&wrapped)

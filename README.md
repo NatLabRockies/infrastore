@@ -158,7 +158,7 @@ got = get_time_series(store, key)
 ## CLI (`cas`)
 
 `cas` is a command-line tool that loads time series from CSV and inspects a store, talking directly
-to the on-disk NetCDF + SQLite artifact (no gRPC). Output follows the `torc` convention of a global
+to the on-disk NetCDF + SQLite artifact (no gRPC). Output follows a convention of a global
 `-f/--format` with `table` (default), `json`, and `csv`.
 
 ```sh

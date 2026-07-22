@@ -13,7 +13,7 @@ exposes multiple bindings over a shared core:
 - **Julia** — `castore-ffi` C ABI cdylib, wrapped by `julia/Castore.jl`
 - **CLI** — `castore-cli` (`cas` binary): loads time series from CSV + a descriptor JSON and
   inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no gRPC).
-  Output mirrors the `../torc` CLI's global `-f/--format table|json|csv`.
+  Output uses a global `-f/--format table|json|csv`.
 
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
 end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
