@@ -68,7 +68,8 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 
 ## Next Steps
 
-- Build a store and round-trip a series in the [Quick Start](./quick-start.md).
+- Build a store and round-trip a series in the [Python](./quick-start-python.md) or
+  [Julia](./quick-start-julia.md) Quick Start.
 - Set up a language binding: [Python](../how-to/integrate-python.md) ·
   [Julia](../how-to/integrate-julia.md).
 - Stand up the [gRPC server](../how-to/run-server.md).

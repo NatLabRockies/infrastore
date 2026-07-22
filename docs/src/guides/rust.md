@@ -3,6 +3,13 @@
 This guide covers using `castore-core` from Rust. For exact signatures see the
 [Rust API reference](../reference/rust-api.md).
 
+For a runnable end-to-end round-trip, `examples/basic_rust.rs` creates an in-memory store, adds a
+`SingleTimeSeries`, and reads it back:
+
+```sh
+cargo run --manifest-path crates/castore-core/Cargo.toml --example basic
+```
+
 ## Add the Dependency
 
 The crate is part of this workspace. From another crate in the workspace:

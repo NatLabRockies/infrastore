@@ -5,7 +5,8 @@
 # Getting Started
 
 - [Installation](./getting-started/installation.md)
-- [Quick Start (Rust)](./getting-started/quick-start.md)
+- [Quick Start (Python)](./getting-started/quick-start-python.md)
+- [Quick Start (Julia)](./getting-started/quick-start-julia.md)
 
 # Documentation
 

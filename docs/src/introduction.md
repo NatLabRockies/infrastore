@@ -81,6 +81,9 @@ flowchart TB
 ## Next Steps
 
 - **Setting up?** Start with [Installation](./getting-started/installation.md).
-- **Want the 60-second tour?** Read the [Quick Start](./getting-started/quick-start.md).
+- **Want the 60-second tour?** Read the Quick Start for
+  [Python](./getting-started/quick-start-python.md) or
+  [Julia](./getting-started/quick-start-julia.md). Rust users can go straight to the
+  [Rust Developer Guide](./guides/rust.md).
 - **Want to understand how it works?** Read the [Architecture](./explanation/architecture.md).
 - **Need exact bytes on disk?** See the [On-Disk File Format](./reference/file-format.md).
