@@ -3,6 +3,10 @@
 `time-series-store-cli` builds the `tss` binary, which reads and writes a store directly on disk
 (NetCDF + SQLite). For a task-oriented walkthrough, see [Use the `tss` CLI](../how-to/use-cli.md).
 
+The CLI covers time series only. The
+[association catalogs](../explanation/data-model.md#associations-between-entities) in the same
+catalog file have no `tss` commands; reach them through the Rust, Python, or Julia API.
+
 ## Synopsis
 
 ```text

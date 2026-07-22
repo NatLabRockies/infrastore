@@ -7,7 +7,8 @@ read it to build a mental model, not to accomplish a specific task. For step-by-
 
 - [Architecture](./architecture.md) — The crates, the two-file storage split, and how the language
   bindings sit on top of a single core.
-- [Data Model](./data-model.md) — Owners, time-series types, keys, and feature maps.
+- [Data Model](./data-model.md) — Owners, time-series types, keys, feature maps, and the
+  associations between catalog entities.
 - [Storage Model](./storage-model.md) — Why arrays go to NetCDF4 and metadata goes to SQLite, and
   how the two stay consistent.
 - [Content Addressing](./content-addressing.md) — How arrays are hashed, deduplicated, and verified.

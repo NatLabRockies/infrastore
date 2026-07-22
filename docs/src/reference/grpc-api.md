@@ -4,6 +4,10 @@ The proto contract lives at `proto/time_series_store/v1/store.proto` and is comp
 `time-series-store-proto` with `tonic`. The service is **read-only** — every write operation (add,
 remove, clear, compact) requires local filesystem access and is intentionally absent.
 
+The [association catalogs](../explanation/data-model.md#associations-between-entities) are absent
+too, reads included: no message or RPC covers `supplemental_attribute_associations` or
+`parent_child_associations`. Consumers of those tables work against a local `Store`.
+
 - **Package:** `time_series_store.v1`
 - **Service:** `TimeSeriesStore`
 

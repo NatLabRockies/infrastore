@@ -90,7 +90,8 @@ same physical shape — the type, timestamps, and windowing parameters all live 
 
 ## The Metadata Side: SQLite
 
-The catalog holds three tables:
+The catalog holds five tables. The first three describe time series; the last two record
+relationships between catalog entities and have nothing to do with time series at all.
 
 - **`time_series_associations`** — one row per
   `(owner_id, owner_category, time_series_type, name, resolution, interval, features)` association,
@@ -106,6 +107,20 @@ The catalog holds three tables:
   `ON DELETE CASCADE` (see [Compaction](#compaction) below).
 - **`schema_version`** — a single `version` column holding the catalog schema version (currently
   `1`).
+- **`supplemental_attribute_associations`** — which supplemental attributes are attached to which
+  components, as `(component_id, component_type, attribute_id, attribute_type)`. Identity is the
+  `(component_id, attribute_id)` pair.
+- **`parent_child_associations`** — directed edges between components, as
+  `(parent_id, parent_type, child_id, child_type)`. Identity is the _ordered_
+  `(parent_id, child_id)` pair.
+
+The last two are described in
+[Associations Between Entities](./data-model.md#associations-between-entities). They carry no
+foreign keys and no cascade, and they are independent of `time_series_associations` in both
+directions: removing a time series never touches them, and removing an association never touches a
+series. They were also added without a `data_format_version` bump, so a store written before they
+existed simply gains them on its first writable open — which is why every read of them tolerates the
+table being absent.
 
 A unique index over
 `(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)` enforces
