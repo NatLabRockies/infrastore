@@ -39,6 +39,38 @@ pub enum Compression {
     Deflate { level: u8, shuffle: bool },
 }
 
+/// How an array is physically laid out by [`StorageBackend::put_array`].
+///
+/// This is a write-time storage policy only: it controls chunking and packing
+/// but never the logical data, which is read back via chunk-agnostic hyperslabs
+/// regardless of the layout chosen at write time. The on-disk
+/// [`DATA_FORMAT_VERSION`](crate::version::DATA_FORMAT_VERSION) is therefore
+/// unaffected by the choice, and stores written under different layouts stay
+/// mutually readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArrayLayout {
+    /// Column-pack with other same-shaped arrays (`SingleTimeSeries` and the
+    /// backing array of a `DeterministicSingleTimeSeries`). Chunked
+    /// timestamp-major so a read across series at one timestamp is one chunk.
+    Packed,
+    /// Standalone multi-dimensional variable chunked as a single whole-array
+    /// chunk. Used for `NonSequentialTimeSeries`, which is read whole or by an
+    /// axis-0 time range.
+    Standalone,
+    /// Standalone, but chunked in bounded blocks along `count_axis` so that
+    /// reading one forecast window — a size-1 slice on that axis — decompresses
+    /// one block rather than the whole array. Used for dense forecasts
+    /// (`Deterministic` → axis 1; `Probabilistic` / `Scenarios` → axis 2).
+    StandaloneWindowed { count_axis: usize },
+}
+
+impl ArrayLayout {
+    /// Whether this layout column-packs the array.
+    pub(crate) fn is_packed(self) -> bool {
+        matches!(self, ArrayLayout::Packed)
+    }
+}
+
 impl Default for Compression {
     /// Matches the historical hard-coded behaviour: DEFLATE level 3 + shuffle.
     fn default() -> Self {
@@ -128,15 +160,17 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// of new content returns `true`. The array's dtype + shape travel with it;
     /// `resolution` keys the packed storage pool.
     ///
-    /// `packed = true` column-packs the array with other same-shaped arrays (for
-    /// SingleTimeSeries / DST); `packed = false` stores it as a standalone
-    /// multi-dimensional variable (for irregular series and native forecasts).
+    /// `layout` selects the physical placement: [`ArrayLayout::Packed`]
+    /// column-packs with other same-shaped arrays (SingleTimeSeries / DST),
+    /// while the standalone variants store a self-contained multi-dimensional
+    /// variable (irregular series and native forecasts), differing only in how
+    /// the variable is chunked.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
         resolution: Period,
-        packed: bool,
+        layout: ArrayLayout,
     ) -> Result<bool>;
 
     /// Insert a block of same-shaped packed arrays in one operation.
@@ -162,7 +196,7 @@ pub(crate) trait StorageBackend: Send + Sync {
         hashes
             .iter()
             .zip(arrays)
-            .map(|(hash, data)| self.put_array(hash, data, resolution, true))
+            .map(|(hash, data)| self.put_array(hash, data, resolution, ArrayLayout::Packed))
             .collect()
     }
 
@@ -213,23 +247,27 @@ pub(crate) trait StorageBackend: Send + Sync {
         Ok((arr.dtype, arr.shape))
     }
 
-    /// Read a single forecast window: the `window_index` slice along `count_axis`
-    /// of a standalone array, with that axis removed. `out` is cleared then
-    /// filled with the window's row-major, little-endian bytes. Reusing the
-    /// caller's buffer keeps a per-timestamp forecast loop allocation-free.
+    /// Read a contiguous block of `len` forecast windows starting at
+    /// `window_start`: the `window_start..window_start + len` slice along
+    /// `count_axis`, keeping that axis. `out` is cleared then filled with the
+    /// block's row-major, little-endian bytes in the array's native layout
+    /// (count axis interior), so the caller can gather individual windows from
+    /// it. Backs the forecast reader's chunk-aligned block cache.
     ///
-    /// The default materializes the whole array and copies out one window; the
-    /// NetCDF backend overrides this to read just the window with a hyperslab.
-    fn read_window_into(
+    /// The default materializes the whole array and copies the block out; the
+    /// NetCDF backend overrides this to read just the block with one hyperslab,
+    /// decompressing only the storage chunks it overlaps.
+    fn read_window_block_into(
         &self,
         hash: &[u8; 32],
         count_axis: usize,
-        window_index: usize,
+        window_start: usize,
+        len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         let arr = self.get_array(hash)?;
         out.clear();
-        write_window(&arr, count_axis, window_index, out)
+        write_window_block(&arr, count_axis, window_start, len, out)
     }
 
     /// Read `len` consecutive time steps along axis 0 starting at `start`,
@@ -273,11 +311,18 @@ pub(crate) trait StorageBackend: Send + Sync {
     }
 }
 
-/// Append the bytes of one window — the slice at `w` along `count_axis`, with
-/// that axis removed — to `out`. The size-1 axis contributes nothing to the
-/// row-major layout, so the gathered bytes are exactly the window in order.
-/// Shared by the default [`StorageBackend::read_window_into`].
-fn write_window(arr: &TypedArray, count_axis: usize, w: usize, out: &mut Vec<u8>) -> Result<()> {
+/// Copy the contiguous block of `len` windows starting at `start` along
+/// `count_axis` out of `arr` into `out`, keeping the count axis. The result is
+/// the array's natural row-major sub-block of shape
+/// `[..outer.., len, ..inner..]`. For each outer index the `len` windows are
+/// contiguous, so the copy is one run per outer index. `out` is appended to.
+fn write_window_block(
+    arr: &TypedArray,
+    count_axis: usize,
+    start: usize,
+    len: usize,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     if count_axis >= arr.shape.len() {
         return Err(TimeSeriesError::IntegrityError(format!(
             "count axis {count_axis} out of bounds for shape {:?}",
@@ -285,18 +330,20 @@ fn write_window(arr: &TypedArray, count_axis: usize, w: usize, out: &mut Vec<u8>
         )));
     }
     let axis_len = arr.shape[count_axis];
-    if w >= axis_len {
+    if start + len > axis_len {
         return Err(TimeSeriesError::InvalidParameter(format!(
-            "window index {w} out of bounds for axis length {axis_len}"
+            "window block {start}..{} out of bounds for axis length {axis_len}",
+            start + len
         )));
     }
     let outer: usize = arr.shape[..count_axis].iter().product();
     let inner_bytes: usize =
         arr.shape[count_axis + 1..].iter().product::<usize>() * arr.dtype.size();
-    out.reserve(outer * inner_bytes);
+    let run = len * inner_bytes;
+    out.reserve(outer * run);
     for o in 0..outer {
-        let start = (o * axis_len + w) * inner_bytes;
-        out.extend_from_slice(&arr.bytes[start..start + inner_bytes]);
+        let src = (o * axis_len + start) * inner_bytes;
+        out.extend_from_slice(&arr.bytes[src..src + run]);
     }
     Ok(())
 }

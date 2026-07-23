@@ -48,7 +48,7 @@ prints a JSON descriptor. `export` requires `-f csv` or `-f json` (there is no t
 | `compact`           | Reclaim reusable space (prompts unless `--force`); print the report.            |
 | `completions`       | Generate shell completions to stdout (bash/zsh/fish/…).                         |
 | `stats`             | Overall + detailed + per-type counts and distinct-array count.                  |
-| `summary`           | Grouped static and/or forecast summaries (`--static`/`--forecast`).             |
+| `summary`           | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`).   |
 | `verify`            | Verify store integrity; nonzero exit if errors are present.                     |
 | `check-consistency` | Verify the per-resolution static grid (`--resolution`).                         |
 | `resolutions`       | List distinct resolutions and forecast intervals.                               |
@@ -71,7 +71,7 @@ cas --store <PATH> persist --dest <PATH.nc>
 cas --store <PATH> compact [--force]
 cas --store <PATH> stats
 cas completions <SHELL>
-cas --store <PATH> summary [--static | --forecast]
+cas --store <PATH> summary [--static-only | --forecast-only]
 cas --store <PATH> verify
 cas --store <PATH> check-consistency [--resolution <DUR>]
 cas --store <PATH> resolutions
@@ -170,25 +170,25 @@ but string-comparing rendered output against the short form will not match.
 A descriptor JSON file is either a single object (one series) or an array of objects (batch add).
 The CSV holds only numbers (plus a leading timestamp column for `non_sequential`).
 
-| Key                            | Required for                | Notes                                                  |
-| ------------------------------ | --------------------------- | ------------------------------------------------------ |
-| `owner_id`                     | all                         | Integer component identifier (`i64`).                  |
-| `owner_type`                   | all                         |                                                        |
-| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.     |
-| `name`                         | all                         |                                                        |
-| `type`                         | all                         | One of the five writable types.                        |
-| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.             |
-| `csv`                          | unless `--csv` is passed    | Path relative to the descriptor; `--csv` overrides it. |
-| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                |
-| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).         |
-| `units`                        | optional                    | Free-form label.                                       |
-| `logical_type`                 | optional                    | Opaque domain-reconstruction tag on the association.   |
-| `features`                     | optional                    | JSON object; int/float/bool/string values.             |
-| `initial_timestamp`            | all except `non_sequential` |                                                        |
-| `resolution`                   | all except `non_sequential` |                                                        |
-| `horizon`, `interval`, `count` | forecasts                   |                                                        |
-| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                    |
-| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.              |
+| Key                            | Required for                | Notes                                                      |
+| ------------------------------ | --------------------------- | ---------------------------------------------------------- |
+| `owner_id`                     | all                         | Integer component identifier (`i64`).                      |
+| `owner_type`                   | all                         |                                                            |
+| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.         |
+| `name`                         | all                         |                                                            |
+| `type`                         | all                         | One of the five writable types.                            |
+| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.                 |
+| `csv`                          | unless `--csv` is passed    | Path relative to the descriptor; `--csv` overrides it.     |
+| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                    |
+| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).             |
+| `units`                        | optional                    | Free-form label.                                           |
+| `ext`                          | optional                    | Opaque package-owned payload (e.g. JSON), stored verbatim. |
+| `features`                     | optional                    | JSON object; int/float/bool/string values.                 |
+| `initial_timestamp`            | all except `non_sequential` |                                                            |
+| `resolution`                   | all except `non_sequential` |                                                            |
+| `horizon`, `interval`, `count` | forecasts                   |                                                            |
+| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                        |
+| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.                  |
 
 Unknown keys are rejected. Any key not in the table above — including a typo like `resolutionn` — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than

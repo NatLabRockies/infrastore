@@ -26,9 +26,10 @@ hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer.
   add functions. The owner identity is the pair `(owner_id, owner_category)` — a component and a
   supplemental attribute may share a numeric `owner_id` and stay distinct — and the category is
   recorded with the association at add time.
-- **`logical_type`** is an optional opaque domain label passed to the add functions.
-- **Strings** are null-terminated UTF-8. Optional string arguments (`logical_type`, `features_json`,
-  `units`) accept `NULL`.
+- **`ext`** is an optional opaque, package-owned payload (typically JSON) passed verbatim to the add
+  functions and stored uninterpreted.
+- **Strings** are null-terminated UTF-8. Optional string arguments (`ext`, `features_json`, `units`)
+  accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string.
 - **Timestamps** are `int64_t` Unix milliseconds. **Resolutions/horizons/intervals** are ISO-8601
   duration strings (e.g. `"PT1H"`, `"P1M"`, `"P1Y"`); a `NULL` (or empty) string means unset. On
@@ -79,7 +80,7 @@ int32_t castore_store_add_single(struct CastoreStore *handle,
                             int64_t initial_ts_unix_ms, const char *resolution,  /* ISO-8601 */
                             int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                             const uint8_t *data_ptr, uint64_t data_byte_len,
-                            const char *logical_type,         /* optional */
+                            const char *ext,         /* optional */
                             const char *features_json,        /* optional */
                             const char *units,                /* optional */
                             struct CastoreKey **out_key);          /* owned; castore_key_free */
@@ -112,10 +113,10 @@ alongside the typed data buffer. `castore_store_get_non_sequential` returns owne
 and raw-byte buffers (free with `castore_buffer_free_i64`, `castore_buffer_free_i64`, and
 `castore_buffer_free_u8`) plus the dtype code. The shape is the full `[length, *element_shape]`
 array shape (the first dim is time, so callers can recover an N-dimensional per-step element shape).
-`out_logical_type` is an optional opaque element-typing tag copied into a caller-allocated buffer of
-`logical_type_cap` bytes, with the full length reported in `out_logical_type_len` — probe with a
-NULL/zero-capacity buffer first, then call again with a buffer of that length (as
-`castore_store_get_single` documents for its shape and logical-type outputs).
+`out_ext` is the optional opaque package-owned payload copied into a caller-allocated buffer of
+`ext_cap` bytes, with the full length reported in `out_ext_len` — probe with a NULL/zero-capacity
+buffer first, then call again with a buffer of that length (as `castore_store_get_single` documents
+for its shape and `ext` outputs).
 
 ```c
 int32_t castore_store_add_non_sequential(struct CastoreStore *handle,
@@ -124,7 +125,7 @@ int32_t castore_store_add_non_sequential(struct CastoreStore *handle,
                                     const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
                                     int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr, uint64_t data_byte_len,
-                                    const char *logical_type, const char *features_json,
+                                    const char *ext, const char *features_json,
                                     const char *units,
                                     struct CastoreKey **out_key);
 
@@ -133,8 +134,8 @@ int32_t castore_store_get_non_sequential(const struct CastoreStore *handle, cons
                                     int32_t *out_dtype,
                                     int64_t **out_shape, uint64_t *out_shape_len,  /* castore_buffer_free_i64 */
                                     uint8_t **out_data, uint64_t *out_data_byte_len,  /* castore_buffer_free_u8 */
-                                    char *out_logical_type, uint64_t logical_type_cap,
-                                    uint64_t *out_logical_type_len);
+                                    char *out_ext, uint64_t ext_cap,
+                                    uint64_t *out_ext_len);
 ```
 
 ## Attribute-Based Access
@@ -152,8 +153,8 @@ int32_t castore_store_get_metadata(const struct CastoreStore *handle,
                               char **out_resolution,          /* ISO-8601; castore_string_free */
                               uint64_t *out_length, uint8_t *out_data_hash, /* 32-byte buffer */
                               int32_t *out_dtype,
-                              char *out_logical_type, uint64_t logical_type_cap,
-                              uint64_t *out_logical_type_len,
+                              char *out_ext, uint64_t ext_cap,
+                              uint64_t *out_ext_len,
                               char *out_units, uint64_t units_cap,
                               uint64_t *out_units_len,        /* empty => unset */
                               uint64_t *out_element_shape, uint64_t element_shape_cap,
@@ -265,7 +266,7 @@ int32_t castore_store_add_forecast(struct CastoreStore *handle,
                               uint64_t count,
                               int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                               const uint8_t *data_ptr, uint64_t data_byte_len,
-                              const char *logical_type,          /* optional */
+                              const char *ext,          /* optional */
                               const char *features_json, const char *units,
                               struct CastoreKey **out_key);
 
@@ -278,7 +279,7 @@ int32_t castore_store_add_probabilistic(struct CastoreStore *handle,
                                    const double *percentiles_ptr, uint64_t percentiles_len,
                                    int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
-                                   const char *logical_type,     /* optional */
+                                   const char *ext,     /* optional */
                                    const char *features_json, const char *units,
                                    struct CastoreKey **out_key);
 
@@ -375,8 +376,8 @@ int32_t castore_store_get_forecast_metadata(const struct CastoreStore *handle,
                                        char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; castore_string_free */
                                        uint64_t *out_count, uint64_t *out_length,
                                        uint8_t *out_data_hash,
-                                       char *logical_type_buf, uint64_t logical_type_cap,
-                                       uint64_t *out_logical_type_len,
+                                       char *ext_buf, uint64_t ext_cap,
+                                       uint64_t *out_ext_len,
                                        char *out_units, uint64_t units_cap,
                                        uint64_t *out_units_len,
                                        uint64_t *out_element_shape, uint64_t element_shape_cap,
@@ -622,10 +623,13 @@ int32_t castore_store_get_forecast_parameters(const struct CastoreStore *handle,
                                          bool *out_present, char **out_horizon,
                                          char **out_interval, int64_t *out_count,
                                          char **out_resolution, int64_t *out_initial_ms);
-/* All SingleTimeSeries share one (initial_timestamp, length): out_present=false
-   when none; error when they disagree. */
-int32_t castore_store_check_static_consistency(const struct CastoreStore *handle, bool *out_present,
-                                          int64_t *out_initial_ms, int64_t *out_length);
+/* Per-resolution static grids as a JSON array of {"resolution","initial_timestamp_ms",
+   "length"} objects, ordered by resolution (empty array when no SingleTimeSeries);
+   error when the series at one resolution disagree. filter_resolution NULL = every
+   resolution, else scope to that ISO-8601 grid. Probe-then-fetch (buf=NULL, cap=0 to size). */
+int32_t castore_store_check_static_consistency(const struct CastoreStore *handle,
+                                          const char *filter_resolution, char *buf,
+                                          uint64_t cap, uint64_t *out_len);
 /* Distinct resolutions as a JSON array of ISO-8601 duration strings, ascending;
    optional type filter. Probe-then-fetch (buf=NULL, cap=0 to size). */
 int32_t castore_store_get_resolutions(const struct CastoreStore *handle,

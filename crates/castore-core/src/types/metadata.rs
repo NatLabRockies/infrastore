@@ -115,12 +115,14 @@ pub struct TimeSeriesMetadata {
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,
 
-    // Physical + logical element typing of the stored array.
+    // Physical element typing of the stored array.
     /// Element dtype of the stored array.
     pub dtype: super::array::Dtype,
     /// Per-step element shape (trailing dims after time); empty = scalar.
     pub element_shape: Vec<usize>,
-    /// Opaque logical-type label for domain reconstruction by the binding
-    /// (e.g. `"QuadraticFunctionData"`); the store never interprets it.
-    pub logical_type: Option<String>,
+    /// Opaque, package-owned extension payload stored verbatim (typically a
+    /// JSON object such as `{"function_type":"QuadraticFunctionData"}` that a
+    /// binding writes and reads to reconstruct its domain objects). The store
+    /// never parses or interprets it; end users are not expected to set it.
+    pub ext: Option<String>,
 }

@@ -7,7 +7,7 @@ use crate::hash::array_hash;
 use crate::types::array::TypedArray;
 use crate::types::period::Period;
 
-use super::{CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayLayout, CompactionReport, IntegrityReport, StorageBackend};
 
 /// Pure in-memory storage backend.
 ///
@@ -32,7 +32,7 @@ impl StorageBackend for MemoryBackend {
         hash: &[u8; 32],
         data: &TypedArray,
         _resolution: Period,
-        _packed: bool,
+        _layout: ArrayLayout,
     ) -> Result<bool> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.
         self.tombstoned.remove(hash);

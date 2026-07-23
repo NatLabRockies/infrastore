@@ -13,10 +13,14 @@
 //!   hash (empty = free slot). Removal frees a slot; `compact` is a stub because
 //!   NetCDF can't shrink in place.
 //!
-//! * **Standalone** (`packed = false`, used for NonSequentialTimeSeries and
-//!   native forecasts): each array is its own typed multi-dim variable `arr_{hexhash}`
-//!   of shape `[length, k1, ...]`. Removal drops it from the index (the variable
-//!   lingers as dead space until `compact`, since NetCDF can't delete variables).
+//! * **Standalone** (used for NonSequentialTimeSeries and native forecasts):
+//!   each array is its own typed multi-dim variable `arr_{hexhash}` of shape
+//!   `[length, k1, ...]`. Irregular series are chunked as one whole-array chunk;
+//!   dense forecasts are chunked in bounded blocks along their count (window)
+//!   axis (see [`window_block_cols`]) so a single-window read decompresses one
+//!   block rather than the whole array. Removal drops it from the index (the
+//!   variable lingers as dead space until `compact`, since NetCDF can't delete
+//!   variables).
 //!
 //! `shape` encodes the element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`.
 
@@ -30,7 +34,7 @@ use netcdf::{Extents, FileMut, Group, GroupMut};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
-use crate::storage::Compression;
+use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::period::Period;
 use crate::version::DATA_FORMAT_VERSION;
@@ -61,6 +65,49 @@ fn resolve_dataset_cols(requested: Option<usize>, dtype: Dtype, element_shape: &
     let block = element_block_bytes(dtype, element_shape).max(1);
     let cap = (MAX_CHUNK_BYTES / block).max(1);
     requested.unwrap_or(DEFAULT_COLS_PER_DATASET).clamp(1, cap)
+}
+
+/// Windows per chunk block for a standalone forecast array chunked along
+/// `count_axis`. One block spans every index of every *other* axis and
+/// `cols` windows along `count_axis`, so its bytes are
+/// `product(shape without count_axis) * cols * dtype.size()`; `cols` is the
+/// largest count keeping that at or below [`MAX_CHUNK_BYTES`], clamped to
+/// `[1, shape[count_axis]]`. A single-window read then decompresses one block,
+/// and the [`ForecastReader`](crate::reader::ForecastReader) aligns its cache to
+/// the same width so a window sweep decompresses each block once.
+pub(crate) fn window_block_cols(dtype: Dtype, shape: &[usize], count_axis: usize) -> usize {
+    let axis_len = shape.get(count_axis).copied().unwrap_or(0);
+    if axis_len == 0 {
+        return 1;
+    }
+    // Bytes of one window (the array with the count axis removed).
+    let window_block: usize = shape
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| i != count_axis)
+        .map(|(_, &d)| d)
+        .product::<usize>()
+        .saturating_mul(dtype.size())
+        .max(1);
+    let cap = (MAX_CHUNK_BYTES / window_block).max(1);
+    cap.min(axis_len)
+}
+
+/// The HDF5 chunk shape for a standalone array. `None` → one whole-array chunk
+/// (the historical layout, used for irregular series). `Some(axis)` → full on
+/// every axis except `axis`, which is blocked to [`window_block_cols`] windows.
+fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -> Vec<usize> {
+    match window_axis {
+        Some(axis) if axis < data.shape.len() && !data.shape.contains(&0) => {
+            let cols = window_block_cols(data.dtype, &data.shape, axis);
+            let mut chunks = data.shape.clone();
+            chunks[axis] = cols;
+            chunks
+        }
+        // Whole-array chunk: no window axis, an out-of-range axis, or a zero
+        // dimension (HDF5 rejects a zero-length chunk edge).
+        _ => data.shape.clone(),
+    }
 }
 
 const ROOT_GROUP: &str = "time_series";
@@ -801,7 +848,19 @@ impl Inner {
     }
 
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
-    fn put_standalone(&mut self, hash: &[u8; 32], data: &TypedArray) -> Result<()> {
+    /// Store an array as its own multi-dimensional `arr_{hash}` variable.
+    ///
+    /// `window_axis` selects the chunking. `None` chunks the whole array as a
+    /// single chunk (irregular series, read whole or by axis-0 range).
+    /// `Some(axis)` chunks in bounded blocks along `axis` — full on every other
+    /// axis — so a forecast-window read (a size-1 slice on `axis`) decompresses
+    /// one block instead of the entire array. See [`window_block_cols`].
+    fn put_standalone(
+        &mut self,
+        hash: &[u8; 32],
+        data: &TypedArray,
+        window_axis: Option<usize>,
+    ) -> Result<()> {
         let var = format!("{STANDALONE_PREFIX}{}", hash_hex(hash));
         // If the variable already exists (live or tombstoned), the content is
         // identical (content-addressed); just (re)index it.
@@ -810,6 +869,7 @@ impl Inner {
             return Ok(());
         }
         let compression = self.compression;
+        let chunks = standalone_chunks(data, window_axis);
         self.with_single_mut(|single| {
             let dims: Vec<(String, usize)> = data
                 .shape
@@ -821,14 +881,7 @@ impl Inner {
                 single.add_dimension(dn, *sz).map_err(map_nc)?;
             }
             let dim_names: Vec<&str> = dims.iter().map(|(n, _)| n.as_str()).collect();
-            add_typed_variable(
-                single,
-                &var,
-                data.dtype,
-                &dim_names,
-                &data.shape,
-                compression,
-            )?;
+            add_typed_variable(single, &var, data.dtype, &dim_names, &chunks, compression)?;
             let mut v = single.variable_mut(&var).ok_or_else(|| {
                 TimeSeriesError::IntegrityError(format!("missing variable {var}"))
             })?;
@@ -1128,15 +1181,16 @@ impl Inner {
         }
     }
 
-    /// Read one forecast window with a single hyperslab: the standalone array's
-    /// slice at `window_index` along `count_axis`. The selected axis is size 1 in
-    /// the read, contributing nothing to the row-major byte layout, so the result
-    /// is exactly the window (axis removed). Appends to `out` (cleared first).
-    fn read_window_locked(
+    /// Read a contiguous block of `len` windows with a single hyperslab: the
+    /// `start..start + len` slice along `count_axis`, keeping that axis. The
+    /// result is the array's natural row-major sub-block, decompressing only the
+    /// storage chunks the block overlaps. Appends to `out` (cleared first).
+    fn read_window_block_locked(
         &self,
         hash: &[u8; 32],
         count_axis: usize,
-        window_index: usize,
+        start: usize,
+        len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         out.clear();
@@ -1156,9 +1210,10 @@ impl Inner {
                         "count axis {count_axis} out of bounds for shape {dims:?}"
                     )));
                 }
-                if window_index >= dims[count_axis] {
+                if start + len > dims[count_axis] {
                     return Err(TimeSeriesError::InvalidParameter(format!(
-                        "window index {window_index} out of bounds for axis length {}",
+                        "window block {start}..{} out of bounds for axis length {}",
+                        start + len,
                         dims[count_axis]
                     )));
                 }
@@ -1166,11 +1221,11 @@ impl Inner {
                 let ranges: Vec<Range<usize>> = dims
                     .iter()
                     .enumerate()
-                    .map(|(i, &len)| {
+                    .map(|(i, &axis_len)| {
                         if i == count_axis {
-                            window_index..window_index + 1
+                            start..start + len
                         } else {
-                            0..len
+                            0..axis_len
                         }
                     })
                     .collect();
@@ -1211,16 +1266,18 @@ impl StorageBackend for NetCdfBackend {
         hash: &[u8; 32],
         data: &TypedArray,
         resolution: Period,
-        packed: bool,
+        layout: ArrayLayout,
     ) -> Result<bool> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
         if inner.by_hash.contains_key(hash) {
             return Ok(false);
         }
-        if packed {
-            inner.put_packed(hash, data, resolution)?;
-        } else {
-            inner.put_standalone(hash, data)?;
+        match layout {
+            ArrayLayout::Packed => inner.put_packed(hash, data, resolution)?,
+            ArrayLayout::Standalone => inner.put_standalone(hash, data, None)?,
+            ArrayLayout::StandaloneWindowed { count_axis } => {
+                inner.put_standalone(hash, data, Some(count_axis))?
+            }
         }
         Ok(true)
     }
@@ -1266,15 +1323,16 @@ impl StorageBackend for NetCdfBackend {
     }
 
     #[tracing::instrument(skip(self, hash, out), fields(count_axis, window_index))]
-    fn read_window_into(
+    fn read_window_block_into(
         &self,
         hash: &[u8; 32],
         count_axis: usize,
-        window_index: usize,
+        window_start: usize,
+        len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_window_locked(hash, count_axis, window_index, out)
+        inner.read_window_block_locked(hash, count_axis, window_start, len, out)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
@@ -1375,5 +1433,79 @@ impl StorageBackend for NetCdfBackend {
 
     fn compression(&self) -> Compression {
         NetCdfBackend::compression(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::array_hash;
+    use crate::types::array::TypedArray;
+
+    impl NetCdfBackend {
+        /// The on-disk HDF5 chunk shape of a standalone `arr_{hash}` variable.
+        fn standalone_chunking(&self, hash: &[u8; 32]) -> Vec<usize> {
+            let inner = self.inner.lock().unwrap();
+            let var = format!("{STANDALONE_PREFIX}{}", hash_hex(hash));
+            inner
+                .with_single(|single| {
+                    let v = single.variable(&var).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("missing variable {var}"))
+                    })?;
+                    Ok(v.chunking().map_err(map_nc)?.unwrap_or_default())
+                })
+                .unwrap()
+        }
+    }
+
+    /// A dense-`Deterministic`-shaped `[h, count]` scalar f64 array.
+    fn det_array(h: usize, count: usize) -> TypedArray {
+        let vals: Vec<f64> = (0..h * count).map(|x| x as f64).collect();
+        TypedArray::from_f64(vec![h, count], &vals)
+    }
+
+    #[test]
+    fn dense_forecast_chunks_are_blocked_along_the_count_axis() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.nc");
+        let data = det_array(3, 4);
+        let hash = array_hash(&data);
+        let mut be = NetCdfBackend::create(&path, Compression::default()).unwrap();
+        be.put_array(
+            &hash,
+            &data,
+            Period::Months(0),
+            ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        )
+        .unwrap();
+        // Full on the horizon axis, blocked to `cols` windows on the count axis.
+        let cols = window_block_cols(Dtype::F64, &[3, 4], 1);
+        assert_eq!(be.standalone_chunking(&hash), vec![3, cols]);
+    }
+
+    #[test]
+    fn irregular_standalone_arrays_chunk_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.nc");
+        let data = det_array(3, 4);
+        let hash = array_hash(&data);
+        let mut be = NetCdfBackend::create(&path, Compression::default()).unwrap();
+        be.put_array(&hash, &data, Period::Months(0), ArrayLayout::Standalone)
+            .unwrap();
+        // No window axis -> a single whole-array chunk.
+        assert_eq!(be.standalone_chunking(&hash), vec![3, 4]);
+    }
+
+    #[test]
+    fn window_block_cols_bounds_the_chunk_to_the_byte_budget() {
+        // Small window -> the whole count axis fits in one chunk block.
+        assert_eq!(window_block_cols(Dtype::F64, &[2, 5], 1), 5);
+        // A window that is itself ~1 MiB forces a single-window block.
+        let big_h = MAX_CHUNK_BYTES / std::mem::size_of::<f64>();
+        assert_eq!(window_block_cols(Dtype::F64, &[big_h, 8], 1), 1);
+        // A degenerate zero-length count axis is clamped to 1 (never a 0 edge).
+        assert_eq!(window_block_cols(Dtype::F64, &[3, 0], 1), 1);
+        // Probabilistic `[P, H, count, *E]` blocks along axis 2.
+        assert_eq!(window_block_cols(Dtype::F64, &[2, 3, 7], 2), 7);
     }
 }

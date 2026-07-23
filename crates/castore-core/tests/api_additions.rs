@@ -43,7 +43,7 @@ fn det(name: &str, base: f64) -> Deterministic {
 // ---- 1.1 AddRequest builder + Store::add ----------------------------------
 
 #[test]
-fn store_add_preserves_logical_type() {
+fn store_add_preserves_ext() {
     let mut store = create_store(None, true).unwrap();
     let mut features: Features = BTreeMap::new();
     features.insert("scenario".into(), FeatureValue::Str("base".into()));
@@ -58,18 +58,18 @@ fn store_add_preserves_logical_type() {
             )
             .with_features(features.clone())
             .with_units("MW")
-            .with_logical_type("QuadraticFunctionData"),
+            .with_ext("QuadraticFunctionData"),
         )
         .unwrap();
 
     let meta = store.get_metadata(key.identity()).unwrap();
-    assert_eq!(meta.logical_type.as_deref(), Some("QuadraticFunctionData"));
+    assert_eq!(meta.ext.as_deref(), Some("QuadraticFunctionData"));
     assert_eq!(meta.units.as_deref(), Some("MW"));
     assert_eq!(meta.features, features);
 }
 
 #[test]
-fn bulk_push_preserves_logical_type() {
+fn bulk_push_preserves_ext() {
     let mut store = create_store(None, true).unwrap();
     let keys = {
         let mut bulk = store.bulk_add();
@@ -80,7 +80,7 @@ fn bulk_push_preserves_logical_type() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(sts("a", 1.0, 4)),
             )
-            .with_logical_type("TypeA"),
+            .with_ext("TypeA"),
         );
         bulk.push(
             AddRequest::new(
@@ -89,7 +89,7 @@ fn bulk_push_preserves_logical_type() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(sts("b", 2.0, 4)),
             )
-            .with_logical_type("TypeB"),
+            .with_ext("TypeB"),
         );
         bulk.commit().unwrap()
     };
@@ -98,7 +98,7 @@ fn bulk_push_preserves_logical_type() {
         store
             .get_metadata(keys[0].identity())
             .unwrap()
-            .logical_type
+            .ext
             .as_deref(),
         Some("TypeA")
     );
@@ -106,7 +106,7 @@ fn bulk_push_preserves_logical_type() {
         store
             .get_metadata(keys[1].identity())
             .unwrap()
-            .logical_type
+            .ext
             .as_deref(),
         Some("TypeB")
     );
@@ -415,7 +415,7 @@ fn metadata_and_data_json_round_trip() {
                 TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
             )
             .with_units("MW")
-            .with_logical_type("QuadraticFunctionData"),
+            .with_ext("QuadraticFunctionData"),
         )
         .unwrap();
 

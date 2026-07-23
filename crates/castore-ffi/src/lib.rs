@@ -400,7 +400,7 @@ unsafe fn build_single_request(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
@@ -431,7 +431,7 @@ unsafe fn build_single_request(
         }
     };
     let units = unsafe { cstr_to_optional_string(units) }?;
-    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let ext = unsafe { cstr_to_optional_string(ext) }?;
     let features = unsafe { parse_features_json(features_json) }?;
 
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
@@ -453,14 +453,14 @@ unsafe fn build_single_request(
         features,
         units,
 
-        logical_type,
+        ext,
     })
 }
 
 /// Add a SingleTimeSeries to the store.
 ///
 /// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
-/// bool, or string. `logical_type` and `units` are optional.
+/// bool, or string. `ext` and `units` are optional.
 ///
 /// # Safety
 ///
@@ -484,7 +484,7 @@ pub unsafe extern "C" fn castore_store_add_single(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     out_key: *mut *mut CastoreKeyHandle,
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn castore_store_add_single(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -551,7 +551,7 @@ unsafe fn build_non_sequential_request(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
@@ -591,7 +591,7 @@ unsafe fn build_non_sequential_request(
     };
     let features = unsafe { parse_features_json(features_json) }?;
     let units = unsafe { cstr_to_optional_string(units) }?;
-    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let ext = unsafe { cstr_to_optional_string(ext) }?;
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
@@ -600,7 +600,7 @@ unsafe fn build_non_sequential_request(
         features,
         units,
 
-        logical_type,
+        ext,
     })
 }
 
@@ -628,7 +628,7 @@ pub unsafe extern "C" fn castore_store_add_non_sequential(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     out_key: *mut *mut CastoreKeyHandle,
@@ -658,7 +658,7 @@ pub unsafe extern "C" fn castore_store_add_non_sequential(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -805,9 +805,9 @@ pub unsafe extern "C" fn castore_store_get_single(
 ///
 /// `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
 /// N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
-/// and `out_data` carry the row-major element bytes. `out_logical_type` is an optional opaque
+/// and `out_data` carry the row-major element bytes. `out_ext` is an optional opaque
 /// element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
-/// `logical_type_cap` bytes; the full length is reported in `out_logical_type_len` so the caller can
+/// `ext_cap` bytes; the full length is reported in `out_ext_len` so the caller can
 /// probe with a null/zero-capacity buffer first.
 ///
 /// The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
@@ -833,9 +833,9 @@ pub unsafe extern "C" fn castore_store_get_non_sequential(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
-    out_logical_type: *mut c_char,
-    logical_type_cap: u64,
-    out_logical_type_len: *mut u64,
+    out_ext: *mut c_char,
+    ext_cap: u64,
+    out_ext_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -853,7 +853,7 @@ pub unsafe extern "C" fn castore_store_get_non_sequential(
         || out_shape_len.is_null()
         || out_data.is_null()
         || out_data_byte_len.is_null()
-        || out_logical_type_len.is_null()
+        || out_ext_len.is_null()
     {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -879,9 +879,9 @@ pub unsafe extern "C" fn castore_store_get_non_sequential(
         }
         Err(error) => return map_core_error(error),
     };
-    // The logical-type tag lives on the metadata row, not on the reconstructed series.
-    let logical_type = match store.inner.get_metadata(&key.inner) {
-        Ok(meta) => meta.logical_type.unwrap_or_default(),
+    // The extension payload lives on the metadata row, not on the reconstructed series.
+    let ext = match store.inner.get_metadata(&key.inner) {
+        Ok(meta) => meta.ext.unwrap_or_default(),
         Err(error) => return map_core_error(error),
     };
     let mut timestamps = match series
@@ -919,12 +919,7 @@ pub unsafe extern "C" fn castore_store_get_non_sequential(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
-        write_str_out(
-            &logical_type,
-            out_logical_type,
-            logical_type_cap,
-            out_logical_type_len,
-        );
+        write_str_out(&ext, out_ext, ext_cap, out_ext_len);
     }
     CASTORE_OK
 }
@@ -1820,9 +1815,9 @@ unsafe fn build_key_from_attrs(
 /// Look up a SingleTimeSeries metadata record by attributes. On success the
 /// caller's out-params receive the initial timestamp, resolution, length, the
 /// 32-byte content hash (written into the `out_data_hash` buffer, which must
-/// have room for 32 bytes), the dtype code (`out_dtype`), the logical-type
-/// tag and units string via probe-then-fetch (`out_logical_type` /
-/// `out_logical_type_len` and `out_units` / `out_units_len`; an empty string
+/// have room for 32 bytes), the dtype code (`out_dtype`), the extension
+/// payload and units string via probe-then-fetch (`out_ext` /
+/// `out_ext_len` and `out_units` / `out_units_len`; an empty string
 /// means the field is unset), the per-timestep element shape via
 /// probe-then-fetch (`out_element_shape` / `out_element_shape_len`; length 0
 /// means scalar elements), and the features as a JSON object string via
@@ -1834,8 +1829,8 @@ unsafe fn build_key_from_attrs(
 /// `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
 /// Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
 /// null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
-/// value and `out_data_hash` must be valid for 32 bytes. The `out_logical_type`, `out_units`, and
-/// `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+/// value and `out_data_hash` must be valid for 32 bytes. The `out_ext`, `out_units`, and
+/// `out_features_json` caller buffers, when non-null, must be valid for `ext_cap`,
 /// `units_cap`, and `features_json_cap` bytes respectively; the `out_element_shape` buffer, when
 /// non-null, must be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be
 /// valid for one `u64`.
@@ -1853,9 +1848,9 @@ pub unsafe extern "C" fn castore_store_get_metadata(
     out_length: *mut u64,
     out_data_hash: *mut u8,
     out_dtype: *mut i32,
-    out_logical_type: *mut c_char,
-    logical_type_cap: u64,
-    out_logical_type_len: *mut u64,
+    out_ext: *mut c_char,
+    ext_cap: u64,
+    out_ext_len: *mut u64,
     out_units: *mut c_char,
     units_cap: u64,
     out_units_len: *mut u64,
@@ -1876,7 +1871,7 @@ pub unsafe extern "C" fn castore_store_get_metadata(
         || out_length.is_null()
         || out_data_hash.is_null()
         || out_dtype.is_null()
-        || out_logical_type_len.is_null()
+        || out_ext_len.is_null()
         || out_units_len.is_null()
         || out_element_shape_len.is_null()
         || out_features_json_len.is_null()
@@ -1909,13 +1904,13 @@ pub unsafe extern "C" fn castore_store_get_metadata(
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
         *out_dtype = meta.dtype.code();
     }
-    // logical_type and units (optional): probe-then-fetch caller buffers.
+    // ext and units (optional): probe-then-fetch caller buffers.
     unsafe {
         write_str_out(
-            meta.logical_type.as_deref().unwrap_or(""),
-            out_logical_type,
-            logical_type_cap,
-            out_logical_type_len,
+            meta.ext.as_deref().unwrap_or(""),
+            out_ext,
+            ext_cap,
+            out_ext_len,
         );
         write_str_out(
             meta.units.as_deref().unwrap_or(""),
@@ -2315,7 +2310,7 @@ pub unsafe extern "C" fn castore_store_add_forecast(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     out_key: *mut *mut CastoreKeyHandle,
@@ -2346,7 +2341,7 @@ pub unsafe extern "C" fn castore_store_add_forecast(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -2385,7 +2380,7 @@ unsafe fn build_forecast_request(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
@@ -2419,7 +2414,7 @@ unsafe fn build_forecast_request(
             return Err(CASTORE_ERR_INVALID_PARAMETER);
         }
     };
-    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let ext = unsafe { cstr_to_optional_string(ext) }?;
     let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let resolution = unsafe { cstr_to_period(resolution)? };
@@ -2478,7 +2473,7 @@ unsafe fn build_forecast_request(
         features,
         units,
 
-        logical_type,
+        ext,
     })
 }
 
@@ -2512,7 +2507,7 @@ pub unsafe extern "C" fn castore_store_add_probabilistic(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
     out_key: *mut *mut CastoreKeyHandle,
@@ -2544,7 +2539,7 @@ pub unsafe extern "C" fn castore_store_add_probabilistic(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -2584,7 +2579,7 @@ unsafe fn build_probabilistic_request(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
@@ -2613,7 +2608,7 @@ unsafe fn build_probabilistic_request(
     };
     let percentiles =
         unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
-    let logical_type = unsafe { cstr_to_optional_string(logical_type) }?;
+    let ext = unsafe { cstr_to_optional_string(ext) }?;
     let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let prob = match core_lib::Probabilistic::new(
@@ -2640,7 +2635,7 @@ unsafe fn build_probabilistic_request(
         features,
         units,
 
-        logical_type,
+        ext,
     })
 }
 
@@ -2701,7 +2696,7 @@ pub unsafe extern "C" fn castore_batch_add_single(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> i32 {
@@ -2726,7 +2721,7 @@ pub unsafe extern "C" fn castore_batch_add_single(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -2764,7 +2759,7 @@ pub unsafe extern "C" fn castore_batch_add_non_sequential(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> i32 {
@@ -2789,7 +2784,7 @@ pub unsafe extern "C" fn castore_batch_add_non_sequential(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -2831,7 +2826,7 @@ pub unsafe extern "C" fn castore_batch_add_forecast(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> i32 {
@@ -2860,7 +2855,7 @@ pub unsafe extern "C" fn castore_batch_add_forecast(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -2903,7 +2898,7 @@ pub unsafe extern "C" fn castore_batch_add_probabilistic(
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
-    logical_type: *const c_char,
+    ext: *const c_char,
     features_json: *const c_char,
     units: *const c_char,
 ) -> i32 {
@@ -2933,7 +2928,7 @@ pub unsafe extern "C" fn castore_batch_add_probabilistic(
             dims_ptr,
             data_ptr,
             data_byte_len,
-            logical_type,
+            ext,
             features_json,
             units,
         )
@@ -3309,7 +3304,7 @@ pub unsafe extern "C" fn castore_bulk_result_item_type(
 
 /// Read a `NonSequentialTimeSeries` element out of a bulk-read result. The
 /// out-params mirror `castore_store_get_non_sequential` except there is no
-/// `logical_type` (a bulk read carries the array data, not the metadata row;
+/// `ext` (a bulk read carries the array data, not the metadata row;
 /// fetch it per-key with `castore_store_get_metadata` if needed). The caller owns the
 /// `out_timestamps`, `out_shape`, and `out_data` buffers.
 ///
@@ -3695,8 +3690,8 @@ pub unsafe extern "C" fn castore_store_get_probabilistic_metadata(
 
 /// Read forecast metadata by attributes. Out-params receive initial timestamp,
 /// resolution, horizon, interval, count, the stored array length, the 32-byte
-/// content hash (into `out_data_hash`), the logical-type tag and units
-/// string via probe-then-fetch (`logical_type_buf` / `out_logical_type_len` and
+/// content hash (into `out_data_hash`), the extension payload and units
+/// string via probe-then-fetch (`ext_buf` / `out_ext_len` and
 /// `out_units` / `out_units_len`; an empty string means the field is unset),
 /// the per-timestep element shape via probe-then-fetch (`out_element_shape` /
 /// `out_element_shape_len`; length 0 means scalar elements), and the features
@@ -3710,8 +3705,8 @@ pub unsafe extern "C" fn castore_store_get_probabilistic_metadata(
 /// null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
 /// ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
 /// Scalar output pointers must each be valid for
-/// one value and `out_data_hash` must be valid for 32 bytes. The `logical_type_buf`, `out_units`,
-/// and `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+/// one value and `out_data_hash` must be valid for 32 bytes. The `ext_buf`, `out_units`,
+/// and `out_features_json` caller buffers, when non-null, must be valid for `ext_cap`,
 /// `units_cap`, and `features_json_cap` bytes; the `out_element_shape` buffer, when non-null, must
 /// be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be valid for one
 /// `u64`.
@@ -3733,9 +3728,9 @@ pub unsafe extern "C" fn castore_store_get_forecast_metadata(
     out_count: *mut u64,
     out_length: *mut u64,
     out_data_hash: *mut u8,
-    logical_type_buf: *mut c_char,
-    logical_type_cap: u64,
-    out_logical_type_len: *mut u64,
+    ext_buf: *mut c_char,
+    ext_cap: u64,
+    out_ext_len: *mut u64,
     out_units: *mut c_char,
     units_cap: u64,
     out_units_len: *mut u64,
@@ -3758,7 +3753,7 @@ pub unsafe extern "C" fn castore_store_get_forecast_metadata(
         || out_count.is_null()
         || out_length.is_null()
         || out_data_hash.is_null()
-        || out_logical_type_len.is_null()
+        || out_ext_len.is_null()
         || out_units_len.is_null()
         || out_element_shape_len.is_null()
         || out_features_json_len.is_null()
@@ -3804,10 +3799,10 @@ pub unsafe extern "C" fn castore_store_get_forecast_metadata(
         *out_length = meta.length.unwrap_or(0) as u64;
         ptr::copy_nonoverlapping(meta.data_hash.as_ptr(), out_data_hash, 32);
         write_str_out(
-            meta.logical_type.as_deref().unwrap_or(""),
-            logical_type_buf,
-            logical_type_cap,
-            out_logical_type_len,
+            meta.ext.as_deref().unwrap_or(""),
+            ext_buf,
+            ext_cap,
+            out_ext_len,
         );
         write_str_out(
             meta.units.as_deref().unwrap_or(""),
@@ -4445,7 +4440,7 @@ pub unsafe extern "C" fn castore_store_get_time_series_keys(
 // Serialize keys to a JSON array. Each object carries the identity tuple
 // (`owner_id`, `owner_category`, `time_series_type`, `name`, `resolution`,
 // `features`) plus the per-variant descriptive snapshot. Physical storage detail
-// (`data_hash`, `dtype`, `logical_type`, `percentiles`) is deliberately absent —
+// (`data_hash`, `dtype`, `ext`, `percentiles`) is deliberately absent —
 // it is read on demand via the metadata read descriptors.
 /// Build the JSON object for one key (the per-row shape shared by
 /// `keys_to_json` and `keys_with_hash_to_json`).
@@ -4537,7 +4532,7 @@ fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> Strin
 
 /// Full-metadata JSON object for one association row: the identity/descriptive
 /// key fields plus the physical-storage columns a key row omits (`data_hash`
-/// hex, `dtype`, `element_shape`, `percentiles`, `units`, `logical_type`).
+/// hex, `dtype`, `element_shape`, `percentiles`, `units`, `ext`).
 /// Periods are ISO-8601 strings; `initial_timestamp_ms` is Unix milliseconds.
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
     let iso = |p: Option<core_lib::Period>| -> Value {
@@ -4606,11 +4601,8 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
         m.units.clone().map(Value::from).unwrap_or(Value::Null),
     );
     o.insert(
-        "logical_type".into(),
-        m.logical_type
-            .clone()
-            .map(Value::from)
-            .unwrap_or(Value::Null),
+        "ext".into(),
+        m.ext.clone().map(Value::from).unwrap_or(Value::Null),
     );
     o
 }
@@ -4690,7 +4682,7 @@ pub unsafe extern "C" fn castore_store_list_keys(
 
 /// List full time-series metadata rows as a JSON array (see `metadata_to_map`
 /// for the per-row shape: the key fields plus `data_hash`, `dtype`,
-/// `element_shape`, `percentiles`, `units`, and `logical_type`). Filters and the
+/// `element_shape`, `percentiles`, `units`, and `ext`). Filters and the
 /// probe-then-fetch buffer convention match `castore_store_list_keys`.
 ///
 /// # Safety

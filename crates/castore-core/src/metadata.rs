@@ -584,7 +584,7 @@ impl MetadataStore {
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_json, units, percentiles_json,
-              dtype, element_shape, logical_type, features_hash)
+              dtype, element_shape, ext, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                      ?16, ?17, ?18, ?19)",
         )?;
@@ -606,7 +606,7 @@ impl MetadataStore {
             percentiles_json,
             meta.dtype.as_str(),
             element_shape_json,
-            meta.logical_type,
+            meta.ext,
             f_hash.as_slice(),
         ]);
 
@@ -843,7 +843,7 @@ impl MetadataStore {
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_json, units, percentiles_json,
-                    dtype, element_shape, logical_type
+                    dtype, element_shape, ext
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1833,7 +1833,7 @@ struct MetaRow {
     percentiles: Option<Vec<f64>>,
     dtype: crate::types::array::Dtype,
     element_shape: Vec<usize>,
-    logical_type: Option<String>,
+    ext: Option<String>,
 }
 
 impl MetaRow {
@@ -1857,7 +1857,7 @@ impl MetaRow {
             percentiles: self.percentiles,
             dtype: self.dtype,
             element_shape: self.element_shape,
-            logical_type: self.logical_type,
+            ext: self.ext,
         }
     }
 }
@@ -1884,7 +1884,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let percentiles_json: Option<String> = row.get(15)?;
     let dtype_str: String = row.get(16)?;
     let element_shape_json: Option<String> = row.get(17)?;
-    let logical_type: Option<String> = row.get(18)?;
+    let ext: Option<String> = row.get(18)?;
 
     let owner_category = OwnerCategory::parse(&owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -2008,7 +2008,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             percentiles,
             dtype,
             element_shape,
-            logical_type,
+            ext,
         },
     ))
 }

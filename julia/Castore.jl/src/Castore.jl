@@ -307,8 +307,8 @@ struct SingleTimeSeries{T,N}
     data::Array{T,N}
     "Association name (required; the same array may be stored under different names)."
     name::String
-    "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type::Union{Nothing,String}
+    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
+    ext::Union{Nothing,String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -318,14 +318,14 @@ function SingleTimeSeries(
     resolution,
     data::AbstractArray,
     name::AbstractString;
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     return SingleTimeSeries{eltype(data),ndims(data)}(
         initial,
         resolution,
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(logical_type),
+        _maybe_string(ext),
     )
 end
 
@@ -337,8 +337,8 @@ struct NonSequentialTimeSeries{T,N}
     data::Array{T,N}
     "Association name (required)."
     name::String
-    "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type::Union{Nothing,String}
+    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
+    ext::Union{Nothing,String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -348,7 +348,7 @@ function NonSequentialTimeSeries(
     timestamps,
     data::AbstractArray,
     name::AbstractString;
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
@@ -356,7 +356,7 @@ function NonSequentialTimeSeries(
         throw(InvalidParameterError("timestamps must be strictly increasing"))
     arr = data isa Array ? data : Array(data)
     return NonSequentialTimeSeries{eltype(arr),ndims(arr)}(
-        Vector{DateTime}(timestamps), arr, String(name), _maybe_string(logical_type)
+        Vector{DateTime}(timestamps), arr, String(name), _maybe_string(ext)
     )
 end
 
@@ -392,8 +392,8 @@ struct Deterministic{T,N} <: AbstractDeterministic
     data::Array{T,N}
     "Association name (required)."
     name::String
-    "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type::Union{Nothing,String}
+    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
+    ext::Union{Nothing,String}
 end
 
 function Deterministic(
@@ -404,7 +404,7 @@ function Deterministic(
     count,
     data::AbstractArray,
     name::AbstractString;
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     return Deterministic{eltype(data),ndims(data)}(
         initial,
@@ -414,7 +414,7 @@ function Deterministic(
         Int(count),
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(logical_type),
+        _maybe_string(ext),
     )
 end
 
@@ -429,8 +429,8 @@ struct Probabilistic{T,N}
     data::Array{T,N}
     "Association name (required)."
     name::String
-    "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type::Union{Nothing,String}
+    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
+    ext::Union{Nothing,String}
 end
 
 function Probabilistic(
@@ -442,7 +442,7 @@ function Probabilistic(
     percentiles,
     data::AbstractArray,
     name::AbstractString;
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     return Probabilistic{eltype(data),ndims(data)}(
         initial,
@@ -453,7 +453,7 @@ function Probabilistic(
         Vector{Float64}(percentiles),
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(logical_type),
+        _maybe_string(ext),
     )
 end
 
@@ -468,8 +468,8 @@ struct Scenarios{T,N}
     data::Array{T,N}
     "Association name (required)."
     name::String
-    "Opaque logical-type tag for the binding to reconstruct domain objects."
-    logical_type::Union{Nothing,String}
+    "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
+    ext::Union{Nothing,String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -481,7 +481,7 @@ function Scenarios(
     count,
     data::AbstractArray,
     name::AbstractString;
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     return Scenarios{eltype(data),ndims(data)}(
         initial,
@@ -492,7 +492,7 @@ function Scenarios(
         size(data, 1),
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(logical_type),
+        _maybe_string(ext),
     )
 end
 
@@ -785,7 +785,7 @@ function add_time_series!(
     ts::SingleTimeSeries;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     name = ts.name
     initial_ms = _to_unix_ms(ts.initial_timestamp)
@@ -795,7 +795,7 @@ function add_time_series!(
     bytes = _row_major_bytes(ts.data)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     units_ptr = units === nothing ? C_NULL : pointer(String(units))
-    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
 
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
@@ -831,7 +831,7 @@ function add_time_series!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        logical_ptr,
+        ext_ptr,
         features_json,
         units_ptr,
         out_key,
@@ -848,7 +848,7 @@ function add_time_series!(
     ts::NonSequentialTimeSeries;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     name = ts.name
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
@@ -857,7 +857,7 @@ function add_time_series!(
     bytes = _row_major_bytes(ts.data)
     features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
     units_ptr = units === nothing ? C_NULL : pointer(String(units))
-    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:castore_store_add_non_sequential, lib_path()),
@@ -892,7 +892,7 @@ function add_time_series!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        logical_ptr,
+        ext_ptr,
         features_json,
         units_ptr,
         out_key,
@@ -905,10 +905,10 @@ end
     get_metadata(store, owner_id, owner_category, name; resolution, features=Dict())
 
 Look up a SingleTimeSeries by attributes and return a named tuple of
-`(initial_timestamp, resolution, length, data_hash, dtype, logical_type, units,
+`(initial_timestamp, resolution, length, data_hash, dtype, ext, units,
 element_shape, features)`. `owner_category` is the
 owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). `data_hash` is
-the 32-byte content hash as a `Vector{UInt8}`. `logical_type` and `units` are
+the 32-byte content hash as a `Vector{UInt8}`. `ext` and `units` are
 `nothing` when unset. `element_shape` is the per-timestep shape tuple (empty for
 scalar elements; for forecasts across all metadata getters it is the stored
 array's trailing dims after its first axis) and `features` the feature
@@ -991,7 +991,7 @@ function get_metadata(
     )
     _check(code)
     resolution = _take_period(out_resolution[])
-    logical_type = _take_buffer_string(lt_buf, out_lt_len[])
+    ext = _take_buffer_string(lt_buf, out_lt_len[])
     units = _take_buffer_string(units_buf, out_units_len[])
     return (
         initial_timestamp=_from_unix_ms(out_initial[]),
@@ -999,7 +999,7 @@ function get_metadata(
         length=Int(out_length[]),
         data_hash=out_hash,
         dtype=_julia_dtype(out_dtype[]),
-        logical_type=logical_type,
+        ext=ext,
         units=units,
         element_shape=_take_element_shape(shape_buf, out_shape_len[]),
         features=_take_features_json(fj_buf, out_fj_len[]),
@@ -1009,12 +1009,12 @@ end
 """
     get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval, features=Dict())
 
-Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, logical_type,
+Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, ext,
 units, element_shape, features)`
 for a stored forecast of integer `ts_type` (see the `CASTORE_TYPE_*` constants).
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`). The optional `interval` keyword (a `Period`) restricts
-the lookup to a forecast with that interval. `logical_type` and `units` are
+the lookup to a forecast with that interval. `ext` and `units` are
 `nothing` when unset.
 """
 function get_forecast_metadata(
@@ -1106,7 +1106,7 @@ function get_forecast_metadata(
         out_fj_len,
     )
     _check(code)
-    logical_type = _take_buffer_string(lt_buf, out_lt_len[])
+    ext = _take_buffer_string(lt_buf, out_lt_len[])
     units = _take_buffer_string(units_buf, out_units_len[])
     return (
         initial_timestamp=_from_unix_ms(out_initial[]),
@@ -1116,7 +1116,7 @@ function get_forecast_metadata(
         count=Int(out_count[]),
         length=Int(out_length[]),
         data_hash=out_hash,
-        logical_type=logical_type,
+        ext=ext,
         units=units,
         element_shape=_take_element_shape(shape_buf, out_shape_len[]),
         features=_take_features_json(fj_buf, out_fj_len[]),
@@ -1621,7 +1621,7 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
 end
 
 # Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (no
-# logical_type: a bulk read carries array data, not the metadata row).
+# ext: a bulk read carries array data, not the metadata row).
 function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_ts = Ref{Ptr{Int64}}(C_NULL);
     out_ts_len = Ref{UInt64}(0)
@@ -1942,10 +1942,10 @@ function get_time_series(
         permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
     end
     n = min(Int(out_lt_len[]), length(lt_buf))
-    logical_type = n == 0 ? nothing : String(lt_buf[1:n])
+    ext = n == 0 ? nothing : String(lt_buf[1:n])
     assoc = _get_association(store, key)
     return NonSequentialTimeSeries(
-        _from_unix_ms.(timestamp_ms), data, assoc.name; logical_type=logical_type
+        _from_unix_ms.(timestamp_ms), data, assoc.name; ext=ext
     )
 end
 
@@ -2167,7 +2167,7 @@ filters. With no filter set the whole store is listed.
 Each key is a `NamedTuple` with `owner_id`, `owner_category`, `time_series_type`
 (the Julia type), `name`, `initial_timestamp`, `resolution`, `length`, `horizon`,
 `interval`, `count`, and `features`; fields that do not apply to a key's type are
-`nothing`. Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is
+`nothing`. Physical storage detail (`data_hash`, `ext`, `percentiles`) is
 not on the key — read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
 """
 function list_keys(
@@ -2278,7 +2278,7 @@ end
 
 Full metadata rows matching the filter (same filters as [`list_keys`](@ref)). Each
 row is a `Dict` with the key fields plus `data_hash` (hex), `dtype`,
-`element_shape`, `percentiles`, `units`, and `logical_type`.
+`element_shape`, `percentiles`, `units`, and `ext`.
 """
 function list_time_series(
     store::Store;
@@ -4259,7 +4259,7 @@ function add_time_series!(
     ts::Deterministic;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     return _add_dense_forecast!(
         store,
@@ -4276,7 +4276,7 @@ function add_time_series!(
         ts.data;
         features=features,
         units=units,
-        logical_type=logical_type,
+        ext=ext,
     )
 end
 
@@ -4288,7 +4288,7 @@ function add_time_series!(
     ts::Scenarios;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     return _add_dense_forecast!(
         store,
@@ -4305,7 +4305,7 @@ function add_time_series!(
         ts.data;
         features=features,
         units=units,
-        logical_type=logical_type,
+        ext=ext,
     )
 end
 
@@ -4326,11 +4326,11 @@ function _add_dense_forecast!(
     data::AbstractArray;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
-    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
@@ -4376,7 +4376,7 @@ function _add_dense_forecast!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        logical_ptr,
+        ext_ptr,
         features_json,
         units_ptr,
         out_key,
@@ -4569,7 +4569,7 @@ function add_time_series!(
     ts::Probabilistic;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     name = ts.name
     initial_timestamp = ts.initial_timestamp
@@ -4581,7 +4581,7 @@ function add_time_series!(
     data = ts.data
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
-    logical_ptr = logical_type === nothing ? C_NULL : pointer(String(logical_type))
+    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
@@ -4629,7 +4629,7 @@ function add_time_series!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        logical_ptr,
+        ext_ptr,
         features_json,
         units_ptr,
         out_key,
@@ -4684,7 +4684,7 @@ function add_time_series!(
     ts::SingleTimeSeries;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
@@ -4721,7 +4721,7 @@ function add_time_series!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        _opt_string_arg(logical_type),
+        _opt_string_arg(ext),
         _features_arg(features),
         _opt_string_arg(units),
     )
@@ -4738,7 +4738,7 @@ function add_time_series!(
     ts::NonSequentialTimeSeries;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
@@ -4776,7 +4776,7 @@ function add_time_series!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        _opt_string_arg(logical_type),
+        _opt_string_arg(ext),
         _features_arg(features),
         _opt_string_arg(units),
     )
@@ -4793,7 +4793,7 @@ function add_time_series!(
     ts::Deterministic;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -4810,7 +4810,7 @@ function add_time_series!(
         ts.data;
         features=features,
         units=units,
-        logical_type=logical_type,
+        ext=ext,
     )
 end
 
@@ -4822,7 +4822,7 @@ function add_time_series!(
     ts::Scenarios;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -4839,7 +4839,7 @@ function add_time_series!(
         ts.data;
         features=features,
         units=units,
-        logical_type=logical_type,
+        ext=ext,
     )
 end
 
@@ -4858,7 +4858,7 @@ function _batch_add_dense_forecast!(
     data::AbstractArray;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing,AbstractString}=nothing,
 )
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
@@ -4903,7 +4903,7 @@ function _batch_add_dense_forecast!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        _opt_string_arg(logical_type),
+        _opt_string_arg(ext),
         _features_arg(features),
         _opt_string_arg(units),
     )
@@ -4920,7 +4920,7 @@ function add_time_series!(
     ts::Probabilistic;
     features::AbstractDict=Dict{String,Any}(),
     units::Union{Nothing,AbstractString}=nothing,
-    logical_type::Union{Nothing,AbstractString}=ts.logical_type,
+    ext::Union{Nothing,AbstractString}=ts.ext,
 )
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
@@ -4967,7 +4967,7 @@ function add_time_series!(
         dims,
         bytes,
         UInt64(length(bytes)),
-        _opt_string_arg(logical_type),
+        _opt_string_arg(ext),
         _features_arg(features),
         _opt_string_arg(units),
     )

@@ -7,6 +7,8 @@ build a mental model, not to accomplish a specific task. For step-by-step recipe
 
 - [Architecture](./architecture.md) — The crates, the two-file storage split, and how the language
   bindings sit on top of a single core.
+- [Design Choices](./design-choices.md) — What castore optimizes for and why, written for developers
+  of parent packages like IS.jl and infrasys.
 - [Data Model](./data-model.md) — Owners, time-series types, keys, feature maps, and the
   associations between catalog entities.
 - [Storage Model](./storage-model.md) — Why arrays go to NetCDF4 and metadata goes to SQLite, and

@@ -87,7 +87,7 @@ let keys = store.add_time_series_bulk(vec![
         data: TimeSeriesData::SingleTimeSeries(ts_a),   // the series carries its own name
         features: Features::new(),
         units: Some("MW".into()),
-        logical_type: None,                             // opaque domain label, binding-owned
+        ext: None,                             // opaque package-owned payload (e.g. JSON)
     },
     // ...
 ])?;
@@ -102,8 +102,8 @@ the buffer if dropped without committing:
 ```rust
 let mut bulk = store.bulk_add();
 for (owner_id, ts) in many_series {
-    // `add` builds the AddRequest from its parts (logical_type = None);
-    // `push` takes a prebuilt AddRequest when you need to set logical_type.
+    // `add` builds the AddRequest from its parts (ext = None);
+    // `push` takes a prebuilt AddRequest when you need to set ext.
     bulk.add(owner_id, "Generator", OwnerCategory::Component,
         TimeSeriesData::SingleTimeSeries(ts), Features::new(), Some("MW".into()));
 }

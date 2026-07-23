@@ -8,4 +8,4 @@
 /// table landed this way — see the DDL comment in `metadata/schema.rs` for the
 /// obligation that comes with it: every read of such a table must tolerate its
 /// absence, because a read-only open cannot run DDL.
-pub const DATA_FORMAT_VERSION: &str = "0.10.0";
+pub const DATA_FORMAT_VERSION: &str = "0.11.0";

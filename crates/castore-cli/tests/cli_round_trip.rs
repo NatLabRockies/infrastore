@@ -646,7 +646,7 @@ fn export_to_dir_and_stdout() {
 }
 
 #[test]
-fn logical_type_round_trips_through_descriptor() {
+fn ext_round_trips_through_descriptor() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("lt.nc");
     write(dir.path(), "lt.csv", "1.0\n2.0\n");
@@ -659,7 +659,7 @@ fn logical_type_round_trips_through_descriptor() {
   "name": "load",
   "type": "single",
   "dtype": "f64",
-  "logical_type": "Profile",
+  "ext": "Profile",
   "csv": "lt.csv",
   "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
@@ -671,15 +671,9 @@ fn logical_type_round_trips_through_descriptor() {
         &["add", "--descriptor", descriptor.to_str().unwrap()],
     );
     let info = run(&store, &["-f", "json", "info", "--owner-id", "5"]);
-    assert!(
-        info.contains("\"logical_type\": \"Profile\""),
-        "info: {info}"
-    );
+    assert!(info.contains("\"ext\": \"Profile\""), "info: {info}");
     let list = run(&store, &["-f", "json", "list"]);
-    assert!(
-        list.contains("\"logical_type\": \"Profile\""),
-        "list: {list}"
-    );
+    assert!(list.contains("\"ext\": \"Profile\""), "list: {list}");
 }
 
 #[test]

@@ -97,7 +97,7 @@ meta = get_metadata(
     features = Dict("model_year" => 2030),
 )
 # meta :: (initial_timestamp::DateTime, resolution::Millisecond, length::Int,
-#          data_hash::Vector{UInt8}, dtype, logical_type)
+#          data_hash::Vector{UInt8}, dtype, ext)
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
@@ -141,8 +141,8 @@ got_by_key = get_time_series(Deterministic, store, key)
 `Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)`
 carries the percentile vector, and
 `Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)` takes
-`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a
-`logical_type=` keyword. Read the corresponding type back with `get_time_series(Probabilistic, …)` /
+`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a `ext=`
+keyword. Read the corresponding type back with `get_time_series(Probabilistic, …)` /
 `get_time_series(Scenarios, …)`.
 
 If two forecasts of one owner/name/type differ only by `interval` (say day-ahead and intra-day),

@@ -267,7 +267,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         units: m.units.clone(),
         dtype: m.dtype.code(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
-        logical_type: m.logical_type.clone(),
+        ext: m.ext.clone(),
         percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
@@ -337,7 +337,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
             message: format!("unknown dtype code {}", m.dtype),
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
-        logical_type: m.logical_type,
+        ext: m.ext,
     })
 }
 
@@ -355,7 +355,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
-            logical_type: String::new(),
+            ext: String::new(),
             horizon: String::new(),
             interval: String::new(),
             count: 0,
@@ -371,7 +371,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
-            logical_type: String::new(),
+            ext: String::new(),
             horizon: String::new(),
             interval: String::new(),
             count: 0,
@@ -387,7 +387,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: d.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
             timestamps_rfc3339: Vec::new(),
-            logical_type: String::new(),
+            ext: String::new(),
             horizon: d.horizon.to_iso8601(),
             interval: d.interval.to_iso8601(),
             count: d.count as u64,
@@ -403,7 +403,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: p.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
             timestamps_rfc3339: Vec::new(),
-            logical_type: String::new(),
+            ext: String::new(),
             horizon: p.horizon.to_iso8601(),
             interval: p.interval.to_iso8601(),
             count: p.count as u64,
@@ -419,7 +419,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
             timestamps_rfc3339: Vec::new(),
-            logical_type: String::new(),
+            ext: String::new(),
             horizon: s.horizon.to_iso8601(),
             interval: s.interval.to_iso8601(),
             count: s.count as u64,
@@ -743,7 +743,7 @@ mod tests {
             units: None,
             dtype: Dtype::F64.code(),
             element_shape: Vec::new(),
-            logical_type: None,
+            ext: None,
             percentiles: Vec::new(),
         }
     }

@@ -1156,6 +1156,26 @@ impl PyForecastReader {
             .collect()
     }
 
+    /// The number of deduplicated window slots: one physical backend read per
+    /// slot on each `forecast_read` (`<= len(entries())`). Entries that share a
+    /// backing array and read plan collapse to one slot.
+    fn num_slots(&self) -> usize {
+        self.inner.slots().len()
+    }
+
+    /// The 0-based slot backing entry `index`. Entries reporting equal slots
+    /// share one window, so group by this to materialize each unique window only
+    /// once. Raises `InvalidParameterError` if `index` is out of range.
+    fn entry_slot(&self, index: usize) -> PyResult<usize> {
+        self.inner
+            .entries()
+            .get(index)
+            .map(|e| e.slot())
+            .ok_or_else(|| {
+                InvalidParameterError::new_err(format!("entry index {index} out of range"))
+            })
+    }
+
     /// Every window start timestamp, in order.
     fn timestamps(&self) -> Vec<DateTime<Utc>> {
         self.inner.timestamps().collect()
@@ -1311,9 +1331,9 @@ impl PyStore {
     /// object (`time_series.name`).
     ///
     /// `features` is a `dict[str, int|float|bool|str]`. `units` and
-    /// `logical_type` are optional strings (`logical_type` is an opaque
-    /// domain-reconstruction tag stored on the association).
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, logical_type=None))]
+    /// `ext` are optional strings (`ext` is an opaque, package-owned
+    /// payload — typically JSON — stored verbatim on the association).
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, ext=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -1323,7 +1343,7 @@ impl PyStore {
         time_series: &Bound<'_, PyAny>,
         features: Option<&Bound<'_, PyDict>>,
         units: Option<String>,
-        logical_type: Option<String>,
+        ext: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
         let data = extract_time_series_data(time_series)?;
@@ -1333,8 +1353,8 @@ impl PyStore {
         if let Some(u) = units {
             request = request.with_units(u);
         }
-        if let Some(lt) = logical_type {
-            request = request.with_logical_type(lt);
+        if let Some(lt) = ext {
+            request = request.with_ext(lt);
         }
         let key = self.store_mut()?.add(request).map_err(map_err)?;
         Ok(PyTimeSeriesKey {
@@ -1378,7 +1398,7 @@ impl PyStore {
                 Some(u) if !u.is_none() => Some(u.extract()?),
                 _ => None,
             };
-            let logical_type: Option<String> = match item.get_item("logical_type")? {
+            let ext: Option<String> = match item.get_item("ext")? {
                 Some(l) if !l.is_none() => Some(l.extract()?),
                 _ => None,
             };
@@ -1390,7 +1410,7 @@ impl PyStore {
                 data,
                 features,
                 units,
-                logical_type,
+                ext,
             });
         }
         let keys = self
@@ -2803,7 +2823,7 @@ fn metadata_to_dict<'py>(
     )?;
     d.set_item("features", features_to_dict(py, &m.features)?)?;
     d.set_item("units", m.units.clone())?;
-    d.set_item("logical_type", m.logical_type.clone())?;
+    d.set_item("ext", m.ext.clone())?;
     Ok(d)
 }
 

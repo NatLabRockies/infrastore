@@ -171,7 +171,7 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
     obj.insert("type".into(), json!(meta.time_series_type.as_str()));
     obj.insert("name".into(), json!(meta.name));
     obj.insert("units".into(), json!(meta.units));
-    obj.insert("logical_type".into(), json!(meta.logical_type));
+    obj.insert("ext".into(), json!(meta.ext));
     match data {
         TimeSeriesData::SingleTimeSeries(s) => {
             obj.insert(

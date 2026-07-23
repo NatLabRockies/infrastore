@@ -385,7 +385,7 @@ const SINGLE: &str = r#"{
   "type": "single",
   "dtype": "f64",
   "units": "MW",
-  "logical_type": "Profile",
+  "ext": "Profile",
   "csv": "load.csv",
   "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",

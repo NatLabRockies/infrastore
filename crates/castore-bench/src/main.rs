@@ -203,7 +203,7 @@ fn make_sts_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 features: Features::default(),
                 units: Some("MW".to_string()),
 
-                logical_type: None,
+                ext: None,
             }
         })
         .collect()
@@ -238,7 +238,7 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 features: Features::default(),
                 units: Some("MW".to_string()),
 
-                logical_type: None,
+                ext: None,
             }
         })
         .collect()

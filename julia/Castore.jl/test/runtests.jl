@@ -95,26 +95,26 @@ end
     @test got_attr.name == "events"
 end
 
-@testset "non-sequential N-D + logical_type round-trip" begin
+@testset "non-sequential N-D + ext round-trip" begin
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]
-    # A (length, k) per-step element array tagged with an opaque logical type, as a
+    # A (length, k) per-step element array tagged with an opaque extension payload, as a
     # FunctionData encoding would produce on the InfrastructureSystems.jl side.
     data = Float64[1 2; 3 4; 5 6]
     series = NonSequentialTimeSeries(
-        timestamps, data, "curves"; logical_type="LinearFunctionData"
+        timestamps, data, "curves"; ext="LinearFunctionData"
     )
     key = add_time_series!(store, 9, "Generator", Component, series)
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
     @test got.data == data
     @test got.data isa Array{Float64,2}
-    @test got.logical_type == "LinearFunctionData"
+    @test got.ext == "LinearFunctionData"
     @test got.name == "curves"
 
     got_attr = get_time_series(NonSequentialTimeSeries, store, 9, Component, "curves")
     @test got_attr.data == data
-    @test got_attr.logical_type == "LinearFunctionData"
+    @test got_attr.ext == "LinearFunctionData"
 end
 
 @testset "attribute-based metadata + hash access" begin
@@ -196,7 +196,7 @@ end
         1001,
         "Generator",
         Component,
-        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; logical_type="Int64"),
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; ext="Int64"),
     )
     m = get_metadata(store, 1001, Component, "load"; resolution=res)
     @test m.dtype == Int64
@@ -209,7 +209,7 @@ end
         1002,
         "Generator",
         Component,
-        SingleTimeSeries(t0, res, A, "cost"; logical_type="QuadraticFunctionData"),
+        SingleTimeSeries(t0, res, A, "cost"; ext="QuadraticFunctionData"),
     )
     mq = get_metadata(store, 1002, Component, "cost"; resolution=res)
     @test mq.dtype == Float64
@@ -1476,11 +1476,11 @@ end
     # units round-trips through get_metadata (previously write-only).
     sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
     k = add_time_series!(
-        store, 1, "Generator", Component, sts; units="MW", logical_type="Profile"
+        store, 1, "Generator", Component, sts; units="MW", ext="Profile"
     )
     md = get_metadata(store, 1, Component, "load"; resolution=res)
     @test md.units == "MW"
-    @test md.logical_type == "Profile"
+    @test md.ext == "Profile"
 
     # time_range slicing on the SingleTimeSeries get path matches a full read.
     full = get_time_series(store, k)
@@ -1503,11 +1503,11 @@ end
     @test list_names(store; owner_id=1) == ["load"]
     @test sort(list_owner_types(store)) == ["Bus", "Generator"]
 
-    # Full metadata rows include units + logical_type.
+    # Full metadata rows include units + ext.
     rows = list_time_series(store; owner_id=1)
     @test length(rows) == 1
     @test rows[1]["units"] == "MW"
-    @test rows[1]["logical_type"] == "Profile"
+    @test rows[1]["ext"] == "Profile"
     @test rows[1]["dtype"] == "f64"
 
     # get_probabilistic_metadata exposes percentiles + units without a data fetch.

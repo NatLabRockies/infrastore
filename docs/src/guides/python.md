@@ -100,6 +100,64 @@ read in one decompress-once pass per dataset, which is much faster than a `get_t
 series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
 ```
 
+## Per-Timestamp Reads (Simulation Loop)
+
+`get_time_series` hands back a whole series or forecast. Simulations instead walk the timeline and,
+at each timestamp, want the value of _every_ series at that instant. For that, build a **reader**
+once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
+allocates almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves
+forecasts. (Full signatures: [Python API reference](../reference/python-api.md#readers).)
+
+### Static series
+
+Series are grouped by `(dtype, element_shape)`; each group's `group_values` is one dense
+`(num_columns, *element_shape)` array whose columns line up with that group's `keys`. All matched
+series must share one grid (`initial_timestamp` + `length`), validated at build.
+
+```python
+reader = store.build_static_reader(timedelta(hours=1))
+grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
+groups = reader.groups()           # each: {"dtype", "element_shape", "keys"}
+for ts in reader.timestamps():
+    store.static_read(reader, ts)
+    for i, g in enumerate(groups):
+        vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["keys"][j]
+```
+
+### Forecasts
+
+`entry_values(i)` returns the window backing `entries()[i]`, shaped `(horizon, *element_shape)` for
+`Deterministic`/`DeterministicSingleTimeSeries`, `(num_percentiles, horizon, *element_shape)` for
+`Probabilistic`, and `(scenario_count, horizon, *element_shape)` for `Scenarios`. A `Deterministic`
+reader is abstract — it also includes any `DeterministicSingleTimeSeries` (read into identical
+windows).
+
+```python
+reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
+tl = reader.timeline()             # {"initial_timestamp", "resolution", "interval", "count", ...}
+entries = reader.entries()         # list[TimeSeriesKey], parallel to entry_values
+for ts in reader.timestamps():
+    store.forecast_read(reader, ts)
+    for i, key in enumerate(entries):
+        window = reader.entry_values(i)   # window for key's owner
+```
+
+### Shared forecasts are read once
+
+Forecasts that share a backing array (deduplicated identical data, or several
+`DeterministicSingleTimeSeries` over one `SingleTimeSeries`) collapse to a single **window slot**.
+`forecast_read` reads each slot from the `.nc` file once per timestamp, so a forecast shared by 10
+components costs one read, not ten. `reader.num_slots()` is the physical read count, and
+`reader.entry_slot(i)` says which slot an entry uses — group by slot to materialize each unique
+window only once on the Python side too:
+
+```python
+store.forecast_read(reader, ts)
+windows: dict[int, np.ndarray] = {}
+for i, key in enumerate(entries):
+    window = windows.setdefault(reader.entry_slot(i), reader.entry_values(i))
+```
+
 ## Query Metadata
 
 `list_time_series` returns a list of plain dicts, filtered by any combination of arguments (the
@@ -133,7 +191,7 @@ moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
 report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
                                    #  "feature_sets_reclaimed": ...}
-errors = store.verify_integrity()   # [] when intact
+integrity = store.verify_integrity()   # {"ok": True, "errors": []} when intact
 ```
 
 ## Associations

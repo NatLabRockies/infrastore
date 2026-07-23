@@ -16,7 +16,7 @@ the authoritative description of both. For the rationale behind the split, see t
 The NetCDF root carries two global attributes:
 
 ```text
-data_format_version = "0.10.0"
+data_format_version = "0.11.0"
 compression         = "deflate:3:shuffle"
 ```
 
@@ -35,26 +35,28 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.10.0` replaced the per-association `features` table with the content-addressed `feature_sets`
-table below, so a feature map is stored once and shared by every association that uses it — dropping
-the `association_id` foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset
-chunking to timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset
-(sized to the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp
-and bulk writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two
-forecasts of one variable that differ only by interval are now distinct series — widening both
-unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`);
-`0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
-[periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration strings (e.g.
-`PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
-SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
-fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so the owner identity
-is the pair `(owner_id, owner_category)`), widening the unique indexes and `ix_owner`; `0.5.0`
-changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the
-Rust port of InfrastructureSystems.jl shipped with — the version that introduced
-`DATA_FORMAT_VERSION` itself; `0.3.0` switched the time unit from nanoseconds to milliseconds,
-renaming the SQLite `*_ns` columns to `*_ms` and encoding the packed dataset name's `{res}` field in
-milliseconds instead of whole seconds; `0.2.0` introduced typed, multi-dimensional arrays and the
-two-mode NetCDF layout below; `0.1.0` stored only 1-D `f64`.)
+(`0.11.0` renamed the metadata column `logical_type` to `ext` — an opaque, package-owned extension
+payload (typically JSON) the store stores verbatim and never interprets; `0.10.0` replaced the
+per-association `features` table with the content-addressed `feature_sets` table below, so a feature
+map is stored once and shared by every association that uses it — dropping the `association_id`
+foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset chunking to
+timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset (sized to
+the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
+writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two forecasts
+of one variable that differ only by interval are now distinct series — widening both unique indexes
+(the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made
+`resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
+now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
+milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
+(`Month`/`Quarter`/`Year`) can be represented distinctly from fixed spans; `0.6.0` added
+`owner_category` to the association uniqueness key (so the owner identity is the pair
+`(owner_id, owner_category)`), widening the unique indexes and `idx_owner`; `0.5.0` changed the
+owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the Rust port of
+InfrastructureSystems.jl shipped with — the version that introduced `DATA_FORMAT_VERSION` itself;
+`0.3.0` switched the time unit from nanoseconds to milliseconds, renaming the SQLite `*_ns` columns
+to `*_ms` and encoding the packed dataset name's `{res}` field in milliseconds instead of whole
+seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode NetCDF layout below;
+`0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -78,7 +80,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.nc
-├── attribute  data_format_version = "0.10.0"
+├── attribute  data_format_version = "0.11.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 └── group      time_series/
     └── group  single/
@@ -140,11 +142,22 @@ within a byte budget (`MAX_CHUNK_BYTES = 1 MiB`); a batch wider than the cap spi
 
 Used for **`NonSequentialTimeSeries`** and the dense forecast arrays (**`Deterministic`**,
 **`Probabilistic`**, **`Scenarios`**). Each array is its own typed, multi-dimensional variable named
-`arr_{hex_hash}` of shape `[length, *element_shape]` in the `time_series/single` group. There is no
-column packing and no companion hash variable — the variable name carries the hash.
+`arr_{hex_hash}` in the `time_series/single` group. There is no column packing and no companion hash
+variable — the variable name carries the hash.
 
-`NonSequentialTimeSeries` stores its explicit, strictly-increasing timestamps in the association's
-`timestamps_json` metadata field, not in the array.
+- **`NonSequentialTimeSeries`** is shaped `[length, *element_shape]` and chunked as a single
+  whole-array chunk. It stores its explicit, strictly-increasing timestamps in the association's
+  `timestamps_json` metadata field, not in the array.
+- **Dense forecasts** are shaped `[H, count, *element_shape]` (`Deterministic`),
+  `[num_percentiles, H, count, *element_shape]` (`Probabilistic`), or
+  `[num_scenarios, H, count, *element_shape]` (`Scenarios`), where `count` is the number of forecast
+  windows. They are chunked in **bounded blocks along the `count` (window) axis** — full on every
+  other axis, `cols` windows wide, where `cols` is the largest count keeping one chunk within the
+  same 1 MiB budget the packed datasets use. Reading a single window therefore decompresses one
+  block rather than the whole array, and the `ForecastReader` aligns its in-memory cache to the same
+  block width so sweeping the window timeline decompresses each block exactly once. The chunk width
+  is not recorded anywhere: it is a write-time storage choice that reads transparently regardless of
+  the width a store was written with, so it does not affect the data-format version.
 
 ### Compression
 
@@ -188,28 +201,28 @@ The catalog database is created with `PRAGMA foreign_keys = ON` and the followin
 
 One row per association between an owner and a stored array.
 
-| Column              | Type    | Notes                                                           |
-| ------------------- | ------- | --------------------------------------------------------------- |
-| `id`                | INTEGER | Primary key                                                     |
-| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)  |
-| `owner_type`        | TEXT    | Owner's concrete type, descriptive                              |
-| `owner_category`    | TEXT    | `CHECK` in (`Component`, `SupplementalAttribute`); part of key  |
-| `time_series_type`  | TEXT    | One of the six `TimeSeriesType` names                           |
-| `name`              | TEXT    | Series name                                                     |
-| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`           |
-| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential |
-| `length`            | INTEGER | Number of timesteps                                             |
-| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts             |
-| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts            |
-| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                 |
-| `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (`NonSequentialTimeSeries`)   |
-| `units`             | TEXT    | Free-form units label                                           |
-| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else      |
-| `dtype`             | TEXT    | Element dtype string (`NOT NULL DEFAULT 'f64'`)                 |
-| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                     |
-| `logical_type`      | TEXT    | Opaque binding-owned domain label; `NULL` if unset              |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable |
-| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                              |
+| Column              | Type    | Notes                                                                    |
+| ------------------- | ------- | ------------------------------------------------------------------------ |
+| `id`                | INTEGER | Primary key                                                              |
+| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)           |
+| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                       |
+| `owner_category`    | TEXT    | `CHECK` in (`Component`, `SupplementalAttribute`); part of key           |
+| `time_series_type`  | TEXT    | One of the six `TimeSeriesType` names                                    |
+| `name`              | TEXT    | Series name                                                              |
+| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                    |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential          |
+| `length`            | INTEGER | Number of timesteps                                                      |
+| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                      |
+| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                     |
+| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                          |
+| `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (`NonSequentialTimeSeries`)            |
+| `units`             | TEXT    | Free-form units label                                                    |
+| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else               |
+| `dtype`             | TEXT    | Element dtype string (`NOT NULL DEFAULT 'f64'`)                          |
+| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                              |
+| `ext`               | TEXT    | Opaque package-owned extension payload (JSON), verbatim; `NULL` if unset |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable          |
+| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                       |
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
@@ -264,14 +277,14 @@ CREATE TABLE supplemental_attribute_associations (
 
 CREATE UNIQUE INDEX uq_sa_assoc
     ON supplemental_attribute_associations(component_id, attribute_id);
-CREATE INDEX ix_sa_assoc_attribute
+CREATE INDEX idx_sa_assoc_attribute
     ON supplemental_attribute_associations(attribute_id, component_id, component_type);
 ```
 
 `uq_sa_assoc` makes the `(component_id, attribute_id)` pair the row's identity — the type columns
 are denormalized labels for filtering, so the same pair under different type names is a duplicate
 and surfaces as `DuplicateAssociation`. That index also serves lookups keyed on the component;
-`ix_sa_assoc_attribute` serves the reverse direction ("which components carry this attribute").
+`idx_sa_assoc_attribute` serves the reverse direction ("which components carry this attribute").
 
 One attribute may be attached to many components; one component may carry many attributes. Only the
 exact pair is constrained.
@@ -293,7 +306,7 @@ CREATE TABLE parent_child_associations (
 
 CREATE UNIQUE INDEX uq_parent_child
     ON parent_child_associations(parent_id, child_id);
-CREATE INDEX ix_parent_child_child
+CREATE INDEX idx_parent_child_child
     ON parent_child_associations(child_id, parent_id, parent_type);
 ```
 
@@ -345,9 +358,9 @@ CREATE UNIQUE INDEX uq_ts_assoc_coalesced ON time_series_associations
     (owner_id, owner_category, time_series_type, name,
      COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
 
-CREATE INDEX ix_hash       ON time_series_associations(data_hash);
-CREATE INDEX ix_owner      ON time_series_associations(owner_id, owner_category);
-CREATE INDEX ix_resolution ON time_series_associations(resolution);
+CREATE INDEX idx_hash       ON time_series_associations(data_hash);
+CREATE INDEX idx_owner      ON time_series_associations(owner_id, owner_category);
+CREATE INDEX idx_resolution ON time_series_associations(resolution);
 ```
 
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a

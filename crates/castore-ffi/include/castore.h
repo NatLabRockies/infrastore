@@ -165,7 +165,7 @@ void castore_store_free(struct CastoreStore *handle);
  * Add a SingleTimeSeries to the store.
  *
  * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
- * bool, or string. `logical_type` and `units` are optional.
+ * bool, or string. `ext` and `units` are optional.
  *
  * # Safety
  *
@@ -187,7 +187,7 @@ int32_t castore_store_add_single(struct CastoreStore *handle,
                                  const uint64_t *dims_ptr,
                                  const uint8_t *data_ptr,
                                  uint64_t data_byte_len,
-                                 const char *logical_type,
+                                 const char *ext,
                                  const char *features_json,
                                  const char *units,
                                  struct CastoreKey **out_key);
@@ -215,7 +215,7 @@ int32_t castore_store_add_non_sequential(struct CastoreStore *handle,
                                          const uint64_t *dims_ptr,
                                          const uint8_t *data_ptr,
                                          uint64_t data_byte_len,
-                                         const char *logical_type,
+                                         const char *ext,
                                          const char *features_json,
                                          const char *units,
                                          struct CastoreKey **out_key);
@@ -264,9 +264,9 @@ int32_t castore_store_get_single(const struct CastoreStore *handle,
  *
  * `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
  * N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
- * and `out_data` carry the row-major element bytes. `out_logical_type` is an optional opaque
+ * and `out_data` carry the row-major element bytes. `out_ext` is an optional opaque
  * element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
- * `logical_type_cap` bytes; the full length is reported in `out_logical_type_len` so the caller can
+ * `ext_cap` bytes; the full length is reported in `out_ext_len` so the caller can
  * probe with a null/zero-capacity buffer first.
  *
  * The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
@@ -290,9 +290,9 @@ int32_t castore_store_get_non_sequential(const struct CastoreStore *handle,
                                          uint64_t *out_shape_len,
                                          uint8_t **out_data,
                                          uint64_t *out_data_byte_len,
-                                         char *out_logical_type,
-                                         uint64_t logical_type_cap,
-                                         uint64_t *out_logical_type_len);
+                                         char *out_ext,
+                                         uint64_t ext_cap,
+                                         uint64_t *out_ext_len);
 
 /**
  * Remove the time series identified by `key`.
@@ -606,9 +606,9 @@ int32_t castore_store_persist(struct CastoreStore *handle, const char *path);
  * Look up a SingleTimeSeries metadata record by attributes. On success the
  * caller's out-params receive the initial timestamp, resolution, length, the
  * 32-byte content hash (written into the `out_data_hash` buffer, which must
- * have room for 32 bytes), the dtype code (`out_dtype`), the logical-type
- * tag and units string via probe-then-fetch (`out_logical_type` /
- * `out_logical_type_len` and `out_units` / `out_units_len`; an empty string
+ * have room for 32 bytes), the dtype code (`out_dtype`), the extension
+ * payload and units string via probe-then-fetch (`out_ext` /
+ * `out_ext_len` and `out_units` / `out_units_len`; an empty string
  * means the field is unset), the per-timestep element shape via
  * probe-then-fetch (`out_element_shape` / `out_element_shape_len`; length 0
  * means scalar elements), and the features as a JSON object string via
@@ -620,8 +620,8 @@ int32_t castore_store_persist(struct CastoreStore *handle, const char *path);
  * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
  * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
  * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
- * value and `out_data_hash` must be valid for 32 bytes. The `out_logical_type`, `out_units`, and
- * `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+ * value and `out_data_hash` must be valid for 32 bytes. The `out_ext`, `out_units`, and
+ * `out_features_json` caller buffers, when non-null, must be valid for `ext_cap`,
  * `units_cap`, and `features_json_cap` bytes respectively; the `out_element_shape` buffer, when
  * non-null, must be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be
  * valid for one `u64`.
@@ -637,9 +637,9 @@ int32_t castore_store_get_metadata(const struct CastoreStore *handle,
                                    uint64_t *out_length,
                                    uint8_t *out_data_hash,
                                    int32_t *out_dtype,
-                                   char *out_logical_type,
-                                   uint64_t logical_type_cap,
-                                   uint64_t *out_logical_type_len,
+                                   char *out_ext,
+                                   uint64_t ext_cap,
+                                   uint64_t *out_ext_len,
                                    char *out_units,
                                    uint64_t units_cap,
                                    uint64_t *out_units_len,
@@ -769,7 +769,7 @@ int32_t castore_store_add_forecast(struct CastoreStore *handle,
                                    const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr,
                                    uint64_t data_byte_len,
-                                   const char *logical_type,
+                                   const char *ext,
                                    const char *features_json,
                                    const char *units,
                                    struct CastoreKey **out_key);
@@ -803,7 +803,7 @@ int32_t castore_store_add_probabilistic(struct CastoreStore *handle,
                                         const uint64_t *dims_ptr,
                                         const uint8_t *data_ptr,
                                         uint64_t data_byte_len,
-                                        const char *logical_type,
+                                        const char *ext,
                                         const char *features_json,
                                         const char *units,
                                         struct CastoreKey **out_key);
@@ -853,7 +853,7 @@ int32_t castore_batch_add_single(struct CastoreBatch *batch,
                                  const uint64_t *dims_ptr,
                                  const uint8_t *data_ptr,
                                  uint64_t data_byte_len,
-                                 const char *logical_type,
+                                 const char *ext,
                                  const char *features_json,
                                  const char *units);
 
@@ -881,7 +881,7 @@ int32_t castore_batch_add_non_sequential(struct CastoreBatch *batch,
                                          const uint64_t *dims_ptr,
                                          const uint8_t *data_ptr,
                                          uint64_t data_byte_len,
-                                         const char *logical_type,
+                                         const char *ext,
                                          const char *features_json,
                                          const char *units);
 
@@ -913,7 +913,7 @@ int32_t castore_batch_add_forecast(struct CastoreBatch *batch,
                                    const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr,
                                    uint64_t data_byte_len,
-                                   const char *logical_type,
+                                   const char *ext,
                                    const char *features_json,
                                    const char *units);
 
@@ -946,7 +946,7 @@ int32_t castore_batch_add_probabilistic(struct CastoreBatch *batch,
                                         const uint64_t *dims_ptr,
                                         const uint8_t *data_ptr,
                                         uint64_t data_byte_len,
-                                        const char *logical_type,
+                                        const char *ext,
                                         const char *features_json,
                                         const char *units);
 
@@ -1070,7 +1070,7 @@ int32_t castore_bulk_result_item_type(const struct CastoreBulkReadHandle *result
 /**
  * Read a `NonSequentialTimeSeries` element out of a bulk-read result. The
  * out-params mirror `castore_store_get_non_sequential` except there is no
- * `logical_type` (a bulk read carries the array data, not the metadata row;
+ * `ext` (a bulk read carries the array data, not the metadata row;
  * fetch it per-key with `castore_store_get_metadata` if needed). The caller owns the
  * `out_timestamps`, `out_shape`, and `out_data` buffers.
  *
@@ -1198,8 +1198,8 @@ int32_t castore_store_get_probabilistic_metadata(const struct CastoreStore *hand
 /**
  * Read forecast metadata by attributes. Out-params receive initial timestamp,
  * resolution, horizon, interval, count, the stored array length, the 32-byte
- * content hash (into `out_data_hash`), the logical-type tag and units
- * string via probe-then-fetch (`logical_type_buf` / `out_logical_type_len` and
+ * content hash (into `out_data_hash`), the extension payload and units
+ * string via probe-then-fetch (`ext_buf` / `out_ext_len` and
  * `out_units` / `out_units_len`; an empty string means the field is unset),
  * the per-timestep element shape via probe-then-fetch (`out_element_shape` /
  * `out_element_shape_len`; length 0 means scalar elements), and the features
@@ -1213,8 +1213,8 @@ int32_t castore_store_get_probabilistic_metadata(const struct CastoreStore *hand
  * null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
  * ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
  * Scalar output pointers must each be valid for
- * one value and `out_data_hash` must be valid for 32 bytes. The `logical_type_buf`, `out_units`,
- * and `out_features_json` caller buffers, when non-null, must be valid for `logical_type_cap`,
+ * one value and `out_data_hash` must be valid for 32 bytes. The `ext_buf`, `out_units`,
+ * and `out_features_json` caller buffers, when non-null, must be valid for `ext_cap`,
  * `units_cap`, and `features_json_cap` bytes; the `out_element_shape` buffer, when non-null, must
  * be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be valid for one
  * `u64`.
@@ -1234,9 +1234,9 @@ int32_t castore_store_get_forecast_metadata(const struct CastoreStore *handle,
                                             uint64_t *out_count,
                                             uint64_t *out_length,
                                             uint8_t *out_data_hash,
-                                            char *logical_type_buf,
-                                            uint64_t logical_type_cap,
-                                            uint64_t *out_logical_type_len,
+                                            char *ext_buf,
+                                            uint64_t ext_cap,
+                                            uint64_t *out_ext_len,
                                             char *out_units,
                                             uint64_t units_cap,
                                             uint64_t *out_units_len,
@@ -1465,7 +1465,7 @@ int32_t castore_store_list_keys(const struct CastoreStore *handle,
 /**
  * List full time-series metadata rows as a JSON array (see `metadata_to_map`
  * for the per-row shape: the key fields plus `data_hash`, `dtype`,
- * `element_shape`, `percentiles`, `units`, and `logical_type`). Filters and the
+ * `element_shape`, `percentiles`, `units`, and `ext`). Filters and the
  * probe-then-fetch buffer convention match `castore_store_list_keys`.
  *
  * # Safety

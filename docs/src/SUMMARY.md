@@ -12,6 +12,7 @@
 
 - [Explanation](./explanation/index.md)
   - [Architecture](./explanation/architecture.md)
+  - [Design Choices](./explanation/design-choices.md)
   - [Data Model](./explanation/data-model.md)
   - [Storage Model](./explanation/storage-model.md)
   - [Content Addressing](./explanation/content-addressing.md)

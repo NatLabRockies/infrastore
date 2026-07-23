@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     percentiles_json  TEXT,
     dtype             TEXT    NOT NULL DEFAULT 'f64',
     element_shape     TEXT,
-    logical_type      TEXT,
+    ext      TEXT,
     -- Content-address hashes are grouped at the end of the row. Column order is
     -- cosmetic: every INSERT/SELECT in metadata.rs names its columns explicitly,
     -- so nothing depends on ordinal position.
@@ -106,9 +106,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ts_assoc_coalesced ON time_series_associati
     (owner_id, owner_category, time_series_type, name,
      COALESCE(resolution, ''), COALESCE(interval, ''), features_hash);
 
-CREATE INDEX IF NOT EXISTS ix_hash       ON time_series_associations(data_hash);
-CREATE INDEX IF NOT EXISTS ix_owner      ON time_series_associations(owner_id, owner_category);
-CREATE INDEX IF NOT EXISTS ix_resolution ON time_series_associations(resolution);
+CREATE INDEX IF NOT EXISTS idx_hash       ON time_series_associations(data_hash);
+CREATE INDEX IF NOT EXISTS idx_owner      ON time_series_associations(owner_id, owner_category);
+CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution);
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS supplemental_attribute_associations (
 -- ("which components carry this attribute") needs its own.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_sa_assoc
     ON supplemental_attribute_associations(component_id, attribute_id);
-CREATE INDEX IF NOT EXISTS ix_sa_assoc_attribute
+CREATE INDEX IF NOT EXISTS idx_sa_assoc_attribute
     ON supplemental_attribute_associations(attribute_id, component_id, component_type);
 
 -- Directed parent/child edges between components — e.g. a generator (parent)
@@ -176,6 +176,6 @@ CREATE TABLE IF NOT EXISTS parent_child_associations (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_parent_child
     ON parent_child_associations(parent_id, child_id);
-CREATE INDEX IF NOT EXISTS ix_parent_child_child
+CREATE INDEX IF NOT EXISTS idx_parent_child_child
     ON parent_child_associations(child_id, parent_id, parent_type);
 "#;

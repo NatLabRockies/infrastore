@@ -13,11 +13,11 @@ use castore_core::{
     ParentChildAssociation, ParentChildFilter,
     StaticReader, StaticGroup, ForecastReader, ForecastEntry, WindowSlot,
     TimeSeriesCounts, TimeSeriesCountsDetailed, StaticSummaryRow, ForecastSummaryRow,
-    ForecastParameters, CompactionReport, IntegrityReport,
+    ForecastParameters, StaticConsistency, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
 
-// Not re-exported at the crate root — reach into the module:
+// `array_hash` and `hash_hex` are also re-exported at the crate root; `features_hash` is not:
 use castore_core::hash::{array_hash, features_hash, hash_hex};
 use castore_core::storage::StorageBackend;
 ```
@@ -132,7 +132,7 @@ impl Store {
 
     pub fn list_time_series(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>>;
     // Key-centric listing: the same rows reduced to their keys, dropping storage
-    // detail (`data_hash`, `dtype`, `logical_type`, `percentiles`).
+    // detail (`data_hash`, `dtype`, `ext`, `percentiles`).
     pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>>;
     // …and with each key's array content hash, so callers can group series that
     // share stored data (dedup'd arrays; an STS and any DST derived from it).
@@ -177,7 +177,10 @@ impl Store {
     ) -> Result<ForecastParameters>;
 
     // Catalog introspection (each one catalog query; see "Introspection" below).
-    pub fn check_static_consistency(&self) -> Result<Option<(DateTime<Utc>, usize)>>;
+    pub fn check_static_consistency(
+        &self,
+        resolution: Option<Period>,
+    ) -> Result<Vec<StaticConsistency>>;
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>>;
     pub fn num_distinct_arrays(&self) -> Result<i64>;
     pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed>;
@@ -344,9 +347,12 @@ can be moved between threads, but sharing one requires external synchronization 
 Grouped catalog queries the bindings use instead of listing every association and aggregating in the
 caller. All are read-only and hit SQLite once.
 
-- **`check_static_consistency`** — `Ok(None)` when there are no `SingleTimeSeries`,
-  `Ok(Some((initial_timestamp, length)))` when they all share one grid, and `IntegrityError` when
-  more than one distinct pair exists.
+- **`check_static_consistency`** — one [`StaticConsistency`](#report-and-count-types)
+  `{ resolution, initial_timestamp, length }` per resolution present (empty `Vec` when there are no
+  `SingleTimeSeries`), ordered by resolution; each row is the grid shared by every
+  `SingleTimeSeries` at that resolution. Consistency is only required _within_ a resolution — series
+  at different resolutions legitimately have different grids — so pass `Some(resolution)` to scope
+  the check to one grid. Returns `IntegrityError` when the series at a single resolution disagree.
 - **`counts_by_type`** — Association count per [`TimeSeriesType`](#timeseriestype).
 - **`num_distinct_arrays`** — Distinct stored content hashes; series sharing an array count once.
 - **`time_series_counts_detailed`** — [`TimeSeriesCountsDetailed`](#report-and-count-types):
@@ -951,8 +957,8 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `units`,
 `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`, and `logical_type: Option<String>`. The span fields (`resolution`,
-`horizon`, `interval`) are `Option<Period>`.
+`element_shape: Vec<usize>`, and `ext: Option<String>`. The span fields (`resolution`, `horizon`,
+`interval`) are `Option<Period>`.
 
 ### `ListFilter`
 
@@ -975,8 +981,8 @@ ListFilter::new()
 ### `AddRequest`
 
 The element type of `add_time_series_bulk` (and of `BulkAdd::push`), mirroring the `add_time_series`
-arguments plus an optional `logical_type` — an opaque, binding-owned domain label. The series name
-lives on the `TimeSeriesData` object, not here.
+arguments plus an optional `ext` — an opaque, package-owned payload (typically JSON) stored
+verbatim. The series name lives on the `TimeSeriesData` object, not here.
 
 ```rust
 pub struct AddRequest {
@@ -986,7 +992,7 @@ pub struct AddRequest {
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
-    pub logical_type: Option<String>,
+    pub ext: Option<String>,
 }
 ```
 
@@ -1008,7 +1014,7 @@ impl BulkAdd<'_> {
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
-    ) -> &mut Self;                                             // logical_type = None
+    ) -> &mut Self;                                             // ext = None
     pub fn len(&self) -> usize;          // requests buffered so far
     pub fn is_empty(&self) -> bool;
     pub fn commit(self) -> Result<Vec<TimeSeriesKey>>;          // keys in push order
@@ -1157,6 +1163,11 @@ pub struct ForecastParameters {
     pub count: Option<usize>, pub resolution: Option<Period>,
     pub initial_timestamp: Option<DateTime<Utc>>,
 }
+pub struct StaticConsistency {  // one row per resolution from check_static_consistency
+    pub resolution: Period,
+    pub initial_timestamp: DateTime<Utc>,
+    pub length: usize,
+}
 ```
 
 ## Errors
@@ -1265,7 +1276,8 @@ pub trait StorageBackend: Send + Sync {
 
 ## Hashing
 
-In the `hash` module (`castore_core::hash`), not at the crate root.
+In the `hash` module (`castore_core::hash`). `array_hash` and `hash_hex` are also re-exported at the
+crate root; `features_hash` is only reachable through the module.
 
 ```rust
 pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes
@@ -1279,5 +1291,5 @@ These define the cross-language content-addressing contract; see
 ## Constants
 
 ```rust
-pub const DATA_FORMAT_VERSION: &str = "0.10.0";
+pub const DATA_FORMAT_VERSION: &str = "0.11.0";
 ```

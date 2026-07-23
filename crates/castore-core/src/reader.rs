@@ -31,10 +31,12 @@
 //! self-referential borrows, which matters for the FFI handle.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
+use crate::storage::netcdf::window_block_cols;
 use crate::types::array::{Dtype, Element};
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
@@ -415,6 +417,12 @@ pub(crate) enum WindowRead {
 /// [`Store::forecast_read`] reads each slot once regardless of how many
 /// components reference it — the forecast analog of a packed static column read
 /// once and gathered into many owners.
+///
+/// For dense forecasts the slot caches one storage chunk's worth of windows (a
+/// block of [`Self::block_cols`] consecutive windows, matching the on-disk
+/// [`window_block_cols`] chunking). Reads whose window falls in the cached block
+/// are served from memory, so sweeping the timeline decompresses each block
+/// once instead of once per window.
 #[derive(Debug)]
 pub struct WindowSlot {
     hash: [u8; 32],
@@ -423,7 +431,18 @@ pub struct WindowSlot {
     window_shape: Vec<usize>,
     /// How to read this slot's window from storage.
     read: WindowRead,
-    /// Reused output buffer: `product(window_shape) * dtype.size()` bytes.
+    /// Total windows on the timeline; bounds the final (short) cache block.
+    count: usize,
+    /// Windows per cached block for the dense path — the storage chunk width
+    /// along the count axis (1 for the derived path, which is not block-cached).
+    block_cols: usize,
+    /// Window index range currently held in [`Self::block`], if any.
+    cached: Option<Range<usize>>,
+    /// Raw bytes of the cached block: the array's rows for windows
+    /// `cached`, in native (count-axis-interior) row-major order. Dense only.
+    block: Vec<u8>,
+    /// Reused single-window output buffer: `product(window_shape) * dtype.size()`
+    /// bytes, gathered from [`Self::block`] (dense) or read directly (derived).
     buf: Vec<u8>,
     filled: bool,
 }
@@ -462,16 +481,78 @@ impl WindowSlot {
             .collect())
     }
 
-    /// Drive a backend window read into this slot's reusable buffer. The closure
-    /// receives the read descriptor, the array hash, and the buffer to fill;
-    /// splitting the borrow across fields avoids aliasing.
-    pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
+    /// Fill this slot's single-window buffer for window index `window`.
+    ///
+    /// Dense forecasts read the enclosing chunk block once via `read_block`
+    /// (`hash, count_axis, block_start, block_len, out`) and gather the window
+    /// from the cache; a repeat read inside the cached block does no I/O.
+    /// The derived path reads its contiguous horizon run via `read_range`
+    /// (`hash, start, len, out`).
+    pub(crate) fn read_window<FBlock, FRange>(
+        &mut self,
+        window: usize,
+        read_block: FBlock,
+        read_range: FRange,
+    ) -> Result<()>
     where
-        F: FnOnce(&WindowRead, &[u8; 32], &mut Vec<u8>) -> Result<()>,
+        FBlock: FnOnce(&[u8; 32], usize, usize, usize, &mut Vec<u8>) -> Result<()>,
+        FRange: FnOnce(&[u8; 32], usize, usize, &mut Vec<u8>) -> Result<()>,
     {
-        read(&self.read, &self.hash, &mut self.buf)?;
+        match self.read {
+            WindowRead::Dense { count_axis } => {
+                let cols = self.block_cols.max(1);
+                let start = (window / cols) * cols;
+                let end = (start + cols).min(self.count);
+                if self.cached.as_ref() != Some(&(start..end)) {
+                    read_block(&self.hash, count_axis, start, end - start, &mut self.block)?;
+                    self.cached = Some(start..end);
+                }
+                gather_window(
+                    &self.block,
+                    &self.window_shape,
+                    count_axis,
+                    end - start,
+                    window - start,
+                    self.dtype.size(),
+                    &mut self.buf,
+                );
+            }
+            WindowRead::Derived {
+                interval_steps,
+                horizon_steps,
+            } => {
+                let start = window * interval_steps;
+                read_range(&self.hash, start, horizon_steps, &mut self.buf)?;
+            }
+        }
         self.filled = true;
         Ok(())
+    }
+}
+
+/// Gather a single window (local count-axis index `lw`) out of a cached block.
+///
+/// `block` holds `block_len` windows in the array's native row-major order (the
+/// count axis interior at `count_axis`); `window_shape` is one window's shape
+/// (the array shape with the count axis removed). The window's rows are strided
+/// by `block_len` along `count_axis`, so they are copied one outer index at a
+/// time into `out` (cleared first).
+fn gather_window(
+    block: &[u8],
+    window_shape: &[usize],
+    count_axis: usize,
+    block_len: usize,
+    lw: usize,
+    elem_size: usize,
+    out: &mut Vec<u8>,
+) {
+    let outer: usize = window_shape[..count_axis].iter().product();
+    let inner_bytes: usize = window_shape[count_axis..].iter().product::<usize>() * elem_size;
+    out.clear();
+    out.reserve(outer * inner_bytes);
+    for o in 0..outer {
+        let start = (o * block_len + lw) * inner_bytes;
+        out.extend_from_slice(&block[start..start + inner_bytes]);
     }
 }
 
@@ -759,11 +840,22 @@ pub(crate) fn build_forecast_entries(
             let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
             let mut buf = vec![0u8; bytes];
             buf.clear();
+            // Block-cache the dense path at the storage chunk width so a window
+            // sweep decompresses each chunk once; the derived path reads a
+            // contiguous run per window and is not block-cached.
+            let block_cols = match read {
+                WindowRead::Dense { count_axis } => window_block_cols(m.dtype, &shape, count_axis),
+                WindowRead::Derived { .. } => 1,
+            };
             slots.push(WindowSlot {
                 hash: m.data_hash,
                 dtype: m.dtype,
                 window_shape: window_shape.clone(),
                 read,
+                count,
+                block_cols,
+                cached: None,
+                block: Vec::new(),
                 buf,
                 filled: false,
             });
@@ -1167,6 +1259,68 @@ mod tests {
         assert_eq!(rd.entries()[1].key().owner_id(), 2);
         assert_eq!(s1.window_shape(), &[2, 2]);
         assert_eq!(f64_window(s1), vec![110.0, 111.0, 210.0, 211.0]);
+    }
+
+    /// The dense window cache reads its enclosing chunk block once and serves
+    /// every window in it from memory: sweeping a `[H=2, count=5]` array with
+    /// `block_cols = 2` hits the backend three times (blocks `[0,2) [2,4) [4,5)`),
+    /// re-reading a cached window does no I/O, and every gathered window is
+    /// correct across block boundaries.
+    #[test]
+    fn dense_window_cache_reads_each_block_once() {
+        use std::cell::Cell;
+
+        let (h, count, block_cols) = (2usize, 5usize, 2usize);
+        // Model array value[hi][k] = k*10 + hi (native `[H, count]` row-major).
+        let mut slot = WindowSlot {
+            hash: [0u8; 32],
+            dtype: Dtype::F64,
+            window_shape: vec![h], // count axis removed
+            read: WindowRead::Dense { count_axis: 1 },
+            count,
+            block_cols,
+            cached: None,
+            block: Vec::new(),
+            buf: Vec::new(),
+            filled: false,
+        };
+        let reads = Cell::new(0usize);
+        let range_unused =
+            |_: &[u8; 32], _: usize, _: usize, _: &mut Vec<u8>| -> Result<()> { unreachable!() };
+
+        for k in 0..count {
+            slot.read_window(
+                k,
+                |_hash, _axis, start, len, out| {
+                    reads.set(reads.get() + 1);
+                    out.clear();
+                    // Emit the `[H, len]` block in native row-major order.
+                    for hi in 0..h {
+                        for kk in start..start + len {
+                            out.extend_from_slice(&((kk * 10 + hi) as f64).to_le_bytes());
+                        }
+                    }
+                    Ok(())
+                },
+                range_unused,
+            )
+            .unwrap();
+            assert_eq!(
+                f64_window(&slot),
+                vec![(k * 10) as f64, (k * 10 + 1) as f64],
+                "window {k}"
+            );
+        }
+        assert_eq!(reads.get(), 3, "one backend read per 2-window block over 5");
+
+        // Re-reading a window inside the currently cached block does no I/O.
+        slot.read_window(
+            count - 1,
+            |_, _, _, _, _| -> Result<()> { panic!("cached block must not re-read") },
+            range_unused,
+        )
+        .unwrap();
+        assert_eq!(reads.get(), 3);
     }
 
     /// Components sharing one forecast array dedup to a single [`WindowSlot`], so

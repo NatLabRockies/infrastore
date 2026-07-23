@@ -54,9 +54,9 @@ The store registers a finalizer; close it eagerly with `close!(store)`.
 
 ## Types
 
-Each struct carries the association `name` (required) and an optional `logical_type`. Every
-constructor takes `name` as the positional after `data` and `logical_type=` as a keyword — e.g.
-`SingleTimeSeries(initial, resolution, data, name; logical_type=nothing)`.
+Each struct carries the association `name` (required) and an optional `ext`. Every constructor takes
+`name` as the positional after `data` and `ext=` as a keyword — e.g.
+`SingleTimeSeries(initial, resolution, data, name; ext=nothing)`.
 
 Every data-carrying struct is parameterized `{T,N}` on the element type and dimensionality of its
 value array; `{T,N}` is inferred from `data` by the constructor (an `AbstractArray` argument — a
@@ -68,17 +68,17 @@ struct SingleTimeSeries{T,N}
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
-SingleTimeSeries(initial_timestamp, resolution, data, name; logical_type=nothing)
+SingleTimeSeries(initial_timestamp, resolution, data, name; ext=nothing)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
     data         :: Array{T,N}
     name         :: String
-    logical_type :: Union{Nothing,String}
+    ext :: Union{Nothing,String}
 end
-NonSequentialTimeSeries(timestamps, data, name; logical_type=nothing)
+NonSequentialTimeSeries(timestamps, data, name; ext=nothing)
 
 struct Deterministic{T,N} <: AbstractDeterministic
     initial_timestamp :: DateTime
@@ -88,10 +88,10 @@ struct Deterministic{T,N} <: AbstractDeterministic
     count             :: Int
     data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
-              logical_type=nothing)
+              ext=nothing)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -102,10 +102,10 @@ struct Probabilistic{T,N}
     percentiles       :: Vector{Float64}
     data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
-              logical_type=nothing)
+              ext=nothing)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -116,10 +116,10 @@ struct Scenarios{T,N}
     scenario_count    :: Int             # set from size(data, 1) by the constructor
     data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
-          logical_type=nothing)         # note: scenario_count is NOT a constructor argument
+          ext=nothing)         # note: scenario_count is NOT a constructor argument
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. Surfaces as a
@@ -146,11 +146,12 @@ end
 end
 ```
 
-`logical_type` is an opaque label the binding can use to reconstruct a domain object on read.
-`add_time_series!` reads `name` off the object (it is not a call argument), so the same array can be
-stored under different names; its `logical_type=` keyword defaults to the object's `logical_type`.
-`data` keeps its Julia element type: the binding maps `T` to a stored dtype (`Float64`, `Float32`,
-`Int64`, `Int32`, `UInt64`, `Bool`) and converts to row-major bytes on the way down.
+`ext` is an opaque, package-owned payload (typically JSON) the binding can use to reconstruct a
+domain object on read; the store stores it verbatim and never interprets it. `add_time_series!`
+reads `name` off the object (it is not a call argument), so the same array can be stored under
+different names; its `ext=` keyword defaults to the object's `ext`. `data` keeps its Julia element
+type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, `Int64`, `Int32`, `UInt64`,
+`Bool`) and converts to row-major bytes on the way down.
 
 ## Static Series
 
@@ -159,14 +160,14 @@ add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::SingleTimeSeries;
     features::AbstractDict = Dict(), units = nothing,
-    logical_type = ts.logical_type,
+    ext = ts.ext,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
     features = Dict(), units = nothing,
-    logical_type = ts.logical_type,
+    ext = ts.ext,
 ) -> TimeSeriesKey
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -> SingleTimeSeries
@@ -201,7 +202,9 @@ To read every series' value at one timestamp in a loop (the simulation pattern),
 ### Bulk reads
 
 ```julia
-bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey}) -> Vector{SingleTimeSeries}
+bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
+          time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing) -> Vector{SingleTimeSeries}
+# time_range slices every series to that window (default: each series in full)
 ```
 
 Reads many whole `SingleTimeSeries` in one call, returning one per key **in the same order**. Each
@@ -241,7 +244,7 @@ remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
 `owner_category` (`Component` / `SupplementalAttribute`) is required: the owner identity is the pair
 `(owner_id, owner_category)`, so a component and a supplemental attribute may share a numeric
 `owner_id` and remain distinct. `get_metadata` returns
-`(initial_timestamp, resolution, length, data_hash, dtype, logical_type, units, element_shape,
+`(initial_timestamp, resolution, length, data_hash, dtype, ext, units, element_shape,
 features)`,
 where `data_hash` is the 32-byte content hash, `element_shape` is the per-timestep shape tuple
 (empty for scalar elements), and `features` is the feature dictionary. It throws `NotFoundError` if
@@ -312,19 +315,19 @@ The forecast `name` comes from the struct, e.g.
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Deterministic;
-    features=Dict(), units=nothing, logical_type=nothing,
+    features=Dict(), units=nothing, ext=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Probabilistic;
-    features=Dict(), units=nothing, logical_type=nothing,
+    features=Dict(), units=nothing, ext=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Scenarios;
-    features=Dict(), units=nothing, logical_type=nothing,
+    features=Dict(), units=nothing, ext=nothing,
 ) -> TimeSeriesKey
 ```
 
@@ -569,7 +572,7 @@ count_array_references(store, data_hash::Vector{UInt8}) -> NamedTuple  # (sts, d
 static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
 forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
-check_static_consistency(store) -> Union{Nothing,NamedTuple}  # shared (initial_timestamp, length) of SingleTimeSeries; throws if they disagree
+check_static_consistency(store; resolution=nothing) -> Vector{NamedTuple}  # one (resolution, initial_timestamp, length) per resolution present (empty when none); throws if the series at one resolution disagree
 get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
@@ -603,7 +606,7 @@ and independent, and combine as a conjunction; with none set the whole store is 
 - `resolution` — a `Period`.
 - `features` — match keys whose features include all the given entries (subset match).
 
-Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is not on a key — read it via
+Physical storage detail (`data_hash`, `ext`, `percentiles`) is not on a key — read it via
 `get_metadata` / `get_forecast_metadata`.
 
 `list_array_groups` takes the same six filters and returns the same row fields as `list_keys`, but

@@ -7,3 +7,4 @@ Task-oriented recipes. Each page solves one problem in the fewest steps and link
 - [Integrate with Python](./integrate-python.md) — Get the `castore` wheel into your project.
 - [Integrate with Julia](./integrate-julia.md) — Wire `Castore.jl` to the native library.
 - [Run the gRPC Server](./run-server.md) — Serve a store for remote readers.
+- [Use the `cas` CLI](./use-cli.md) — Load and inspect a store from the command line.

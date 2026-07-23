@@ -103,7 +103,7 @@ message TimeSeriesMetadata {
   // Element typing.
   int32           dtype                          = 17;       // Dtype code
   repeated uint64 element_shape                  = 18;       // per-step trailing dims
-  optional string logical_type                   = 19;       // opaque reconstruction tag
+  optional string ext                   = 19;       // opaque package-owned payload
   repeated double percentiles                    = 20;        // Probabilistic only
 }
 
@@ -141,7 +141,7 @@ message GetResp {
   repeated string    timestamps_rfc3339          = 7;
   int32              dtype                       = 8;        // Dtype code
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
-  string             logical_type                = 10;
+  string             ext                = 10;
   // Forecast-specific fields (fields 1–10 are backward-compatible).
   string             horizon                     = 11;       // ISO-8601 duration
   string             interval                    = 12;       // ISO-8601 duration

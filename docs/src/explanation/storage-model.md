@@ -80,9 +80,12 @@ flowchart TB
   data-format version is unaffected. In-memory stores ignore the setting.
 
 **Standalone mode** holds `NonSequentialTimeSeries` and the dense forecast arrays (`Deterministic`,
-`Probabilistic`, `Scenarios`). Each is its own typed, multi-dimensional variable `arr_{hex_hash}` of
-shape `[length, *element_shape]` — no column packing and no companion hash (the variable name
-carries the hash).
+`Probabilistic`, `Scenarios`). Each is its own typed, multi-dimensional variable `arr_{hex_hash}` —
+no column packing and no companion hash (the variable name carries the hash). Irregular series are
+shaped `[length, *element_shape]` and chunked whole; dense forecasts are shaped
+`[H, count, *element_shape]` (with extra leading axes for `Probabilistic` / `Scenarios`) and chunked
+in bounded blocks along the `count` (window) axis, so reading one forecast window decompresses a
+single block rather than the whole array. The `ForecastReader` caches a block at a time to match.
 
 The [file-format reference](../reference/file-format.md#netcdf-layout) gives the precise naming and
 dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
@@ -96,8 +99,9 @@ relationships between catalog entities and have nothing to do with time series a
 - **`time_series_associations`** — one row per
   `(owner_id, owner_category, time_series_type, name, resolution, interval, features)` association,
   including the `data_hash` that links it to a packed column or standalone variable, the array
-  typing (`dtype`, `element_shape`, `logical_type`), plus temporal fields, forecast parameters
-  (`horizon`, `interval`, `count`, `percentiles`), units, and the `features_hash`.
+  typing (`dtype`, `element_shape`), the opaque package-owned `ext` payload, plus temporal fields,
+  forecast parameters (`horizon`, `interval`, `count`, `percentiles`), units, and the
+  `features_hash`.
 - **`feature_sets`** — the expanded key/value pairs of a feature map, one row per key, typed by a
   `value_kind` discriminator. The table is **content-addressed**, exactly as arrays are: its primary
   key is `(features_hash, key)` — the same hash the association row already carries, so no join

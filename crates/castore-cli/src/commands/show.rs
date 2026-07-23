@@ -83,7 +83,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     );
     obj.insert("length".into(), json!(m.length));
     obj.insert("units".into(), json!(m.units));
-    obj.insert("logical_type".into(), json!(m.logical_type));
+    obj.insert("ext".into(), json!(m.ext));
     Value::Object(obj)
 }
 
@@ -170,8 +170,8 @@ pub fn info(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
     if let Some(u) = &meta.units {
         fields.push(("units".into(), u.clone()));
     }
-    if let Some(lt) = &meta.logical_type {
-        fields.push(("logical_type".into(), lt.clone()));
+    if let Some(lt) = &meta.ext {
+        fields.push(("ext".into(), lt.clone()));
     }
     for (k, v) in &meta.features {
         fields.push((format!("feature.{k}"), feature_to_string(v)));
@@ -444,8 +444,8 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     if let Some(u) = &meta.units {
         obj.insert("units".into(), json!(u));
     }
-    if let Some(lt) = &meta.logical_type {
-        obj.insert("logical_type".into(), json!(lt));
+    if let Some(lt) = &meta.ext {
+        obj.insert("ext".into(), json!(lt));
     }
     if let Some(r) = meta.resolution {
         obj.insert("resolution".into(), json!(parse::format_period(r)));

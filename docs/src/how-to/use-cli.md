@@ -72,9 +72,9 @@ objects it errors (`--csv cannot be used with an array descriptor`).
 
 ## 4. Read It Back
 
-`cas` follows an output convention: a global `-f/--format` with
-`table` (default), `json`, and `csv`. Only the read commands (`list`, `get`, `info`) honor it;
-`add`, `remove`, `transform`, and `template` accept the flag but ignore it and print plain text.
+`cas` follows an output convention: a global `-f/--format` with `table` (default), `json`, and
+`csv`. Only the read commands (`list`, `get`, `info`) honor it; `add`, `remove`, `transform`, and
+`template` accept the flag but ignore it and print plain text.
 
 ```sh
 cas --store demo.nc list                                       # what's in the store
@@ -156,7 +156,7 @@ cas --store demo.nc get --owner-id 42 --name load --type deterministic_single
 
 - The CLI writes locally; there is no remote/gRPC mode yet (store access is isolated so one can be
   added later).
-- Output is colored (green table headers) only when stdout is a terminal; it is plain
-  when piped/redirected or when `NO_COLOR` is set, so `-f json`/`-f csv` stay clean for other tools.
+- Output is colored (green table headers) only when stdout is a terminal; it is plain when
+  piped/redirected or when `NO_COLOR` is set, so `-f json`/`-f csv` stay clean for other tools.
 - `--log-level` (or `RUST_LOG`) controls logging; the default is quiet (`warn`).
 - The `.nc` and `.nc.sqlite` files are one artifact — move, copy, and delete them together.

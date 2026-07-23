@@ -106,9 +106,9 @@ ISO-8601 string for either kind, and return the ISO-8601 string).
 Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, `i64`, `i32`, `u64`,
 or `bool`) and a shape `[length, k1, k2, …]`. The first axis is time; the trailing axes are a fixed
 **per-step element shape**, so a step can hold a scalar (empty element shape) or a small tuple — for
-example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The optional
-`logical_type` label travels with the metadata so a binding can reconstruct its domain object on
-read; the store itself never interprets it.
+example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The optional `ext`
+payload travels with the metadata so a binding can reconstruct its domain object on read; the store
+itself never interprets it.
 
 ### Forecasts
 
@@ -199,9 +199,11 @@ is a metadata concept; the array is shared by [content addressing](./content-add
 
 Each association can also carry:
 
-- **`units`** — a free-form label such as `"MW"`. No dimensional analysis is performed.
-- **`logical_type`** — an opaque, binding-owned label (e.g. `"QuadraticFunctionData"`) for
-  reconstructing a domain object on read. The store never interprets it.
+- **`units`** — a free-form, end-user-facing label such as `"MW"`. No dimensional analysis is
+  performed.
+- **`ext`** — an opaque, **package-owned** extension payload stored verbatim (typically JSON, e.g.
+  `{"function_type":"QuadraticFunctionData"}`) that a binding writes and reads to reconstruct a
+  domain object. The store never parses or interprets it, and end users are not expected to set it.
 
 These are recorded in metadata and returned on read, but they do not affect identity or storage.
 

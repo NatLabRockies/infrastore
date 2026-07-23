@@ -315,7 +315,7 @@ fn bulk_add_atomic_rollback() {
             features: Features::new(),
             units: None,
 
-            logical_type: None,
+            ext: None,
         },
         AddRequest {
             owner_id: 1,
@@ -325,7 +325,7 @@ fn bulk_add_atomic_rollback() {
             features: Features::new(),
             units: None,
 
-            logical_type: None,
+            ext: None,
         },
     ];
     let err = store.add_time_series_bulk(bulk).unwrap_err();

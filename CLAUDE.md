@@ -33,9 +33,9 @@ simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust c
 and Python. The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
 name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_filter`,
 `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
-preserving `logical_type`, and serde on the core types) is available in the Rust core and threaded
-through the C ABI/Julia and Python bindings. Two **association catalogs** are available in the Rust
-core, C ABI, Julia, and Python, but not over gRPC or the CLI: `supplemental_attribute_associations`
+preserving `ext`, and serde on the core types) is available in the Rust core and threaded through
+the C ABI/Julia and Python bindings. Two **association catalogs** are available in the Rust core, C
+ABI, Julia, and Python, but not over gRPC or the CLI: `supplemental_attribute_associations`
 (component ↔ supplemental attribute, the wider surface — counts, counts-by-type, grouped summary)
 and `parent_child_associations` (directed component ↔ component edges, e.g. a generator connected to
 a bus, deliberately narrower until a consumer needs more). Both are independent of time series in

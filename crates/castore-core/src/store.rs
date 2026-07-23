@@ -10,9 +10,10 @@ use crate::metadata::{
     ParentChildFilter, SeriesFamily, SupplementalAttributeAssociation, SupplementalAttributeFilter,
     SupplementalAttributeSummaryRow, references_to_in_tx,
 };
-use crate::reader::{ForecastReader, StaticReader, WindowRead};
+use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
-    CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend, StorageBackend,
+    ArrayLayout, CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend,
+    StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::key::{
@@ -109,16 +110,17 @@ pub struct AddRequest {
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
-    /// Opaque logical-type label for domain reconstruction (binding-owned).
-    pub logical_type: Option<String>,
+    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
+    /// for a binding to reconstruct its domain objects; the store never interprets it.
+    pub ext: Option<String>,
 }
 
 impl AddRequest {
-    /// Start a request with empty features and no units or logical type. Chain
+    /// Start a request with empty features and no units or extension payload. Chain
     /// [`Self::with_features`], [`Self::with_units`], and
-    /// [`Self::with_logical_type`] to set the optional fields. This is the
+    /// [`Self::with_ext`] to set the optional fields. This is the
     /// ergonomic constructor for [`Store::add`] and [`BulkAdd::push`]; unlike the
-    /// wide [`Store::add_time_series`] signature it preserves `logical_type`.
+    /// wide [`Store::add_time_series`] signature it preserves `ext`.
     pub fn new(
         owner_id: i64,
         owner_type: impl Into<String>,
@@ -132,7 +134,7 @@ impl AddRequest {
             data,
             features: Features::new(),
             units: None,
-            logical_type: None,
+            ext: None,
         }
     }
 
@@ -148,9 +150,9 @@ impl AddRequest {
         self
     }
 
-    /// Set the opaque logical-type label carried through to the metadata row.
-    pub fn with_logical_type(mut self, logical_type: impl Into<String>) -> Self {
-        self.logical_type = Some(logical_type.into());
+    /// Set the opaque extension payload carried through to the metadata row.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ext = Some(ext.into());
         self
     }
 }
@@ -289,13 +291,13 @@ impl Store {
             data,
             features,
             units,
-            logical_type: None,
+            ext: None,
         }])
         .map(|mut keys| keys.remove(0))
     }
 
     /// Add one time series from an [`AddRequest`], preserving every field
-    /// including `logical_type` (which [`Self::add_time_series`] cannot set).
+    /// including `ext` (which [`Self::add_time_series`] cannot set).
     /// Routed through the same per-column path as [`Self::add_time_series`].
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![request])
@@ -338,7 +340,7 @@ impl Store {
             let RequestParts {
                 hash,
                 resolution,
-                packed,
+                layout,
                 meta,
                 key,
             } = build_request_parts(item)?;
@@ -348,11 +350,11 @@ impl Store {
             tracing::debug!(
                 owner = item.owner_id,
                 bytes = data.bytes.len(),
-                packed,
+                packed = layout.is_packed(),
                 already_present,
                 "backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution, packed)?;
+            self.backend.put_array(&hash, data, resolution, layout)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
@@ -419,7 +421,7 @@ impl Store {
             HashMap::new();
         for (i, p) in parts.iter().enumerate() {
             let array = request_array(&items[i]);
-            if p.packed {
+            if p.layout.is_packed() {
                 packed_groups
                     .entry((
                         array.dtype,
@@ -432,7 +434,7 @@ impl Store {
             } else {
                 let already = self.backend.contains(&p.hash)?;
                 self.backend
-                    .put_array(&p.hash, array, p.resolution, false)?;
+                    .put_array(&p.hash, array, p.resolution, p.layout)?;
                 if !already {
                     staged_hashes.push(p.hash);
                 }
@@ -942,7 +944,7 @@ impl Store {
     /// List the [`TimeSeriesKey`] of every association matching `filter`. This is
     /// the key-centric counterpart of [`Self::list_time_series`]: each row is
     /// reduced to its identifying + descriptive key, dropping physical storage
-    /// detail (`data_hash`, `dtype`, `logical_type`, `percentiles`) which is read
+    /// detail (`data_hash`, `dtype`, `ext`, `percentiles`) which is read
     /// on demand via [`Self::get_metadata`]. The binding-facing listing path.
     pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>> {
         self.metadata
@@ -1089,21 +1091,18 @@ impl Store {
         let window = reader.window_index(at)?;
         // One read per *slot*: forecasts that share an array and read plan
         // (e.g. components referencing one shared forecast) collapse to a single
-        // slot at build time, so the backend is hit once for all of them.
+        // slot at build time, so the backend is hit once for all of them. Each
+        // slot caches its enclosing chunk block, so stepping the timeline only
+        // hits the backend when the window crosses a block boundary.
+        let backend = &*self.backend;
         for slot in reader.slots_mut() {
-            slot.fill(|read, hash, out| match *read {
-                WindowRead::Dense { count_axis } => {
-                    self.backend.read_window_into(hash, count_axis, window, out)
-                }
-                WindowRead::Derived {
-                    interval_steps,
-                    horizon_steps,
-                } => {
-                    let start = window * interval_steps;
-                    self.backend
-                        .read_range_into(hash, start, horizon_steps, out)
-                }
-            })?;
+            slot.read_window(
+                window,
+                |hash, count_axis, start, len, out| {
+                    backend.read_window_block_into(hash, count_axis, start, len, out)
+                },
+                |hash, start, len, out| backend.read_range_into(hash, start, len, out),
+            )?;
         }
         reader.mark_read(at);
         Ok(())
@@ -2011,13 +2010,9 @@ impl Store {
             // series along axis 0 (SingleTimeSeries and its derived DST views).
             // Dense forecasts and non-sequential series must stay standalone —
             // the forecast window read path rejects packed arrays.
-            let mut plans: HashMap<[u8; 32], (bool, Period)> = HashMap::new();
+            let mut plans: HashMap<[u8; 32], (ArrayLayout, Period)> = HashMap::new();
             for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
-                let packed = matches!(
-                    key.time_series_type(),
-                    TimeSeriesType::SingleTimeSeries
-                        | TimeSeriesType::DeterministicSingleTimeSeries
-                );
+                let layout = array_layout_for(key.time_series_type());
                 // The resolution only groups the packed on-disk layout; reads
                 // locate arrays by content hash, so the fallback for
                 // resolution-less (non-sequential) series is harmless.
@@ -2026,12 +2021,19 @@ impl Store {
                     .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
                 plans
                     .entry(hash)
-                    .and_modify(|(p, _)| *p &= packed)
-                    .or_insert((packed, resolution));
+                    // A hash shared across keys must use a standalone layout if
+                    // any referencing key is standalone (the window read rejects
+                    // packed); the first non-packed layout wins and sticks.
+                    .and_modify(|(l, _)| {
+                        if l.is_packed() {
+                            *l = layout;
+                        }
+                    })
+                    .or_insert((layout, resolution));
             }
-            for (hash, (packed, resolution)) in &plans {
+            for (hash, (layout, resolution)) in &plans {
                 let array = self.backend.get_array(hash)?;
-                nc.put_array(hash, &array, *resolution, *packed)?;
+                nc.put_array(hash, &array, *resolution, *layout)?;
             }
             nc.flush()?;
         }
@@ -2077,7 +2079,7 @@ impl BulkAdd<'_> {
             data,
             features,
             units,
-            logical_type: None,
+            ext: None,
         })
     }
 
@@ -2120,22 +2122,40 @@ impl Drop for BulkAdd<'_> {
 struct RequestParts {
     hash: [u8; 32],
     resolution: Period,
-    packed: bool,
+    layout: ArrayLayout,
     meta: TimeSeriesMetadata,
     key: TimeSeriesKey,
+}
+
+/// The physical storage layout for a time-series type's backing array. The
+/// count-axis choices for dense forecasts mirror the forecast reader's
+/// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
+/// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
+/// axis the windows lie along.
+fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
+    match ts_type {
+        TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {
+            ArrayLayout::Packed
+        }
+        TimeSeriesType::NonSequentialTimeSeries => ArrayLayout::Standalone,
+        TimeSeriesType::Deterministic => ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => {
+            ArrayLayout::StandaloneWindowed { count_axis: 2 }
+        }
+    }
 }
 
 /// Derive the [`RequestParts`] for one request, validating where required
 /// (`NonSequentialTimeSeries` timestamps). `SingleTimeSeries` is packed; every
 /// other type is stored standalone.
 fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
-    let (hash, resolution, packed, meta, key) = match &item.data {
+    let (hash, resolution, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
             let hash = array_hash(&single.data);
             (
                 hash,
                 single.resolution,
-                true,
+                array_layout_for(TimeSeriesType::SingleTimeSeries),
                 TimeSeriesMetadata {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
@@ -2155,7 +2175,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     percentiles: None,
                     dtype: single.data.dtype,
                     element_shape: single.data.element_shape().to_vec(),
-                    logical_type: item.logical_type.clone(),
+                    ext: item.ext.clone(),
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -2176,7 +2196,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 // Non-sequential series are stored standalone, so the
                 // resolution (which keys the packed pool) is unused.
                 Period::Months(0),
-                false,
+                array_layout_for(TimeSeriesType::NonSequentialTimeSeries),
                 TimeSeriesMetadata {
                     owner_id: item.owner_id,
                     owner_type: item.owner_type.clone(),
@@ -2196,7 +2216,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     percentiles: None,
                     dtype: non_sequential.data.dtype,
                     element_shape: non_sequential.data.element_shape().to_vec(),
-                    logical_type: item.logical_type.clone(),
+                    ext: item.ext.clone(),
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -2214,7 +2234,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         TimeSeriesData::Deterministic(det) => (
             array_hash(&det.data),
             det.resolution,
-            false,
+            array_layout_for(TimeSeriesType::Deterministic),
             forecast_metadata(
                 item,
                 TimeSeriesType::Deterministic,
@@ -2241,7 +2261,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         TimeSeriesData::Probabilistic(prob) => (
             array_hash(&prob.data),
             prob.resolution,
-            false,
+            array_layout_for(TimeSeriesType::Probabilistic),
             forecast_metadata(
                 item,
                 TimeSeriesType::Probabilistic,
@@ -2268,7 +2288,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         TimeSeriesData::Scenarios(scen) => (
             array_hash(&scen.data),
             scen.resolution,
-            false,
+            array_layout_for(TimeSeriesType::Scenarios),
             forecast_metadata(
                 item,
                 TimeSeriesType::Scenarios,
@@ -2296,7 +2316,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     Ok(RequestParts {
         hash,
         resolution,
-        packed,
+        layout,
         meta,
         key,
     })
@@ -2397,7 +2417,7 @@ fn forecast_metadata(
         percentiles,
         dtype: data.dtype,
         element_shape: data.element_shape().to_vec(),
-        logical_type: item.logical_type.clone(),
+        ext: item.ext.clone(),
     }
 }
 
