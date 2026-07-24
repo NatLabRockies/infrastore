@@ -503,6 +503,9 @@ fn rename_and_remove_all() {
 }
 
 /// Run `cas`, expecting failure; returns stderr.
+/// Run `cas`, asserting a nonzero exit **and** the `Error: ` stderr prefix that
+/// `main` writes. The prefix is part of the CLI's contract with a shell caller:
+/// it is how a user tells a diagnostic apart from log output.
 fn run_err(store: &Path, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
@@ -515,7 +518,12 @@ fn run_err(store: &Path, args: &[&str]) -> String {
         "cas {args:?} unexpectedly succeeded:\nstdout: {}",
         String::from_utf8_lossy(&output.stdout),
     );
-    String::from_utf8(output.stderr).expect("utf8 stderr")
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(
+        stderr.contains("Error: "),
+        "cas {args:?} exited nonzero without an `Error: ` diagnostic; stderr was:\n{stderr}"
+    );
+    stderr
 }
 
 /// Seed one store with distinctly-named series for glob/export tests.

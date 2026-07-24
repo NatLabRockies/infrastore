@@ -305,3 +305,20 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
   pattern; `wind[1]` used as a pattern matches nothing. Callers needing literal matching must use
   `ListFilter::name`. Pinned by `name_glob_follows_sqlite_glob_semantics` (1.4). Documentation gap
   rather than a defect, but worth stating in the user-facing docs.
+- F9: `castore-server/src/client.rs` — `BulkReadResp` items carry no name, so
+  `RemoteClient::bulk_read` fills in the empty string while `get_time_series` (which knows the name
+  from the key it was handed) keeps it. Pinned by `a_time_range_applies_to_every_key_in_a_bulk_read`
+  (3.3). The caller holds the keys positionally so nothing is lost, but the asymmetry is a trap.
+- F10: `cas export` emits a **timestamped** CSV (`timestamp,value`), while a `single` descriptor's
+  CSV holds values only — so `export` output is not directly re-addable as the same type, despite
+  `export` being documented as the read-direction inverse of `add`. A caller must strip the
+  timestamp column or re-add as `non_sequential`. Both routes are pinned by
+  `export_then_add_reproduces_the_values` (3.6).
+- F11: `castore-cli/src/descriptor.rs:292` — the "element_shape must not contain a zero dimension"
+  guard is unreachable, because `per_step` is computed as `product().max(1)`, so a zero dimension
+  becomes 1. `element_shape: [0]` instead surfaces later as a value-count mismatch against the
+  degenerate shape (`expected 0 values for shape [3, 0]`). Still actionable, but not the intended
+  message. Pinned by `a_zero_element_shape_dimension_is_rejected` (3.6).
+- F12: `cas verify` writes its failing report to **stdout** and then exits 1, so unlike every other
+  failing command it produces no `Error:` stderr diagnostic. A shell caller checking stderr for a
+  problem sees nothing. Pinned by `verify_exits_one_on_a_corrupt_store` (3.6).

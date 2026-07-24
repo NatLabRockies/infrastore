@@ -24,5 +24,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# `cli_errors.rs` builds deliberately corrupt stores: `netcdf` to perturb a
+# stored array behind its recorded hash, `rusqlite` to corrupt the catalog half.
+netcdf = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = "3"
