@@ -6,6 +6,13 @@ Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI), and the `
 
 Spec: [NatLabRockies/castore#1](https://github.com/NatLabRockies/castore/issues/1).
 
+## Why the name
+
+**castore** = **CA**talog + **STORE** — the two halves of what this library is: a
+metadata/association catalog (SQLite) alongside an array store (NetCDF). The name also nods to
+Castore, the Italian name for Castor of the Gemini twins: a persisted store is a pair of twin files
+— the `.nc` and its `.sqlite` sidecar — that must always travel together.
+
 ## v0 scope
 
 - **SingleTimeSeries** and **NonSequentialTimeSeries** are implemented end-to-end (read+write in the

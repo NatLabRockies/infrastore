@@ -110,6 +110,52 @@ CREATE INDEX IF NOT EXISTS idx_hash       ON time_series_associations(data_hash)
 CREATE INDEX IF NOT EXISTS idx_owner      ON time_series_associations(owner_id, owner_category);
 CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution);
 
+-- Secondary indexes for the filter/discovery surface. Without these, every
+-- predicate below is a full-table scan, and the table's rows are wide (ext,
+-- timestamps_json), so scans get expensive well before row counts get large.
+-- Measured on a 405k-row catalog (100k owners):
+--
+--   * idx_ts_type       count_by_type / counts_by_type / list() with a type
+--                       predicate: 3-10x. Serves every stats and summary call
+--                       that scopes by time_series_type.
+--   * idx_name          exact-name filters 12x; name GLOB with a literal
+--                       prefix 6x (BINARY collation lets GLOB range-seek).
+--                       Leading-wildcard patterns still scan, but over the
+--                       narrow index instead of the wide table.
+--   * idx_owner_type    owner_type filters 34x; makes DISTINCT owner_type a
+--                       covering scan.
+--   * idx_category_owner  category-scoped owner enumeration and counts 4-8x.
+--                       idx_owner leads with owner_id, so it cannot serve a
+--                       category-only predicate; leading with the category
+--                       (then owner_id, keeping DISTINCT owner_id covered)
+--                       does. Near-zero insert cost (two small columns).
+--   * idx_interval      distinct_intervals becomes a covering range seek
+--                       (was a full scan + temp b-tree); the interval
+--                       counterpart of idx_resolution.
+--
+-- Deliberately NOT added, per the same measurements:
+--
+--   * (features_hash) alone — would only speed the orphan-set sweep, which runs
+--     at compact time, and a 32-byte BLOB index is comparatively expensive to
+--     maintain on every insert.
+--   * (time_series_type, data_hash) — 23x on count_distinct_arrays_for_types,
+--     but +62% metadata-insert cost and it baits the planner into a
+--     non-covering seek that doubles list_identities' latency. The plain
+--     idx_ts_type is the better trade.
+--
+-- Known planner trade-off accepted here: with idx_ts_type / idx_owner_type
+-- present, list_identities and static_summary pick index-assisted plans that
+-- are ~10-20% slower than their previous covering full scans. Both are
+-- infrequent reporting calls; the wins above are on the hot filter paths.
+--
+-- Like every index here, these are additive: an existing store gains them on
+-- its first writable open (one-time build cost proportional to catalog size).
+CREATE INDEX IF NOT EXISTS idx_ts_type        ON time_series_associations(time_series_type);
+CREATE INDEX IF NOT EXISTS idx_name           ON time_series_associations(name);
+CREATE INDEX IF NOT EXISTS idx_owner_type     ON time_series_associations(owner_type);
+CREATE INDEX IF NOT EXISTS idx_category_owner ON time_series_associations(owner_category, owner_id);
+CREATE INDEX IF NOT EXISTS idx_interval       ON time_series_associations(interval);
+
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
 -- The two association tables below record relationships between catalog
