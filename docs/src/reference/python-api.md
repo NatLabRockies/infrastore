@@ -1,25 +1,26 @@
 # Python API
 
-The PyO3 binding is importable as the `time_series_store` module (package `time-series-store`). It
-is built as an `abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
+The PyO3 binding is importable as the `castore` module (package `castore`). It is built as an
+`abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
 
 ```python
-from time_series_store import (
-    TimeSeriesStore, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
+from castore import (
+    Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
+    SupplementalAttributeAssociation, ParentChildAssociation,
     TimeSeriesError, NotFoundError, DuplicateTimeSeriesError,
-    InvalidParameterError, IntegrityError, ReadOnlyStoreError,
+    DuplicateAssociationError, InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 ```
 
-`time_series_store.__version__` reports the wheel version.
+`castore.__version__` reports the wheel version.
 
 > **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, `int64`,
 > `int32`, `uint64`, or `bool`; whatever dtype is given round-trips unchanged. Multi-dimensional
 > arrays (a per-step element shape) are supported via the NumPy array's shape.
 
-## `TimeSeriesStore`
+## `Store`
 
 ### Constructors
 
@@ -32,10 +33,10 @@ def create(
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
-) -> TimeSeriesStore: ...
+) -> Store: ...
 
 @classmethod
-def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
+def open(cls, path: str, read_only: bool = False) -> Store: ...
 ```
 
 - `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
@@ -46,7 +47,7 @@ def open(cls, path: str, read_only: bool = False) -> TimeSeriesStore: ...
   `InvalidParameterError`.
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
 
-The store is also a context manager: `with TimeSeriesStore.create(...) as store:` closes it on exit.
+The store is also a context manager: `with Store.create(...) as store:` closes it on exit.
 `store.close()` drops the underlying handle and releases its files; subsequent operations raise
 `TimeSeriesError` (it is idempotent). `repr(store)` shows the path (or `in-memory`), the read-only
 flag, and `closed` once closed.
@@ -90,9 +91,11 @@ def get_time_series(
 def bulk_read(
     self,
     keys: list[TimeSeriesKey],
+    *,
+    time_range: tuple[datetime, datetime] | None = None,
 ) -> list[SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios]: ...
-# Reads each key's series in full — no time-range slicing. Results are returned in
-# the same order as `keys`; an empty list of keys returns an empty list.
+# `time_range` applies the same window to every key (default: each series in full).
+# Results are returned in the same order as `keys`; an empty list of keys returns an empty list.
 
 def remove_time_series(self, key: TimeSeriesKey) -> None: ...
 def clear_time_series(
@@ -139,7 +142,8 @@ def has_time_series(self, key: TimeSeriesKey) -> bool: ...
 def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[str]: ...
 # resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
 def get_time_series_counts(self) -> dict: ...
-def get_forecast_parameters(self) -> dict: ...
+def get_forecast_parameters(self, *, resolution: str | None = None,
+                            interval: str | None = None) -> dict: ...
 def get_compression(self) -> dict: ...
 def compact(self) -> dict: ...
 def verify_integrity(self) -> dict: ...
@@ -148,9 +152,9 @@ def flush(self) -> None: ...
 ```
 
 > **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
-> marker): filter kwargs, `features=`/`units=`/`logical_type=` on the add paths, `time_range=` on
-> the read paths, and so on. Positional use raises `TypeError`. The wheel ships a
-> `time_series_store.pyi` stub, so IDEs and type checkers see the full signatures.
+> marker): filter kwargs, `features=`/`units=`/`ext=` on the add paths, `time_range=` on the read
+> paths, and so on. Positional use raises `TypeError`. The wheel ships a `castore.pyi` stub, so IDEs
+> and type checkers see the full signatures.
 
 #### Return shapes
 
@@ -161,8 +165,9 @@ def flush(self) -> None: ...
   matches the stored type.
 - **`bulk_read`** returns one typed object per key, in the same order as `keys` (an empty key list
   returns an empty list). It is the bulk counterpart to `get_time_series`: packed `SingleTimeSeries`
-  are read in one decompress-once pass per dataset instead of one read per key. It does not slice —
-  every series comes back in full; use `get_time_series(key, time_range=...)` for a window.
+  are read in one decompress-once pass per dataset instead of one read per key. Pass the
+  keyword-only `time_range=(start, end)` to apply the same window to every key; by default each
+  series comes back in full.
 - **`list_time_series`** returns a list of dicts, each with the keys: `owner_id`, `owner_type`,
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`, `resolution`
   (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`, `features`, `units`.
@@ -175,9 +180,11 @@ def flush(self) -> None: ...
 - **`get_time_series_counts`** returns
   `{"components_with_time_series": int, "static_time_series": int, "forecasts": int}`.
 - **`get_forecast_parameters`** returns
-  `{"horizon": str, "interval": str, "count": int, "resolution": str}`, where `horizon`, `interval`,
-  and `resolution` are ISO 8601 duration strings (e.g. `"PT1H"`). Every value is `None` when the
-  store holds no forecasts.
+  `{"horizon": str, "interval": str, "count": int, "resolution": str, "initial_timestamp": str}`,
+  where `horizon`, `interval`, and `resolution` are ISO 8601 duration strings (e.g. `"PT1H"`) and
+  `initial_timestamp` is an RFC 3339 string. Every value is `None` when the store holds no
+  forecasts. The keyword-only `resolution` / `interval` arguments scope the query to forecasts
+  matching that grid.
 - **`get_compression`** returns `{"compression": "deflate" | "none", "level": int, "shuffle": bool}`
   — the policy the store was created with (restored from the file on open; `"none"` for in-memory).
 - **`compact`** returns
@@ -344,6 +351,311 @@ Same properties as `Deterministic`, plus:
 forecast.scenario_count -> int
 ```
 
+## Readers
+
+`get_time_series` returns one whole series or forecast. For the simulation access pattern — _walk
+every timestamp and, at each, read the value of every matching series_ — use a **reader** instead. A
+reader is built once over a filter, pins one resolution, and reuses its output buffers so a tight
+loop allocates almost nothing. There are two: `StaticReader` for `SingleTimeSeries`, and
+`ForecastReader` for forecasts. Both share the lifecycle: build → inspect the layout once →
+`*_read(when)` in a loop → pull values per group/entry.
+
+The builders and drivers live on `Store`:
+
+```python
+def build_static_reader(
+    self,
+    resolution: timedelta | str,
+    *,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+    owner_type: str | None = None,
+    name: str | None = None,
+    name_glob: str | None = None,
+    features: dict[str, int | float | bool | str] | None = None,
+) -> StaticReader: ...
+def static_read(self, reader: StaticReader, when: datetime) -> None: ...
+
+def build_forecast_reader(
+    self,
+    time_series_type: TimeSeriesType,
+    resolution: timedelta | str,
+    *,
+    owner_id: int | None = None,
+    owner_category: OwnerCategory | None = None,
+    owner_type: str | None = None,
+    name: str | None = None,
+    name_glob: str | None = None,
+    features: dict[str, int | float | bool | str] | None = None,
+) -> ForecastReader: ...
+def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
+```
+
+`resolution` is required on both builders (one resolution per reader). `static_read` /
+`forecast_read` fill the reader's buffers in place and return `None`; passing a `when` that is off
+the reader's grid or timeline raises `InvalidParameterError`.
+
+### `StaticReader`
+
+Reads the value of every matching `SingleTimeSeries` at one timestamp. Results are **columnar**:
+series are partitioned into `(dtype, element_shape)` groups, and each group's values come back as
+one dense `(num_columns, *element_shape)` numpy array.
+
+```python
+class StaticReader:
+    def grid(self) -> dict: ...     # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "length": int}
+    def groups(self) -> list[dict]: ...  # each: {"dtype": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
+    def timestamps(self) -> list[datetime]: ...   # every timestamp on the grid, in order
+    def group_values(self, index: int) -> numpy.ndarray: ...  # last read of group `index`
+```
+
+All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
+and raises on divergence, so there is no presence mask — every column has a value at every valid
+timestamp. `group_values(i)` returns a `(num_columns, *element_shape)` array whose column `j`
+corresponds to `groups()[i]["keys"][j]`; it is empty until the first `static_read`.
+
+```python
+reader = store.build_static_reader(timedelta(hours=1))
+grid = reader.grid()
+groups = reader.groups()
+start = datetime.fromisoformat(grid["initial_timestamp"])
+for ts in reader.timestamps():
+    store.static_read(reader, ts)
+    for i, g in enumerate(groups):
+        vals = reader.group_values(i)   # column j ↔ g["keys"][j]
+```
+
+### `ForecastReader`
+
+Reads the forecast _window_ at one timestamp for every matching forecast of one type. The build
+filter must name a forecast type and pin a resolution; a `Deterministic` reader is abstract and also
+includes `DeterministicSingleTimeSeries` (read into identical `(horizon, *element_shape)` windows).
+All matched forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
+
+`time_series_type` must be one of the concrete forecast types — `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios`; any other raises
+`InvalidParameterError`.
+
+```python
+class ForecastReader:
+    def timeline(self) -> dict: ...   # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "interval": ISO str, "count": int, "time_series_type": str}
+    def entries(self) -> list[TimeSeriesKey]: ...   # per-entry keys, in order (parallel to entry_values)
+    def timestamps(self) -> list[datetime]: ...     # every window-start timestamp, in order
+    def entry_values(self, index: int) -> numpy.ndarray: ...  # last read of entry `index`
+    def num_slots(self) -> int: ...          # deduplicated window slots (physical reads per forecast_read)
+    def entry_slot(self, index: int) -> int: ...  # 0-based slot backing entry `index`
+```
+
+Valid read timestamps are `initial_timestamp + k·interval` for `k in range(count)` (each names the
+window forecast _from_ that instant). `entry_values(i)` returns the window backing `entries()[i]`,
+shaped `(horizon, *element_shape)` for `Deterministic` / `DeterministicSingleTimeSeries`,
+`(num_percentiles, horizon, *element_shape)` for `Probabilistic`, and
+`(scenario_count, horizon, *element_shape)` for `Scenarios`; it is empty until the first
+`forecast_read`.
+
+```python
+reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
+tl = reader.timeline()
+entries = reader.entries()
+for ts in reader.timestamps():
+    store.forecast_read(reader, ts)
+    for i, key in enumerate(entries):
+        window = reader.entry_values(i)   # window for key's owner
+```
+
+**Window-read deduplication.** Forecasts that share one backing array and read plan — deduplicated
+identical data, or several `DeterministicSingleTimeSeries` over one `SingleTimeSeries` — collapse to
+a single _window slot_. `forecast_read` performs one backend (`.nc`) read per slot, not per entry,
+so a forecast shared by N owners is read once per timestamp. `num_slots()` is that physical read
+count (`<= len(entries())`), and `entry_slot(i)` (0-based) identifies the slot backing entry `i`;
+entries that share data report the same slot. Group by slot to also materialize each unique window
+only once on the Python side:
+
+```python
+store.forecast_read(reader, ts)
+windows: dict[int, numpy.ndarray] = {}
+for i, key in enumerate(entries):
+    window = windows.setdefault(reader.entry_slot(i), reader.entry_values(i))
+```
+
+## Associations
+
+Two catalogs of relationships between entities the store does not otherwise model. Both are
+independent of time series: removing a time series never removes an association, and vice versa
+(there are no foreign keys and no cascade — both endpoints live in the caller's object graph, so a
+cascade could never fire), so a caller that wants both makes both calls.
+
+Every query in both families takes the same keyword-only filter arguments as its family's `has_*`
+method. All are optional and ANDed; with none set they match every row, which is what makes a
+no-filter export and an `add_*` import a round trip. The `*_types` arguments are lists of
+**concrete** type names, matched as SQL `IN (…)`: expanding an abstract type into its subtypes stays
+in Python, where the type hierarchy lives, and an empty list matches nothing — unlike omitting the
+argument, which matches everything. Every `remove_*` returns the number removed; removing nothing
+returns `0` rather than raising.
+
+### Supplemental-attribute associations
+
+Which supplemental attributes are attached to which components. One attribute may be attached to
+many components.
+
+```python
+SupplementalAttributeAssociation(
+    component_id: int,
+    component_type: str,
+    attribute_id: int,
+    attribute_type: str,
+)
+```
+
+Read-only properties: `component_id`, `component_type`, `attribute_id`, `attribute_type`. The object
+is hashable and compares structurally, so attachments work in sets and as dict keys. In the
+**catalog**, though, identity is only the `(component_id, attribute_id)` pair — the type names are
+denormalized labels carried for filtering — so re-attaching the same pair under different type names
+raises `DuplicateAssociationError`.
+
+```python
+def add_supplemental_attribute_association(
+    self, association: SupplementalAttributeAssociation
+) -> None: ...
+def add_supplemental_attribute_associations(
+    self, associations: list[SupplementalAttributeAssociation]
+) -> int: ...
+# All-or-nothing: a duplicate anywhere in the batch rolls the whole batch back.
+# Returns the number inserted; the import half of the round trip whose export is
+# list_supplemental_attribute_associations() with no filter.
+
+def has_supplemental_attribute_association(
+    self,
+    *,
+    component_id: int | None = None,
+    component_types: list[str] | None = None,
+    attribute_id: int | None = None,
+    attribute_types: list[str] | None = None,
+) -> bool: ...
+
+def list_supplemental_attribute_associations(
+    self, *, ...
+) -> list[SupplementalAttributeAssociation]: ...
+def list_supplemental_attribute_ids(self, *, ...) -> list[int]: ...
+def list_components_with_attributes(self, *, ...) -> list[int]: ...
+def remove_supplemental_attribute_associations(self, *, ...) -> int: ...
+def count_supplemental_attribute_associations(self, *, ...) -> int: ...
+def count_supplemental_attributes(self, *, ...) -> int: ...
+def count_components_with_attributes(self, *, ...) -> int: ...
+# Every `...` above is the same keyword-only filter as has_supplemental_attribute_association.
+
+def replace_supplemental_attribute_component_id(self, old_id: int, new_id: int) -> int: ...
+
+def supplemental_attribute_counts_by_type(self) -> list[tuple[str, int]]: ...
+def supplemental_attribute_summary(self) -> list[dict]: ...
+```
+
+- **`list_supplemental_attribute_associations`** returns rows in insertion order, so exporting with
+  no filter and importing the result with `add_supplemental_attribute_associations` is a round trip.
+- **`list_supplemental_attribute_ids`** returns the distinct attribute ids of the matching rows,
+  ascending — the attributes attached to component `c` with `component_id=c`.
+  **`list_components_with_attributes`** is the other end: the components carrying attribute `a` with
+  `attribute_id=a`. **`count_supplemental_attributes`** and **`count_components_with_attributes`**
+  are those two queries counted, and **`count_supplemental_attribute_associations`** counts the
+  matching rows themselves.
+- **`replace_supplemental_attribute_component_id`** moves every attachment from component `old_id`
+  to `new_id`, returning the rows updated, and raises `DuplicateAssociationError` if `new_id`
+  already carries one of the attributes being moved.
+- **`supplemental_attribute_counts_by_type`** returns `[(attribute_type, count), …]` ordered by
+  type; **`supplemental_attribute_summary`** returns one dict per distinct pair with keys
+  `component_type`, `attribute_type`, `count`, ordered by attribute type then component type.
+
+```python
+from castore import SupplementalAttributeAssociation, Store
+
+store = Store.create(in_memory=True)
+store.add_supplemental_attribute_association(
+    SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo")
+)
+store.add_supplemental_attribute_association(
+    SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo")
+)
+
+store.list_supplemental_attribute_ids(component_id=1)     # -> [100]
+store.list_components_with_attributes(attribute_id=100)   # -> [1, 2]
+
+store.remove_supplemental_attribute_associations(component_id=1)
+# -> 1; any time series of component 1 are untouched
+```
+
+### Parent/child associations
+
+Directed edges between components — a generator (parent) wired to a bus (child), say. Both endpoints
+are always components; an attribute cannot appear here.
+
+```python
+ParentChildAssociation(
+    parent_id: int,
+    parent_type: str,
+    child_id: int,
+    child_type: str,
+)
+```
+
+Read-only properties: `parent_id`, `parent_type`, `child_id`, `child_type`; hashable and
+structurally comparable like the attachment object. In the **catalog**, identity is the _ordered_
+`(parent_id, child_id)` pair, so the reversed pair is a different edge, while repeating the same
+ordered pair under different type names raises `DuplicateAssociationError`. There is no
+relationship-kind column, so one ordered pair may be related at most once.
+
+This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.
+
+```python
+def add_parent_child_association(self, association: ParentChildAssociation) -> None: ...
+def add_parent_child_associations(self, associations: list[ParentChildAssociation]) -> int: ...
+# All-or-nothing, like the supplemental bulk add; returns the number inserted.
+
+def has_parent_child_association(
+    self,
+    *,
+    parent_id: int | None = None,
+    parent_types: list[str] | None = None,
+    child_id: int | None = None,
+    child_types: list[str] | None = None,
+) -> bool: ...
+
+def list_parent_child_associations(self, *, ...) -> list[ParentChildAssociation]: ...
+def list_children(self, *, ...) -> list[int]: ...
+def list_parents(self, *, ...) -> list[int]: ...
+def remove_parent_child_associations(self, *, ...) -> int: ...
+def count_parent_child_associations(self, *, ...) -> int: ...
+# Every `...` above is the same keyword-only filter as has_parent_child_association.
+
+def replace_parent_child_component_id(self, old_id: int, new_id: int) -> int: ...
+```
+
+- **`list_parent_child_associations`** returns rows in insertion order, so a no-filter export and an
+  `add_parent_child_associations` import round-trip.
+- **`list_children`** returns the distinct child ids of the matching edges, ascending — the children
+  of component `p` with `parent_id=p`; **`list_parents`** is the other end, the parents of component
+  `c` with `child_id=c`.
+- **`replace_parent_child_component_id`** rewrites `old_id` to `new_id` on **both** ends of every
+  edge, returning the rows updated, and raises `DuplicateAssociationError` if the rewrite would
+  duplicate an edge `new_id` already has.
+
+```python
+from castore import ParentChildAssociation, Store
+
+store = Store.create(in_memory=True)
+store.add_parent_child_association(ParentChildAssociation(1, "Generator", 7, "Bus"))
+# The reversed pair is a different edge, not a duplicate.
+store.add_parent_child_association(ParentChildAssociation(7, "Bus", 1, "Generator"))
+
+store.list_children(parent_id=1)   # -> [7]
+store.list_parents(child_id=7)     # -> [1]
+
+store.remove_parent_child_associations(parent_types=["Bus"])   # -> 1
+```
+
+Neither association catalog is exposed over the [gRPC server](grpc-api.md) or the
+[`cas` CLI](cli.md).
+
 ## Exceptions
 
 All inherit from `TimeSeriesError`:
@@ -352,6 +664,7 @@ All inherit from `TimeSeriesError`:
 | --------------------------- | ----------------------------------------------------- |
 | `NotFoundError`             | A key or array does not exist                         |
 | `DuplicateTimeSeriesError`  | Adding a series whose key already exists              |
+| `DuplicateAssociationError` | Re-adding an attachment or edge that already exists   |
 | `InvalidParameterError`     | Bad arguments (bad feature type, malformed period, …) |
 | `IntegrityError`            | On-disk inconsistency detected                        |
 | `ReadOnlyStoreError`        | A write on a read-only store                          |
@@ -380,8 +693,8 @@ directive string. Examples:
 
 ```python
 init_tracing("debug")                            # all targets at DEBUG
-init_tracing("time_series_store_core=debug")     # store core only
-init_tracing("warn,time_series_store_core=trace") # warn globally, trace the core
+init_tracing("castore_core=debug")     # store core only
+init_tracing("warn,castore_core=trace") # warn globally, trace the core
 ```
 
 Silently no-ops if a subscriber is already registered (including the one auto-initialized from

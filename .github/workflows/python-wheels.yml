@@ -1,4 +1,4 @@
-# Build (and, on tags, publish) the `time-series-store` Python wheels.
+# Build (and, on tags, publish) the `castore` Python wheels.
 #
 # The PyO3 crate links libnetcdf + libhdf5; cibuildwheel installs Rust and the
 # system HDF5/NetCDF in `before-all` (see [tool.cibuildwheel] in pyproject.toml)
@@ -9,7 +9,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: ["crates/time-series-store-py/**", "crates/time-series-store-core/**"]
+    paths: ["crates/castore-py/**", "crates/castore-core/**"]
   workflow_dispatch:
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
           - os: windows-latest
     defaults:
       run:
-        working-directory: crates/time-series-store-py
+        working-directory: crates/castore-py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,12 +58,12 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         with:
-          package-dir: crates/time-series-store-py
+          package-dir: crates/castore-py
           output-dir: wheelhouse
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: crates/time-series-store-py/wheelhouse/*.whl
+          path: crates/castore-py/wheelhouse/*.whl
 
   publish:
     name: publish to PyPI

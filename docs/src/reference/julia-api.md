@@ -1,11 +1,11 @@
 # Julia API
 
-The Julia package is **`TimeSeriesStore.jl`** (module `TimeSeriesStore`); it wraps the
-[C ABI](./c-abi.md) cdylib. The library is resolved from the `TIME_SERIES_STORE_LIB` environment
-variable (development builds), or from the `TimeSeriesStore_jll` binary package when installed.
+The Julia package is **`Castore.jl`** (module `Castore`); it wraps the [C ABI](./c-abi.md) cdylib.
+The library is resolved from the `CASTORE_LIB` environment variable (development builds), or from
+the `Castore_jll` binary package when installed.
 
 ```julia
-using TimeSeriesStore
+using Castore
 ```
 
 Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
@@ -14,14 +14,24 @@ Exported names: `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, `Determi
 `AddBatch`, `add_time_series_bulk!`, `get_time_series`, `bulk_read`, `get_time_series_keys`,
 `key_info`, `list_keys`, `list_array_groups`, `remove_time_series!`, `has_time_series`,
 `get_counts`, `counts_by_type`, `num_distinct_arrays`, `time_series_counts`, `list_owner_ids`,
-`static_summary`, `forecast_summary`, `get_forecast_parameters`, `check_static_consistency`,
-`get_resolutions`, `get_compression`, `verify_integrity`, `compact!`, `get_metadata`,
-`get_forecast_metadata`, `get_array_by_hash`, `count_array_references`, `open_store`, `flush!`,
-`clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`, `remove_typed!`,
-`copy_time_series!`, `close!`, `persist!`, `StaticReader`, `build_static_reader`, `static_grid`,
-`static_groups`, `static_read!`, `static_values`, `ForecastReader`, `build_forecast_reader`,
-`forecast_timeline`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_values`,
-`init_logging`.
+`static_summary`, `forecast_summary`, `SupplementalAttributeAssociation`,
+`add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
+`has_supplemental_attribute_association`, `list_supplemental_attribute_associations`,
+`list_supplemental_attribute_ids`, `list_components_with_attributes`,
+`remove_supplemental_attribute_associations!`, `replace_supplemental_attribute_component_id!`,
+`count_supplemental_attribute_associations`, `count_supplemental_attributes`,
+`count_components_with_attributes`, `supplemental_attribute_counts_by_type`,
+`supplemental_attribute_summary`, `ParentChildAssociation`, `add_parent_child_association!`,
+`add_parent_child_associations!`, `has_parent_child_association`, `list_parent_child_associations`,
+`list_children`, `list_parents`, `remove_parent_child_associations!`,
+`replace_parent_child_component_id!`, `count_parent_child_associations`, `get_forecast_parameters`,
+`check_static_consistency`, `get_resolutions`, `get_compression`, `verify_integrity`, `compact!`,
+`get_metadata`, `get_forecast_metadata`, `get_array_by_hash`, `count_array_references`,
+`open_store`, `flush!`, `clear!`, `replace_owner!`, `transform_single_time_series!`, `has_typed`,
+`remove_typed!`, `copy_time_series!`, `close!`, `persist!`, `StaticReader`, `build_static_reader`,
+`static_grid`, `static_groups`, `static_read!`, `static_values`, `ForecastReader`,
+`build_forecast_reader`, `forecast_timeline`, `forecast_entries`, `forecast_num_slots`,
+`forecast_read!`, `forecast_values`, `init_logging`.
 
 ## Constructors
 
@@ -44,9 +54,9 @@ The store registers a finalizer; close it eagerly with `close!(store)`.
 
 ## Types
 
-Each struct carries the association `name` (required) and an optional `logical_type`. Every
-constructor takes `name` as the positional after `data` and `logical_type=` as a keyword — e.g.
-`SingleTimeSeries(initial, resolution, data, name; logical_type=nothing)`.
+Each struct carries the association `name` (required) and an optional `ext`. Every constructor takes
+`name` as the positional after `data` and `ext=` as a keyword — e.g.
+`SingleTimeSeries(initial, resolution, data, name; ext=nothing)`.
 
 Every data-carrying struct is parameterized `{T,N}` on the element type and dimensionality of its
 value array; `{T,N}` is inferred from `data` by the constructor (an `AbstractArray` argument — a
@@ -58,17 +68,17 @@ struct SingleTimeSeries{T,N}
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
-SingleTimeSeries(initial_timestamp, resolution, data, name; logical_type=nothing)
+SingleTimeSeries(initial_timestamp, resolution, data, name; ext=nothing)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
     data         :: Array{T,N}
     name         :: String
-    logical_type :: Union{Nothing,String}
+    ext :: Union{Nothing,String}
 end
-NonSequentialTimeSeries(timestamps, data, name; logical_type=nothing)
+NonSequentialTimeSeries(timestamps, data, name; ext=nothing)
 
 struct Deterministic{T,N} <: AbstractDeterministic
     initial_timestamp :: DateTime
@@ -78,10 +88,10 @@ struct Deterministic{T,N} <: AbstractDeterministic
     count             :: Int
     data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
-              logical_type=nothing)
+              ext=nothing)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -92,10 +102,10 @@ struct Probabilistic{T,N}
     percentiles       :: Vector{Float64}
     data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
-              logical_type=nothing)
+              ext=nothing)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -106,10 +116,10 @@ struct Scenarios{T,N}
     scenario_count    :: Int             # set from size(data, 1) by the constructor
     data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
-    logical_type      :: Union{Nothing,String}
+    ext      :: Union{Nothing,String}
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
-          logical_type=nothing)         # note: scenario_count is NOT a constructor argument
+          ext=nothing)         # note: scenario_count is NOT a constructor argument
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. Surfaces as a
@@ -136,11 +146,12 @@ end
 end
 ```
 
-`logical_type` is an opaque label the binding can use to reconstruct a domain object on read.
-`add_time_series!` reads `name` off the object (it is not a call argument), so the same array can be
-stored under different names; its `logical_type=` keyword defaults to the object's `logical_type`.
-`data` keeps its Julia element type: the binding maps `T` to a stored dtype (`Float64`, `Float32`,
-`Int64`, `Int32`, `UInt64`, `Bool`) and converts to row-major bytes on the way down.
+`ext` is an opaque, package-owned payload (typically JSON) the binding can use to reconstruct a
+domain object on read; the store stores it verbatim and never interprets it. `add_time_series!`
+reads `name` off the object (it is not a call argument), so the same array can be stored under
+different names; its `ext=` keyword defaults to the object's `ext`. `data` keeps its Julia element
+type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, `Int64`, `Int32`, `UInt64`,
+`Bool`) and converts to row-major bytes on the way down.
 
 ## Static Series
 
@@ -149,14 +160,14 @@ add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::SingleTimeSeries;
     features::AbstractDict = Dict(), units = nothing,
-    logical_type = ts.logical_type,
+    ext = ts.ext,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
     features = Dict(), units = nothing,
-    logical_type = ts.logical_type,
+    ext = ts.ext,
 ) -> TimeSeriesKey
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -> SingleTimeSeries
@@ -191,7 +202,9 @@ To read every series' value at one timestamp in a loop (the simulation pattern),
 ### Bulk reads
 
 ```julia
-bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey}) -> Vector{SingleTimeSeries}
+bulk_read(store::Store, keys::AbstractVector{TimeSeriesKey};
+          time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing) -> Vector{SingleTimeSeries}
+# time_range slices every series to that window (default: each series in full)
 ```
 
 Reads many whole `SingleTimeSeries` in one call, returning one per key **in the same order**. Each
@@ -231,7 +244,7 @@ remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
 `owner_category` (`Component` / `SupplementalAttribute`) is required: the owner identity is the pair
 `(owner_id, owner_category)`, so a component and a supplemental attribute may share a numeric
 `owner_id` and remain distinct. `get_metadata` returns
-`(initial_timestamp, resolution, length, data_hash, dtype, logical_type, units, element_shape,
+`(initial_timestamp, resolution, length, data_hash, dtype, ext, units, element_shape,
 features)`,
 where `data_hash` is the 32-byte content hash, `element_shape` is the per-timestep shape tuple
 (empty for scalar elements), and `features` is the feature dictionary. It throws `NotFoundError` if
@@ -302,19 +315,19 @@ The forecast `name` comes from the struct, e.g.
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Deterministic;
-    features=Dict(), units=nothing, logical_type=nothing,
+    features=Dict(), units=nothing, ext=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Probabilistic;
-    features=Dict(), units=nothing, logical_type=nothing,
+    features=Dict(), units=nothing, ext=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Scenarios;
-    features=Dict(), units=nothing, logical_type=nothing,
+    features=Dict(), units=nothing, ext=nothing,
 ) -> TimeSeriesKey
 ```
 
@@ -559,7 +572,7 @@ count_array_references(store, data_hash::Vector{UInt8}) -> NamedTuple  # (sts, d
 static_summary(store) -> Vector{NamedTuple}   # grouped static rows with a `count`; build your own table
 forecast_summary(store) -> Vector{NamedTuple}   # grouped forecast rows with a `count`
 get_forecast_parameters(store; resolution=nothing, interval=nothing) -> NamedTuple  # (horizon, interval, count, resolution, initial_timestamp); fields `nothing` when none match
-check_static_consistency(store) -> Union{Nothing,NamedTuple}  # shared (initial_timestamp, length) of SingleTimeSeries; throws if they disagree
+check_static_consistency(store; resolution=nothing) -> Vector{NamedTuple}  # one (resolution, initial_timestamp, length) per resolution present (empty when none); throws if the series at one resolution disagree
 get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
 get_compression(store) -> NamedTuple  # (compression=:deflate|:none, level, shuffle); restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
@@ -586,13 +599,14 @@ descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `i
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
-- `time_series_type` — a `TS_TYPE_*` **integer code** (`0 = SingleTimeSeries` … `5 = Scenarios`),
-  not a Julia type. (The `time_series_type` field on a returned row _is_ the Julia type.)
+- `time_series_type` — a `CASTORE_TYPE_*` **integer code** (`0 = SingleTimeSeries` …
+  `5 = Scenarios`), not a Julia type. (The `time_series_type` field on a returned row _is_ the Julia
+  type.)
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `features` — match keys whose features include all the given entries (subset match).
 
-Physical storage detail (`data_hash`, `logical_type`, `percentiles`) is not on a key — read it via
+Physical storage detail (`data_hash`, `ext`, `percentiles`) is not on a key — read it via
 `get_metadata` / `get_forecast_metadata`.
 
 `list_array_groups` takes the same six filters and returns the same row fields as `list_keys`, but
@@ -610,20 +624,162 @@ off each metadata row); there are no per-row `get_metadata` round-trips.
 Because a DST shares its backing `SingleTimeSeries` array, a caller uses these counts to decide
 whether removing a `SingleTimeSeries` would orphan a derived DST.
 
+## Associations
+
+Two catalogs of relationships between entities the store does not otherwise model, replacing the
+association tables IS3.jl used to keep itself. Both are **independent of time series**: there are no
+foreign keys and no cascade (both endpoints live in the caller's object graph, so a cascade could
+never fire), so removing a time series never removes an association and vice versa; a caller that
+wants both makes both calls.
+
+Every query in a family takes that family's four optional keyword filters, ANDed; with none set they
+match every row, which is what makes a bare `list_*` call a whole-catalog export that the matching
+`add_*!` re-imports unchanged. The `*_types` keywords take a vector of **concrete** type names,
+matched as SQL `IN (…)`: expanding an abstract type into its subtypes stays on the Julia side, where
+the type hierarchy lives, and an empty vector matches nothing, unlike omitting the keyword, which
+matches everything. Every `remove_*!` returns the number of rows removed; removing nothing is `0`,
+not an error.
+
+### Supplemental-attribute associations
+
+Which supplemental attributes are attached to which components. One attribute may be attached to
+many components.
+
+```julia
+struct SupplementalAttributeAssociation
+    component_id::Int64
+    component_type::String
+    attribute_id::Int64
+    attribute_type::String
+end
+```
+
+`SupplementalAttributeAssociation` overloads `==`, `hash`, and `show` (a compact
+`SupplementalAttributeAssociation(Generator 1 <- GeographicInfo 100)`), so attachments work as
+`Dict`/`Set` members. In the **catalog**, identity is only the `(component_id, attribute_id)` pair —
+the type names are denormalized labels carried for filtering — so re-attaching the same pair under
+different type names throws `DuplicateAssociationError`.
+
+```julia
+add_supplemental_attribute_association!(store, association::SupplementalAttributeAssociation) -> Nothing
+add_supplemental_attribute_associations!(store, associations::AbstractVector{SupplementalAttributeAssociation}) -> Int
+                                  # one all-or-nothing transaction; count inserted
+has_supplemental_attribute_association(store; filters...) -> Bool
+list_supplemental_attribute_associations(store; filters...) -> Vector{SupplementalAttributeAssociation}
+                                  # insertion order
+list_supplemental_attribute_ids(store; filters...) -> Vector{Int}
+                                  # distinct attribute ids, ascending
+list_components_with_attributes(store; filters...) -> Vector{Int}
+                                  # distinct component ids, ascending
+remove_supplemental_attribute_associations!(store; filters...) -> Int   # count removed
+replace_supplemental_attribute_component_id!(store, old_id, new_id) -> Int   # rows updated
+count_supplemental_attribute_associations(store; filters...) -> Int
+count_supplemental_attributes(store; filters...) -> Int
+count_components_with_attributes(store; filters...) -> Int
+supplemental_attribute_counts_by_type(store) -> Vector{NamedTuple}   # (type, count), by type
+supplemental_attribute_summary(store) -> Vector{NamedTuple}
+                                  # (component_type, attribute_type, count), by attribute then component type
+```
+
+The four keyword filters are `component_id`, `component_types`, `attribute_id`, and
+`attribute_types`.
+
+`list_supplemental_attribute_ids` is "the attributes attached to this component" when `component_id`
+is set; `list_components_with_attributes` is the other end, "the components carrying this attribute"
+when `attribute_id` is set. `count_supplemental_attributes` and `count_components_with_attributes`
+are those two queries counted, and `count_supplemental_attribute_associations` counts the matching
+rows themselves.
+
+`replace_supplemental_attribute_component_id!` moves every attachment from component `old_id` to
+`new_id`, and throws `DuplicateAssociationError` if `new_id` already carries one of the attributes
+being moved.
+
+```julia
+store = Store(in_memory=true)
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(1, "Generator", 100, "GeographicInfo"))
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(2, "Load", 100, "GeographicInfo"))
+
+list_supplemental_attribute_ids(store; component_id=1)     # [100]
+list_components_with_attributes(store; attribute_id=100)   # [1, 2]
+
+remove_supplemental_attribute_associations!(store; component_id=1)
+# 1; component 1's time series are untouched
+```
+
+### Parent/child associations
+
+Directed edges between components — a generator (parent) wired to a bus (child), say. Both endpoints
+are always components; an attribute cannot appear here.
+
+```julia
+struct ParentChildAssociation
+    parent_id::Int64
+    parent_type::String
+    child_id::Int64
+    child_type::String
+end
+```
+
+`ParentChildAssociation` overloads `==`, `hash`, and `show` (a compact
+`ParentChildAssociation(Generator 1 -> Bus 7)`) the same way. In the **catalog**, identity is the
+_ordered_ `(parent_id, child_id)` pair, so the reversed pair is a different edge, while repeating
+the same ordered pair under different type names throws `DuplicateAssociationError`. There is no
+relationship-kind column, so one ordered pair may be related at most once.
+
+This family is deliberately narrower than the supplemental one — no counts-by-type and no grouped
+summary — because there is no consumer for them yet; both are additive if one appears.
+
+```julia
+add_parent_child_association!(store, association::ParentChildAssociation) -> Nothing
+add_parent_child_associations!(store, associations::AbstractVector{ParentChildAssociation}) -> Int
+                                  # one all-or-nothing transaction; count inserted
+has_parent_child_association(store; filters...) -> Bool
+list_parent_child_associations(store; filters...) -> Vector{ParentChildAssociation}
+                                  # insertion order
+list_children(store; filters...) -> Vector{Int}   # distinct child ids, ascending
+list_parents(store; filters...) -> Vector{Int}    # distinct parent ids, ascending
+remove_parent_child_associations!(store; filters...) -> Int   # count removed
+replace_parent_child_component_id!(store, old_id, new_id) -> Int   # rows updated
+count_parent_child_associations(store; filters...) -> Int
+```
+
+The four keyword filters are `parent_id`, `parent_types`, `child_id`, and `child_types`.
+
+`replace_parent_child_component_id!` rewrites `old_id` to `new_id` on **both** ends of every edge,
+and throws `DuplicateAssociationError` if the rewrite would duplicate an edge `new_id` already has.
+
+```julia
+store = Store(in_memory=true)
+add_parent_child_association!(store, ParentChildAssociation(1, "Generator", 7, "Bus"))
+# The reversed pair is a different edge, not a duplicate.
+add_parent_child_association!(store, ParentChildAssociation(7, "Bus", 1, "Generator"))
+
+list_children(store; parent_id=1)   # [7]
+list_parents(store; child_id=7)     # [1]
+
+remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
+```
+
+Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
+[`cas` CLI](./cli.md).
+
 ## Errors
 
 All subtype `TimeSeriesException`:
 
-| Type                       | Mapped from FFI code                                                       |
-| -------------------------- | -------------------------------------------------------------------------- |
-| `NotFoundError`            | `TS_ERR_NOT_FOUND`                                                         |
-| `DuplicateTimeSeriesError` | `TS_ERR_DUPLICATE`                                                         |
-| `InvalidParameterError`    | `TS_ERR_INVALID_PARAMETER` / `TS_ERR_INVALID_UTF8` / `TS_ERR_NULL_POINTER` |
-| `IntegrityError`           | `TS_ERR_INTEGRITY`                                                         |
-| `ReadOnlyStoreError`       | `TS_ERR_READ_ONLY`                                                         |
-| `IncompatibleFormatError`  | `TS_ERR_INCOMPATIBLE_FORMAT`                                               |
-| `IOError`                  | `TS_ERR_IO`                                                                |
-| `GenericError`             | Any other non-zero code (carries the numeric `code`)                       |
+| Type                        | Mapped from FFI code                                                                      |
+| --------------------------- | ----------------------------------------------------------------------------------------- |
+| `NotFoundError`             | `CASTORE_ERR_NOT_FOUND`                                                                   |
+| `DuplicateTimeSeriesError`  | `CASTORE_ERR_DUPLICATE`                                                                   |
+| `DuplicateAssociationError` | `CASTORE_ERR_DUPLICATE_ASSOCIATION`                                                       |
+| `InvalidParameterError`     | `CASTORE_ERR_INVALID_PARAMETER` / `CASTORE_ERR_INVALID_UTF8` / `CASTORE_ERR_NULL_POINTER` |
+| `IntegrityError`            | `CASTORE_ERR_INTEGRITY`                                                                   |
+| `ReadOnlyStoreError`        | `CASTORE_ERR_READ_ONLY`                                                                   |
+| `IncompatibleFormatError`   | `CASTORE_ERR_INCOMPATIBLE_FORMAT`                                                         |
+| `IOError`                   | `CASTORE_ERR_IO`                                                                          |
+| `GenericError`              | Any other non-zero code (carries the numeric `code`)                                      |
 
 The message text comes from the FFI layer's thread-local error buffer.
 
@@ -663,23 +819,23 @@ init_logging(level::AbstractString = "") -> Int32  # the FFI status code
 
 Initialize the Rust tracing subscriber. `level` is an
 [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html)
-directive string such as `"debug"` or `"time_series_store_core=debug"`. Pass an empty string (the
-default) to read `RUST_LOG`; if that variable is also unset, no output is produced.
+directive string such as `"debug"` or `"castore_core=debug"`. Pass an empty string (the default) to
+read `RUST_LOG`; if that variable is also unset, no output is produced.
 
 The subscriber is initialized at most once per process — subsequent calls are no-ops. The module's
 `__init__` hook calls `init_logging("")` automatically when `RUST_LOG` is set, so the common case
 requires no code change:
 
 ```sh
-export RUST_LOG=time_series_store_core=debug
+export RUST_LOG=castore_core=debug
 julia --project=. myscript.jl
 ```
 
 For programmatic control without environment variables:
 
 ```julia
-using TimeSeriesStore
-init_logging("time_series_store_core=debug")
+using Castore
+init_logging("castore_core=debug")
 ```
 
 See [Julia developer guide](../guides/julia.md#diagnostics-and-tracing) for usage examples and a

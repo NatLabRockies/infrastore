@@ -1,23 +1,27 @@
 # CLI Reference
 
-`time-series-store-cli` builds the `tss` binary, which reads and writes a store directly on disk
-(NetCDF + SQLite). For a task-oriented walkthrough, see [Use the `tss` CLI](../how-to/use-cli.md).
+`castore-cli` builds the `cas` binary, which reads and writes a store directly on disk (NetCDF +
+SQLite). For a task-oriented walkthrough, see [Use the `cas` CLI](../how-to/use-cli.md).
+
+The CLI covers time series only. The
+[association catalogs](../explanation/data-model.md#associations-between-entities) in the same
+catalog file have no `cas` commands; reach them through the Rust, Python, or Julia API.
 
 ## Synopsis
 
 ```text
-tss [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
+cas [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 ```
 
 ### Global options
 
-| Option           | Description                                                                                                                 |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `TSS_STORE` environment variable. |
-| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                         |
-| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                              |
+| Option           | Description                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `CASTORE_STORE` environment variable. |
+| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                             |
+| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                  |
 
-`--store` (or `TSS_STORE`) is required by every command except `template` and `completions`.
+`--store` (or `CASTORE_STORE`) is required by every command except `template` and `completions`.
 
 `-f`/`--format` affects the read/inspection commands (`list`, `get`, `info`, `export`, `stats`,
 `summary`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`). It is accepted
@@ -44,7 +48,7 @@ prints a JSON descriptor. `export` requires `-f csv` or `-f json` (there is no t
 | `compact`           | Reclaim reusable space (prompts unless `--force`); print the report.            |
 | `completions`       | Generate shell completions to stdout (bash/zsh/fish/…).                         |
 | `stats`             | Overall + detailed + per-type counts and distinct-array count.                  |
-| `summary`           | Grouped static and/or forecast summaries (`--static`/`--forecast`).             |
+| `summary`           | Grouped static and/or forecast summaries (`--static-only`/`--forecast-only`).   |
 | `verify`            | Verify store integrity; nonzero exit if errors are present.                     |
 | `check-consistency` | Verify the per-resolution static grid (`--resolution`).                         |
 | `resolutions`       | List distinct resolutions and forecast intervals.                               |
@@ -52,27 +56,27 @@ prints a JSON descriptor. `export` requires `-f csv` or `-f json` (there is no t
 | `template`          | Print an example descriptor for a given type to stdout.                         |
 
 ```text
-tss --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>] [--compression <none|deflate[:LEVEL]>] [--no-shuffle]
-tss --store <PATH> list    [SELECTOR...]
-tss --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
-tss --store <PATH> info    [SELECTOR...]
-tss --store <PATH> -f csv|json export [SELECTOR...] [--dir <DIR>]
-tss --store <PATH> remove  [SELECTOR...] [--all] [--force] [--dry-run]
-tss --store <PATH> rename  [SELECTOR...] --new-name <NAME> [--dry-run]
-tss --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>] [--dry-run]
-tss --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
-tss --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
-tss --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
-tss --store <PATH> persist --dest <PATH.nc>
-tss --store <PATH> compact [--force]
-tss --store <PATH> stats
-tss completions <SHELL>
-tss --store <PATH> summary [--static | --forecast]
-tss --store <PATH> verify
-tss --store <PATH> check-consistency [--resolution <DUR>]
-tss --store <PATH> resolutions
-tss --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
-tss template <single|non_sequential|deterministic|probabilistic|scenarios>
+cas --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>] [--compression <none|deflate[:LEVEL]>] [--no-shuffle]
+cas --store <PATH> list    [SELECTOR...]
+cas --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
+cas --store <PATH> info    [SELECTOR...]
+cas --store <PATH> -f csv|json export [SELECTOR...] [--dir <DIR>]
+cas --store <PATH> remove  [SELECTOR...] [--all] [--force] [--dry-run]
+cas --store <PATH> rename  [SELECTOR...] --new-name <NAME> [--dry-run]
+cas --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>] [--dry-run]
+cas --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
+cas --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
+cas --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
+cas --store <PATH> persist --dest <PATH.nc>
+cas --store <PATH> compact [--force]
+cas --store <PATH> stats
+cas completions <SHELL>
+cas --store <PATH> summary [--static-only | --forecast-only]
+cas --store <PATH> verify
+cas --store <PATH> check-consistency [--resolution <DUR>]
+cas --store <PATH> resolutions
+cas --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
+cas template <single|non_sequential|deterministic|probabilistic|scenarios>
 ```
 
 `--csv` overrides the `csv` path inside the descriptor, and only works for a descriptor that
@@ -116,7 +120,7 @@ value:
 | `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`, or ISO-8601 like `PT1H`, `P1M`.            |
 | `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 
-If a selector matches more than one series, `tss` errors and lists the candidates so the query can
+If a selector matches more than one series, `cas` errors and lists the candidates so the query can
 be narrowed. The owner identity is the pair `(owner_id, owner_category)`, so a component and a
 supplemental attribute may share a numeric `owner_id`; add `--owner-category` to disambiguate when
 both exist.
@@ -138,7 +142,7 @@ ignores underscores, so each type has a short form and a full form:
 `deterministic_single` is not writable from a descriptor (use `transform`), but it _is_ selectable,
 and it is often required: `transform` derives a series that shares `(owner_id, name, resolution)`
 with its source `SingleTimeSeries`, so after a transform a query like
-`tss get --owner-id 42 --name load` matches two series and errors. `--type single` or
+`cas get --owner-id 42 --name load` matches two series and errors. `--type single` or
 `--type deterministic_single` is the only way to pick one.
 
 Note that inputs and outputs use different spellings. You _pass_ the short, lowercase forms
@@ -166,25 +170,25 @@ but string-comparing rendered output against the short form will not match.
 A descriptor JSON file is either a single object (one series) or an array of objects (batch add).
 The CSV holds only numbers (plus a leading timestamp column for `non_sequential`).
 
-| Key                            | Required for                | Notes                                                  |
-| ------------------------------ | --------------------------- | ------------------------------------------------------ |
-| `owner_id`                     | all                         | Integer component identifier (`i64`).                  |
-| `owner_type`                   | all                         |                                                        |
-| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.     |
-| `name`                         | all                         |                                                        |
-| `type`                         | all                         | One of the five writable types.                        |
-| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.             |
-| `csv`                          | unless `--csv` is passed    | Path relative to the descriptor; `--csv` overrides it. |
-| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                |
-| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).         |
-| `units`                        | optional                    | Free-form label.                                       |
-| `logical_type`                 | optional                    | Opaque domain-reconstruction tag on the association.   |
-| `features`                     | optional                    | JSON object; int/float/bool/string values.             |
-| `initial_timestamp`            | all except `non_sequential` |                                                        |
-| `resolution`                   | all except `non_sequential` |                                                        |
-| `horizon`, `interval`, `count` | forecasts                   |                                                        |
-| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                    |
-| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.              |
+| Key                            | Required for                | Notes                                                      |
+| ------------------------------ | --------------------------- | ---------------------------------------------------------- |
+| `owner_id`                     | all                         | Integer component identifier (`i64`).                      |
+| `owner_type`                   | all                         |                                                            |
+| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.         |
+| `name`                         | all                         |                                                            |
+| `type`                         | all                         | One of the five writable types.                            |
+| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.                 |
+| `csv`                          | unless `--csv` is passed    | Path relative to the descriptor; `--csv` overrides it.     |
+| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                    |
+| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).             |
+| `units`                        | optional                    | Free-form label.                                           |
+| `ext`                          | optional                    | Opaque package-owned payload (e.g. JSON), stored verbatim. |
+| `features`                     | optional                    | JSON object; int/float/bool/string values.                 |
+| `initial_timestamp`            | all except `non_sequential` |                                                            |
+| `resolution`                   | all except `non_sequential` |                                                            |
+| `horizon`, `interval`, `count` | forecasts                   |                                                            |
+| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                        |
+| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.                  |
 
 Unknown keys are rejected. Any key not in the table above — including a typo like `resolutionn` — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than
@@ -192,7 +196,7 @@ silently dropping a setting.
 
 ## CSV Layout
 
-`tss` computes the full array shape from the descriptor and reads the CSV's value cells in
+`cas` computes the full array shape from the descriptor and reads the CSV's value cells in
 **row-major** order to fill it. The total cell count must equal the product of the shape.
 
 | Type             | Shape                             | CSV                                                                    |

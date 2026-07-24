@@ -1,0 +1,20 @@
+[package]
+name = "castore-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for castore"
+
+[lib]
+name = "castore"
+crate-type = ["cdylib"]
+
+[dependencies]
+chrono = { workspace = true }
+ndarray = { workspace = true }
+numpy = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py310", "chrono"] }
+castore-core = { workspace = true }
+tracing-subscriber = { workspace = true }

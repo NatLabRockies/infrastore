@@ -1,8 +1,8 @@
 # Rust Developer Style Guide
 
 This guide establishes coding standards, conventions, and workflows for developers contributing to
-**time-series-store**. Following these guidelines keeps the codebase consistent across its five
-crates and four language bindings, and streamlines review.
+**castore**. Following these guidelines keeps the codebase consistent across its five crates and
+four language bindings, and streamlines review.
 
 ## Pre-commit Checks
 
@@ -14,9 +14,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 dprint check                                             # Markdown formatting
 ```
 
-The hook is installed when `time-series-store-core` is built. If any check fails, the commit is
-blocked. It also runs `shellcheck` when that tool is available. Run
-`cargo test --workspace --all-features` before committing and keep the workspace clippy-clean.
+The hook is installed when `castore-core` is built. If any check fails, the commit is blocked. It
+also runs `shellcheck` when that tool is available. Run `cargo test --workspace --all-features`
+before committing and keep the workspace clippy-clean.
 
 ## Code Formatting
 
@@ -53,15 +53,15 @@ code.
 ## Workspace Layout
 
 The workspace is a single core crate plus four binding crates that wrap it. Keep that dependency
-direction: bindings depend on `time-series-store-core`, never the reverse.
+direction: bindings depend on `castore-core`, never the reverse.
 
-| Crate                      | Role                                                     |
-| -------------------------- | -------------------------------------------------------- |
-| `time-series-store-core`   | Types, NetCDF + SQLite storage, hashing, public Rust API |
-| `time-series-store-proto`  | Protobuf service definition, tonic codegen, conversions  |
-| `time-series-store-server` | gRPC server binary + Rust client                         |
-| `time-series-store-py`     | PyO3 bindings (abi3-py310 wheel)                         |
-| `time-series-store-ffi`    | C ABI cdylib consumed by the Julia binding               |
+| Crate            | Role                                                     |
+| ---------------- | -------------------------------------------------------- |
+| `castore-core`   | Types, NetCDF + SQLite storage, hashing, public Rust API |
+| `castore-proto`  | Protobuf service definition, tonic codegen, conversions  |
+| `castore-server` | gRPC server binary + Rust client                         |
+| `castore-py`     | PyO3 bindings (abi3-py310 wheel)                         |
+| `castore-ffi`    | C ABI cdylib consumed by the Julia binding               |
 
 Shared dependency versions are declared once in the root `Cargo.toml` `[workspace.dependencies]`.
 Reference them from member crates with `{ workspace = true }` rather than pinning a version locally.
@@ -72,30 +72,30 @@ The defining constraint of this repo: a single core feature is exposed through f
 you add or change something in the core public API, propagate it through every binding before
 considering the work done.
 
-| Surface       | Location                                                                            | Notes                                          |
-| ------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------- |
-| Core Rust API | `time-series-store-core/src/store.rs`                                               | The source of truth                            |
-| gRPC          | `proto/`, `time-series-store-proto/src/`, `time-series-store-server/src/service.rs` | Read-only server; writes need local filesystem |
-| Rust client   | `time-series-store-server/src/client.rs`                                            | Mirrors the gRPC surface                       |
-| Python        | `time-series-store-py/src/lib.rs`                                                   | PyO3; keep `python/tests/` in sync             |
-| Julia / FFI   | `time-series-store-ffi/src/lib.rs`, `julia/TimeSeries.jl/src/`                      | C ABI; regenerate the header (below)           |
+| Surface       | Location                                                        | Notes                                          |
+| ------------- | --------------------------------------------------------------- | ---------------------------------------------- |
+| Core Rust API | `castore-core/src/store.rs`                                     | The source of truth                            |
+| gRPC          | `proto/`, `castore-proto/src/`, `castore-server/src/service.rs` | Read-only server; writes need local filesystem |
+| Rust client   | `castore-server/src/client.rs`                                  | Mirrors the gRPC surface                       |
+| Python        | `castore-py/src/lib.rs`                                         | PyO3; keep `python/tests/` in sync             |
+| Julia / FFI   | `castore-ffi/src/lib.rs`, `julia/TimeSeries.jl/src/`            | C ABI; regenerate the header (below)           |
 
 ### Proto / gRPC changes
 
 1. Edit the `.proto` source under `proto/`.
 2. The proto crate's build script regenerates the tonic code; add hand-written conversions in
-   `time-series-store-proto/src/convert.rs`.
+   `castore-proto/src/convert.rs`.
 3. Update the server (`service.rs`) and Rust client (`client.rs`) to cover the new surface.
-4. Run `cargo test -p time-series-store-server` (includes `tests/grpc_round_trip.rs`).
+4. Run `cargo test -p castore-server` (includes `tests/grpc_round_trip.rs`).
 
 ### FFI / Julia changes
 
-The `extern "C"` surface in `time-series-store-ffi/src/lib.rs` is the contract for the Julia
-binding. After changing it:
+The `extern "C"` surface in `castore-ffi/src/lib.rs` is the contract for the Julia binding. After
+changing it:
 
-1. Regenerate `include/time_series_store.h` via `cbindgen` and keep the checked-in header in sync.
+1. Regenerate `include/castore.h` via `cbindgen` and keep the checked-in header in sync.
 2. Update the Julia wrapper in `julia/TimeSeries.jl/src/` and its tests.
-3. Build with `cargo build -p time-series-store-ffi --release` and run the Julia test suite.
+3. Build with `cargo build -p castore-ffi --release` and run the Julia test suite.
 
 Cross-language types must round-trip. Add a case to the relevant round-trip test
 (`tests/round_trip.rs`, `tests/netcdf_roundtrip.rs`, `python/tests/`, `julia/.../test/`).
@@ -108,7 +108,7 @@ Use typed errors with `thiserror`. The core crate defines the shared error type 
 add variants there rather than introducing parallel error enums:
 
 ```rust
-// time-series-store-core/src/error.rs
+// castore-core/src/error.rs
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, TimeSeriesError>;
@@ -137,7 +137,7 @@ pub enum TimeSeriesError {
 Use `.expect()` with descriptive messages instead of `.unwrap()`:
 
 ```rust
-let store = TimeSeriesStore::create_in_memory().expect("in-memory store should initialize");
+let store = Store::create_in_memory().expect("in-memory store should initialize");
 ```
 
 ## Testing
@@ -149,8 +149,8 @@ async server paths. There is no `rstest`/`anyhow` dependency; don't add one with
 
 - **Unit tests**: inline `#[cfg(test)]` modules next to the code (e.g. `hash.rs`, `auth.rs`).
 - **Integration tests**: under each crate's `tests/` directory:
-  - `time-series-store-core/tests/round_trip.rs`, `netcdf_roundtrip.rs`
-  - `time-series-store-server/tests/grpc_round_trip.rs`, `auth.rs`
+  - `castore-core/tests/round_trip.rs`, `netcdf_roundtrip.rs`
+  - `castore-server/tests/grpc_round_trip.rs`, `auth.rs`
 - **Python**: `python/tests/` (pytest) — run via `maturin develop` then `pytest`.
 - **Julia**: `julia/TimeSeries.jl/test/runtests.jl`.
 
@@ -177,8 +177,8 @@ info!(owner_id, name, "added time series");
 Enable debug logging with:
 
 ```bash
-RUST_LOG=debug cargo run -p time-series-store-server -- --config my_server.toml
-RUST_LOG=time_series_store_server=debug cargo run -p time-series-store-server  # fine-grained
+RUST_LOG=debug cargo run -p castore-server -- --config my_server.toml
+RUST_LOG=castore_server=debug cargo run -p castore-server  # fine-grained
 ```
 
 ## Configuration Priority
@@ -195,6 +195,6 @@ Before submitting a pull request, verify:
 - [ ] `cargo test --workspace` passes
 - [ ] New error cases use `TimeSeriesError` variants; out-of-scope input returns `InvalidParameter`
 - [ ] Core API changes are propagated through proto/gRPC, Rust client, Python, and FFI/Julia
-- [ ] The cbindgen header `time_series_store.h` is regenerated if the FFI surface changed
+- [ ] The cbindgen header `castore.h` is regenerated if the FFI surface changed
 - [ ] Cross-binding features have round-trip tests in each affected binding's suite
 - [ ] `examples/server.toml` updated if server configuration changed

@@ -1,23 +1,22 @@
 # Julia Developer Guide
 
-This guide covers building on `TimeSeriesStore.jl`, the Julia package that wraps the
+This guide covers building on `Castore.jl`, the Julia package that wraps the
 [C ABI](../reference/c-abi.md). For exact signatures see the
 [Julia API reference](../reference/julia-api.md); to set up the package and the native library, see
 [Integrate with Julia](../how-to/integrate-julia.md).
 
 ## Load the Package
 
-`TimeSeriesStore.jl` resolves the native library from the `TIME_SERIES_STORE_LIB` environment
-variable (or the `TimeSeriesStore_jll` package when installed). Build the cdylib and point at it
-before `using TimeSeriesStore`:
+`Castore.jl` resolves the native library from the `CASTORE_LIB` environment variable (or the
+`Castore_jll` package when installed). Build the cdylib and point at it before `using Castore`:
 
 ```sh
-cargo build -p time-series-store-ffi --release
-export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
+cargo build -p castore-ffi --release
+export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
 ```
 
 ```julia
-using Dates, TimeSeriesStore
+using Dates, Castore
 ```
 
 Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, the forecast structs
@@ -85,8 +84,8 @@ series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}, all SingleTim
 
 ## Attribute-Based Lookups
 
-Beyond key handles, `TimeSeriesStore.jl` can resolve a series directly from its attributes —
-convenient when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):
+Beyond key handles, `Castore.jl` can resolve a series directly from its attributes — convenient when
+a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):
 
 ```julia
 meta = get_metadata(
@@ -98,7 +97,7 @@ meta = get_metadata(
     features = Dict("model_year" => 2030),
 )
 # meta :: (initial_timestamp::DateTime, resolution::Millisecond, length::Int,
-#          data_hash::Vector{UInt8}, dtype, logical_type)
+#          data_hash::Vector{UInt8}, dtype, ext)
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
@@ -115,9 +114,9 @@ interchangeable for every time series type, static or forecast.
 
 ## Forecasts
 
-`TimeSeriesStore.jl` exposes `Deterministic`, `Probabilistic`, and `Scenarios` structs that wrap a
-native `AbstractArray` in the type's logical shape (the wrapper derives the dtype and dims and
-serializes the buffer row-major). Construct one and add it through the generic `add_time_series!`:
+`Castore.jl` exposes `Deterministic`, `Probabilistic`, and `Scenarios` structs that wrap a native
+`AbstractArray` in the type's logical shape (the wrapper derives the dtype and dims and serializes
+the buffer row-major). Construct one and add it through the generic `add_time_series!`:
 
 ```julia
 data = zeros(Float64, 24, 7)   # (horizon_count, count)
@@ -142,8 +141,8 @@ got_by_key = get_time_series(Deterministic, store, key)
 `Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)`
 carries the percentile vector, and
 `Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)` takes
-`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a
-`logical_type=` keyword. Read the corresponding type back with `get_time_series(Probabilistic, …)` /
+`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a `ext=`
+keyword. Read the corresponding type back with `get_time_series(Probabilistic, …)` /
 `get_time_series(Scenarios, …)`.
 
 If two forecasts of one owner/name/type differ only by `interval` (say day-ahead and intra-day),
@@ -270,6 +269,79 @@ nerr   = verify_integrity(store)  # 0 == intact
 compact!(store)
 ```
 
+## Associations
+
+Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities).
+
+Filter keywords are all optional and ANDed; passing none matches everything.
+
+```julia
+add_supplemental_attribute_association!(
+    store, SupplementalAttributeAssociation(42, "Generator", 100, "GeographicInfo"))
+
+# Bulk add is one all-or-nothing transaction.
+add_supplemental_attribute_associations!(store, [
+    SupplementalAttributeAssociation(43, "Generator", 100, "GeographicInfo"),
+    SupplementalAttributeAssociation(43, "Generator", 101, "Outage"),
+])
+
+# Queries run in both directions, returning distinct ids in ascending order.
+list_supplemental_attribute_ids(store; component_id=43)      # [100, 101]
+list_components_with_attributes(store; attribute_id=100)     # [42, 43]
+has_supplemental_attribute_association(store; component_id=42, attribute_id=100)  # true
+
+# `*_types` filters take CONCRETE type names, so expand an abstract type yourself —
+# `get_all_subtype_names` in InfrastructureSystems.jl is the usual source. An empty
+# vector is a deliberate "none of these" and matches nothing.
+list_supplemental_attribute_ids(store; component_id=43, attribute_types=["Outage"])  # [101]
+
+count_supplemental_attributes(store)         # 2, distinct attributes
+count_components_with_attributes(store)      # 2, distinct components
+supplemental_attribute_counts_by_type(store)
+# [(type = "GeographicInfo", count = 2), (type = "Outage", count = 1)]
+supplemental_attribute_summary(store)
+# [(component_type = "Generator", attribute_type = "GeographicInfo", count = 2), ...]
+```
+
+Identity is the `(component_id, attribute_id)` pair. The type names ride along for filtering and are
+not part of it, so re-attaching the same pair under different type names is still a duplicate:
+
+```julia
+try
+    add_supplemental_attribute_association!(
+        store, SupplementalAttributeAssociation(42, "Load", 100, "Outage"))
+catch e
+    e isa Castore.DuplicateAssociationError || rethrow()
+    @info e.msg   # attribute 100 is already attached to component 42
+end
+
+# Removal returns a count. Matching nothing returns 0 rather than throwing, so assert on
+# the count yourself if you expected a hit.
+remove_supplemental_attribute_associations!(store; component_id=43)   # 2
+```
+
+Parent/child edges work the same way, except that identity is the **ordered** pair — the reverse of
+an edge is a different edge — and both endpoints are always components:
+
+```julia
+add_parent_child_association!(store, ParentChildAssociation(42, "Generator", 7, "Bus"))
+add_parent_child_associations!(store, [ParentChildAssociation(43, "Generator", 7, "Bus")])
+
+list_children(store; parent_id=42)      # [7]
+list_parents(store; child_id=7)         # [42, 43]
+count_parent_child_associations(store)  # 2
+
+# Renumbering a component rewrites both ends of every edge.
+replace_parent_child_component_id!(store, 42, 99)   # 1
+list_parents(store; child_id=7)                     # [43, 99]
+```
+
+Neither table is reachable over gRPC or the `cas` CLI.
+
 ## Persist to Disk
 
 ```julia
@@ -280,14 +352,14 @@ Keep the `.nc` and `.nc.sqlite` files together.
 
 ## Error Handling
 
-Errors subtype `TimeSeriesStore.TimeSeriesException`. The exception types are not exported, so
-reference them module-qualified. Catch broadly or narrowly:
+Errors subtype `Castore.TimeSeriesException`. The exception types are not exported, so reference
+them module-qualified. Catch broadly or narrowly:
 
 ```julia
 try
     add_time_series!(store, 42, "Generator", Component, ts)
 catch e
-    if e isa TimeSeriesStore.DuplicateTimeSeriesError
+    if e isa Castore.DuplicateTimeSeriesError
         @warn "already present"
     else
         rethrow()
@@ -295,11 +367,10 @@ catch e
 end
 ```
 
-The available types are `TimeSeriesStore.NotFoundError`, `TimeSeriesStore.DuplicateTimeSeriesError`,
-`TimeSeriesStore.InvalidParameterError`, `TimeSeriesStore.IntegrityError`,
-`TimeSeriesStore.ReadOnlyStoreError`, `TimeSeriesStore.IncompatibleFormatError` (the on-disk store
-was written by an incompatible data format version), and `TimeSeriesStore.GenericError` (which
-carries the raw FFI status `code`).
+The available types are `Castore.NotFoundError`, `Castore.DuplicateTimeSeriesError`,
+`Castore.InvalidParameterError`, `Castore.IntegrityError`, `Castore.ReadOnlyStoreError`,
+`Castore.IncompatibleFormatError` (the on-disk store was written by an incompatible data format
+version), and `Castore.GenericError` (which carries the raw FFI status `code`).
 
 ## InfrastructureSystems.jl Integration Notes
 
@@ -333,16 +404,16 @@ hook calls `init_logging("")` automatically, which reads `RUST_LOG` if set:
 
 ```sh
 # shell
-export RUST_LOG=time_series_store_core=debug
+export RUST_LOG=castore_core=debug
 julia --project=. myscript.jl
 ```
 
 **Programmatically** — call `init_logging` with a filter directive string:
 
 ```julia
-using TimeSeriesStore
+using Castore
 
-init_logging("time_series_store_core=debug")
+init_logging("castore_core=debug")
 
 store = Store(in_memory=true)
 add_time_series!(store, ...)   # spans appear on stderr
@@ -352,6 +423,6 @@ add_time_series!(store, ...)   # spans appear on stderr
 `RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
 bare level such as `"debug"` to match everything. Useful targets:
 
-| Target                   | What it covers                                               |
-| ------------------------ | ------------------------------------------------------------ |
-| `time_series_store_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |
+| Target         | What it covers                                               |
+| -------------- | ------------------------------------------------------------ |
+| `castore_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |

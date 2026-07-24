@@ -5,12 +5,14 @@
 # Getting Started
 
 - [Installation](./getting-started/installation.md)
-- [Quick Start (Rust)](./getting-started/quick-start.md)
+- [Quick Start (Python)](./getting-started/quick-start-python.md)
+- [Quick Start (Julia)](./getting-started/quick-start-julia.md)
 
 # Documentation
 
 - [Explanation](./explanation/index.md)
   - [Architecture](./explanation/architecture.md)
+  - [Design Choices](./explanation/design-choices.md)
   - [Data Model](./explanation/data-model.md)
   - [Storage Model](./explanation/storage-model.md)
   - [Content Addressing](./explanation/content-addressing.md)
@@ -26,7 +28,7 @@
   - [Integrate with Python](./how-to/integrate-python.md)
   - [Integrate with Julia](./how-to/integrate-julia.md)
   - [Run the gRPC Server](./how-to/run-server.md)
-  - [Use the `tss` CLI](./how-to/use-cli.md)
+  - [Use the `cas` CLI](./how-to/use-cli.md)
 - [Reference](./reference/index.md)
   - [On-Disk File Format](./reference/file-format.md)
   - [Rust API](./reference/rust-api.md)

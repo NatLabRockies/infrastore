@@ -1,0 +1,343 @@
+syntax = "proto3";
+
+package castore.v1;
+
+// Read-only gRPC service for `castore`.
+//
+// All write operations (add, remove, clear, compact) require local filesystem
+// access and are NOT exposed through this service.
+service CatalogStore {
+  rpc ListTimeSeries     (ListReq)        returns (ListResp);
+  rpc GetTimeSeries      (GetReq)         returns (GetResp);
+  rpc GetTimeSeriesKeys  (KeysReq)        returns (KeysResp);
+  rpc GetResolutions     (ResolutionsReq) returns (ResolutionsResp);
+  rpc GetCounts          (CountsReq)      returns (CountsResp);
+  rpc GetForecastParameters (ForecastParamsReq) returns (ForecastParamsResp);
+  rpc HasTimeSeries      (HasReq)         returns (HasResp);
+  rpc VerifyIntegrity    (VerifyReq)      returns (VerifyResp);
+
+  // Additive read surface (Phase 4.4).
+  rpc ListKeys               (ListKeysReq)           returns (ListKeysResp);
+  rpc GetMetadata            (KeyReq)                returns (TimeSeriesMetadata);
+  rpc BulkRead               (BulkReadReq)           returns (BulkReadResp);
+  rpc GetDetailedCounts      (EmptyReq)              returns (DetailedCountsResp);
+  rpc GetCountsByType        (EmptyReq)              returns (CountsByTypeResp);
+  rpc ListOwnerIds           (ListOwnerIdsReq)       returns (ListOwnerIdsResp);
+  rpc GetIntervals           (IntervalsReq)          returns (IntervalsResp);
+  rpc GetStaticSummary       (EmptyReq)              returns (StaticSummaryResp);
+  rpc GetForecastSummary     (EmptyReq)              returns (ForecastSummaryResp);
+  rpc CheckStaticConsistency (ConsistencyReq)        returns (ConsistencyResp);
+  rpc ResolveForecastKey     (ResolveForecastKeyReq) returns (ResolveForecastKeyResp);
+}
+
+// ---- Common types ----
+
+enum TimeSeriesType {
+  SINGLE_TIME_SERIES                 = 0;
+  NON_SEQUENTIAL_TIME_SERIES         = 1;
+  DETERMINISTIC                      = 2;
+  DETERMINISTIC_SINGLE_TIME_SERIES   = 3;
+  PROBABILISTIC                      = 4;
+  SCENARIOS                          = 5;
+}
+
+enum OwnerCategory {
+  COMPONENT               = 0;
+  SUPPLEMENTAL_ATTRIBUTE  = 1;
+}
+
+message FeatureValue {
+  oneof value {
+    int64  int_value   = 1;
+    double float_value = 2;
+    bool   bool_value  = 3;
+    string str_value   = 4;
+  }
+}
+
+message Features {
+  map<string, FeatureValue> entries = 1;
+}
+
+message TimeSeriesKey {
+  int64           owner_id          = 1;
+  TimeSeriesType  time_series_type  = 2;
+  string          name              = 3;
+  // Resolution as an ISO-8601 duration (e.g. "PT1H", "P1M", "P1Y"). Empty =
+  // unset (e.g. NonSequentialTimeSeries).
+  string          resolution        = 4;
+  Features        features          = 5;
+  OwnerCategory   owner_category    = 6;
+  // Forecast interval as an ISO-8601 duration; part of the identity. Empty =
+  // unset (static series, which never carry an interval).
+  string          interval          = 7;
+  // Descriptive snapshot fields (NOT part of the identity). The variant is
+  // implied by `time_series_type`: Single carries initial_timestamp + length;
+  // NonSequential carries length; forecasts carry initial_timestamp + horizon +
+  // count. Absent on an identity-only key (e.g. one built from attributes).
+  optional string initial_timestamp_rfc3339 = 8;
+  optional uint64 length                     = 9;
+  optional string horizon                    = 10;      // ISO-8601 duration
+  optional uint64 count                      = 11;
+}
+
+message TimeSeriesMetadata {
+  int64           owner_id                       = 1;
+  string          owner_type                     = 2;
+  OwnerCategory   owner_category                 = 3;
+  TimeSeriesType  time_series_type               = 4;
+  string          name                           = 5;
+  bytes           data_hash                      = 6;        // 32 bytes
+  // Temporal — populated when applicable to the time series type. `optional`
+  // (rather than an empty-string / zero sentinel) so genuinely-present values
+  // like length == 0 decode correctly.
+  optional string initial_timestamp_rfc3339      = 7;
+  optional string resolution                     = 8;        // ISO-8601 duration
+  optional uint64 length                         = 9;
+  optional string horizon                        = 10;       // ISO-8601 duration
+  optional string interval                       = 11;       // ISO-8601 duration
+  optional uint64 count                          = 12;
+  repeated string timestamps_rfc3339             = 13;
+  Features        features                       = 14;
+  optional string units                          = 16;
+  // Element typing.
+  int32           dtype                          = 17;       // Dtype code
+  repeated uint64 element_shape                  = 18;       // per-step trailing dims
+  optional string ext                   = 19;       // opaque package-owned payload
+  repeated double percentiles                    = 20;        // Probabilistic only
+}
+
+// ---- ListTimeSeries ----
+
+message ListReq {
+  optional int64           owner_id          = 1;
+  optional string          owner_type        = 2;
+  optional TimeSeriesType  time_series_type  = 3;
+  optional string          name              = 4;
+  optional string          resolution        = 5;       // ISO-8601 duration
+  Features                 features          = 6;
+  optional OwnerCategory   owner_category    = 7;
+  optional string          interval          = 8;       // ISO-8601 duration
+}
+message ListResp {
+  repeated TimeSeriesMetadata metadata = 1;
+}
+
+// ---- GetTimeSeries ----
+
+message GetReq {
+  TimeSeriesKey  key                       = 1;
+  // Optional time-range slicing on the time axis.
+  optional string start_rfc3339            = 2;
+  optional string end_rfc3339              = 3;
+}
+message GetResp {
+  string             initial_timestamp_rfc3339  = 1;
+  string             resolution                 = 2;        // ISO-8601 duration
+  uint64             length                     = 3;
+  repeated uint64    shape                      = 4;
+  reserved 5;  // was: repeated double values (replaced by dtype + value_bytes)
+  TimeSeriesType     time_series_type            = 6;
+  repeated string    timestamps_rfc3339          = 7;
+  int32              dtype                       = 8;        // Dtype code
+  bytes              value_bytes                 = 9;        // raw little-endian, row-major
+  string             ext                = 10;
+  // Forecast-specific fields (fields 1–10 are backward-compatible).
+  string             horizon                     = 11;       // ISO-8601 duration
+  string             interval                    = 12;       // ISO-8601 duration
+  uint64             count                       = 13;
+  repeated double    percentiles                 = 14;       // Probabilistic only
+  uint64             scenario_count              = 15;       // Scenarios only
+}
+
+// ---- GetTimeSeriesKeys ----
+
+message KeysReq {
+  int64         owner_id       = 1;
+  OwnerCategory owner_category = 2;
+}
+message KeysResp {
+  repeated TimeSeriesKey keys = 1;
+}
+
+// ---- GetResolutions ----
+
+message ResolutionsReq {
+  optional TimeSeriesType time_series_type = 1;
+}
+message ResolutionsResp {
+  repeated string resolution = 1;       // ISO-8601 durations
+}
+
+// ---- GetCounts ----
+
+message CountsReq {}
+message CountsResp {
+  int64 components_with_time_series = 1;
+  int64 static_time_series          = 2;
+  int64 forecasts                   = 3;
+}
+
+// ---- GetForecastParameters ----
+
+message ForecastParamsReq {
+  optional string resolution = 1;       // ISO-8601 duration filter
+  optional string interval   = 2;       // ISO-8601 duration filter
+}
+// All fields optional: absent when the store holds no forecasts (or that
+// particular field is not populated for the forecast type found).
+message ForecastParamsResp {
+  optional string horizon                   = 1;   // ISO-8601 duration
+  optional string interval                  = 2;   // ISO-8601 duration
+  optional uint64 count                     = 3;
+  optional string resolution                = 4;   // ISO-8601 duration
+  optional string initial_timestamp_rfc3339 = 5;
+}
+
+// ---- HasTimeSeries ----
+
+message HasReq {
+  TimeSeriesKey key = 1;
+}
+message HasResp {
+  bool present = 1;
+}
+
+// ---- VerifyIntegrity ----
+
+message VerifyReq {}
+message VerifyResp {
+  repeated string errors = 1;
+}
+
+// ---- Additive read RPCs (Phase 4.4) ----
+
+// Shared no-argument request for the aggregate read RPCs.
+message EmptyReq {}
+
+// Single-key request (identity is enough; descriptive fields are ignored).
+message KeyReq {
+  TimeSeriesKey key = 1;
+}
+
+// ListKeys: full keys, optionally annotated with the array content hash.
+message ListKeysReq {
+  ListReq filter    = 1;
+  bool    with_hash = 2;   // populate each row's data_hash
+}
+message ListKeysResp {
+  message Row {
+    TimeSeriesKey key       = 1;
+    optional bytes data_hash = 2;   // present only when with_hash was set
+  }
+  repeated Row rows = 1;
+}
+
+// BulkRead: fetch several series (any variant) at once, optionally time-sliced.
+message BulkReadReq {
+  repeated TimeSeriesKey keys          = 1;
+  optional string        start_rfc3339 = 2;
+  optional string        end_rfc3339   = 3;
+}
+message BulkReadResp {
+  repeated GetResp items = 1;   // aligned with the request keys
+}
+
+// GetDetailedCounts.
+message DetailedCountsResp {
+  int64 components_with_time_series                = 1;
+  int64 supplemental_attributes_with_time_series   = 2;
+  int64 static_time_series_count                   = 3;
+  int64 forecast_count                             = 4;
+}
+
+// GetCountsByType.
+message CountsByTypeResp {
+  message Entry {
+    TimeSeriesType time_series_type = 1;
+    int64          count            = 2;
+  }
+  repeated Entry entries = 1;
+}
+
+// ListOwnerIds.
+message ListOwnerIdsReq {
+  OwnerCategory           owner_category   = 1;
+  optional TimeSeriesType time_series_type = 2;
+  optional string         resolution       = 3;   // ISO-8601 duration
+}
+message ListOwnerIdsResp {
+  repeated int64 owner_id = 1;
+}
+
+// GetIntervals.
+message IntervalsReq {
+  optional TimeSeriesType time_series_type = 1;
+}
+message IntervalsResp {
+  repeated string interval = 1;   // ISO-8601 durations
+}
+
+// GetStaticSummary / GetForecastSummary.
+message StaticSummaryRow {
+  string          owner_type                    = 1;
+  OwnerCategory   owner_category                = 2;
+  TimeSeriesType  time_series_type              = 3;
+  string          name                          = 4;
+  optional string initial_timestamp_rfc3339     = 5;
+  optional string resolution                    = 6;   // ISO-8601 duration
+  optional int64  time_step_count               = 7;
+  int64           count                         = 8;
+}
+message StaticSummaryResp {
+  repeated StaticSummaryRow rows = 1;
+}
+message ForecastSummaryRow {
+  string          owner_type                    = 1;
+  OwnerCategory   owner_category                = 2;
+  TimeSeriesType  time_series_type              = 3;
+  string          name                          = 4;
+  optional string initial_timestamp_rfc3339     = 5;
+  optional string resolution                    = 6;   // ISO-8601 duration
+  optional string horizon                       = 7;   // ISO-8601 duration
+  optional string interval                      = 8;   // ISO-8601 duration
+  optional int64  window_count                  = 9;
+  int64           count                         = 10;
+}
+message ForecastSummaryResp {
+  repeated ForecastSummaryRow rows = 1;
+}
+
+// CheckStaticConsistency.
+message ConsistencyReq {
+  optional string resolution = 1;   // ISO-8601 duration scope
+}
+message ConsistencyResp {
+  message Row {
+    string resolution                = 1;   // ISO-8601 duration
+    string initial_timestamp_rfc3339 = 2;
+    uint64 length                    = 3;
+  }
+  repeated Row rows = 1;
+}
+
+// ResolveForecastKey: the requested type is a concrete forecast type OR the
+// abstract-deterministic family (matching a Deterministic or DST).
+message RequestedType {
+  oneof kind {
+    TimeSeriesType concrete               = 1;
+    bool           abstract_deterministic = 2;   // set true
+  }
+}
+message ResolveForecastKeyReq {
+  int64          owner_id       = 1;
+  OwnerCategory  owner_category = 2;
+  string         name           = 3;
+  optional string resolution    = 4;   // ISO-8601 duration
+  optional string interval      = 5;   // ISO-8601 duration
+  Features       features       = 6;
+  RequestedType  requested      = 7;
+}
+message ResolveForecastKeyResp {
+  TimeSeriesKey key = 1;
+}

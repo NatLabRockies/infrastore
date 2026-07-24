@@ -1,5 +1,5 @@
 """Tests for the Phase-3 Python surface: readers, discovery/removal/rename,
-richer metadata rows, transform params, logical_type, key set semantics."""
+richer metadata rows, transform params, ext, key set semantics."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from time_series_store import (
+from castore import (
     Deterministic,
+    InvalidParameterError,
     OwnerCategory,
     SingleTimeSeries,
-    TimeSeriesStore,
+    Store,
     TimeSeriesType,
 )
 
@@ -32,22 +33,22 @@ def _det(name: str) -> Deterministic:
     return Deterministic(_t0(), timedelta(hours=1), timedelta(hours=2), timedelta(hours=1), 3, data, name)
 
 
-def test_add_logical_type_and_get_metadata():
-    store = TimeSeriesStore.create(in_memory=True)
+def test_add_ext_and_get_metadata():
+    store = Store.create(in_memory=True)
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-        time_series=_sts("load", 10.0), units="MW", logical_type="Profile",
+        time_series=_sts("load", 10.0), units="MW", ext="Profile",
     )
     meta = store.get_metadata(key)
     assert meta["units"] == "MW"
-    assert meta["logical_type"] == "Profile"
+    assert meta["ext"] == "Profile"
     assert meta["dtype"] == "f64"
     assert meta["element_shape"] == []
     assert meta["initial_timestamp"] is not None
 
 
 def test_bulk_read_time_range():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
                               owner_category=OwnerCategory.Component, time_series=_sts("load", 100.0))
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
@@ -60,7 +61,7 @@ def test_bulk_read_time_range():
 
 
 def test_discovery_and_removal_and_rename():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
     store.add_time_series(owner_id=2, owner_type="Bus",
@@ -86,7 +87,7 @@ def test_discovery_and_removal_and_rename():
 
 
 def test_transform_with_params_and_forecast_parameters():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 5.0, length=5))
     n = store.transform_single_time_series(
@@ -99,7 +100,7 @@ def test_transform_with_params_and_forecast_parameters():
 
 
 def test_keys_usable_in_sets():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     k1 = store.add_time_series(owner_id=1, owner_type="Generator",
                                owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0))
     k2 = store.add_time_series(owner_id=2, owner_type="Generator",
@@ -112,7 +113,7 @@ def test_keys_usable_in_sets():
 
 
 def test_static_reader():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_sts("load", 10.0, length=4))
     store.add_time_series(owner_id=2, owner_type="Generator",
@@ -140,7 +141,7 @@ def test_static_reader():
 
 
 def test_forecast_reader():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_det("fc"))
     reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
@@ -150,6 +151,12 @@ def test_forecast_reader():
     entries = reader.entries()
     assert len(entries) == 1
 
+    # A single entry occupies its own slot.
+    assert reader.num_slots() == 1
+    assert reader.entry_slot(0) == 0
+    with pytest.raises(InvalidParameterError):
+        reader.entry_slot(1)
+
     store.forecast_read(reader, _t0() + timedelta(hours=1))
     window = reader.entry_values(0)
     # window shape [H] = (2,); window k=1 of [[0,1,2],[3,4,5]] is [1, 4].
@@ -157,15 +164,32 @@ def test_forecast_reader():
     np.testing.assert_array_equal(window, np.array([1.0, 4.0]))
 
 
+def test_forecast_reader_shared_slot_dedup():
+    # Two owners carrying the identical forecast dedup to one backing array, so
+    # the reader reports one slot shared by both entries.
+    store = Store.create(in_memory=True)
+    for oid in (1, 2):
+        store.add_time_series(owner_id=oid, owner_type="Generator",
+                              owner_category=OwnerCategory.Component, time_series=_det("fc"))
+    reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
+    assert len(reader.entries()) == 2
+    assert reader.num_slots() == 1
+    assert reader.entry_slot(0) == reader.entry_slot(1) == 0
+
+    # Both entries resolve to the same window, materialized once per slot.
+    store.forecast_read(reader, _t0() + timedelta(hours=1))
+    np.testing.assert_array_equal(reader.entry_values(0), reader.entry_values(1))
+
+
 def test_list_time_series_new_fields_and_interval_filter():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(owner_id=1, owner_type="Generator",
                           owner_category=OwnerCategory.Component, time_series=_det("fc"))
     rows = store.list_time_series(interval=timedelta(hours=1))
     assert len(rows) == 1
     row = rows[0]
     for field in ("initial_timestamp", "horizon", "interval", "count",
-                  "percentiles", "dtype", "element_shape", "logical_type"):
+                  "percentiles", "dtype", "element_shape", "ext"):
         assert field in row
     assert row["interval"] == "PT1H"
     # No forecast at a different interval.
@@ -173,7 +197,7 @@ def test_list_time_series_new_fields_and_interval_filter():
 
 
 def test_close_and_repr():
-    store = TimeSeriesStore.create(in_memory=True)
+    store = Store.create(in_memory=True)
     store.add_time_series(
         owner_id=1, owner_type="Generator",
         owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0),
@@ -193,7 +217,7 @@ def test_close_and_repr():
 
 def test_context_manager_reopen(tmp_path):
     path = tmp_path / "s.nc"
-    with TimeSeriesStore.create(path=str(path)) as store:
+    with Store.create(path=str(path)) as store:
         store.add_time_series(
             owner_id=1, owner_type="Generator",
             owner_category=OwnerCategory.Component, time_series=_sts("load", 1.0),
@@ -204,7 +228,7 @@ def test_context_manager_reopen(tmp_path):
         store.list_names()
 
     # Reopen read-only via the context manager and read the data back.
-    with TimeSeriesStore.open(str(path), read_only=True) as ro:
+    with Store.open(str(path), read_only=True) as ro:
         assert ro.read_only is True
         assert str(path) in repr(ro)
         assert ro.list_names() == ["load"]

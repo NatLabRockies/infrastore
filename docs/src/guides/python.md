@@ -1,18 +1,18 @@
 # Python Developer Guide
 
-This guide covers building on the `time_series_store` PyO3 module. For exact signatures and return
-shapes, see the [Python API reference](../reference/python-api.md). To install the wheel into your
-environment, see [Integrate with Python](../how-to/integrate-python.md).
+This guide covers building on the `castore` PyO3 module. For exact signatures and return shapes, see
+the [Python API reference](../reference/python-api.md). To install the wheel into your environment,
+see [Integrate with Python](../how-to/integrate-python.md).
 
 ## Import
 
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory, TimeSeriesType
+from castore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 ```
 
-The module exposes `TimeSeriesStore`; the static series classes `SingleTimeSeries` and
+The module exposes `Store`; the static series classes `SingleTimeSeries` and
 `NonSequentialTimeSeries`; the forecast classes `Deterministic`, `Probabilistic`, and `Scenarios`;
 `TimeSeriesKey`; the `TimeSeriesType` and `OwnerCategory` enums; the `init_tracing` function; and an
 exception hierarchy rooted at `TimeSeriesError`.
@@ -21,13 +21,13 @@ exception hierarchy rooted at `TimeSeriesError`.
 
 ```python
 # In-memory: no filesystem I/O.
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 
 # On disk: writes system.nc and system.nc.sqlite.
-store = TimeSeriesStore.create(path="system.nc")
+store = Store.create(path="system.nc")
 
 # Reopen read-only.
-store = TimeSeriesStore.open("system.nc", read_only=True)
+store = Store.open("system.nc", read_only=True)
 ```
 
 ## Build a Series
@@ -100,6 +100,64 @@ read in one decompress-once pass per dataset, which is much faster than a `get_t
 series = store.bulk_read(keys)   # keys: list[TimeSeriesKey]
 ```
 
+## Per-Timestamp Reads (Simulation Loop)
+
+`get_time_series` hands back a whole series or forecast. Simulations instead walk the timeline and,
+at each timestamp, want the value of _every_ series at that instant. For that, build a **reader**
+once and drive it in a loop — it pins one resolution and reuses its output buffers, so the loop
+allocates almost nothing. `StaticReader` serves `SingleTimeSeries`; `ForecastReader` serves
+forecasts. (Full signatures: [Python API reference](../reference/python-api.md#readers).)
+
+### Static series
+
+Series are grouped by `(dtype, element_shape)`; each group's `group_values` is one dense
+`(num_columns, *element_shape)` array whose columns line up with that group's `keys`. All matched
+series must share one grid (`initial_timestamp` + `length`), validated at build.
+
+```python
+reader = store.build_static_reader(timedelta(hours=1))
+grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
+groups = reader.groups()           # each: {"dtype", "element_shape", "keys"}
+for ts in reader.timestamps():
+    store.static_read(reader, ts)
+    for i, g in enumerate(groups):
+        vals = reader.group_values(i)   # (num_columns, *element_shape); column j ↔ g["keys"][j]
+```
+
+### Forecasts
+
+`entry_values(i)` returns the window backing `entries()[i]`, shaped `(horizon, *element_shape)` for
+`Deterministic`/`DeterministicSingleTimeSeries`, `(num_percentiles, horizon, *element_shape)` for
+`Probabilistic`, and `(scenario_count, horizon, *element_shape)` for `Scenarios`. A `Deterministic`
+reader is abstract — it also includes any `DeterministicSingleTimeSeries` (read into identical
+windows).
+
+```python
+reader = store.build_forecast_reader(TimeSeriesType.Deterministic, timedelta(hours=1))
+tl = reader.timeline()             # {"initial_timestamp", "resolution", "interval", "count", ...}
+entries = reader.entries()         # list[TimeSeriesKey], parallel to entry_values
+for ts in reader.timestamps():
+    store.forecast_read(reader, ts)
+    for i, key in enumerate(entries):
+        window = reader.entry_values(i)   # window for key's owner
+```
+
+### Shared forecasts are read once
+
+Forecasts that share a backing array (deduplicated identical data, or several
+`DeterministicSingleTimeSeries` over one `SingleTimeSeries`) collapse to a single **window slot**.
+`forecast_read` reads each slot from the `.nc` file once per timestamp, so a forecast shared by 10
+components costs one read, not ten. `reader.num_slots()` is the physical read count, and
+`reader.entry_slot(i)` says which slot an entry uses — group by slot to materialize each unique
+window only once on the Python side too:
+
+```python
+store.forecast_read(reader, ts)
+windows: dict[int, np.ndarray] = {}
+for i, key in enumerate(entries):
+    window = windows.setdefault(reader.entry_slot(i), reader.entry_values(i))
+```
+
 ## Query Metadata
 
 `list_time_series` returns a list of plain dicts, filtered by any combination of arguments (the
@@ -133,8 +191,89 @@ moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
 report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
                                    #  "feature_sets_reclaimed": ...}
-errors = store.verify_integrity()   # [] when intact
+integrity = store.verify_integrity()   # {"ok": True, "errors": []} when intact
 ```
+
+## Associations
+
+Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities).
+
+Filter arguments are keyword-only, all optional, and ANDed; passing none matches everything.
+
+```python
+from castore import (
+    SupplementalAttributeAssociation,
+    ParentChildAssociation,
+    DuplicateAssociationError,
+)
+
+store.add_supplemental_attribute_association(
+    SupplementalAttributeAssociation(42, "Generator", 100, "GeographicInfo")
+)
+
+# Bulk add is one all-or-nothing transaction.
+store.add_supplemental_attribute_associations([
+    SupplementalAttributeAssociation(43, "Generator", 100, "GeographicInfo"),
+    SupplementalAttributeAssociation(43, "Generator", 101, "Outage"),
+])
+
+# Queries run in both directions, returning distinct ids in ascending order.
+assert store.list_supplemental_attribute_ids(component_id=43) == [100, 101]
+assert store.list_components_with_attributes(attribute_id=100) == [42, 43]
+assert store.has_supplemental_attribute_association(component_id=42, attribute_id=100)
+
+# `*_types` filters take CONCRETE type names. Expanding an abstract type into its
+# subtypes is the caller's job — the store has no type hierarchy. An empty list is a
+# deliberate "none of these" and matches nothing.
+assert store.list_supplemental_attribute_ids(
+    component_id=43, attribute_types=["Outage"]
+) == [101]
+
+assert store.count_supplemental_attributes() == 2        # distinct attributes
+assert store.count_components_with_attributes() == 2     # distinct components
+store.supplemental_attribute_counts_by_type()
+# [('GeographicInfo', 2), ('Outage', 1)]
+store.supplemental_attribute_summary()
+# [{'component_type': 'Generator', 'attribute_type': 'GeographicInfo', 'count': 2}, ...]
+```
+
+Identity is the `(component_id, attribute_id)` pair. The type names ride along for filtering and are
+not part of it, so re-attaching the same pair under different type names is still a duplicate:
+
+```python
+try:
+    store.add_supplemental_attribute_association(
+        SupplementalAttributeAssociation(42, "Load", 100, "Outage")
+    )
+except DuplicateAssociationError as e:
+    print(e)   # attribute 100 is already attached to component 42
+
+# Removal returns a count. Matching nothing returns 0 rather than raising, so assert on
+# the count yourself if you expected a hit.
+assert store.remove_supplemental_attribute_associations(component_id=43) == 2
+```
+
+Parent/child edges work the same way, except that identity is the **ordered** pair — the reverse of
+an edge is a different edge — and both endpoints are always components:
+
+```python
+store.add_parent_child_association(ParentChildAssociation(42, "Generator", 7, "Bus"))
+store.add_parent_child_associations([ParentChildAssociation(43, "Generator", 7, "Bus")])
+
+assert store.list_children(parent_id=42) == [7]
+assert store.list_parents(child_id=7) == [42, 43]
+assert store.count_parent_child_associations() == 2
+
+# Renumbering a component rewrites both ends of every edge.
+assert store.replace_parent_child_component_id(42, 99) == 1
+assert store.list_parents(child_id=7) == [43, 99]
+```
+
+Neither table is reachable over gRPC or the `cas` CLI.
 
 ## Persist to Disk
 
@@ -149,7 +288,7 @@ Keep the two files together — the `.nc` and `.nc.sqlite` pair is a single logi
 The store's own exceptions inherit from `TimeSeriesError`, so you can catch broadly or narrowly:
 
 ```python
-from time_series_store import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
+from castore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
 
 try:
     store.add_time_series(...)
@@ -172,9 +311,9 @@ first, so `True`/`False` feature values are stored as booleans (not as `1`/`0` i
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory
+from castore import Store, SingleTimeSeries, OwnerCategory
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
@@ -203,17 +342,17 @@ subscriber on import when this variable is set:
 ```sh
 RUST_LOG=debug python myscript.py
 # or, to limit output to the store core only:
-RUST_LOG=time_series_store_core=debug python myscript.py
+RUST_LOG=castore_core=debug python myscript.py
 ```
 
 **Programmatically** — call `init_tracing` with a filter directive string:
 
 ```python
-from time_series_store import init_tracing
+from castore import init_tracing
 
-init_tracing("time_series_store_core=debug")
+init_tracing("castore_core=debug")
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 store.add_time_series(...)   # spans appear on stderr
 ```
 
@@ -221,6 +360,6 @@ store.add_time_series(...)   # spans appear on stderr
 `RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
 bare level such as `"debug"` to match everything. Useful targets:
 
-| Target                   | What it covers                                               |
-| ------------------------ | ------------------------------------------------------------ |
-| `time_series_store_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |
+| Target         | What it covers                                               |
+| -------------- | ------------------------------------------------------------ |
+| `castore_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |

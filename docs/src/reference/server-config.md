@@ -4,7 +4,7 @@ The gRPC server is configured by a single TOML file passed with `--config`. The 
 `examples/server.toml`.
 
 ```sh
-time-series-store-server --config my_server.toml
+castore-server --config my_server.toml
 ```
 
 ## File Structure
@@ -77,12 +77,12 @@ On launch the server:
 1. Loads and parses the TOML file.
 2. Validates the `[authentication]` section.
 3. Opens the first `[data].files` entry as a read-only store (errors if the list is empty).
-4. Binds `host:port` and serves the `TimeSeriesStore` gRPC service.
+4. Binds `host:port` and serves the `CatalogStore` gRPC service.
 
 Logging honors the `RUST_LOG` environment variable (default `info`):
 
 ```sh
-RUST_LOG=debug time-series-store-server --config my_server.toml
+RUST_LOG=debug castore-server --config my_server.toml
 ```
 
 See the [gRPC Server guide](../guides/server.md) for the end-to-end workflow and the

@@ -1,0 +1,32 @@
+[package]
+name = "castore-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "gRPC server + Rust client for castore"
+
+[[bin]]
+name = "castore-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+chrono = { workspace = true }
+clap = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+castore-core = { workspace = true }
+castore-proto = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+ndarray = { workspace = true }

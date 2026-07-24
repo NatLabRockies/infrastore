@@ -1,26 +1,25 @@
 # Architecture
 
-time-series-store is a Rust workspace with one core library and a ring of interface crates around
-it. Every interface — native Rust, Python, Julia, the `tss` CLI, and the gRPC server — ultimately
-drives the same `Store` type in `time-series-store-core`, and every interface reads and writes the
-same on-disk format.
+castore is a Rust workspace with one core library and a ring of interface crates around it. Every
+interface — native Rust, Python, Julia, the `cas` CLI, and the gRPC server — ultimately drives the
+same `Store` type in `castore-core`, and every interface reads and writes the same on-disk format.
 
 ## Crate Layout
 
 ```mermaid
 flowchart TB
     subgraph ifaces["Interface crates"]
-        PY["time-series-store-py<br/>PyO3 wheel"]
-        FFI["time-series-store-ffi<br/>C ABI cdylib"]
-        SRV["time-series-store-server<br/>gRPC server + Rust client"]
-        CLI["time-series-store-cli<br/>tss binary"]
+        PY["castore-py<br/>PyO3 wheel"]
+        FFI["castore-ffi<br/>C ABI cdylib"]
+        SRV["castore-server<br/>gRPC server + Rust client"]
+        CLI["castore-cli<br/>cas binary"]
     end
 
-    PYMOD["time_series_store<br/>(Python module)"]
-    JL["TimeSeriesStore.jl<br/>(Julia package)"]
-    PROTO["time-series-store-proto<br/>protobuf + tonic"]
+    PYMOD["castore<br/>(Python module)"]
+    JL["Castore.jl<br/>(Julia package)"]
+    PROTO["castore-proto<br/>protobuf + tonic"]
 
-    subgraph core["time-series-store-core"]
+    subgraph core["castore-core"]
         STORE["Store"]
         META["MetadataStore<br/>(SQLite)"]
         BACK["StorageBackend<br/>(trait)"]
@@ -54,17 +53,17 @@ flowchart TB
     style CLI fill:#fd7e14,color:#fff
 ```
 
-| Crate / package            | Role                                                                    |
-| -------------------------- | ----------------------------------------------------------------------- |
-| `time-series-store-core`   | The whole engine: types, storage backends, hashing, the `Store` API     |
-| `time-series-store-proto`  | The `.proto` service compiled with `tonic`; shared message types        |
-| `time-series-store-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`  |
-| `time-series-store-py`     | PyO3 classes exposing `Store` as the `time_series_store` module         |
-| `time_series_store`        | The importable Python module — user-facing surface of the PyO3 wheel    |
-| `time-series-store-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`            |
-| `TimeSeriesStore.jl`       | A Julia package that `ccall`s into the FFI cdylib                       |
-| `time-series-store-cli`    | The `tss` binary: read+write access to an on-disk store from a terminal |
-| `time-series-store-bench`  | The `tss-bench` binary: ingestion and simulation-read benchmarks        |
+| Crate / package  | Role                                                                    |
+| ---------------- | ----------------------------------------------------------------------- |
+| `castore-core`   | The whole engine: types, storage backends, hashing, the `Store` API     |
+| `castore-proto`  | The `.proto` service compiled with `tonic`; shared message types        |
+| `castore-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`  |
+| `castore-py`     | PyO3 classes exposing `Store` as the `castore` module                   |
+| `castore`        | The importable Python module — user-facing surface of the PyO3 wheel    |
+| `castore-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`            |
+| `Castore.jl`     | A Julia package that `ccall`s into the FFI cdylib                       |
+| `castore-cli`    | The `cas` binary: read+write access to an on-disk store from a terminal |
+| `castore-bench`  | The `cas-bench` binary: ingestion and simulation-read benchmarks        |
 
 ## The Core: `Store`
 
@@ -102,7 +101,7 @@ matter where the arrays live. Tests run against the memory backend; production u
 
 Numerical arrays and their descriptive metadata have different access patterns. Arrays are large,
 append-mostly, and read by content; metadata is small, frequently queried, and benefits from indexes
-and transactions. time-series-store puts each where it is strongest:
+and transactions. castore puts each where it is strongest:
 
 - **Arrays → NetCDF4.** Chunked, compressed, columnar storage that HDF5 tooling already understands.
 - **Metadata → SQLite.** A queryable, transactional catalog at `<path>.nc.sqlite`.
@@ -144,7 +143,7 @@ itself is `Send + Sync`. The `Store` as a whole, however, is **`Send` but not `S
 cannot be shared between threads. In practice this means a `Store` can be **moved** to another
 thread, but sharing one across threads requires external synchronization — the gRPC server holds its
 store as an `Arc<Mutex<Store>>`, and the PyO3 binding marks the class `unsendable` so a Python
-`TimeSeriesStore` stays on the thread that created it.
+`Store` stays on the thread that created it.
 
 `MetadataStore` uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.

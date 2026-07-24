@@ -1,11 +1,11 @@
 # Introduction
 
-**time-series-store** is a Rust library for managing time-series data in power-systems and energy
-simulations. It separates persistence into two concerns: numerical arrays are stored in NetCDF4,
-while the metadata that associates each array with an owning component lives in SQLite. Identical
-arrays are stored once and shared through content addressing.
+**castore** is a Rust library for managing time-series data in power-systems and energy simulations.
+It separates persistence into two concerns: numerical arrays are stored in NetCDF4, while the
+metadata that associates each array with an owning component lives in SQLite. Identical arrays are
+stored once and shared through content addressing.
 
-The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the `tss`
+The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the `cas`
 command-line tool and a read-only gRPC server with a Rust client.
 
 ```mermaid
@@ -14,10 +14,10 @@ flowchart TB
         RUST["Rust<br/>(native crate)"]
         PY["Python<br/>(PyO3 wheel)"]
         JL["Julia<br/>(C ABI)"]
-        CLI["tss<br/>(CLI)"]
+        CLI["cas<br/>(CLI)"]
     end
 
-    subgraph core["time-series-store-core"]
+    subgraph core["castore-core"]
         STORE["Store"]
         STORE --> NC[("NetCDF4<br/>arrays")]
         STORE --> SQL[("SQLite<br/>metadata")]
@@ -59,7 +59,7 @@ flowchart TB
 - **Typed, N-dimensional arrays** — Store `f64`, `f32`, `i64`, `i32`, `u64`, or `bool` values, with
   an optional per-step element shape (e.g. the coefficient tuple of a cost curve)
 - **Three language bindings** — Use it from Rust, Python, or Julia with the same on-disk format
-- **A `tss` command-line tool** — Load time series from CSV, and list, read, and inspect a store
+- **A `cas` command-line tool** — Load time series from CSV, and list, read, and inspect a store
   straight from a terminal, with `table` / `json` / `csv` output ([CLI how-to](./how-to/use-cli.md))
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
@@ -74,13 +74,16 @@ flowchart TB
 | **Python package developers**   | [Python Developer Guide](./guides/python.md)      |
 | **Julia package developers**    | [Julia Developer Guide](./guides/julia.md)        |
 | **Rust developers**             | [Rust Developer Guide](./guides/rust.md)          |
-| **Command-line users**          | [Use the `tss` CLI](./how-to/use-cli.md)          |
+| **Command-line users**          | [Use the `cas` CLI](./how-to/use-cli.md)          |
 | **Anyone deploying the server** | [gRPC Server & Client](./guides/server.md)        |
 | **Tooling & forensics**         | [On-Disk File Format](./reference/file-format.md) |
 
 ## Next Steps
 
 - **Setting up?** Start with [Installation](./getting-started/installation.md).
-- **Want the 60-second tour?** Read the [Quick Start](./getting-started/quick-start.md).
+- **Want the 60-second tour?** Read the Quick Start for
+  [Python](./getting-started/quick-start-python.md) or
+  [Julia](./getting-started/quick-start-julia.md). Rust users can go straight to the
+  [Rust Developer Guide](./guides/rust.md).
 - **Want to understand how it works?** Read the [Architecture](./explanation/architecture.md).
 - **Need exact bytes on disk?** See the [On-Disk File Format](./reference/file-format.md).

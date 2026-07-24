@@ -1,18 +1,18 @@
-# Yggdrasil build recipe for TimeSeriesStore_jll.
+# Yggdrasil build recipe for Castore_jll.
 #
-# This produces the `libtime_series_store_ffi` binary that `TimeSeriesStore.jl`
+# This produces the `libcastore_ffi` binary that `Castore.jl`
 # (and, through it, InfrastructureSystems.jl) loads. It is built against the
 # ecosystem's NetCDF_jll + HDF5_jll so there is a single libhdf5 in any Julia
 # process (no Homebrew dependency, no version drift).
 #
 # To publish: copy this directory into a Yggdrasil fork under
-# `T/TimeSeriesStore/`, pin `version` + the source commit, and open a PR.
+# `C/Castore/`, pin `version` + the source commit, and open a PR.
 # Run locally first with:
 #   julia build_tarballs.jl --verbose --debug <triplet>
 
 using BinaryBuilder, Pkg
 
-name = "TimeSeriesStore"
+name = "Castore"
 version = v"0.1.0"
 
 # Pin to a tagged release/commit of the Rust workspace. NOTE: this commit must be
@@ -20,14 +20,14 @@ version = v"0.1.0"
 # for the submission PR).
 sources = [
     GitSource(
-        "https://github.com/NatLabRockies/time-series-store.git",
+        "https://github.com/NatLabRockies/castore.git",
         "fde88b96d1ad53c64f03dba761cc903f75d78d42",
     ),
 ]
 
 # Build the FFI cdylib, linking the jll-provided NetCDF/HDF5.
 script = raw"""
-cd ${WORKSPACE}/srcdir/time-series-store
+cd ${WORKSPACE}/srcdir/castore
 
 # Point the netcdf-sys / hdf5-metno-sys build scripts at the jll libraries.
 export HDF5_DIR=${prefix}
@@ -49,14 +49,14 @@ done
 # kernels cannot be assembled here; use the portable SHA-256 (x86_64 still detects
 # SHA-NI at runtime) for the distributed binary.
 sed -i 's/sha2 = { workspace = true, features = \["asm"\] }/sha2 = { workspace = true }/' \
-    crates/time-series-store-core/Cargo.toml
+    crates/castore-core/Cargo.toml
 
-cargo build --release --target ${rust_target} -p time-series-store-ffi
+cargo build --release --target ${rust_target} -p castore-ffi
 
-install -Dvm755 "target/${rust_target}/release/libtime_series_store_ffi.${dlext}" \
-    "${libdir}/libtime_series_store_ffi.${dlext}"
-install -Dvm644 "crates/time-series-store-ffi/include/time_series_store.h" \
-    "${includedir}/time_series_store.h"
+install -Dvm755 "target/${rust_target}/release/libcastore_ffi.${dlext}" \
+    "${libdir}/libcastore_ffi.${dlext}"
+install -Dvm644 "crates/castore-ffi/include/castore.h" \
+    "${includedir}/castore.h"
 """
 
 # Start from the platforms NetCDF_jll/HDF5_jll support; the Rust toolchain in
@@ -66,7 +66,7 @@ platforms = supported_platforms()
 platforms = expand_cxxstring_abis(platforms)
 
 products = [
-    LibraryProduct("libtime_series_store_ffi", :libtime_series_store_ffi),
+    LibraryProduct("libcastore_ffi", :libcastore_ffi),
 ]
 
 dependencies = [

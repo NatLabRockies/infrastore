@@ -28,9 +28,9 @@ The data model defines six time-series types, all present in the `TimeSeriesType
 metadata schema. Both static series types are implemented across every interface. The four forecast
 types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
 forecasts are written through the generic `add_time_series` across the Rust core, Python, and Julia
-(the C ABI keeps the per-type `ts_store_add_forecast` / `ts_store_add_probabilistic` transport
-functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries` via
-`transform_single_time_series` (gRPC stays read-only):
+(the C ABI keeps the per-type `castore_store_add_forecast` / `castore_store_add_probabilistic`
+transport functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries`
+via `transform_single_time_series` (gRPC stays read-only):
 
 | Type                            | Write path                                | Description                                         |
 | ------------------------------- | ----------------------------------------- | --------------------------------------------------- |
@@ -42,7 +42,7 @@ functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTi
 | `Scenarios`                     | `add_time_series`                         | Forecast with discrete scenarios                    |
 
 All six types can be **read** from every interface: the Rust core, the C ABI, Python, Julia, the
-`tss` CLI, and the gRPC server. The **write** paths in the table are available in the Rust core, the
+`cas` CLI, and the gRPC server. The **write** paths in the table are available in the Rust core, the
 C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no interface
 adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by transforming a
 stored `SingleTimeSeries`.
@@ -58,9 +58,9 @@ readers can match either concrete type without caring which is stored).
 Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
 `Scenarios` object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
-`ts_store_add_forecast` / `ts_store_add_probabilistic` transport; a `DeterministicSingleTimeSeries`
-is produced by `transform_single_time_series`. The read-only gRPC server serves forecast reads but
-does not accept writes. See [Forecasts](#forecasts) below.
+`castore_store_add_forecast` / `castore_store_add_probabilistic` transport; a
+`DeterministicSingleTimeSeries` is produced by `transform_single_time_series`. The read-only gRPC
+server serves forecast reads but does not accept writes. See [Forecasts](#forecasts) below.
 
 ### `NonSequentialTimeSeries`
 
@@ -106,9 +106,9 @@ ISO-8601 string for either kind, and return the ISO-8601 string).
 Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, `i64`, `i32`, `u64`,
 or `bool`) and a shape `[length, k1, k2, …]`. The first axis is time; the trailing axes are a fixed
 **per-step element shape**, so a step can hold a scalar (empty element shape) or a small tuple — for
-example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The optional
-`logical_type` label travels with the metadata so a binding can reconstruct its domain object on
-read; the store itself never interprets it.
+example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The optional `ext`
+payload travels with the metadata so a binding can reconstruct its domain object on read; the store
+itself never interprets it.
 
 ### Forecasts
 
@@ -199,8 +199,63 @@ is a metadata concept; the array is shared by [content addressing](./content-add
 
 Each association can also carry:
 
-- **`units`** — a free-form label such as `"MW"`. No dimensional analysis is performed.
-- **`logical_type`** — an opaque, binding-owned label (e.g. `"QuadraticFunctionData"`) for
-  reconstructing a domain object on read. The store never interprets it.
+- **`units`** — a free-form, end-user-facing label such as `"MW"`. No dimensional analysis is
+  performed.
+- **`ext`** — an opaque, **package-owned** extension payload stored verbatim (typically JSON, e.g.
+  `{"function_type":"QuadraticFunctionData"}`) that a binding writes and reads to reconstruct a
+  domain object. The store never parses or interprets it, and end users are not expected to set it.
 
 These are recorded in metadata and returned on read, but they do not affect identity or storage.
+
+## Associations Between Entities
+
+Beyond owning time series, catalog entities can be related to each other. The catalog records two
+such relationships, in two separate tables, because they are not the same kind of thing: attaching
+an attribute to a component and wiring one component to another have different identities and
+different query patterns.
+
+### Supplemental attributes attached to components
+
+| Field                            | Meaning                                  |
+| -------------------------------- | ---------------------------------------- |
+| `component_id`, `component_type` | The component carrying the attribute     |
+| `attribute_id`, `attribute_type` | The supplemental attribute being carried |
+
+**Identity is the `(component_id, attribute_id)` pair.** The type names are denormalized labels, not
+part of identity: re-attaching the same pair under different type names is a duplicate and is
+rejected. One attribute may be attached to many components, and one component may carry many
+attributes; only the exact pair is constrained.
+
+### Parent/child edges between components
+
+| Field                      | Meaning                                          |
+| -------------------------- | ------------------------------------------------ |
+| `parent_id`, `parent_type` | The parent component, e.g. a generator           |
+| `child_id`, `child_type`   | The child component, e.g. the bus it connects to |
+
+Both endpoints are always components, so unlike time-series owners there is no category to
+disambiguate. **Identity is the ordered `(parent_id, child_id)` pair** — the reversed pair is a
+different edge. There is no relationship-kind column, so a given pair may be related at most once.
+
+### Properties shared by both
+
+Two consequences of the deliberate absence of foreign keys and cascades:
+
+- **Associations and time series are independent in both directions.** Removing a component's time
+  series does not remove its attribute attachments or its edges, and removing either does not touch
+  any series. A consumer that wants both effects makes both calls.
+- **The store never observes a deletion it did not perform.** Components and attributes live in the
+  consumer's object graph, so a cascade could never fire; consumers call the matching `remove_*`
+  with the appropriate filter instead.
+
+Filtering takes lists of **concrete** type names, rendered into SQL `IN (…)`. Expanding an abstract
+type into its subtypes stays in the calling language, where the type hierarchy lives.
+
+> Terminology: rows of the `time_series_associations` table — the owner-to-time-series records
+> described above — are also called "associations" throughout this documentation and the code. They
+> are unrelated to the entity-to-entity tables described in this section.
+
+Both are available in the Rust core, the C ABI, Julia, and Python; neither is exposed over gRPC or
+the `cas` CLI. The supplemental-attribute surface is the wider of the two (it carries counts and a
+grouped summary) because each of its operations is driven by an existing consumer; the parent/child
+surface is deliberately narrower for now.

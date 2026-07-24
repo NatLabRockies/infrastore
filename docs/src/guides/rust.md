@@ -1,7 +1,14 @@
 # Rust Developer Guide
 
-This guide covers using `time-series-store-core` from Rust. For exact signatures see the
+This guide covers using `castore-core` from Rust. For exact signatures see the
 [Rust API reference](../reference/rust-api.md).
+
+For a runnable end-to-end round-trip, `examples/basic_rust.rs` creates an in-memory store, adds a
+`SingleTimeSeries`, and reads it back:
+
+```sh
+cargo run --manifest-path crates/castore-core/Cargo.toml --example basic
+```
 
 ## Add the Dependency
 
@@ -9,7 +16,7 @@ The crate is part of this workspace. From another crate in the workspace:
 
 ```toml
 [dependencies]
-time-series-store-core = { path = "../time-series-store-core" }
+castore-core = { path = "../castore-core" }
 chrono = "0.4"
 ```
 
@@ -21,7 +28,7 @@ the API speaks.
 
 ```rust
 use std::path::Path;
-use time_series_store_core::{create_store, open_store};
+use castore_core::{create_store, open_store};
 
 // In-memory (tests, scratch work): no filesystem I/O.
 let mut store = create_store(None, true)?;
@@ -37,7 +44,7 @@ let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
 
 ```rust
 use chrono::{Duration, TimeZone, Utc};
-use time_series_store_core::{
+use castore_core::{
     Features, FeatureValue, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
 };
 
@@ -70,7 +77,7 @@ For many series at once, `add_time_series_bulk` takes a `Vec<AddRequest>` and co
 batch atomically — any error rolls back every array and association in the call:
 
 ```rust
-use time_series_store_core::AddRequest;
+use castore_core::AddRequest;
 
 let keys = store.add_time_series_bulk(vec![
     AddRequest {
@@ -80,7 +87,7 @@ let keys = store.add_time_series_bulk(vec![
         data: TimeSeriesData::SingleTimeSeries(ts_a),   // the series carries its own name
         features: Features::new(),
         units: Some("MW".into()),
-        logical_type: None,                             // opaque domain label, binding-owned
+        ext: None,                             // opaque package-owned payload (e.g. JSON)
     },
     // ...
 ])?;
@@ -95,8 +102,8 @@ the buffer if dropped without committing:
 ```rust
 let mut bulk = store.bulk_add();
 for (owner_id, ts) in many_series {
-    // `add` builds the AddRequest from its parts (logical_type = None);
-    // `push` takes a prebuilt AddRequest when you need to set logical_type.
+    // `add` builds the AddRequest from its parts (ext = None);
+    // `push` takes a prebuilt AddRequest when you need to set ext.
     bulk.add(owner_id, "Generator", OwnerCategory::Component,
         TimeSeriesData::SingleTimeSeries(ts), Features::new(), Some("MW".into()));
 }
@@ -149,7 +156,7 @@ let series = store.bulk_read(&ids)?;
 is ANDed, and the `features` clause is a subset match:
 
 ```rust
-use time_series_store_core::{ListFilter, OwnerCategory, TimeSeriesType};
+use castore_core::{ListFilter, OwnerCategory, TimeSeriesType};
 
 let metas = store.list_time_series(
     ListFilter::new()
@@ -176,7 +183,7 @@ to, so you can group series that share stored data:
 
 ```rust
 for (key, hash) in store.list_keys_with_hash(ListFilter::new().owner_id(42))? {
-    println!("{} -> {}", key.identity().name, time_series_store_core::hash::hash_hex(&hash));
+    println!("{} -> {}", key.identity().name, castore_core::hash::hash_hex(&hash));
 }
 ```
 
@@ -198,7 +205,7 @@ Dense forecasts are written through the generic `add_time_series` by wrapping a 
 conventional shapes per type); the store content-addresses it and records the windowing parameters:
 
 ```rust
-use time_series_store_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
+use castore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
 
 // A Deterministic forecast: a [H, count, *E] array (here scalar steps, so [H, count]).
 let (horizon_count, count) = (24, 7);
@@ -274,7 +281,7 @@ request is ambiguous. `RequestedType::AbstractDeterministic` matches a stored `D
 `DeterministicSingleTimeSeries`, so callers need not know which one is stored:
 
 ```rust
-use time_series_store_core::RequestedType;
+use castore_core::RequestedType;
 
 let key = store.resolve_forecast_key(
     42,
@@ -320,6 +327,93 @@ a shared array survives until its last referencing key is gone. `count_array_ref
 returns the `(SingleTimeSeries, DeterministicSingleTimeSeries)` association counts on one array,
 which is how you tell whether removing a `SingleTimeSeries` would orphan a forecast derived from it.
 
+## Associations
+
+Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+[Associations Between Entities](../explanation/data-model.md#associations-between-entities).
+
+Attachments are keyed on the `(component_id, attribute_id)` pair. The type names ride along for
+filtering and are not part of identity, so re-attaching the same pair under different type names is
+a duplicate and fails with `DuplicateAssociation`:
+
+```rust
+use castore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+
+store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
+    component_id: 42,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+})?;
+
+// Bulk add is one all-or-nothing transaction.
+store.add_supplemental_attribute_associations(vec![SupplementalAttributeAssociation {
+    component_id: 43,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+}])?;
+```
+
+Filters are all-optional and ANDed; the default matches everything, which is what makes a bulk
+export/import round trip. Queries run in both directions:
+
+```rust
+// The attributes on one component...
+let attrs =
+    store.list_supplemental_attribute_ids(&SupplementalAttributeFilter::new().component_id(42))?;
+assert_eq!(attrs, vec![100]);
+
+// ...and the components carrying one attribute.
+let owners =
+    store.list_components_with_attributes(&SupplementalAttributeFilter::new().attribute_id(100))?;
+assert_eq!(owners, vec![42, 43]);
+
+// `*_types` filters take CONCRETE type names, rendered as SQL `IN (…)`. Expanding an
+// abstract type into its subtypes is the caller's job — the store has no type hierarchy.
+// An empty list is a deliberate "none of these" and matches nothing.
+let geo = SupplementalAttributeFilter::new().attribute_types(["GeographicInfo"]);
+assert_eq!(store.count_supplemental_attributes(&geo)?, 1);   // distinct attributes
+assert_eq!(store.count_components_with_attributes(&geo)?, 2); // distinct components
+
+for row in store.supplemental_attribute_summary()? {
+    println!("{} on {}: {}", row.attribute_type, row.component_type, row.count);
+}
+
+// Removal returns a count. Matching nothing is `Ok(0)`, not an error: assert on the
+// count yourself if you expected a hit.
+let removed = store
+    .remove_supplemental_attribute_associations(&SupplementalAttributeFilter::new().component_id(43))?;
+assert_eq!(removed, 1);
+```
+
+Parent/child edges work the same way, except that identity is the **ordered** pair — the reverse of
+an edge is a different edge — and both endpoints are always components, so there is no category:
+
+```rust
+use castore_core::{ParentChildAssociation, ParentChildFilter};
+
+store.add_parent_child_association(ParentChildAssociation {
+    parent_id: 42,
+    parent_type: "Generator".into(),
+    child_id: 7,
+    child_type: "Bus".into(),
+})?;
+
+assert_eq!(store.list_children(&ParentChildFilter::new().parent_id(42))?, vec![7]);
+assert_eq!(store.list_parents(&ParentChildFilter::new().child_id(7))?, vec![42]);
+
+// Renumbering a component rewrites both ends of every edge in one statement, so an
+// edge that names it twice is counted once.
+let updated = store.replace_parent_child_component_id(42, 99)?;
+assert_eq!(updated, 1);
+```
+
+Neither table is reachable over gRPC or the `cas` CLI.
+
 ## Persist to Disk
 
 The NetCDF backend buffers writes. Call `flush` before copying the files for backup:
@@ -346,7 +440,7 @@ Always keep the `.nc` and `.nc.sqlite` files together — neither is usable alon
 Every fallible method returns `Result<T, TimeSeriesError>`. Match on the variant to react:
 
 ```rust
-use time_series_store_core::TimeSeriesError;
+use castore_core::TimeSeriesError;
 
 match store.get_time_series(key.identity(), None) {
     Ok(data) => { /* ... */ }

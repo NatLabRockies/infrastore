@@ -1,4 +1,4 @@
-"""Guard against drift between the runtime module and time_series_store.pyi.
+"""Guard against drift between the runtime module and castore.pyi.
 
 Every public runtime name must appear in the stub, and every public method of
 every stubbed class must exist at runtime (and vice versa). Signatures are not
@@ -8,13 +8,13 @@ compared — the stub is hand-written — but name-level drift is caught here.
 import ast
 from pathlib import Path
 
-import time_series_store as tss
+import castore as cas
 
 STUB_PATH = (
     Path(__file__).resolve().parents[2]
     / "crates"
-    / "time-series-store-py"
-    / "time_series_store.pyi"
+    / "castore-py"
+    / "castore.pyi"
 )
 
 
@@ -49,9 +49,9 @@ STUB_ONLY = {"Period", "TimeSeriesData"}
 
 
 def public_runtime_names():
-    # `time_series_store` is the native extension's self-reference inside the
+    # `castore` is the native extension's self-reference inside the
     # maturin-generated package, not part of the API surface.
-    return {n for n in dir(tss) if not n.startswith("_") and n != "time_series_store"}
+    return {n for n in dir(cas) if not n.startswith("_") and n != "castore"}
 
 
 def test_every_runtime_name_is_stubbed():
@@ -62,14 +62,14 @@ def test_every_runtime_name_is_stubbed():
 
 def test_every_stub_name_exists_at_runtime():
     stubbed = (set(STUB_CLASSES) | STUB_FUNCTIONS | STUB_ASSIGNS) - STUB_ONLY
-    ghosts = {n for n in stubbed if not hasattr(tss, n)}
+    ghosts = {n for n in stubbed if not hasattr(cas, n)}
     assert not ghosts, f"stubbed names that do not exist at runtime: {sorted(ghosts)}"
 
 
 def test_class_members_match():
     problems = []
     for cls_name, stub_members in STUB_CLASSES.items():
-        runtime_cls = getattr(tss, cls_name, None)
+        runtime_cls = getattr(cas, cls_name, None)
         if runtime_cls is None or not isinstance(runtime_cls, type):
             continue
         if issubclass(runtime_cls, BaseException):

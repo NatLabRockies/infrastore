@@ -1,11 +1,10 @@
-# time-series-store
+# castore
 
 Rust library for managing time-series data in power-systems / energy simulations. Persistence is
 split between numerical arrays in NetCDF4 and metadata associations in SQLite. Bindings: native
-Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI), and the `tss` CLI.
+Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI), and the `cas` CLI.
 
-Spec:
-[NatLabRockies/time-series-store#1](https://github.com/NatLabRockies/time-series-store/issues/1).
+Spec: [NatLabRockies/castore#1](https://github.com/NatLabRockies/castore/issues/1).
 
 ## v0 scope
 
@@ -15,7 +14,7 @@ Spec:
   values across the Rust core, C ABI, Python, Julia, and gRPC. Dense forecasts (`Deterministic`,
   `Probabilistic`, `Scenarios`) are written through the generic `add_time_series` by passing the
   matching forecast object across the Rust core, Python, and Julia (the C ABI keeps per-type
-  `ts_store_add_forecast` / `ts_store_add_probabilistic` as low-level transport);
+  `castore_store_add_forecast` / `castore_store_add_probabilistic` as low-level transport);
   `DeterministicSingleTimeSeries` is not added directly — it is derived from stored
   `SingleTimeSeries` via `transform_single_time_series`. Forecast writes are not exposed over the
   read-only gRPC server.
@@ -28,31 +27,39 @@ Spec:
   `list_owner_types`, name-pattern filtering (`ListFilter::name_glob`, SQLite `GLOB` semantics),
   filtered/bulk delete (`remove_by_filter`, `remove_time_series_bulk`), `rename_time_series`,
   time-sliced `bulk_read`, and serde on the core types.
+- **Association catalogs**: two tables recording relationships between catalog entities,
+  independently of time series, so consumers no longer keep a SQLite database of their own for them.
+  `supplemental_attribute_associations` records which attributes are attached to which components
+  (the wider surface: add, bulk add, `has_`, `list_`, both id directions, remove, three counts,
+  counts-by-type, a grouped summary, and a component rewrite). `parent_child_associations` records
+  directed edges between components — a generator connected to a bus, say — with a narrower surface
+  (`list_children` / `list_parents`, remove, count, rewrite). Both are available in the Rust core, C
+  ABI, Julia, and Python; neither is exposed over gRPC or the CLI.
 - Language-idiomatic bindings: the Python wheel ships type stubs (`.pyi`), a full exception
   hierarchy, keyword-only optional arguments, and `__eq__`/`__len__` on the value classes; the Julia
   package overloads `Base` (`==`/`hash` on keys via the core identity, `show`,
   `length`/`iterate`/`getindex` on values) and supports do-block `Store`/`open_store` forms.
 - Read-only gRPC server. Writes require local filesystem access.
-- The `tss` CLI covers inspection (`stats`, `summary`, `verify`, `check-consistency`, `resolutions`,
+- The `cas` CLI covers inspection (`stats`, `summary`, `verify`, `check-consistency`, `resolutions`,
   `params`), bulk export (`export`: timestamped CSV or structured JSON, one file per series), and
   maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`, `remove --all` —
   destructive commands take `--dry-run`) in addition to add / list / get / info / transform, plus
-  `completions` and a `TSS_STORE` env fallback for `--store`.
+  `completions` and a `CASTORE_STORE` env fallback for `--store`.
 - Auth: `none` (default) or `api_key` via the `x-api-key` header.
 
 ## Repo layout
 
 ```
 crates/
-  time-series-store-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
-  time-series-store-proto/   # Protobuf service definition + tonic codegen
-  time-series-store-server/  # gRPC server binary + Rust client
-  time-series-store-py/      # PyO3 bindings, abi3-py310 wheel
-  time-series-store-ffi/     # C ABI cdylib (used by the Julia binding)
-  time-series-store-cli/     # `tss` CLI: load CSV + inspect a store on disk
-  time-series-store-bench/   # `tss-bench` binary: ingestion + simulation-read benchmarks
+  castore-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
+  castore-proto/   # Protobuf service definition + tonic codegen
+  castore-server/  # gRPC server binary + Rust client
+  castore-py/      # PyO3 bindings, abi3-py310 wheel
+  castore-ffi/     # C ABI cdylib (used by the Julia binding)
+  castore-cli/     # `cas` CLI: load CSV + inspect a store on disk
+  castore-bench/   # `cas-bench` binary: ingestion + simulation-read benchmarks
 proto/                       # .proto sources
-julia/TimeSeriesStore.jl/    # Julia package wrapping the C ABI (TimeSeriesStore.jl)
+julia/Castore.jl/    # Julia package wrapping the C ABI (Castore.jl)
 python/tests/                # pytest suite
 examples/                    # Sample server config, basic_rust.rs, and cli/ sample CSV + descriptor
 ```
@@ -100,7 +107,7 @@ inert.
 ## Python bindings
 
 ```sh
-cd crates/time-series-store-py
+cd crates/castore-py
 python3 -m venv .venv && source .venv/bin/activate
 pip install maturin pytest numpy
 maturin develop
@@ -110,9 +117,9 @@ pytest ../../python/tests
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from time_series_store import TimeSeriesStore, SingleTimeSeries, OwnerCategory
+from castore import Store, SingleTimeSeries, OwnerCategory
 
-store = TimeSeriesStore.create(in_memory=True)
+store = Store.create(in_memory=True)
 ts = SingleTimeSeries(
     datetime(2024, 1, 1, tzinfo=timezone.utc),
     timedelta(hours=1),
@@ -132,14 +139,14 @@ assert np.array_equal(np.asarray(got.data), np.asarray(ts.data))
 ## Julia bindings
 
 ```sh
-cargo build -p time-series-store-ffi --release
-export TIME_SERIES_STORE_LIB=$PWD/target/release/libtime_series_store_ffi.dylib  # .so on Linux
-julia --project=julia/TimeSeriesStore.jl -e 'using Pkg; Pkg.instantiate()'
-julia --project=julia/TimeSeriesStore.jl julia/TimeSeriesStore.jl/test/runtests.jl
+cargo build -p castore-ffi --release
+export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
+julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
 ```
 
 ```julia
-using Dates, TimeSeriesStore
+using Dates, Castore
 store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
 key = add_time_series!(store, 42, "Generator", Component, ts;
@@ -148,23 +155,23 @@ got = get_time_series(store, key)
 @assert got.data == ts.data
 ```
 
-## CLI (`tss`)
+## CLI (`cas`)
 
-`tss` is a command-line tool that loads time series from CSV and inspects a store, talking directly
-to the on-disk NetCDF + SQLite artifact (no gRPC). Output follows the `torc` convention of a global
+`cas` is a command-line tool that loads time series from CSV and inspects a store, talking directly
+to the on-disk NetCDF + SQLite artifact (no gRPC). Output follows a convention of a global
 `-f/--format` with `table` (default), `json`, and `csv`.
 
 ```sh
-cargo build -p time-series-store-cli   # builds the `tss` binary
-TSS=target/debug/tss
+cargo build -p castore-cli   # builds the `cas` binary
+CAS=target/debug/cas
 
 # Numeric values live in a CSV; everything else is described in a descriptor JSON.
-$TSS template single > load.json       # print an example descriptor to edit
-$TSS --store demo.nc add --descriptor load.json
-$TSS --store demo.nc list
-$TSS --store demo.nc get  --owner-id 42 --name load              # pretty table
-$TSS --store demo.nc -f csv  get  --owner-id 42 --name load      # round-trippable CSV
-$TSS --store demo.nc -f json info --owner-id 42 --name load      # metadata + stats
+$CAS template single > load.json       # print an example descriptor to edit
+$CAS --store demo.nc add --descriptor load.json
+$CAS --store demo.nc list
+$CAS --store demo.nc get  --owner-id 42 --name load              # pretty table
+$CAS --store demo.nc -f csv  get  --owner-id 42 --name load      # round-trippable CSV
+$CAS --store demo.nc -f json info --owner-id 42 --name load      # metadata + stats
 ```
 
 The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,
@@ -172,7 +179,7 @@ resolution, timestamps, units, features); the CSV holds only numbers, except `no
 first column is the timestamp. All six dtypes (`f64|f32|i64|i32|u64|bool`) and all five writable
 types (`single`, `non_sequential`, `deterministic`, `probabilistic`, `scenarios`) are supported —
 forecast arrays are laid out as flat row-major values whose count equals the product of the type's
-shape (see `tss template <type>`). `tss transform --horizon <D> --interval <D>` derives
+shape (see `cas template <type>`). `cas transform --horizon <D> --interval <D>` derives
 `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`. The store is created on first `add`.
 
 ## Server
@@ -180,7 +187,7 @@ shape (see `tss template <type>`). `tss transform --horizon <D> --interval <D>` 
 ```sh
 cp examples/server.toml my_server.toml
 # edit my_server.toml: point [data].files at your .nc, set [authentication]
-cargo run -p time-series-store-server -- --config my_server.toml
+cargo run -p castore-server -- --config my_server.toml
 ```
 
 `auth = "api_key"` requires at least one entry in `keys`. Clients must send the chosen key in the
@@ -194,7 +201,10 @@ contiguous). A sibling string variable `<dataset>_h` holds the SHA-256 hex hash 
 empty string marks a free slot. Standalone arrays are stored as `arr_{hex_hash}`.
 
 Metadata lives in a catalog SQLite file at `<path>.sqlite`. Two artifacts ship together; an
-`archive` helper that bundles them is post-v0.
+`archive` helper that bundles them is post-v0. The catalog also holds the two association tables,
+which were added additively — a store written before they existed gains them on its first writable
+open, and a read-only open of such a store reports no associations rather than failing, so no
+`data_format_version` bump was needed.
 
 ## Open questions resolved for v0
 

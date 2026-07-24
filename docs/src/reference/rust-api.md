@@ -1,23 +1,25 @@
 # Rust API
 
-The public surface of `time-series-store-core`. Import paths below are relative to the crate root.
+The public surface of `castore-core`. Import paths below are relative to the crate root.
 
 ```rust
-use time_series_store_core::{
+use castore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, RequestedType, Period,
     TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
     ListFilter, AddRequest,
+    SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
+    ParentChildAssociation, ParentChildFilter,
     StaticReader, StaticGroup, ForecastReader, ForecastEntry, WindowSlot,
     TimeSeriesCounts, TimeSeriesCountsDetailed, StaticSummaryRow, ForecastSummaryRow,
-    ForecastParameters, CompactionReport, IntegrityReport,
+    ForecastParameters, StaticConsistency, CompactionReport, IntegrityReport,
     TimeSeriesError, Result, DATA_FORMAT_VERSION,
 };
 
-// Not re-exported at the crate root — reach into the module:
-use time_series_store_core::hash::{array_hash, features_hash, hash_hex};
-use time_series_store_core::storage::StorageBackend;
+// `array_hash` and `hash_hex` are also re-exported at the crate root; `features_hash` is not:
+use castore_core::hash::{array_hash, features_hash, hash_hex};
+use castore_core::storage::StorageBackend;
 ```
 
 All time spans in this API — resolutions, horizons, and intervals — are the crate's
@@ -130,7 +132,7 @@ impl Store {
 
     pub fn list_time_series(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>>;
     // Key-centric listing: the same rows reduced to their keys, dropping storage
-    // detail (`data_hash`, `dtype`, `logical_type`, `percentiles`).
+    // detail (`data_hash`, `dtype`, `ext`, `percentiles`).
     pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>>;
     // …and with each key's array content hash, so callers can group series that
     // share stored data (dedup'd arrays; an STS and any DST derived from it).
@@ -175,7 +177,10 @@ impl Store {
     ) -> Result<ForecastParameters>;
 
     // Catalog introspection (each one catalog query; see "Introspection" below).
-    pub fn check_static_consistency(&self) -> Result<Option<(DateTime<Utc>, usize)>>;
+    pub fn check_static_consistency(
+        &self,
+        resolution: Option<Period>,
+    ) -> Result<Vec<StaticConsistency>>;
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>>;
     pub fn num_distinct_arrays(&self) -> Result<i64>;
     pub fn time_series_counts_detailed(&self) -> Result<TimeSeriesCountsDetailed>;
@@ -193,6 +198,83 @@ impl Store {
     pub fn static_read(&self, reader: &mut StaticReader, at: DateTime<Utc>) -> Result<()>;
     pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader>;
     pub fn forecast_read(&self, reader: &mut ForecastReader, at: DateTime<Utc>) -> Result<()>;
+
+    // The supplemental-attribute catalog (see "Associations" below). Independent
+    // of time series: none of these touch, or are touched by, a time-series call.
+    pub fn add_supplemental_attribute_association(
+        &mut self,
+        assoc: SupplementalAttributeAssociation,
+    ) -> Result<()>;
+    pub fn add_supplemental_attribute_associations(
+        &mut self,
+        assocs: Vec<SupplementalAttributeAssociation>,
+    ) -> Result<usize>;
+    pub fn has_supplemental_attribute_association(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<bool>;
+    pub fn list_supplemental_attribute_associations(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<SupplementalAttributeAssociation>>;
+    pub fn list_supplemental_attribute_ids(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<i64>>;
+    pub fn list_components_with_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<Vec<i64>>;
+    pub fn remove_supplemental_attribute_associations(
+        &mut self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<usize>;
+    pub fn replace_supplemental_attribute_component_id(
+        &mut self,
+        old_id: i64,
+        new_id: i64,
+    ) -> Result<usize>;
+    pub fn count_supplemental_attribute_associations(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64>;
+    pub fn count_supplemental_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64>;
+    pub fn count_components_with_attributes(
+        &self,
+        filter: &SupplementalAttributeFilter,
+    ) -> Result<i64>;
+    pub fn supplemental_attribute_counts_by_type(&self) -> Result<Vec<(String, i64)>>;
+    pub fn supplemental_attribute_summary(
+        &self,
+    ) -> Result<Vec<SupplementalAttributeSummaryRow>>;
+
+    // The parent/child catalog (see "Associations" below). Same independence
+    // from time series.
+    pub fn add_parent_child_association(&mut self, assoc: ParentChildAssociation) -> Result<()>;
+    pub fn add_parent_child_associations(
+        &mut self,
+        assocs: Vec<ParentChildAssociation>,
+    ) -> Result<usize>;
+    pub fn has_parent_child_association(&self, filter: &ParentChildFilter) -> Result<bool>;
+    pub fn list_parent_child_associations(
+        &self,
+        filter: &ParentChildFilter,
+    ) -> Result<Vec<ParentChildAssociation>>;
+    pub fn list_children(&self, filter: &ParentChildFilter) -> Result<Vec<i64>>;
+    pub fn list_parents(&self, filter: &ParentChildFilter) -> Result<Vec<i64>>;
+    pub fn remove_parent_child_associations(
+        &mut self,
+        filter: &ParentChildFilter,
+    ) -> Result<usize>;
+    pub fn replace_parent_child_component_id(
+        &mut self,
+        old_id: i64,
+        new_id: i64,
+    ) -> Result<usize>;
+    pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64>;
 
     pub fn compact(&mut self) -> Result<CompactionReport>;
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
@@ -265,9 +347,12 @@ can be moved between threads, but sharing one requires external synchronization 
 Grouped catalog queries the bindings use instead of listing every association and aggregating in the
 caller. All are read-only and hit SQLite once.
 
-- **`check_static_consistency`** — `Ok(None)` when there are no `SingleTimeSeries`,
-  `Ok(Some((initial_timestamp, length)))` when they all share one grid, and `IntegrityError` when
-  more than one distinct pair exists.
+- **`check_static_consistency`** — one [`StaticConsistency`](#report-and-count-types)
+  `{ resolution, initial_timestamp, length }` per resolution present (empty `Vec` when there are no
+  `SingleTimeSeries`), ordered by resolution; each row is the grid shared by every
+  `SingleTimeSeries` at that resolution. Consistency is only required _within_ a resolution — series
+  at different resolutions legitimately have different grids — so pass `Some(resolution)` to scope
+  the check to one grid. Returns `IntegrityError` when the series at a single resolution disagree.
 - **`counts_by_type`** — Association count per [`TimeSeriesType`](#timeseriestype).
 - **`num_distinct_arrays`** — Distinct stored content hashes; series sharing an array count once.
 - **`time_series_counts_detailed`** — [`TimeSeriesCountsDetailed`](#report-and-count-types):
@@ -289,7 +374,7 @@ shape against the windowing parameters (`horizon`, `interval`, `count`, and for 
 `percentiles`):
 
 ```rust
-use time_series_store_core::{Deterministic, TimeSeriesData};
+use castore_core::{Deterministic, TimeSeriesData};
 
 let forecast = Deterministic::new(
     initial_timestamp, resolution, horizon, interval, count, data, name,
@@ -384,6 +469,134 @@ reading a packed column once and gathering it to many columns). `reader.slots()`
 `reader.entry_slot(i)` expose the slots; note that `entry_slot` takes the **entry** index `i` and
 returns the slot backing that entry, while `entry.slot()` is that slot's index into `slots()` (equal
 for entries that share data).
+
+### Associations
+
+Two catalogs of relationships between entities the store does not otherwise model. They live here so
+consumers do not each carry their own SQLite database for them, and they are **wholly independent of
+time series**: there are no foreign keys and no cascade (both endpoints live in the caller's object
+graph, so a cascade could never fire), so removing a time series never removes an association and
+removing an association never removes a time series. A caller that wants both composes the two
+calls.
+
+Both families share the same filter conventions: every field of the filter is optional, set fields
+are ANDed, and the default filter matches every row — which is what makes a bulk export/import pair
+a round trip. The `*_types` fields are lists of **concrete** type names rendered as SQL `IN (…)`;
+expanding an abstract type into its subtypes stays with the caller, where the type hierarchy lives,
+and an empty list matches nothing. Every `remove_*` returns the number of rows removed, and removing
+zero rows is `Ok(0)` rather than an error: the store has no view of whether the caller expected a
+hit.
+
+#### Supplemental-attribute associations
+
+Which supplemental attributes are attached to which components. Identity is the
+`(component_id, attribute_id)` pair — the type names are denormalized labels carried for filtering
+and reporting, not part of identity — so re-attaching the same pair under different type names is
+still a duplicate. One attribute may be attached to many components.
+
+- **`add_supplemental_attribute_association`** — Attaches one
+  [`SupplementalAttributeAssociation`](#association-types). Errors with `DuplicateAssociation` if
+  that component already carries that attribute, whatever type names are supplied.
+- **`add_supplemental_attribute_associations`** — All-or-nothing: a duplicate anywhere in the batch
+  rolls the whole batch back. Returns the number inserted. It is the import half of the round trip
+  whose export is `list_supplemental_attribute_associations` with a default filter.
+- **`list_supplemental_attribute_associations` / `has_supplemental_attribute_association` /
+  `count_supplemental_attribute_associations`** — The
+  [`SupplementalAttributeFilter`](#association-types) predicate over the table. The list returns
+  rows in insertion order, so a default-filter export/import pair round-trips.
+- **`list_supplemental_attribute_ids` / `list_components_with_attributes`** — Distinct ids on one
+  end of the matching rows, ascending: the attributes attached to a component when `component_id` is
+  set, and the components carrying an attribute when `attribute_id` is set.
+- **`count_supplemental_attributes` / `count_components_with_attributes`** — The same two queries
+  counted rather than listed.
+- **`remove_supplemental_attribute_associations`** — Removes every matching row and returns the
+  count.
+- **`replace_supplemental_attribute_component_id`** — Moves every attachment from component `old_id`
+  to `new_id`, returning the rows updated. Errors with `DuplicateAssociation` if `new_id` already
+  carries one of the attributes being moved.
+- **`supplemental_attribute_counts_by_type` / `supplemental_attribute_summary`** — Grouped counts,
+  by attribute type or by both type names ([`SupplementalAttributeSummaryRow`](#association-types),
+  ordered by attribute type then component type). The core groups; the caller formats.
+
+```rust
+use castore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+
+store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
+    component_id: 1,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+})?;
+
+// The attributes attached to component 1, then the components carrying attribute 100.
+let attributes =
+    store.list_supplemental_attribute_ids(&SupplementalAttributeFilter::new().component_id(1))?;
+let components =
+    store.list_components_with_attributes(&SupplementalAttributeFilter::new().attribute_id(100))?;
+
+// Detach them: removing the attachments leaves any time series untouched.
+let removed = store.remove_supplemental_attribute_associations(
+    &SupplementalAttributeFilter::new().component_id(1),
+)?;
+
+// Bulk round trip — the default filter matches every row.
+let exported = store.list_supplemental_attribute_associations(&Default::default())?;
+target.add_supplemental_attribute_associations(exported)?;
+```
+
+#### Parent/child associations
+
+Directed edges between components — a generator (parent) connected to a bus (child), say. Both
+endpoints are always components; an attribute cannot appear here. Identity is the **ordered**
+`(parent_id, child_id)` pair, so the reversed pair is a different edge. There is no
+relationship-kind column, so one ordered pair may be related at most once.
+
+This family is deliberately narrower than the supplemental one: it has no counts-by-type and no
+grouped summary, because there is no consumer for them yet. Both are additive if one appears.
+
+- **`add_parent_child_association`** — Records one [`ParentChildAssociation`](#association-types).
+  Errors with `DuplicateAssociation` if that ordered pair is already related.
+- **`add_parent_child_associations`** — All-or-nothing bulk insert, returning the number inserted;
+  the import half of the round trip whose export is `list_parent_child_associations` with a default
+  filter.
+- **`list_parent_child_associations` / `has_parent_child_association` /
+  `count_parent_child_associations`** — The [`ParentChildFilter`](#association-types) predicate over
+  the table. The list returns rows in insertion order.
+- **`list_children` / `list_parents`** — Distinct ids on one end of the matching edges, ascending:
+  the children of a component when `parent_id` is set, and its parents when `child_id` is set.
+- **`remove_parent_child_associations`** — Removes every matching edge and returns the count.
+- **`replace_parent_child_component_id`** — Rewrites component `old_id` to `new_id` on **both** ends
+  of every edge, returning the rows updated. Errors with `DuplicateAssociation` if the rewrite would
+  duplicate an edge `new_id` already has.
+
+```rust
+use castore_core::{ParentChildAssociation, ParentChildFilter};
+
+store.add_parent_child_association(ParentChildAssociation {
+    parent_id: 1,
+    parent_type: "Generator".into(),
+    child_id: 7,
+    child_type: "Bus".into(),
+})?;
+
+// The reversed pair is a different edge, not a duplicate.
+store.add_parent_child_association(ParentChildAssociation {
+    parent_id: 7,
+    parent_type: "Bus".into(),
+    child_id: 1,
+    child_type: "Generator".into(),
+})?;
+
+let children = store.list_children(&ParentChildFilter::new().parent_id(1))?;   // [7]
+let parents = store.list_parents(&ParentChildFilter::new().child_id(7))?;      // [1]
+
+// Bulk round trip — the default filter matches every row.
+let exported = store.list_parent_child_associations(&ParentChildFilter::default())?;
+target.add_parent_child_associations(exported)?;
+```
+
+Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
+[`cas` CLI](./cli.md).
 
 ## Types
 
@@ -744,8 +957,8 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `units`,
 `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`, and `logical_type: Option<String>`. The span fields (`resolution`,
-`horizon`, `interval`) are `Option<Period>`.
+`element_shape: Vec<usize>`, and `ext: Option<String>`. The span fields (`resolution`, `horizon`,
+`interval`) are `Option<Period>`.
 
 ### `ListFilter`
 
@@ -768,8 +981,8 @@ ListFilter::new()
 ### `AddRequest`
 
 The element type of `add_time_series_bulk` (and of `BulkAdd::push`), mirroring the `add_time_series`
-arguments plus an optional `logical_type` — an opaque, binding-owned domain label. The series name
-lives on the `TimeSeriesData` object, not here.
+arguments plus an optional `ext` — an opaque, package-owned payload (typically JSON) stored
+verbatim. The series name lives on the `TimeSeriesData` object, not here.
 
 ```rust
 pub struct AddRequest {
@@ -779,7 +992,7 @@ pub struct AddRequest {
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
-    pub logical_type: Option<String>,
+    pub ext: Option<String>,
 }
 ```
 
@@ -801,7 +1014,7 @@ impl BulkAdd<'_> {
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
-    ) -> &mut Self;                                             // logical_type = None
+    ) -> &mut Self;                                             // ext = None
     pub fn len(&self) -> usize;          // requests buffered so far
     pub fn is_empty(&self) -> bool;
     pub fn commit(self) -> Result<Vec<TimeSeriesKey>>;          // keys in push order
@@ -825,6 +1038,78 @@ impl RequestedType {
     pub fn matches(self, concrete: TimeSeriesType) -> bool;
 }
 ```
+
+### Association types
+
+The row, predicate, and grouped-row types of the two [association catalogs](#associations). All
+derive `Serialize`/`Deserialize`, so a binding can hand a whole filter or a whole batch across a
+language boundary as one JSON value. The rows also derive `PartialEq`/`Eq`/`Hash`, so they work in
+sets and as map keys.
+
+```rust
+// One attachment: a supplemental attribute carried by a component. Identity is
+// the (component_id, attribute_id) pair; the type names are denormalized labels.
+pub struct SupplementalAttributeAssociation {
+    pub component_id: i64,
+    pub component_type: String,
+    pub attribute_id: i64,
+    pub attribute_type: String,
+}
+
+// One directed edge between two components. Identity is the *ordered*
+// (parent_id, child_id) pair, so the reversed pair is a different edge.
+pub struct ParentChildAssociation {
+    pub parent_id: i64,
+    pub parent_type: String,
+    pub child_id: i64,
+    pub child_type: String,
+}
+
+// One grouped row of `supplemental_attribute_summary`; `count` is how many
+// attachments share the (component_type, attribute_type) pair.
+pub struct SupplementalAttributeSummaryRow {
+    pub component_type: String,
+    pub attribute_type: String,
+    pub count: i64,
+}
+```
+
+The two filters are builders, like [`ListFilter`](#listfilter): every field is optional and the set
+ones are combined with AND, so `::new()` / `::default()` matches every row.
+
+```rust
+pub struct SupplementalAttributeFilter {
+    pub component_id: Option<i64>,
+    pub component_types: Option<Vec<String>>,
+    pub attribute_id: Option<i64>,
+    pub attribute_types: Option<Vec<String>>,
+}
+
+pub struct ParentChildFilter {
+    pub parent_id: Option<i64>,
+    pub parent_types: Option<Vec<String>>,
+    pub child_id: Option<i64>,
+    pub child_types: Option<Vec<String>>,
+}
+```
+
+```rust
+SupplementalAttributeFilter::new()
+    .component_id(1)
+    .component_types(["Generator", "Load"])   // concrete type names, rendered as SQL `IN (…)`
+    .attribute_id(100)
+    .attribute_types(["GeographicInfo"])
+
+ParentChildFilter::new()
+    .parent_id(1)
+    .parent_types(["Generator"])
+    .child_id(7)
+    .child_types(["Bus"])
+```
+
+The `*_types` lists take **concrete** type names only; expanding an abstract type into its subtypes
+stays with the caller, where the type hierarchy lives. An empty list is an empty allow-list and
+matches nothing (as opposed to leaving the field unset, which matches everything).
 
 ### Report and count types
 
@@ -878,6 +1163,11 @@ pub struct ForecastParameters {
     pub count: Option<usize>, pub resolution: Option<Period>,
     pub initial_timestamp: Option<DateTime<Utc>>,
 }
+pub struct StaticConsistency {  // one row per resolution from check_static_consistency
+    pub resolution: Period,
+    pub initial_timestamp: DateTime<Utc>,
+    pub length: usize,
+}
 ```
 
 ## Errors
@@ -889,6 +1179,11 @@ pub type Result<T> = std::result::Result<T, TimeSeriesError>;
 pub enum TimeSeriesError {
     NotFound,
     DuplicateTimeSeries,
+    /// An association with the same identity already exists — the
+    /// `(component_id, attribute_id)` pair of an attachment, or the ordered
+    /// `(parent_id, child_id)` pair of an edge. The payload names the offending
+    /// pair; it is a human-readable message, not a parseable encoding.
+    DuplicateAssociation(String),
     InvalidParameter(String),
     IntegrityError(String),
     ReadOnlyStore,
@@ -910,7 +1205,7 @@ rarely call it directly, but it documents the backend contract. It is **not** re
 crate root — import it (and the backends) from the `storage` module:
 
 ```rust
-use time_series_store_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+use castore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
 ```
 
 Every method below with a default is a performance override: the default is correct but naive, and
@@ -981,7 +1276,8 @@ pub trait StorageBackend: Send + Sync {
 
 ## Hashing
 
-In the `hash` module (`time_series_store_core::hash`), not at the crate root.
+In the `hash` module (`castore_core::hash`). `array_hash` and `hash_hex` are also re-exported at the
+crate root; `features_hash` is only reachable through the module.
 
 ```rust
 pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes
@@ -995,5 +1291,5 @@ These define the cross-language content-addressing contract; see
 ## Constants
 
 ```rust
-pub const DATA_FORMAT_VERSION: &str = "0.10.0";
+pub const DATA_FORMAT_VERSION: &str = "0.11.0";
 ```

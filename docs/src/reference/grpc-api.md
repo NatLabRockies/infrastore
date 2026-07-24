@@ -1,11 +1,15 @@
 # gRPC API
 
-The proto contract lives at `proto/time_series_store/v1/store.proto` and is compiled into
-`time-series-store-proto` with `tonic`. The service is **read-only** — every write operation (add,
-remove, clear, compact) requires local filesystem access and is intentionally absent.
+The proto contract lives at `proto/castore/v1/store.proto` and is compiled into `castore-proto` with
+`tonic`. The service is **read-only** — every write operation (add, remove, clear, compact) requires
+local filesystem access and is intentionally absent.
 
-- **Package:** `time_series_store.v1`
-- **Service:** `TimeSeriesStore`
+The [association catalogs](../explanation/data-model.md#associations-between-entities) are absent
+too, reads included: no message or RPC covers `supplemental_attribute_associations` or
+`parent_child_associations`. Consumers of those tables work against a local `Store`.
+
+- **Package:** `castore.v1`
+- **Service:** `CatalogStore`
 
 ## Methods
 
@@ -83,18 +87,20 @@ message TimeSeriesMetadata {
   TimeSeriesType  time_series_type          = 4;
   string          name                      = 5;
   bytes           data_hash                 = 6;   // 32 bytes
-  string          initial_timestamp_rfc3339 = 7;
-  string          resolution                = 8;   // ISO-8601 duration
-  uint64          length                    = 9;
-  string          horizon                   = 10;  // ISO-8601 duration
-  string          interval                  = 11;  // ISO-8601 duration
-  uint64          count                     = 12;
+  // Temporal fields are `optional` so genuine values (e.g. length == 0) decode
+  // correctly rather than colliding with a zero/empty sentinel.
+  optional string initial_timestamp_rfc3339 = 7;
+  optional string resolution                = 8;   // ISO-8601 duration
+  optional uint64 length                    = 9;
+  optional string horizon                   = 10;  // ISO-8601 duration
+  optional string interval                  = 11;  // ISO-8601 duration
+  optional uint64 count                     = 12;
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
-  string          units                     = 16;
+  optional string units                     = 16;
   int32           dtype                     = 17;  // Dtype code
   repeated uint64 element_shape             = 18;  // per-step trailing dims
-  string          logical_type              = 19;  // opaque reconstruction tag
+  optional string ext                       = 19;  // opaque package-owned payload
   repeated double percentiles               = 20;  // Probabilistic only
 }
 ```
@@ -129,7 +135,7 @@ message GetResp {
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
   int32           dtype                     = 8;   // Dtype code
   bytes           value_bytes               = 9;   // raw little-endian, row-major
-  string          logical_type              = 10;
+  string          ext              = 10;
   // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
   string          horizon                   = 11;  // ISO-8601 duration
   string          interval                  = 12;  // ISO-8601 duration
@@ -151,12 +157,16 @@ message CountsResp {
   int64 forecasts                   = 3;
 }
 
-message ForecastParamsReq  {}
+message ForecastParamsReq  {
+  optional string resolution = 1;   // ISO-8601 duration filter
+  optional string interval   = 2;   // ISO-8601 duration filter
+}
 message ForecastParamsResp {
-  optional string horizon    = 1;   // ISO-8601 duration
-  optional string interval   = 2;   // ISO-8601 duration
-  optional uint64 count      = 3;
-  optional string resolution = 4;   // ISO-8601 duration
+  optional string horizon                   = 1;   // ISO-8601 duration
+  optional string interval                  = 2;   // ISO-8601 duration
+  optional uint64 count                     = 3;
+  optional string resolution                = 4;   // ISO-8601 duration
+  optional string initial_timestamp_rfc3339 = 5;
 }
 
 message HasReq  { TimeSeriesKey key = 1; }
@@ -188,7 +198,7 @@ matching type. Arrays are dtype-generic on the wire — `value_bytes` is the raw
 and `dtype` names the element type (`f64`/`f32`/`i64`/`i32`/`u64`/`bool`), so non-`f64` arrays
 survive the round trip without coercion. One caveat:
 
-- **`logical_type` is not carried in `GetResp`.** The opaque reconstruction tag is returned by
+- **`ext` is not carried in `GetResp`.** The opaque package-owned payload is returned by
   `ListTimeSeries` (on `TimeSeriesMetadata`) but left empty by `GetTimeSeries`, so a value fetched
   directly by key comes back without it.
 
@@ -203,8 +213,8 @@ required. See [Server Configuration](./server-config.md).
 
 ## Rust Client
 
-`time-series-store-server` ships an async `RemoteClient` that mirrors the read methods and returns
-core types, mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy:
+`castore-server` ships an async `RemoteClient` that mirrors the read methods and returns core types,
+mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy:
 
 | gRPC `Code`          | `TimeSeriesError`                |
 | -------------------- | -------------------------------- |
@@ -219,8 +229,8 @@ core types, mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy
 with the same variant a local `Store` would return.
 
 ```rust
-use time_series_store_core::OwnerCategory;
-use time_series_store_server::client::RemoteClient;
+use castore_core::OwnerCategory;
+use castore_server::client::RemoteClient;
 
 let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
 let counts = client.get_counts().await?;
@@ -228,7 +238,10 @@ let keys = client.get_time_series_keys(42, OwnerCategory::Component).await?;
 let data = client.get_time_series(&keys[0], None).await?;
 ```
 
-`RemoteClient` methods: `connect`, `from_channel`, `list_time_series`, `get_time_series`,
-`get_time_series_keys`, `get_resolutions`, `get_counts`, `get_forecast_parameters`,
-`has_time_series`, `verify_integrity`. See the [gRPC Server guide](../guides/server.md) for
-end-to-end usage and adding an API key to client requests.
+`RemoteClient` methods: `connect`, `from_channel`, `list_time_series`, `list_keys`, `get_metadata`,
+`get_time_series`, `bulk_read`, `get_time_series_keys`, `get_resolutions`, `get_intervals`,
+`get_counts`, `counts_by_type`, `time_series_counts_detailed`, `get_forecast_parameters`,
+`static_summary`, `forecast_summary`, `list_owner_ids`, `has_time_series`,
+`check_static_consistency`, `resolve_forecast_key`, `verify_integrity` — the full read surface
+described above. See the [gRPC Server guide](../guides/server.md) for end-to-end usage and adding an
+API key to client requests.

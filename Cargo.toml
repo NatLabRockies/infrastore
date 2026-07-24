@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/time-series-store-core",
-    "crates/time-series-store-proto",
-    "crates/time-series-store-server",
-    "crates/time-series-store-py",
-    "crates/time-series-store-ffi",
-    "crates/time-series-store-cli",
-    "crates/time-series-store-bench",
+    "crates/castore-core",
+    "crates/castore-proto",
+    "crates/castore-server",
+    "crates/castore-py",
+    "crates/castore-ffi",
+    "crates/castore-cli",
+    "crates/castore-bench",
 ]
 
 [workspace.package]
@@ -15,7 +15,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94.0"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/NatLabRockies/time-series-store"
+repository = "https://github.com/NatLabRockies/castore"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -27,8 +27,8 @@ prost = "0.14"
 prost-types = "0.14"
 sha2 = "0.10"
 thiserror = "1"
-time-series-store-core = { version = "0.1.0", path = "crates/time-series-store-core" }
-time-series-store-proto = { version = "0.1.0", path = "crates/time-series-store-proto" }
+castore-core = { version = "0.1.0", path = "crates/castore-core" }
+castore-proto = { version = "0.1.0", path = "crates/castore-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 # `default-features = false` drops the `derive` feature (and its unmaintained
 # `proc-macro-error2` transitive dep); the CLI builds tables via the Builder API.
