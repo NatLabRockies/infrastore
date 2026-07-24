@@ -245,6 +245,8 @@ dependencies = [
  "clap",
  "clap_complete",
  "csv",
+ "netcdf",
+ "rusqlite",
  "serde",
  "serde_json",
  "tabled",
@@ -280,6 +282,7 @@ dependencies = [
  "ndarray",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing-subscriber",
 ]
 
