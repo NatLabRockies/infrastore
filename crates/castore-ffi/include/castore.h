@@ -579,7 +579,13 @@ int32_t castore_store_get_compression(const struct CastoreStore *handle,
                                       bool *out_shuffle);
 
 /**
- * Verify store integrity and return the number of detected errors.
+ * Recompute each stored array's content hash and report how many disagree with
+ * the hash recorded alongside them through `out_error_count`.
+ *
+ * Covers the NetCDF half of the store only: the SQLite catalog is not inspected,
+ * so a zero count does not mean the store as a whole is sound. A catalog that is
+ * corrupted, truncated, or paired with the wrong NetCDF file still reports zero,
+ * while every read of the affected series fails.
  *
  * # Safety
  *

@@ -191,7 +191,8 @@ moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
 report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
                                    #  "feature_sets_reclaimed": ...}
-integrity = store.verify_integrity()   # {"ok": True, "errors": []} when intact
+integrity = store.verify_integrity()   # {"ok": True, "errors": []} when arrays are intact
+                                   # (arrays only — the SQLite catalog is not checked)
 ```
 
 ## Associations

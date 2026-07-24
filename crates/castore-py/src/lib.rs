@@ -1774,8 +1774,17 @@ impl PyStore {
         Ok(d)
     }
 
-    /// Run the integrity check and return the full report as a dict:
+    /// Recompute each stored array's content hash and report the ones that
+    /// disagree with the hash recorded alongside them, as a dict
     /// `{"ok": bool, "errors": list[str]}`.
+    ///
+    /// Checks the NetCDF half of the store only — the SQLite catalog is not
+    /// inspected, so `ok` being True does not mean the store as a whole is sound.
+    /// A catalog that is corrupted, truncated, or paired with the wrong `.nc`
+    /// file still reports `ok`, while every read of the affected series raises.
+    /// For catalog-side checks use `check_static_consistency` (per-resolution grid
+    /// agreement) and `compact` (which reports the unreachable arrays and feature
+    /// sets a delete left behind — an expected state, not corruption).
     fn verify_integrity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let report = self.store()?.verify_integrity().map_err(map_err)?;
         let d = PyDict::new(py);

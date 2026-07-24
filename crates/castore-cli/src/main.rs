@@ -208,7 +208,18 @@ enum Commands {
         #[arg(long)]
         forecast_only: bool,
     },
-    /// Verify store integrity; nonzero exit if errors are present.
+    /// Verify stored array integrity; nonzero exit if errors are present.
+    ///
+    /// Recomputes each stored array's content hash and reports the ones that
+    /// disagree with the hash recorded alongside them. This checks the NetCDF
+    /// half of the store only: the SQLite catalog is not inspected, so a clean
+    /// report does not mean the store as a whole is sound. A catalog that is
+    /// corrupted, truncated, or paired with the wrong .nc file still verifies
+    /// clean here, while every read of the affected series fails.
+    ///
+    /// For catalog-side checks use `cas check-consistency` (per-resolution grid
+    /// agreement) and `cas compact` (which reports the unreachable arrays and
+    /// feature sets a delete left behind — an expected state, not corruption).
     Verify,
     /// Verify per-resolution static grid consistency.
     CheckConsistency {

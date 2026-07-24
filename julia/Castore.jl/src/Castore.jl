@@ -4152,6 +4152,20 @@ function get_path(store::Store)
     return _take_buffer_string(buf, out_len[])
 end
 
+"""
+    verify_integrity(store) -> Int
+
+Recompute each stored array's content hash and return how many disagree with the
+hash recorded alongside them. `0` means every array checked out.
+
+Checks the NetCDF half of the store only — the SQLite catalog is not inspected,
+so `0` does not mean the store as a whole is sound. A catalog that is corrupted,
+truncated, or paired with the wrong `.nc` file still returns `0`, while every read
+of the affected series throws. For catalog-side checks use
+[`check_static_consistency`] (per-resolution grid agreement) and [`compact!`]
+(which reports the unreachable arrays and feature sets a delete left behind — an
+expected state, not corruption).
+"""
 function verify_integrity(store::Store)
     out = Ref{UInt64}(0)
     code = ccall(

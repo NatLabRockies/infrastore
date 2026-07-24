@@ -193,7 +193,9 @@ def flush(self) -> None: ...
   `feature_sets_reclaimed` counts content-addressed feature rows that no association referenced any
   more; see the [file format](file-format.md#feature_sets).
 - **`verify_integrity`** returns `{"ok": bool, "errors": list[str]}`; `ok` is `True` when the error
-  list is empty.
+  list is empty. It checks stored arrays against their recorded hashes and does not inspect the
+  SQLite catalog, so `ok` is not a statement about the store as a whole — see
+  [content addressing](../explanation/content-addressing.md#what-it-does-not-cover).
 - **`get_time_series`** with `time_range=(start, end)` slices on the time axis; `end` is exclusive.
 
 ## `SingleTimeSeries`

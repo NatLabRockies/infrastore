@@ -138,6 +138,13 @@ pub struct CompactionReport {
     pub feature_sets_reclaimed: usize,
 }
 
+/// The result of [`crate::Store::verify_integrity`]: one message per array whose
+/// recomputed content hash disagreed with the recorded one, or that could not be
+/// read at all.
+///
+/// Empty means every *array* checked out. It does not mean the store as a whole
+/// is sound — the SQLite catalog is not inspected. See
+/// [`crate::Store::verify_integrity`] for what falls outside the check.
 #[derive(Debug, Default, Clone)]
 pub struct IntegrityReport {
     pub errors: Vec<String>,

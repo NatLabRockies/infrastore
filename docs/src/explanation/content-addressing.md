@@ -169,3 +169,29 @@ Because the stored hash and the stored data are independent on disk, they can be
 `verify_integrity` walks every indexed column, recomputes `array_hash` from the stored values, and
 reports any mismatch between the recorded hash and the recomputed one — detecting silent corruption.
 See [`verify_integrity`](../reference/rust-api.md#store).
+
+### What it does not cover
+
+The check is scoped to the **array half** of the store. It reads what the NetCDF side knows about
+and rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about
+the arrays, not about the store as a whole. Three things fall outside it:
+
+- a `data_hash` in the catalog that names no stored array — a truncated or corrupted catalog, or a
+  catalog paired with the wrong `.nc` file. Every read of the affected key fails, and
+  `verify_integrity` reports nothing.
+- a catalog row whose `dtype`, `element_shape`, or `length` misdescribes the array it points at.
+- a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
+  opening read-write with the `.sqlite` half deleted silently recreates it empty, and the resulting
+  store — zero time series, every array still present and now unreachable — verifies clean.
+
+This is a deliberate scope rather than an oversight: the array side is where silent bit-level
+corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
+checks — `check_static_consistency` for per-resolution grid agreement, and `compact` for the
+unreachable arrays and feature sets a delete leaves behind (an expected state, documented in the
+[file format](../reference/file-format.md), not corruption). SQLite also enforces a good deal
+itself: the `NOT NULL` and `CHECK` constraints, and the two unique indexes that guarantee identity
+uniqueness.
+
+If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
+the [file format](../reference/file-format.md) is the one that matters: move, copy, and delete the
+`.nc` and its `.sqlite` together.

@@ -281,8 +281,21 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
 - F3: `castore-core/src/store.rs:1979` — `Store::verify_integrity` delegates straight to the NetCDF
   backend, which walks only its own hash index. A `data_hash` corrupted in the SQLite catalog is
   therefore **not** reported even though every read of that key then fails. Pinned by
-  `verify_integrity_does_not_inspect_the_sqlite_catalog` (1.7). Cross-checking catalog hashes
-  against the backend index would be a behavior change; needs a user decision.
+  `verify_integrity_does_not_inspect_the_sqlite_catalog` (1.7). **RESOLVED as documented scope**
+  (user decision, 2026-07-24): the behavior stays as it is and the check's scope is now stated
+  wherever it is surfaced — `Store::verify_integrity` and `IntegrityReport` rustdoc,
+  `cas verify --help` (and its success line, now "Array integrity OK"), the PyO3 docstring, the
+  Julia docstring, the `castore_store_verify` header comment, and a "What it does not cover" section
+  in `docs/src/explanation/content-addressing.md` that the API references link to. Rationale for not
+  implementing: `verify_integrity` is public across four bindings plus the CLI and gRPC, so
+  tightening it can turn a passing pipeline into a nonzero exit on a store that was working. The
+  catalog already has purpose-built checks — `check_static_consistency` and `compact` — and SQLite
+  enforces the `NOT NULL`/`CHECK`/unique-index invariants itself. If it is ever revisited, the
+  cheapest worthwhile version is a dangling-`data_hash` sweep: `SELECT DISTINCT data_hash`
+  cross-checked against `StorageBackend::contains`, which already exists on both backends and is an
+  in-memory `HashMap` lookup (`netcdf.rs:1382`). That alone catches a truncated catalog, a corrupted
+  one, and a catalog paired with the wrong `.nc`. Note that `PRAGMA integrity_check` would **not**
+  catch this finding's case: a flipped `data_hash` is structurally valid SQLite.
 - F4: `castore-core/src/store.rs:247` — a torn artifact (NetCDF present, `.sqlite` deleted) opened
   **read-write** silently recreates an empty catalog: the store reports zero time series while the
   arrays are still on disk as unreachable garbage. Read-only opens fail loudly instead. Pinned by

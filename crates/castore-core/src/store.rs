@@ -1976,6 +1976,37 @@ impl Store {
         Ok(report)
     }
 
+    /// Recompute every stored array's content hash and report the ones that
+    /// disagree with the hash recorded alongside them.
+    ///
+    /// # Scope: the array half only
+    ///
+    /// A persisted store is two artifacts — the NetCDF file and its companion
+    /// `<path>.sqlite` catalog — but this checks only the first. It reads each
+    /// array the NetCDF side knows about, rehashes it, and compares. It does
+    /// **not** open, parse, or cross-reference the catalog, so an empty report is
+    /// not a statement that the store as a whole is sound. In particular these
+    /// are all invisible to it:
+    ///
+    /// - a `data_hash` in the catalog that names no stored array (a truncated or
+    ///   corrupted catalog, or a catalog paired with the wrong NetCDF file) —
+    ///   every read of the affected key fails, but this reports no error;
+    /// - a catalog row whose `dtype`, `element_shape`, or `length` misdescribes
+    ///   the array it points at;
+    /// - a missing catalog: opening read-write with the `.sqlite` half deleted
+    ///   silently recreates it empty, and the resulting store — zero time series,
+    ///   every array still on disk and now unreachable — verifies clean.
+    ///
+    /// What it does catch is the array-side corruption it is named for: a stored
+    /// value perturbed behind its recorded hash, and a read failure on any
+    /// indexed array.
+    ///
+    /// For catalog-side checks use the purpose-built calls instead:
+    /// [`Self::check_static_consistency`] verifies that every series at a given
+    /// resolution agrees on the grid, and [`Self::compact`] reports the
+    /// unreachable arrays and feature sets a delete left behind (both of which
+    /// are expected states, not corruption — see
+    /// `docs/src/reference/file-format.md`).
     pub fn verify_integrity(&self) -> Result<IntegrityReport> {
         self.backend.verify()
     }

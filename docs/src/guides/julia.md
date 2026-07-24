@@ -265,7 +265,7 @@ end
 
 ```julia
 counts = get_counts(store)        # (components_with_time_series, static_time_series, forecasts)
-nerr   = verify_integrity(store)  # 0 == intact
+nerr   = verify_integrity(store)  # 0 == arrays intact (catalog not checked)
 compact!(store)
 ```
 

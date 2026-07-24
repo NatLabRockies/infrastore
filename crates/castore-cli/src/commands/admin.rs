@@ -100,7 +100,9 @@ pub fn verify(store_path: &Path, format: Format) -> Result<(), String> {
         Format::Csv => output::display_csv_rows(&headers, &rows)?,
         Format::Table => {
             if report.errors.is_empty() {
-                println!("{}", color::header("Integrity OK (no errors)."));
+                // Scoped deliberately: this command checks stored arrays against
+                // their recorded hashes and does not inspect the SQLite catalog.
+                println!("{}", color::header("Array integrity OK (no errors)."));
             } else {
                 println!("{}", color::header("Integrity errors:"));
                 output::display_table_dyn(&headers, &rows);
