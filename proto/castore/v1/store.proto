@@ -141,6 +141,13 @@ message GetResp {
   repeated string    timestamps_rfc3339          = 7;
   int32              dtype                       = 8;        // Dtype code
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
+  // Unused: always the empty string. `ext` is a property of the association
+  // row, not of the time-series values, so the read path has no value to put
+  // here — the server builds this message from the data alone. Read `ext` from
+  // GetMetadata or ListTimeSeries instead (TimeSeriesMetadata.ext, field 19).
+  // Kept rather than reserved so the field numbering stays stable for existing
+  // consumers; do not start populating it without deciding what a client is
+  // meant to do with a value that has no home in the data types.
   string             ext                = 10;
   // Forecast-specific fields (fields 1–10 are backward-compatible).
   string             horizon                     = 11;       // ISO-8601 duration

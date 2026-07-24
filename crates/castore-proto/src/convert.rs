@@ -344,6 +344,13 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 // ---- TimeSeriesData (for GetResp body construction) ----
 
 /// Encode a [`TimeSeriesData`] into the wire-shape used by `GetResp`.
+///
+/// `GetResp.ext` is left empty on every variant, and that is not an omission:
+/// `ext` belongs to the association row ([`TimeSeriesMetadata::ext`], which
+/// [`metadata_to_pb`] does carry), not to the time-series values, so a
+/// `TimeSeriesData` has no `ext` for this function to forward. A gRPC caller
+/// reads `ext` from `GetMetadata` or `ListTimeSeries`. Pinned by
+/// `ext_is_always_empty_in_get_resp`; see the proto comment on field 10.
 pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
@@ -1578,7 +1585,7 @@ mod convert_coverage_tests {
             pb::TimeSeriesType::DeterministicSingleTimeSeries as i32
         );
         // The metadata path *does* carry `ext` (unlike GetResp — see
-        // `ext_is_currently_dropped_in_get_resp`).
+        // `ext_is_always_empty_in_get_resp`).
         assert_eq!(pb.ext.as_deref(), Some("QuadraticFunctionData"));
         assert_eq!(metadata_from_pb(pb).unwrap(), meta);
     }
@@ -1646,18 +1653,22 @@ mod convert_coverage_tests {
     // ---- 3.2: `ext` on the GetResp path ----------------------------------
 
     #[test]
-    fn ext_is_currently_dropped_in_get_resp() {
-        // FINDING F1 (TEST_COVERAGE_PLAN.md §9):
-        // `time_series_data_to_get_resp` hardcodes `ext: String::new()` on all
-        // five variants, while `metadata_to_pb` carries `ext` through. A gRPC
-        // client that reads a series therefore never sees its `ext`, even though
-        // listing its metadata does.
+    fn ext_is_always_empty_in_get_resp() {
+        // FINDING F1 (TEST_COVERAGE_PLAN.md §9), resolved as documented
+        // behavior: `GetResp.ext` is always the empty string, and this test is
+        // the tripwire that keeps it that way.
         //
-        // This is pinned, NOT fixed: changing it is a wire-behavior change and
-        // needs a decision. Note the core `TimeSeriesData` variants do not carry
-        // `ext` at all — it lives on the association row — so "fixing" this
-        // means threading the metadata's `ext` into the response at the server,
-        // not into this function.
+        // It is not a value being dropped. `ext` belongs to the association row
+        // — `metadata_to_pb` carries it, and a gRPC caller reads it from
+        // `GetMetadata` / `ListTimeSeries` — whereas the core `TimeSeriesData`
+        // variants have no `ext` field at all, so this function has nothing to
+        // forward. Populating it would mean a second catalog lookup in the
+        // server handler (multiplied across `BulkRead`, which reuses `GetResp`),
+        // to serve a value the typed Rust client still could not surface.
+        //
+        // If that ever changes, this assertion is the thing to revisit
+        // deliberately — along with the comment on field 10 in
+        // `proto/castore/v1/store.proto`.
         let data = typed(Dtype::F64, vec![3]);
         for original in [
             TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
@@ -1717,7 +1728,7 @@ mod convert_coverage_tests {
             assert_eq!(
                 resp.ext,
                 "",
-                "PIN: GetResp blanks ext for {:?}",
+                "GetResp.ext must stay empty for {:?}",
                 original.time_series_type()
             );
         }

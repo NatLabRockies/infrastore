@@ -196,8 +196,9 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
   `time_series_type = DeterministicSingleTimeSeries`.
 - **3.2 `ext` over gRPC — decision item.** `time_series_data_to_get_resp` hardcodes
   `ext: String::new()` on all five variants (convert.rs:358–422) while `metadata_to_pb` carries
-  `ext` through. Do not change behavior: add a test `ext_is_currently_dropped_in_get_resp` pinning
-  the blanking, and record it in Findings (§9) for the user to rule on.
+  `ext` through. Do not change behavior: add a test pinning the blanking, and record it in Findings
+  (§9) for the user to rule on. **Ruled on** — see F1; the test is
+  `ext_is_always_empty_in_get_resp`.
 - **3.3 Server integration** (`crates/castore-server/tests/`): request-validation matrix — missing
   key, `start` without `end`, malformed RFC3339, unparseable ISO period, unknown
   `owner_category`/`time_series_type` enum ints → each asserts `Code::InvalidArgument`; empty-result
@@ -274,8 +275,25 @@ full §1 gate before each. Total new-test estimate: ~120–150 test functions.
 
 Append entries here as `F<n>: <file:line> — <what the test pinned and why it looks wrong>`. Seeded:
 
-- F1: `castore-proto/src/convert.rs:358–422` — `GetResp` unconditionally blanks `ext` while the
-  metadata path carries it; pinned by test (3.2), needs a user decision.
+- F1: `castore-proto/src/convert.rs:358–422` — `GetResp.ext` is always the empty string while the
+  metadata path carries `ext` through. **RESOLVED as documented behavior** (user decision,
+  2026-07-24): `GetResp.ext` stays empty and is documented as unused. On investigation this is not a
+  value being dropped — three findings changed the picture:
+  1. The field is dead in _both_ directions. The server writes `""` on all five variants and nothing
+     reads it: `get_resp_to_time_series_data` never touches `resp.ext`, and `client.rs` does not
+     mention `ext` at all.
+  2. It cannot be populated where it sits. `time_series_data_to_get_resp` takes a `&TimeSeriesData`,
+     and the core data variants carry no `ext` — it is a property of the association row. The
+     function has nothing to forward.
+  3. `ext` is already on the wire: `TimeSeriesMetadata.ext` (field 19, `optional string`) is carried
+     by `metadata_to_pb`, so `GetMetadata` and `ListTimeSeries` both return it. The gap was one
+     round trip, not a missing capability. Rejected alternatives: populating it at the server costs
+     an extra catalog lookup on the hottest read RPC — multiplied across `BulkRead`, which reuses
+     `GetResp` items — to serve a value the typed Rust client still could not surface without a core
+     API change; and `reserved 10`, though idiomatic for this file (precedent: `reserved 5`), is a
+     proto surface change that the plan froze and is better ridden along with other proto work.
+     Documented on field 10 in `proto/castore/v1/store.proto` and on `time_series_data_to_get_resp`;
+     pinned by `ext_is_always_empty_in_get_resp`.
 - F2: Python cannot natively construct an `IncompatibleFormatError` fixture (no NetCDF attribute
   access from the test suite); the case is pinned in Rust only (1.7).
 - F3: `castore-core/src/store.rs:1979` — `Store::verify_integrity` delegates straight to the NetCDF
