@@ -322,3 +322,22 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
 - F12: `cas verify` writes its failing report to **stdout** and then exits 1, so unlike every other
   failing command it produces no `Error:` stderr diagnostic. A shell caller checking stderr for a
   problem sees nothing. Pinned by `verify_exits_one_on_a_corrupt_store` (3.6).
+- F13: **precision mismatch between timestamps and periods.** A timestamp is stored as an RFC3339
+  string and keeps nanoseconds; a `Period` is an integer count of milliseconds. Three consequences,
+  all pinned in `castore-core/tests/cross_cutting.rs` (4.1):
+  1. A sub-millisecond resolution is not rejected at construction — `SingleTimeSeries::new` does not
+     validate — and reads back as `PT0S`. Forecast constructors do reject it. Same from Python
+     (`test_a_microsecond_resolution_is_silently_truncated_to_zero`) and Julia
+     (`a Microsecond resolution is silently flattened to zero`).
+  2. `Period::to_iso8601` drops a sub-millisecond remainder, so `1500us` encodes as `PT0.001S`.
+  3. Worst of the three: inside `store.rs`'s `resolve_windows` the alignment check (`steps_between`)
+     truncates to milliseconds while the window-selection loop compares timestamps **exactly**. A
+     forecast `time_range` start offset from a window boundary by under a millisecond therefore
+     passes the alignment check and then silently selects the _next_ window — the caller asks for
+     hour 1 and gets hour 2, with no error. Pinned by
+     `a_sub_millisecond_offset_from_the_grid_is_silently_absorbed`. This one looks like a genuine
+     defect rather than a documentation gap; it needs a user decision.
+- F14 (not a defect, recorded for the record): `Store` is `Send` but **not** `Sync` — `rusqlite`'s
+  `Connection` holds `RefCell`s. A caller wanting concurrent readers must wrap it or open one store
+  per thread. Pinned by `store_is_send_but_not_sync` (4.2). Readers, keys, and `TypedArray` are both
+  `Send` and `Sync`.

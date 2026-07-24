@@ -765,3 +765,251 @@ def test_non_sequential_rejects_bad_timestamps():
         NonSequentialTimeSeries(
             [T0], np.array([1.0, 2.0], dtype=np.float64), "count_mismatch"
         )
+
+
+# ---------------------------------------------------------------------------
+# Timestamp and period precision (Phase 4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_microsecond_datetimes_round_trip():
+    """Python's ``datetime`` is microsecond-precision and the core stores an
+    RFC3339 string, so a microsecond initial timestamp survives exactly."""
+    store = Store.create(in_memory=True)
+    precise = datetime(2024, 1, 1, 0, 0, 0, 123456, tzinfo=timezone.utc)
+    key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
+
+    got = store.get_time_series(key)
+    assert got.initial_timestamp == precise
+    assert got.initial_timestamp.microsecond == 123456
+    # `get_metadata` returns the timestamp as an RFC3339 string, not a datetime
+    # (FINDING F8), but the microseconds are still there.
+    assert store.get_metadata(key)["initial_timestamp"] == "2024-01-01T00:00:00.123456+00:00"
+
+
+def test_microsecond_datetimes_round_trip_through_disk(tmp_path):
+    path = tmp_path / "micro.nc"
+    precise = datetime(2024, 1, 1, 0, 0, 0, 999999, tzinfo=timezone.utc)
+    store = Store.create(path=str(path), in_memory=False)
+    key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
+    store.flush()
+    store.close()
+
+    reopened = Store.open(str(path), read_only=True)
+    assert reopened.get_time_series(key).initial_timestamp == precise
+
+
+def test_a_microsecond_resolution_is_silently_truncated_to_zero():
+    """FINDING F13 (see TEST_COVERAGE_PLAN.md §9), from the Python side.
+
+    A `Period` is a whole number of milliseconds, so a `timedelta` finer than
+    that loses its magnitude. The store *accepts* the series and reports the
+    resolution as ``PT0S`` rather than rejecting the input — pinned, not fixed.
+    """
+    store = Store.create(in_memory=True)
+    key = _add(
+        store,
+        1,
+        SingleTimeSeries(
+            T0, timedelta(microseconds=1), np.arange(4, dtype=np.float64), "micro"
+        ),
+    )
+    assert key.resolution == "PT0S", "PIN: a sub-millisecond resolution becomes PT0S"
+
+    # A full read still works; a time-sliced read cannot, because the grid step
+    # is zero.
+    assert store.get_time_series(key).length == 4
+    with pytest.raises(InvalidParameterError):
+        store.get_time_series(key, time_range=(T0, T0 + timedelta(seconds=1)))
+
+
+def test_sub_second_resolutions_are_exact_down_to_one_millisecond():
+    store = Store.create(in_memory=True)
+    for i, (label, resolution) in enumerate(
+        [
+            ("PT0.5S", timedelta(milliseconds=500)),
+            ("PT0.001S", timedelta(milliseconds=1)),
+            ("PT0.1S", timedelta(milliseconds=100)),
+            ("PT1S", timedelta(seconds=1)),
+        ]
+    ):
+        key = _add(
+            store,
+            i + 1,
+            SingleTimeSeries(
+                T0, resolution, np.arange(4, dtype=np.float64), f"res_{i}"
+            ),
+        )
+        assert key.resolution == label
+        assert store.get_time_series(key).resolution == label
+
+        # And the grid slices correctly at that resolution.
+        sliced = store.get_time_series(
+            key, time_range=(T0 + resolution, T0 + 3 * resolution)
+        )
+        np.testing.assert_array_equal(
+            np.asarray(sliced.data), np.array([1.0, 2.0])
+        )
+        assert sliced.initial_timestamp == T0 + resolution
+
+
+def test_a_naive_datetime_is_rejected():
+    """A timestamp with no tzinfo would be ambiguous, so it is refused at the
+    boundary rather than being assumed to be UTC."""
+    with pytest.raises(TypeError, match="tzinfo"):
+        SingleTimeSeries(
+            datetime(2024, 1, 1), timedelta(hours=1), np.arange(4, dtype=np.float64), "naive"
+        )
+
+
+def test_pre_1970_and_far_future_timestamps_round_trip(tmp_path):
+    path = tmp_path / "spans.nc"
+    store = Store.create(path=str(path), in_memory=False)
+    cases = {
+        "pre_epoch": datetime(1900, 1, 1, tzinfo=timezone.utc),
+        "just_before": datetime(1969, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
+        "epoch": datetime(1970, 1, 1, tzinfo=timezone.utc),
+        "far_future": datetime(2200, 6, 15, 12, 30, 45, tzinfo=timezone.utc),
+    }
+    keys = {
+        name: _add(store, i + 1, _sts(name, np.arange(4, dtype=np.float64), initial=ts))
+        for i, (name, ts) in enumerate(cases.items())
+    }
+    store.flush()
+    store.close()
+
+    reopened = Store.open(str(path), read_only=True)
+    for name, key in keys.items():
+        assert reopened.get_time_series(key).initial_timestamp == cases[name], name
+
+
+def test_non_sequential_timestamps_keep_microsecond_spacing():
+    store = Store.create(in_memory=True)
+    timestamps = [
+        T0,
+        T0 + timedelta(microseconds=1),
+        T0 + timedelta(microseconds=2),
+        T0 + timedelta(milliseconds=1),
+    ]
+    key = store.add_time_series(
+        1,
+        OWNER_TYPE,
+        OWNER_CAT,
+        NonSequentialTimeSeries(
+            timestamps, np.arange(4, dtype=np.float64), "precise"
+        ),
+    )
+    got = store.get_time_series(key)
+    assert got.timestamps == timestamps, (
+        "microsecond spacing must survive; a millisecond-quantized encoding would "
+        "collapse the first three"
+    )
+
+
+def test_a_century_spanning_non_sequential_series_round_trips(tmp_path):
+    path = tmp_path / "century.nc"
+    timestamps = [
+        datetime(1900, 1, 1, tzinfo=timezone.utc),
+        datetime(1970, 1, 1, tzinfo=timezone.utc),
+        datetime(2024, 2, 29, 12, 0, tzinfo=timezone.utc),  # leap day
+        datetime(2100, 12, 31, 23, 59, 59, tzinfo=timezone.utc),
+    ]
+    values = np.arange(4, dtype=np.float64) * 10
+
+    store = Store.create(path=str(path), in_memory=False)
+    key = store.add_time_series(
+        1,
+        OWNER_TYPE,
+        OWNER_CAT,
+        NonSequentialTimeSeries(timestamps, values, "century"),
+    )
+    store.flush()
+    store.close()
+
+    reopened = Store.open(str(path), read_only=True)
+    got = reopened.get_time_series(key)
+    assert got.timestamps == timestamps
+    np.testing.assert_array_equal(np.asarray(got.data), values)
+
+
+# ---------------------------------------------------------------------------
+# Reader / mutation interaction (Phase 4.2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_reader_built_before_a_removal_errors_on_the_next_read():
+    """A ``StaticReader`` is an owned object here, so nothing stops the store
+    being mutated behind it. PIN that the stale read *fails* rather than reading
+    whatever now occupies the reclaimed slot — a silent success would risk
+    handing back another series' data."""
+    store = Store.create(in_memory=True)
+    k1 = _add(store, 1, _sts("a", np.arange(4, dtype=np.float64)))
+    _add(store, 2, _sts("b", np.arange(4, dtype=np.float64) + 100))
+    assert store.num_distinct_arrays() == 2
+
+    reader = store.build_static_reader(resolution=RES_1H)
+    store.static_read(reader, T0)
+    before = np.sort(reader.group_values(0))
+    np.testing.assert_array_equal(before, np.array([0.0, 100.0]))
+
+    store.remove_time_series(k1)
+    assert store.num_distinct_arrays() == 1
+
+    with pytest.raises(NotFoundError):
+        store.static_read(reader, T0)
+
+    # A rebuilt reader works and sees only the survivor.
+    rebuilt = store.build_static_reader(resolution=RES_1H)
+    store.static_read(rebuilt, T0)
+    np.testing.assert_array_equal(rebuilt.group_values(0), np.array([100.0]))
+
+
+def test_a_reader_built_before_a_removal_of_a_shared_array_reads_stale_values():
+    """When the removed series shared its array with a survivor, the array stays
+    alive and the stale reader keeps returning its build-time snapshot — including
+    the column whose association is gone."""
+    store = Store.create(in_memory=True)
+    values = np.arange(4, dtype=np.float64)
+    k1 = _add(store, 1, _sts("a", values))
+    _add(store, 2, _sts("b", values))
+    assert store.num_distinct_arrays() == 1
+
+    reader = store.build_static_reader(resolution=RES_1H)
+    store.static_read(reader, T0)
+    before = reader.group_values(0)
+    assert before.shape == (2,)
+
+    store.remove_time_series(k1)
+    assert store.num_distinct_arrays() == 1
+
+    store.static_read(reader, T0)
+    np.testing.assert_array_equal(
+        reader.group_values(0),
+        before,
+        err_msg="a stale reader must return its snapshot, not garbage",
+    )
+
+    # A rebuilt reader has one column.
+    rebuilt = store.build_static_reader(resolution=RES_1H)
+    store.static_read(rebuilt, T0)
+    assert rebuilt.group_values(0).shape == (1,)
+
+
+def test_a_reader_built_before_an_add_does_not_see_the_new_series():
+    """The column set is fixed at build time, so a caller stepping a timeline gets
+    a stable shape for the whole sweep."""
+    store = Store.create(in_memory=True)
+    _add(store, 1, _sts("a", np.arange(4, dtype=np.float64)))
+
+    reader = store.build_static_reader(resolution=RES_1H)
+    store.static_read(reader, T0)
+    assert reader.group_values(0).shape == (1,)
+
+    _add(store, 2, _sts("b", np.arange(4, dtype=np.float64) + 100))
+
+    store.static_read(reader, T0)
+    assert reader.group_values(0).shape == (1,), "the reader's shape is a snapshot"
+
+    rebuilt = store.build_static_reader(resolution=RES_1H)
+    store.static_read(rebuilt, T0)
+    assert rebuilt.group_values(0).shape == (2,)

@@ -2312,3 +2312,288 @@ end
     @test list_names(store) == [name]
     @test list_owner_types(store) == ["Générateur"]
 end
+
+# ---- Timestamp and period precision (Phase 4.1) ----------------------------
+#
+# Julia's `DateTime` is millisecond-precision, which happens to match the
+# `Period` unit exactly, so nothing truncates on this side — but a `Microsecond`
+# resolution can still be *constructed* and is silently flattened. Pinned here
+# because Julia is the binding whose native type is coarsest.
+
+@testset "millisecond timestamps and sub-second resolutions are exact" begin
+    store = Store(in_memory=true)
+    t = DateTime(2024, 1, 1, 0, 0, 0, 123)  # 123 ms
+    @test Dates.millisecond(t) == 123
+
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t, Hour(1), Float64[1, 2, 3, 4], "load"),
+    )
+    got = get_time_series(SingleTimeSeries, store, 1, Component, "load"; resolution=Hour(1))
+    @test got.initial_timestamp == t
+    @test Dates.millisecond(got.initial_timestamp) == 123
+
+    # Sub-second resolutions down to one millisecond are exact.
+    for (i, res) in
+        enumerate([Millisecond(500), Millisecond(1), Millisecond(100), Second(1)])
+        name = "res_$i"
+        add_time_series!(
+            store,
+            100 + i,
+            "Generator",
+            Component,
+            SingleTimeSeries(t, res, Float64[1, 2, 3, 4], name),
+        )
+        g = get_time_series(
+            SingleTimeSeries, store, 100 + i, Component, name; resolution=res
+        )
+        @test g.resolution == Millisecond(res)
+
+        # And the grid slices correctly at that resolution.
+        sliced = get_time_series(
+            SingleTimeSeries,
+            store,
+            100 + i,
+            Component,
+            name;
+            resolution=res,
+            time_range=(t + res, t + 3 * res),
+        )
+        @test sliced.data == Float64[2, 3]
+        @test sliced.initial_timestamp == t + Millisecond(res)
+    end
+end
+
+@testset "a Microsecond resolution is silently flattened to zero" begin
+    # FINDING F13, from the Julia side: a `Period` is a whole number of
+    # milliseconds, so a `Microsecond(1)` resolution loses its magnitude. The add
+    # succeeds and the stored resolution reads back as `Millisecond(0)` rather
+    # than being rejected. PINNED, not fixed.
+    store = Store(in_memory=true)
+    t = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t, Microsecond(1), Float64[1, 2, 3, 4], "micro"),
+    )
+    keys = list_keys(store; owner_id=1)
+    @test length(keys) == 1
+    @test keys[1].resolution == Millisecond(0)
+
+    # A full read still works; a time-sliced one cannot divide by a zero step.
+    got = get_time_series(
+        SingleTimeSeries, store, 1, Component, "micro"; resolution=Millisecond(0)
+    )
+    @test length(got.data) == 4
+    @test_throws Castore.InvalidParameterError get_time_series(
+        SingleTimeSeries,
+        store,
+        1,
+        Component,
+        "micro";
+        resolution=Millisecond(0),
+        time_range=(t, t + Second(1)),
+    )
+end
+
+@testset "pre-1970 and far-future timestamps round trip" begin
+    mktempdir() do dir
+        path = joinpath(dir, "spans.nc")
+        cases = [
+            ("pre_epoch", DateTime(1900, 1, 1)),
+            ("just_before", DateTime(1969, 12, 31, 23, 59, 59)),
+            ("epoch", DateTime(1970, 1, 1)),
+            ("far_future", DateTime(2200, 6, 15, 12, 30, 45)),
+        ]
+
+        store = Store(in_memory=false, path=path)
+        for (i, (name, ts)) in enumerate(cases)
+            add_time_series!(
+                store,
+                i,
+                "Generator",
+                Component,
+                SingleTimeSeries(ts, Hour(1), Float64[1, 2, 3, 4], name),
+            )
+        end
+        flush!(store)
+        close!(store)
+
+        reopened = open_store(path; read_only=true)
+        for (i, (name, ts)) in enumerate(cases)
+            got = get_time_series(
+                SingleTimeSeries, reopened, i, Component, name; resolution=Hour(1)
+            )
+            @test got.initial_timestamp == ts
+            # A slice resolves against a negative epoch too.
+            sliced = get_time_series(
+                SingleTimeSeries,
+                reopened,
+                i,
+                Component,
+                name;
+                resolution=Hour(1),
+                time_range=(ts + Hour(1), ts + Hour(3)),
+            )
+            @test sliced.data == Float64[2, 3]
+        end
+        close!(reopened)
+    end
+end
+
+@testset "a century-spanning non-sequential series round trips" begin
+    mktempdir() do dir
+        path = joinpath(dir, "century.nc")
+        timestamps = [
+            DateTime(1900, 1, 1),
+            DateTime(1969, 12, 31, 23, 59, 59),
+            DateTime(1970, 1, 1),
+            DateTime(2024, 2, 29, 12, 0),   # leap day
+            DateTime(2100, 12, 31, 23, 59, 59),
+        ]
+        values = Float64[0, 10, 20, 30, 40]
+
+        store = Store(in_memory=false, path=path)
+        add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            NonSequentialTimeSeries(timestamps, values, "century"),
+        )
+        flush!(store)
+        close!(store)
+
+        reopened = open_store(path; read_only=true)
+        got = get_time_series(NonSequentialTimeSeries, reopened, 1, Component, "century")
+        @test got.timestamps == timestamps
+        @test got.data == values
+        close!(reopened)
+    end
+end
+
+@testset "non-sequential timestamps keep millisecond spacing" begin
+    store = Store(in_memory=true)
+    base = DateTime(2024, 1, 1)
+    timestamps = [base, base + Millisecond(1), base + Millisecond(2), base + Second(1)]
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        NonSequentialTimeSeries(timestamps, Float64[1, 2, 3, 4], "precise"),
+    )
+    got = get_time_series(NonSequentialTimeSeries, store, 1, Component, "precise")
+    @test got.timestamps == timestamps
+end
+
+# ---- Reader / mutation interaction (Phase 4.2) ------------------------------
+#
+# A `StaticReader` here is an owned object holding a build-time snapshot of the
+# column set and array hashes, so nothing stops the store being mutated behind
+# it. The two cases differ by whether the removed series' array was shared.
+
+@testset "a stale reader over a reclaimed array errors on the next read" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        2,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[100, 101, 102, 103], "b"),
+    )
+    @test num_distinct_arrays(store) == 2
+
+    reader = build_static_reader(store; resolution=Hour(1))
+    static_read!(reader, t0)
+    @test sort(vec(static_values(reader, 1))) == Float64[1, 100]
+
+    # `list_keys` returns metadata NamedTuples, so remove by attributes.
+    remove_time_series!(store, 1, Component, "a"; resolution=Hour(1))
+    @test num_distinct_arrays(store) == 1
+
+    # PIN: the read fails rather than returning whatever now occupies the
+    # reclaimed slot.
+    @test_throws Castore.NotFoundError static_read!(reader, t0)
+
+    # A rebuilt reader works and sees only the survivor.
+    rebuilt = build_static_reader(store; resolution=Hour(1))
+    static_read!(rebuilt, t0)
+    @test vec(static_values(rebuilt, 1)) == Float64[100]
+end
+
+@testset "a stale reader over a shared array returns its snapshot" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    for (owner, name) in [(1, "a"), (2, "b")]
+        add_time_series!(
+            store,
+            owner,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], name),
+        )
+    end
+    @test num_distinct_arrays(store) == 1
+
+    reader = build_static_reader(store; resolution=Hour(1))
+    static_read!(reader, t0)
+    before = copy(vec(static_values(reader, 1)))
+    @test length(before) == 2
+
+    remove_time_series!(store, 1, Component, "a"; resolution=Hour(1))
+    @test num_distinct_arrays(store) == 1
+
+    # The array is still alive for the survivor, so the stale read succeeds and
+    # returns the build-time snapshot.
+    static_read!(reader, t0)
+    @test vec(static_values(reader, 1)) == before
+
+    rebuilt = build_static_reader(store; resolution=Hour(1))
+    static_read!(rebuilt, t0)
+    @test length(vec(static_values(rebuilt, 1))) == 1
+end
+
+@testset "a reader built before an add does not see the new series" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "a"),
+    )
+
+    reader = build_static_reader(store; resolution=Hour(1))
+    static_read!(reader, t0)
+    @test length(vec(static_values(reader, 1))) == 1
+
+    add_time_series!(
+        store,
+        2,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[100, 101, 102, 103], "b"),
+    )
+
+    static_read!(reader, t0)
+    @test length(vec(static_values(reader, 1))) == 1
+
+    rebuilt = build_static_reader(store; resolution=Hour(1))
+    static_read!(rebuilt, t0)
+    @test length(vec(static_values(rebuilt, 1))) == 2
+end
