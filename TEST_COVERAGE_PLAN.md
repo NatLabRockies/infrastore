@@ -323,20 +323,35 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
   failing command it produces no `Error:` stderr diagnostic. A shell caller checking stderr for a
   problem sees nothing. Pinned by `verify_exits_one_on_a_corrupt_store` (3.6).
 - F13: **precision mismatch between timestamps and periods.** A timestamp is stored as an RFC3339
-  string and keeps nanoseconds; a `Period` is an integer count of milliseconds. Three consequences,
-  all pinned in `castore-core/tests/cross_cutting.rs` (4.1):
-  1. A sub-millisecond resolution is not rejected at construction — `SingleTimeSeries::new` does not
-     validate — and reads back as `PT0S`. Forecast constructors do reject it. Same from Python
-     (`test_a_microsecond_resolution_is_silently_truncated_to_zero`) and Julia
-     (`a Microsecond resolution is silently flattened to zero`).
-  2. `Period::to_iso8601` drops a sub-millisecond remainder, so `1500us` encodes as `PT0.001S`.
-  3. Worst of the three: inside `store.rs`'s `resolve_windows` the alignment check (`steps_between`)
-     truncates to milliseconds while the window-selection loop compares timestamps **exactly**. A
-     forecast `time_range` start offset from a window boundary by under a millisecond therefore
-     passes the alignment check and then silently selects the _next_ window — the caller asks for
-     hour 1 and gets hour 2, with no error. Pinned by
-     `a_sub_millisecond_offset_from_the_grid_is_silently_absorbed`. This one looks like a genuine
-     defect rather than a documentation gap; it needs a user decision.
+  string and keeps nanoseconds; a `Period` is an integer count of milliseconds. The **smallest
+  supported period is one millisecond** (`Period::Fixed`) or one month (`Period::Months`), enforced
+  in three independent places: `is_positive` tests `num_milliseconds() > 0`, `to_iso8601` emits at
+  most three fractional digits, and `from_iso8601` _rejects_ more than three — so a finer period
+  cannot be written to or read from disk or the wire. That floor is now stated in the `period.rs`
+  module docs. Three consequences, all covered in `castore-core/tests/cross_cutting.rs` (4.1):
+  1. **Documented, not fixed.** A sub-millisecond resolution is not rejected at construction —
+     `SingleTimeSeries::new` does not validate — and reads back as `PT0S`. Forecast constructors do
+     reject it. Same from Python (`test_a_microsecond_resolution_is_silently_truncated_to_zero`) and
+     Julia (`a Microsecond resolution is silently flattened to zero`). Callers building a period
+     from a sub-millisecond duration must round it themselves.
+  2. **Documented, not fixed.** `Period::to_iso8601` drops a sub-millisecond remainder, so `1500us`
+     encodes as `PT0.001S`.
+  3. **FIXED** (authorized by the user, 2026-07-24). Inside `Period::steps_between` the `Fixed`
+     branch tested only `delta_ms % step_ms == 0`, and `delta_ms` truncates, so a forecast
+     `time_range` start in the open range `(window boundary, boundary + 1ms)` passed the alignment
+     check and was then excluded by `resolve_windows`' exact `>=` filter — silently selecting the
+     _next_ window, so a caller asking for hour 1 got hour 2 with no error. The `Months` branch had
+     always verified the exact landing via `add_to(start, k) == at`; `Fixed` now does too, making an
+     off-grid forecast bound a clean `InvalidParameter` as that function's contract already claimed.
+     Documenting the millisecond floor could not close this one: the affected input is a
+     _timestamp_, and sub-millisecond timestamps are genuinely supported — an `initial_timestamp`
+     keeps nanoseconds, so a grid can be millisecond-spaced while nanosecond-offset in its phase. No
+     format change (read-path validation only, so no `DATA_FORMAT_VERSION` bump). The static read
+     path is unaffected: it floors/ceils arbitrary bounds by design, via `floor_steps` /
+     `ceil_steps`, which stay lenient. Now asserted by
+     `a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected`,
+     `a_forecast_on_a_nanosecond_offset_grid_reads_at_its_own_boundaries`, and the
+     `steps_between_rejects_sub_millisecond_offsets` unit test.
 - F14 (not a defect, recorded for the record): `Store` is `Send` but **not** `Sync` — `rusqlite`'s
   `Connection` holds `RefCell`s. A caller wanting concurrent readers must wrap it or open one store
   per thread. Pinned by `store_is_send_but_not_sync` (4.2). Readers, keys, and `TypedArray` are both

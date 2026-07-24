@@ -19,6 +19,32 @@
 //! The on-disk and over-the-wire encoding is the ISO-8601 duration string
 //! ([`Period::to_iso8601`] / [`Period::from_iso8601`]), e.g. `PT1H`, `P1M`,
 //! `P1Y`.
+//!
+//! # Smallest supported period
+//!
+//! **One millisecond** for [`Period::Fixed`], one month for [`Period::Months`].
+//! The millisecond floor is not incidental — it is the unit every `Fixed`
+//! computation works in:
+//!
+//! - [`Period::is_positive`] tests `num_milliseconds() > 0`, so a sub-millisecond
+//!   duration is not a positive period and every forecast constructor rejects it;
+//! - [`Period::to_iso8601`] emits at most three fractional-second digits, so
+//!   `PT0.001S` is the smallest non-zero period that can be encoded;
+//! - [`Period::from_iso8601`] **rejects** more than three fractional digits, so a
+//!   finer period cannot be read back from disk or off the wire either.
+//!
+//! `Period::Fixed` wraps a [`chrono::Duration`], which *can* hold a finer span,
+//! and the conversion is lossy in one direction only: constructing
+//! `Period::fixed(Duration::microseconds(500))` succeeds but encodes as `PT0S`.
+//! `SingleTimeSeries::new` does not validate its resolution, so such a series can
+//! be stored, and its resolution reads back as zero. Callers building a period
+//! from a sub-millisecond duration should round it themselves.
+//!
+//! Note that this floor applies to *periods*, not to timestamps: an
+//! `initial_timestamp` is stored as an RFC3339 string and keeps nanoseconds, so a
+//! grid may be millisecond-*spaced* while being nanosecond-*offset* in its phase.
+//! [`Period::steps_between`] therefore compares grid landings exactly rather than
+//! in whole milliseconds.
 
 use chrono::{DateTime, Datelike, Duration, Months, Utc};
 
@@ -95,10 +121,18 @@ impl Period {
     /// The number of whole periods from `start` to `at` on this period's grid.
     ///
     /// Errors if `at` is before `start` or does not land exactly on the grid
-    /// `start, start+1·self, start+2·self, …` (no rounding or clamping). For
-    /// [`Period::Months`] this verifies `self.add_to(start, k) == at`, which
-    /// rejects day-of-month/time-of-day mismatches (e.g. Jan-31 + 1 month is
-    /// Feb-28, not Feb-31).
+    /// `start, start+1·self, start+2·self, …` (no rounding or clamping). Both
+    /// period kinds confirm the landing with `self.add_to(start, k) == at`:
+    ///
+    /// - for [`Period::Months`] that rejects day-of-month/time-of-day mismatches
+    ///   (e.g. Jan-31 + 1 month is Feb-28, not Feb-31);
+    /// - for [`Period::Fixed`] it rejects a `at` whose offset from a grid point is
+    ///   finer than the millisecond the step count is computed in. Without it, an
+    ///   `at` in the open range `(grid point, grid point + 1ms)` divides cleanly
+    ///   in whole milliseconds and would be reported as *on* the grid, leaving a
+    ///   caller with a step index whose grid point is strictly before `at`.
+    ///   Callers that want to snap an arbitrary bound onto the grid instead of
+    ///   rejecting it should use [`Period::floor_steps`] / [`Period::ceil_steps`].
     pub fn steps_between(&self, start: DateTime<Utc>, at: DateTime<Utc>) -> Result<usize> {
         let off_grid = |what: &str| {
             TimeSeriesError::InvalidParameter(format!(
@@ -121,7 +155,14 @@ impl Period {
                 if delta_ms % step_ms != 0 {
                     return Err(off_grid("not aligned to"));
                 }
-                Ok((delta_ms / step_ms) as usize)
+                let k = delta_ms / step_ms;
+                // `delta_ms` truncates toward zero, so divisibility alone accepts
+                // any sub-millisecond offset past a grid point. Verify the exact
+                // landing, as the `Months` branch does.
+                if self.add_to(start, k) != Some(at) {
+                    return Err(off_grid("not aligned to"));
+                }
+                Ok(k as usize)
             }
             Period::Months(m) => {
                 if *m <= 0 {
@@ -560,6 +601,65 @@ mod tests {
         assert_eq!(
             Period::Fixed(Duration::hours(1)).add_to(ts(2024, 1, 1, 0), 5),
             Some(ts(2024, 1, 1, 5))
+        );
+    }
+
+    #[test]
+    fn steps_between_rejects_sub_millisecond_offsets() {
+        // `delta_ms` truncates toward zero, so divisibility alone would accept any
+        // offset in the open range `(grid point, grid point + 1ms)`. Both period
+        // kinds verify the exact landing, so all of these are off-grid.
+        let start = ts(2024, 1, 1, 0);
+        for period in [
+            Period::Fixed(Duration::hours(1)),
+            Period::Fixed(Duration::milliseconds(1)),
+            Period::Months(1),
+        ] {
+            let on_grid = period.add_to(start, 1).unwrap();
+            assert_eq!(
+                period.steps_between(start, on_grid).unwrap(),
+                1,
+                "{period:?}"
+            );
+
+            for offset in [
+                Duration::nanoseconds(1),
+                Duration::microseconds(1),
+                Duration::microseconds(999),
+            ] {
+                assert!(
+                    period.steps_between(start, on_grid + offset).is_err(),
+                    "{period:?}: {offset:?} past a grid point must be off-grid"
+                );
+            }
+        }
+
+        // A grid whose *phase* is finer than a millisecond is still addressable at
+        // its own points: an `initial_timestamp` keeps nanoseconds even though a
+        // period does not.
+        let offset_start = start + Duration::nanoseconds(500);
+        let hourly = Period::Fixed(Duration::hours(1));
+        assert_eq!(
+            hourly
+                .steps_between(offset_start, offset_start + Duration::hours(3))
+                .unwrap(),
+            3
+        );
+        // ...and rounding that phase away puts the bound off the grid.
+        assert!(
+            hourly
+                .steps_between(offset_start, start + Duration::hours(3))
+                .is_err()
+        );
+
+        // `floor_steps` / `ceil_steps` remain the lenient counterparts, by design.
+        assert_eq!(
+            hourly.floor_steps(start, start + Duration::hours(1) + Duration::nanoseconds(1)),
+            1
+        );
+        assert_eq!(
+            hourly.ceil_steps(start, start + Duration::hours(1) + Duration::nanoseconds(1)),
+            2
         );
     }
 

@@ -202,18 +202,23 @@ fn nanosecond_precision_timestamps_survive_the_catalog_round_trip() {
 }
 
 #[test]
-fn a_sub_millisecond_offset_from_the_grid_is_silently_absorbed() {
-    // FINDING F13: an initial timestamp keeps nanoseconds, but every grid
-    // computation goes through `Duration::num_milliseconds()`, which truncates.
-    // So a query bound offset from a grid point by less than a millisecond is
-    // treated as being *on* the grid — including on the forecast path, whose
-    // whole contract is that a window start must land exactly. Pinned, not
-    // fixed: making the check nanosecond-exact would reject bounds that callers
-    // currently get away with.
+fn a_sub_millisecond_offset_from_a_forecast_window_boundary_is_rejected() {
+    // A `Period` is a whole number of milliseconds (see the `period.rs` module
+    // docs), but a timestamp keeps nanoseconds — so a grid can be
+    // millisecond-spaced and nanosecond-offset in its phase. The two paths that
+    // consume a `time_range` treat an off-grid bound differently, by design:
+    //
+    //   * a *static* read floors/ceils the bounds onto the grid;
+    //   * a *forecast* read requires the start to BE a window boundary.
+    //
+    // This previously diverged: `steps_between`'s `Fixed` branch tested only
+    // `delta_ms % step_ms == 0`, and `delta_ms` truncates, so a start in the open
+    // range `(boundary, boundary + 1ms)` passed the alignment check and was then
+    // excluded by the window filter's exact `>=` — silently returning the *next*
+    // window. `Fixed` now verifies the exact landing the way `Months` always has.
     let mut store = create_store(None, true).unwrap();
 
-    // Static: bounds are floored/ceiled anyway, so absorbing the offset is the
-    // documented behavior rather than a surprise.
+    // --- static: an off-grid start is floored onto the grid, as documented ---
     let static_key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
     let nudged = t0() + Duration::hours(1) + Duration::nanoseconds(1);
     let sliced = store
@@ -228,8 +233,7 @@ fn a_sub_millisecond_offset_from_the_grid_is_silently_absorbed() {
         "a static read floors an off-grid start onto the grid"
     );
 
-    // Forecast: a nanosecond nudge is accepted and resolves to window 1, even
-    // though `steps_between` is documented as requiring exact alignment.
+    // --- forecast: an off-grid start is rejected, at any magnitude ---
     let det = Deterministic::new(
         t0(),
         Duration::hours(1),
@@ -241,26 +245,23 @@ fn a_sub_millisecond_offset_from_the_grid_is_silently_absorbed() {
     )
     .unwrap();
     let fc_key = add(&mut store, 2, TimeSeriesData::Deterministic(det));
-    let got = store
-        .get_time_series(fc_key.identity(), Some((nudged, t0() + Duration::hours(3))))
-        .unwrap();
-    let fc = got.as_deterministic().unwrap();
-    // The two halves of `resolve_windows` disagree about precision, and the
-    // combination is what makes this worth pinning:
-    //
-    //   * the alignment check (`steps_between`) truncates to milliseconds, so the
-    //     nudged start passes as "on grid" and resolves to window index 1;
-    //   * the selection loop then keeps windows whose start is `>= start`
-    //     *exactly*, and window 1 begins one nanosecond BEFORE the nudged start.
-    //
-    // So the nudge is accepted and then silently shifts the selection forward by
-    // one window: the caller asked for hour 1 and got hour 2.
-    assert_eq!(
-        fc.initial_timestamp,
-        t0() + Duration::hours(2),
-        "PIN: a sub-millisecond nudge is accepted, then skips the window it named"
-    );
-    assert_eq!(fc.count, 1, "only window 2 survives the exact comparison");
+
+    for (label, offset) in [
+        ("1ns", Duration::nanoseconds(1)),
+        ("1us", Duration::microseconds(1)),
+        ("999us", Duration::microseconds(999)),
+        ("1ms", Duration::milliseconds(1)),
+        ("1s", Duration::seconds(1)),
+    ] {
+        let start = t0() + Duration::hours(1) + offset;
+        let err = store
+            .get_time_series(fc_key.identity(), Some((start, t0() + Duration::hours(3))))
+            .unwrap_err();
+        assert!(
+            matches!(err, castore_core::TimeSeriesError::InvalidParameter(_)),
+            "{label} past a window boundary must be rejected, got {err:?}"
+        );
+    }
 
     // An exactly-aligned start selects the window the caller named.
     let exact = store
@@ -271,36 +272,53 @@ fn a_sub_millisecond_offset_from_the_grid_is_silently_absorbed() {
         .unwrap();
     let exact = exact.as_deterministic().unwrap();
     assert_eq!(exact.initial_timestamp, t0() + Duration::hours(1));
-    assert_eq!(exact.count, 2, "the aligned query gets both windows");
+    assert_eq!(exact.count, 2);
+}
 
-    // A *millisecond* offset is above the truncation threshold and IS rejected,
-    // which is what makes the pin above a precision boundary rather than a
-    // missing check.
-    let one_ms_off = t0() + Duration::hours(1) + Duration::milliseconds(1);
-    assert!(
-        store
-            .get_time_series(
-                fc_key.identity(),
-                Some((one_ms_off, t0() + Duration::hours(3)))
-            )
-            .is_err(),
-        "a whole-millisecond offset must be rejected as off-grid"
-    );
+#[test]
+fn a_forecast_on_a_nanosecond_offset_grid_reads_at_its_own_boundaries() {
+    // The other side of the contract: a sub-millisecond `initial_timestamp` is
+    // supported, so the grid's *phase* can be finer than a millisecond. A read at
+    // the grid's own boundary — nanoseconds included — must work, and a bound
+    // rounded to the millisecond must not.
+    let initial = t0() + Duration::nanoseconds(500);
+    let mut store = create_store(None, true).unwrap();
+    let det = Deterministic::new(
+        initial,
+        Duration::hours(1),
+        Duration::hours(2),
+        Duration::hours(1),
+        3,
+        TypedArray::from_f64(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        "det",
+    )
+    .unwrap();
+    let key = add(&mut store, 1, TimeSeriesData::Deterministic(det));
 
-    // 999 microseconds is one below the truncation threshold, so it takes the
-    // same path: accepted, and shifted forward a window.
-    let just_under = t0() + Duration::hours(1) + Duration::microseconds(999);
-    let shifted = store
+    // The exact window-1 boundary carries the same 500ns phase.
+    let boundary = initial + Duration::hours(1);
+    let got = store
         .get_time_series(
-            fc_key.identity(),
-            Some((just_under, t0() + Duration::hours(3))),
+            key.identity(),
+            Some((boundary, boundary + Duration::hours(2))),
         )
         .unwrap();
-    assert_eq!(
-        shifted.as_deterministic().unwrap().initial_timestamp,
-        t0() + Duration::hours(2),
-        "999us is below the millisecond threshold: accepted, then shifted"
-    );
+    let fc = got.as_deterministic().unwrap();
+    assert_eq!(fc.initial_timestamp, boundary);
+    assert_eq!(fc.count, 2);
+
+    // The same instant rounded down to the millisecond is not a window boundary.
+    for rounded in [t0() + Duration::hours(1), t0()] {
+        assert!(
+            store
+                .get_time_series(
+                    key.identity(),
+                    Some((rounded, rounded + Duration::hours(2)))
+                )
+                .is_err(),
+            "a millisecond-rounded bound is off a nanosecond-offset grid"
+        );
+    }
 }
 
 #[test]
