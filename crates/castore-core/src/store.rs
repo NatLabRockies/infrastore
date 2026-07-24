@@ -199,7 +199,6 @@ pub struct Store {
     metadata: MetadataStore,
     read_only: bool,
     /// Filesystem path for the NetCDF file (None if `in_memory`).
-    #[allow(dead_code)]
     netcdf_path: Option<PathBuf>,
 }
 
@@ -270,6 +269,12 @@ impl Store {
     /// from the file); in-memory stores report [`Compression::None`].
     pub fn compression(&self) -> Compression {
         self.backend.compression()
+    }
+
+    /// The filesystem path backing this store's NetCDF file, or `None` for an
+    /// in-memory store.
+    pub fn netcdf_path(&self) -> Option<&Path> {
+        self.netcdf_path.as_deref()
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is

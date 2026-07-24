@@ -62,6 +62,7 @@ export Store,
     get_resolutions,
     get_intervals,
     get_compression,
+    get_path,
     read_only,
     verify_integrity,
     compact!,
@@ -1944,9 +1945,7 @@ function get_time_series(
     n = min(Int(out_lt_len[]), length(lt_buf))
     ext = n == 0 ? nothing : String(lt_buf[1:n])
     assoc = _get_association(store, key)
-    return NonSequentialTimeSeries(
-        _from_unix_ms.(timestamp_ms), data, assoc.name; ext=ext
-    )
+    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), data, assoc.name; ext=ext)
 end
 
 # ---- Attribute-addressed static reads --------------------------------------
@@ -4113,6 +4112,44 @@ function get_compression(store::Store)
     else
         (compression=:deflate, level=Int(level[]), shuffle=shuffle[])
     end
+end
+
+"""
+    get_path(store) -> Union{Nothing,String}
+
+Return the filesystem path backing the store's NetCDF file, or `nothing` for an
+in-memory store.
+"""
+function get_path(store::Store)
+    has_path = Ref{Bool}(false)
+    out_len = Ref{UInt64}(0)
+    # Probe: a null buffer reports the required length without copying.
+    code = ccall(
+        (:castore_store_get_path, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ref{Bool}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        has_path,
+        C_NULL,
+        UInt64(0),
+        out_len,
+    )
+    _check(code)
+    has_path[] || return nothing
+    # +1 leaves room for the trailing NUL `write_str_out` appends.
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    code = ccall(
+        (:castore_store_get_path, lib_path()),
+        Int32,
+        (Ptr{Cvoid}, Ref{Bool}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+        store.handle,
+        has_path,
+        buf,
+        UInt64(length(buf)),
+        out_len,
+    )
+    _check(code)
+    return _take_buffer_string(buf, out_len[])
 end
 
 function verify_integrity(store::Store)

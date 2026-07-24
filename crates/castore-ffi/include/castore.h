@@ -449,6 +449,22 @@ int32_t castore_store_get_intervals(const struct CastoreStore *handle,
 int32_t castore_store_read_only(const struct CastoreStore *handle, bool *out_read_only);
 
 /**
+ * Write the store's backing NetCDF path into `buf` (probe-then-fetch: call with a
+ * null `buf` to learn `*out_len`, then again with a buffer of that size). An
+ * in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. `out_has_path` and `out_len` must be valid
+ * for writing; `buf` must be null or valid for `cap` bytes.
+ */
+int32_t castore_store_get_path(const struct CastoreStore *handle,
+                               bool *out_has_path,
+                               char *buf,
+                               uint64_t cap,
+                               uint64_t *out_len);
+
+/**
  * Association count grouped by time series type, as a JSON array of
  * `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
  * `castore_store_list_keys`).

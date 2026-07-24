@@ -101,9 +101,7 @@ end
     # A (length, k) per-step element array tagged with an opaque extension payload, as a
     # FunctionData encoding would produce on the InfrastructureSystems.jl side.
     data = Float64[1 2; 3 4; 5 6]
-    series = NonSequentialTimeSeries(
-        timestamps, data, "curves"; ext="LinearFunctionData"
-    )
+    series = NonSequentialTimeSeries(timestamps, data, "curves"; ext="LinearFunctionData")
     key = add_time_series!(store, 9, "Generator", Component, series)
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
@@ -1045,6 +1043,28 @@ end
     @test_throws ArgumentError Store(in_memory=true, compression=:lz4)
 end
 
+@testset "get_path" begin
+    # In-memory stores have no backing path.
+    @test get_path(Store(in_memory=true)) === nothing
+
+    mktempdir() do dir
+        path = joinpath(dir, "store.nc")
+        store = Store(in_memory=false, path=path)
+        try
+            @test get_path(store) == path
+        finally
+            Castore.close!(store)
+        end
+        # A reopened store reports the path it was opened with.
+        reopened = open_store(path; read_only=true)
+        try
+            @test get_path(reopened) == path
+        finally
+            Castore.close!(reopened)
+        end
+    end
+end
+
 @testset "AddBatch bulk add" begin
     store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1)
@@ -1475,9 +1495,7 @@ end
 
     # units round-trips through get_metadata (previously write-only).
     sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
-    k = add_time_series!(
-        store, 1, "Generator", Component, sts; units="MW", ext="Profile"
-    )
+    k = add_time_series!(store, 1, "Generator", Component, sts; units="MW", ext="Profile")
     md = get_metadata(store, 1, Component, "load"; resolution=res)
     @test md.units == "MW"
     @test md.ext == "Profile"

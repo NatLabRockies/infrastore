@@ -1329,6 +1329,44 @@ pub unsafe extern "C" fn castore_store_read_only(
     CASTORE_OK
 }
 
+/// Write the store's backing NetCDF path into `buf` (probe-then-fetch: call with a
+/// null `buf` to learn `*out_len`, then again with a buffer of that size). An
+/// in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. `out_has_path` and `out_len` must be valid
+/// for writing; `buf` must be null or valid for `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn castore_store_get_path(
+    handle: *const CastoreStoreHandle,
+    out_has_path: *mut bool,
+    buf: *mut c_char,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let store = match unsafe { handle.as_ref() } {
+        Some(s) => s,
+        None => return CASTORE_ERR_NULL_POINTER,
+    };
+    if out_has_path.is_null() || out_len.is_null() {
+        set_error("out_has_path or out_len is null");
+        return CASTORE_ERR_NULL_POINTER;
+    }
+    match store.inner.netcdf_path() {
+        Some(path) => {
+            unsafe { *out_has_path = true };
+            unsafe { write_str_out(&path.to_string_lossy(), buf, cap, out_len) };
+        }
+        None => unsafe {
+            *out_has_path = false;
+            *out_len = 0;
+        },
+    }
+    CASTORE_OK
+}
+
 /// Association count grouped by time series type, as a JSON array of
 /// `{"time_series_type": <name>, "count": <n>}` objects. Probe-then-fetch (see
 /// `castore_store_list_keys`).
