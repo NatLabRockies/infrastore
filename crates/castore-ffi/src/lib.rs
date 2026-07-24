@@ -64,6 +64,26 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
     code
 }
 
+/// Dereference a raw handle pointer or return `CASTORE_ERR_NULL_POINTER`.
+///
+/// `deref_handle!(ref p)` yields `&T` via `p.as_ref()`; `deref_handle!(mut p)`
+/// yields `&mut T` via `p.as_mut()`. Both early-return on a null pointer, so
+/// this is only usable inside functions returning `i32`.
+macro_rules! deref_handle {
+    (ref $ptr:expr) => {
+        match unsafe { $ptr.as_ref() } {
+            Some(v) => v,
+            None => return CASTORE_ERR_NULL_POINTER,
+        }
+    };
+    (mut $ptr:expr) => {
+        match unsafe { $ptr.as_mut() } {
+            Some(v) => v,
+            None => return CASTORE_ERR_NULL_POINTER,
+        }
+    };
+}
+
 // ---- Logging --------------------------------------------------------------
 
 /// Initialize the Rust tracing subscriber.
@@ -838,14 +858,8 @@ pub unsafe extern "C" fn castore_store_get_non_sequential(
     out_ext_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(store) => store,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
-    let key = match unsafe { key.as_ref() } {
-        Some(key) => key,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
+    let key = deref_handle!(ref key);
     if out_timestamps.is_null()
         || out_timestamps_len.is_null()
         || out_dtype.is_null()
@@ -938,14 +952,8 @@ pub unsafe extern "C" fn castore_store_remove(
     key: *const CastoreKeyHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
+    let key = deref_handle!(ref key);
     match store.inner.remove_time_series(&key.inner) {
         Ok(()) => CASTORE_OK,
         Err(e) => map_core_error(e),
@@ -970,10 +978,7 @@ pub unsafe extern "C" fn castore_store_remove_bulk(
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     if out_removed.is_null() || (keys.is_null() && len > 0) {
         set_error("an out pointer is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1010,14 +1015,8 @@ pub unsafe extern "C" fn castore_store_has(
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
+    let key = deref_handle!(ref key);
     if out_present.is_null() {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -1043,10 +1042,7 @@ pub unsafe extern "C" fn castore_store_counts(
     out_forecasts: *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_components_with_time_series.is_null()
         || out_static_time_series.is_null()
         || out_forecasts.is_null()
@@ -1098,10 +1094,7 @@ pub unsafe extern "C" fn castore_store_get_forecast_parameters(
     out_initial_ms: *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_present.is_null()
         || out_horizon.is_null()
         || out_interval.is_null()
@@ -1166,10 +1159,7 @@ pub unsafe extern "C" fn castore_store_check_static_consistency(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1220,10 +1210,7 @@ pub unsafe extern "C" fn castore_store_get_resolutions(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1273,10 +1260,7 @@ pub unsafe extern "C" fn castore_store_get_intervals(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1317,10 +1301,7 @@ pub unsafe extern "C" fn castore_store_read_only(
     out_read_only: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_read_only.is_null() {
         set_error("out_read_only is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1346,10 +1327,7 @@ pub unsafe extern "C" fn castore_store_get_path(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_has_path.is_null() || out_len.is_null() {
         set_error("out_has_path or out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1383,10 +1361,7 @@ pub unsafe extern "C" fn castore_store_counts_by_type(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1422,10 +1397,7 @@ pub unsafe extern "C" fn castore_store_num_distinct_arrays(
     out_count: *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_count.is_null() {
         set_error("out_count is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1455,10 +1427,7 @@ pub unsafe extern "C" fn castore_store_counts_detailed(
     out_forecasts: *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_components.is_null()
         || out_supplemental_attributes.is_null()
         || out_static_time_series.is_null()
@@ -1502,10 +1471,7 @@ pub unsafe extern "C" fn castore_store_list_owner_ids(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1560,10 +1526,7 @@ pub unsafe extern "C" fn castore_store_static_summary(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1627,10 +1590,7 @@ pub unsafe extern "C" fn castore_store_forecast_summary(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -1698,10 +1658,7 @@ pub unsafe extern "C" fn castore_store_get_compression(
     out_shuffle: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_kind.is_null() || out_level.is_null() || out_shuffle.is_null() {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -1728,10 +1685,7 @@ pub unsafe extern "C" fn castore_store_verify(
     out_error_count: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_error_count.is_null() {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -1753,10 +1707,7 @@ pub unsafe extern "C" fn castore_store_verify(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn castore_store_compact(handle: *mut CastoreStoreHandle) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     match store.inner.compact() {
         Ok(_) => CASTORE_OK,
         Err(e) => map_core_error(e),
@@ -1772,10 +1723,7 @@ pub unsafe extern "C" fn castore_store_compact(handle: *mut CastoreStoreHandle) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn castore_store_flush(handle: *mut CastoreStoreHandle) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     match store.inner.flush() {
         Ok(()) => CASTORE_OK,
         Err(e) => map_core_error(e),
@@ -1795,10 +1743,7 @@ pub unsafe extern "C" fn castore_store_persist(
     path: *const c_char,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let path = match unsafe { cstr_to_str(path) } {
         Ok(s) => PathBuf::from(s),
         Err(code) => {
@@ -1900,10 +1845,7 @@ pub unsafe extern "C" fn castore_store_get_metadata(
     out_features_json_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_initial_ts_unix_ms.is_null()
         || out_resolution.is_null()
         || out_length.is_null()
@@ -1992,10 +1934,7 @@ pub unsafe extern "C" fn castore_store_has_by_attrs(
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_present.is_null() {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -2033,10 +1972,7 @@ pub unsafe extern "C" fn castore_store_has_for_owner(
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_present.is_null() {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -2088,10 +2024,7 @@ pub unsafe extern "C" fn castore_store_remove_by_attrs(
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let key = match unsafe {
         build_key_from_attrs(owner_id, owner_category, name, resolution, features_json)
     } {
@@ -2121,10 +2054,7 @@ pub unsafe extern "C" fn castore_store_get_array_by_hash(
     out_byte_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if data_hash.is_null() || out_dtype.is_null() || out_data.is_null() || out_byte_len.is_null() {
         set_error("a pointer is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -2354,10 +2284,7 @@ pub unsafe extern "C" fn castore_store_add_forecast(
     out_key: *mut *mut CastoreKeyHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     if out_key.is_null() {
         set_error("out_key pointer is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -2551,10 +2478,7 @@ pub unsafe extern "C" fn castore_store_add_probabilistic(
     out_key: *mut *mut CastoreKeyHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     if out_key.is_null() {
         set_error("out_key pointer is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -3558,10 +3482,7 @@ pub unsafe extern "C" fn castore_store_transform_single_time_series(
     out_count: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     if out_count.is_null() {
         set_error("a required pointer is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -3651,10 +3572,7 @@ pub unsafe extern "C" fn castore_store_get_probabilistic_metadata(
     out_features_json_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_percentiles.is_null()
         || out_percentiles_len.is_null()
         || out_units_len.is_null()
@@ -3780,10 +3698,7 @@ pub unsafe extern "C" fn castore_store_get_forecast_metadata(
     out_features_json_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_initial_ts_unix_ms.is_null()
         || out_resolution.is_null()
         || out_horizon.is_null()
@@ -4685,10 +4600,7 @@ pub unsafe extern "C" fn castore_store_list_keys(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -4744,10 +4656,7 @@ pub unsafe extern "C" fn castore_store_list_time_series(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -4806,10 +4715,7 @@ pub unsafe extern "C" fn castore_store_list_names(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -4864,10 +4770,7 @@ pub unsafe extern "C" fn castore_store_list_owner_types(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -4921,10 +4824,7 @@ pub unsafe extern "C" fn castore_store_remove_by_filter(
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     if out_removed.is_null() {
         set_error("out_removed is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -4972,10 +4872,7 @@ pub unsafe extern "C" fn castore_store_rename(
     out_key: *mut *mut CastoreKeyHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let key = match unsafe { key.as_ref() } {
         Some(k) => k,
         None => {
@@ -5032,10 +4929,7 @@ pub unsafe extern "C" fn castore_store_resolve_forecast_key(
     out_key: *mut *mut CastoreKeyHandle,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_key.is_null() {
         set_error("out_key pointer is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -5184,10 +5078,7 @@ pub unsafe extern "C" fn castore_store_list_array_groups(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -5415,10 +5306,7 @@ pub unsafe extern "C" fn castore_store_has_typed(
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_present.is_null() {
         return CASTORE_ERR_NULL_POINTER;
     }
@@ -5465,10 +5353,7 @@ pub unsafe extern "C" fn castore_store_remove_typed(
     features_json: *const c_char,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let key = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
@@ -5521,10 +5406,7 @@ pub unsafe extern "C" fn castore_store_copy_time_series(
     new_name: *const c_char,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let key = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
@@ -5576,10 +5458,7 @@ pub unsafe extern "C" fn castore_store_clear(
     owner_category: i32,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let owner = if has_owner {
         let category = match owner_category {
             0 => core_lib::OwnerCategory::Component,
@@ -5618,10 +5497,7 @@ pub unsafe extern "C" fn castore_store_replace_owner(
     out_updated: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let category = match owner_category {
         0 => core_lib::OwnerCategory::Component,
         1 => core_lib::OwnerCategory::SupplementalAttribute,
@@ -5726,10 +5602,7 @@ pub unsafe extern "C" fn castore_store_add_supplemental_attribute_association(
     attribute_type: *const c_char,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let component_type = match unsafe { cstr_to_str(component_type) } {
         Ok(s) => s.to_string(),
         Err(c) => return c,
@@ -5769,10 +5642,7 @@ pub unsafe extern "C" fn castore_store_add_supplemental_attribute_associations(
     out_added: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let assocs: Vec<core_lib::SupplementalAttributeAssociation> =
         match unsafe { assoc_rows_from_json(associations_json) } {
             Ok(v) => v,
@@ -5805,10 +5675,7 @@ pub unsafe extern "C" fn castore_store_has_supplemental_attribute_association(
     out_found: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_found.is_null() {
         set_error("out_found is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -5845,10 +5712,7 @@ pub unsafe extern "C" fn castore_store_list_supplemental_attribute_associations(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -5885,10 +5749,7 @@ pub unsafe extern "C" fn castore_store_list_supplemental_attribute_ids(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -5922,10 +5783,7 @@ pub unsafe extern "C" fn castore_store_list_components_with_attributes(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -5956,10 +5814,7 @@ pub unsafe extern "C" fn castore_store_remove_supplemental_attribute_association
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let filter: core_lib::SupplementalAttributeFilter =
         match unsafe { assoc_filter_from_json(filter_json) } {
             Ok(f) => f,
@@ -5996,10 +5851,7 @@ pub unsafe extern "C" fn castore_store_replace_supplemental_attribute_component_
     out_updated: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     match store
         .inner
         .replace_supplemental_attribute_component_id(old_id, new_id)
@@ -6030,10 +5882,7 @@ pub unsafe extern "C" fn castore_store_count_supplemental_attribute_associations
     out_count: *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_count.is_null() {
         set_error("out_count is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6078,10 +5927,7 @@ pub unsafe extern "C" fn castore_store_supplemental_attribute_counts_by_type(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6120,10 +5966,7 @@ pub unsafe extern "C" fn castore_store_supplemental_attribute_summary(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6154,10 +5997,7 @@ pub unsafe extern "C" fn castore_store_add_parent_child_association(
     child_type: *const c_char,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let parent_type = match unsafe { cstr_to_str(parent_type) } {
         Ok(s) => s.to_string(),
         Err(c) => return c,
@@ -6195,10 +6035,7 @@ pub unsafe extern "C" fn castore_store_add_parent_child_associations(
     out_added: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let assocs: Vec<core_lib::ParentChildAssociation> =
         match unsafe { assoc_rows_from_json(associations_json) } {
             Ok(v) => v,
@@ -6230,10 +6067,7 @@ pub unsafe extern "C" fn castore_store_has_parent_child_association(
     out_found: *mut bool,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_found.is_null() {
         set_error("out_found is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6269,10 +6103,7 @@ pub unsafe extern "C" fn castore_store_list_parent_child_associations(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6307,10 +6138,7 @@ pub unsafe extern "C" fn castore_store_list_parent_child_ids(
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_len.is_null() {
         set_error("out_len is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6350,10 +6178,7 @@ pub unsafe extern "C" fn castore_store_remove_parent_child_associations(
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     let filter: core_lib::ParentChildFilter = match unsafe { assoc_filter_from_json(filter_json) } {
         Ok(f) => f,
         Err(c) => return c,
@@ -6386,10 +6211,7 @@ pub unsafe extern "C" fn castore_store_replace_parent_child_component_id(
     out_updated: *mut u64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_mut() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(mut handle);
     match store
         .inner
         .replace_parent_child_component_id(old_id, new_id)
@@ -6417,10 +6239,7 @@ pub unsafe extern "C" fn castore_store_count_parent_child_associations(
     out_count: *mut i64,
 ) -> i32 {
     clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let store = deref_handle!(ref handle);
     if out_count.is_null() {
         set_error("out_count is null");
         return CASTORE_ERR_NULL_POINTER;
@@ -6493,10 +6312,7 @@ pub unsafe extern "C" fn castore_key_identity_hash(
     out_hash: *mut u64,
 ) -> i32 {
     clear_error();
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => return CASTORE_ERR_NULL_POINTER,
-    };
+    let key = deref_handle!(ref key);
     if out_hash.is_null() {
         set_error("out_hash is null");
         return CASTORE_ERR_NULL_POINTER;
