@@ -987,3 +987,789 @@ mod tests {
         assert_eq!(vals[11], 111);
     }
 }
+
+#[cfg(test)]
+mod convert_coverage_tests {
+    //! Conversion cases the module above does not reach.
+    //!
+    //! `tests` covers F64/I64 and the `Int` feature variant. The dtype matrix,
+    //! three of the four `FeatureValue` variants, the `value == None` arm, and
+    //! `Period::Months` anywhere on the wire were untested — and `Months` is the
+    //! interesting one, because a `Fixed` period is deliberately never equal to a
+    //! `Months` one, so a conversion that lost the distinction would silently
+    //! turn a monthly series into a fixed-span one.
+
+    use super::*;
+    use castore_core::{Dtype, TypedArray};
+    use chrono::{Duration, TimeZone};
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap()
+    }
+
+    /// Raw little-endian bytes for `n` elements of `dtype`, with a distinct
+    /// pattern per byte so a mis-sized copy shows up as a value change.
+    fn pattern_bytes(dtype: Dtype, n: usize) -> Vec<u8> {
+        (0..n * dtype.size())
+            .map(|i| (i as u8).wrapping_add(1))
+            .collect()
+    }
+
+    fn typed(dtype: Dtype, shape: Vec<usize>) -> TypedArray {
+        let n: usize = shape.iter().product();
+        TypedArray::new(dtype, shape, pattern_bytes(dtype, n)).unwrap()
+    }
+
+    const ALL_DTYPES: [Dtype; 6] = [
+        Dtype::F64,
+        Dtype::F32,
+        Dtype::I64,
+        Dtype::I32,
+        Dtype::U64,
+        Dtype::Bool,
+    ];
+
+    // ---- Dtype matrix ------------------------------------------------------
+
+    #[test]
+    fn every_dtype_round_trips_through_get_resp() {
+        for dtype in ALL_DTYPES {
+            let data = typed(dtype, vec![3]);
+            let original = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                t0(),
+                Duration::hours(1),
+                data.clone(),
+                "load",
+            ));
+            let resp = time_series_data_to_get_resp(&original);
+            assert_eq!(resp.dtype, dtype.code(), "{dtype:?}: code on the wire");
+            assert_eq!(resp.value_bytes, data.bytes, "{dtype:?}: bytes");
+
+            let back = get_resp_to_time_series_data(resp, "load".to_string()).unwrap();
+            assert_eq!(back, original, "{dtype:?}");
+        }
+    }
+
+    #[test]
+    fn every_dtype_round_trips_through_metadata() {
+        for dtype in ALL_DTYPES {
+            let meta = TimeSeriesMetadata {
+                owner_id: 1,
+                owner_type: "Generator".into(),
+                owner_category: OwnerCategory::Component,
+                time_series_type: TimeSeriesType::SingleTimeSeries,
+                name: "load".into(),
+                data_hash: [7u8; 32],
+                initial_timestamp: Some(t0()),
+                resolution: Some(Period::fixed(Duration::hours(1))),
+                length: Some(3),
+                horizon: None,
+                interval: None,
+                count: None,
+                timestamps: None,
+                features: Features::new(),
+                units: None,
+                percentiles: None,
+                dtype,
+                element_shape: vec![],
+                ext: None,
+            };
+            let pb = metadata_to_pb(&meta);
+            assert_eq!(pb.dtype, dtype.code(), "{dtype:?}");
+            assert_eq!(metadata_from_pb(pb).unwrap(), meta, "{dtype:?}");
+        }
+    }
+
+    #[test]
+    fn every_dtype_round_trips_in_a_forecast() {
+        for dtype in ALL_DTYPES {
+            // shape [H=2, count=3]
+            let data = typed(dtype, vec![2, 3]);
+            let det = Deterministic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(2),
+                Duration::hours(6),
+                3,
+                data.clone(),
+                "det",
+            )
+            .unwrap();
+            let original = TimeSeriesData::Deterministic(det);
+            let resp = time_series_data_to_get_resp(&original);
+            assert_eq!(resp.dtype, dtype.code(), "{dtype:?}");
+            let back = get_resp_to_time_series_data(resp, "det".to_string()).unwrap();
+            assert_eq!(back, original, "{dtype:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_dtype_code_in_a_get_resp_errors() {
+        let data = typed(Dtype::F64, vec![3]);
+        let original = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+            t0(),
+            Duration::hours(1),
+            data,
+            "load",
+        ));
+        let mut resp = time_series_data_to_get_resp(&original);
+        resp.dtype = 99;
+        assert!(matches!(
+            get_resp_to_time_series_data(resp, "load".to_string()),
+            Err(ConvertError::InvalidValue { field: "dtype", .. })
+        ));
+    }
+
+    // ---- FeatureValue variants --------------------------------------------
+
+    #[test]
+    fn every_feature_value_variant_round_trips() {
+        let mut features = Features::new();
+        features.insert("i".into(), FeatureValue::Int(-42));
+        features.insert("f".into(), FeatureValue::Float(1.5));
+        features.insert("f_neg_zero".into(), FeatureValue::Float(-0.0));
+        features.insert("b_true".into(), FeatureValue::Bool(true));
+        features.insert("b_false".into(), FeatureValue::Bool(false));
+        features.insert("s".into(), FeatureValue::Str("负荷 'x'".into()));
+        features.insert("s_empty".into(), FeatureValue::Str(String::new()));
+
+        let pb = features_to_pb(&features);
+        assert_eq!(pb.entries.len(), features.len());
+        let back = features_from_pb(pb).unwrap();
+        assert_eq!(back, features);
+
+        // -0.0 must keep its sign: `==` would not catch a flattened value.
+        let Some(FeatureValue::Float(neg_zero)) = back.get("f_neg_zero") else {
+            panic!("expected a Float");
+        };
+        assert!(neg_zero.is_sign_negative());
+    }
+
+    #[test]
+    fn each_feature_value_variant_maps_to_its_own_wire_arm() {
+        for (value, expect_arm) in [
+            (FeatureValue::Int(1), "int"),
+            (FeatureValue::Float(1.0), "float"),
+            (FeatureValue::Bool(true), "bool"),
+            (FeatureValue::Str("x".into()), "str"),
+        ] {
+            let pb = pb::FeatureValue::from(&value);
+            let arm = match pb.value {
+                Some(pb::feature_value::Value::IntValue(_)) => "int",
+                Some(pb::feature_value::Value::FloatValue(_)) => "float",
+                Some(pb::feature_value::Value::BoolValue(_)) => "bool",
+                Some(pb::feature_value::Value::StrValue(_)) => "str",
+                None => "none",
+            };
+            assert_eq!(arm, expect_arm, "{value:?}");
+            // And back again.
+            assert_eq!(
+                FeatureValue::try_from(pb::FeatureValue::from(&value)).unwrap(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn a_feature_value_with_no_variant_set_is_a_missing_field() {
+        // proto3 leaves a oneof unset when a peer sends a field this build does
+        // not know. That must be a clean error, not a defaulted value.
+        let err = FeatureValue::try_from(pb::FeatureValue { value: None }).unwrap_err();
+        assert!(matches!(
+            err,
+            ConvertError::MissingField("FeatureValue.value")
+        ));
+
+        // The same through the map decoder: one unset entry fails the whole map
+        // rather than being dropped.
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("k".to_string(), pb::FeatureValue { value: None });
+        assert!(matches!(
+            features_from_pb(pb::Features { entries }),
+            Err(ConvertError::MissingField("FeatureValue.value"))
+        ));
+    }
+
+    // ---- Period::Months across the wire types -----------------------------
+
+    #[test]
+    fn months_periods_round_trip_in_metadata() {
+        let meta = TimeSeriesMetadata {
+            owner_id: 9,
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::Deterministic,
+            name: "monthly".into(),
+            data_hash: [3u8; 32],
+            initial_timestamp: Some(t0()),
+            resolution: Some(Period::Months(1)),
+            length: None,
+            horizon: Some(Period::Months(3)),
+            interval: Some(Period::Months(1)),
+            count: Some(4),
+            timestamps: None,
+            features: Features::new(),
+            units: None,
+            percentiles: None,
+            dtype: Dtype::F64,
+            element_shape: vec![],
+            ext: None,
+        };
+
+        let pb = metadata_to_pb(&meta);
+        assert_eq!(pb.resolution.as_deref(), Some("P1M"));
+        assert_eq!(pb.horizon.as_deref(), Some("P3M"));
+        assert_eq!(pb.interval.as_deref(), Some("P1M"));
+
+        let back = metadata_from_pb(pb).unwrap();
+        assert_eq!(back, meta);
+        // The decoded periods are calendar periods, not an equivalent-looking
+        // fixed span. `Period` equality is by (kind, magnitude).
+        assert_eq!(back.resolution, Some(Period::Months(1)));
+        assert!(back.resolution.unwrap().is_irregular());
+        assert_ne!(back.resolution, Some(Period::fixed(Duration::days(30))));
+    }
+
+    #[test]
+    fn a_whole_year_renders_with_y_and_decodes_back_to_months() {
+        // `to_iso8601` renders a whole number of years with `Y`; the decode must
+        // land back on the same `Months` count.
+        let meta = TimeSeriesMetadata {
+            owner_id: 1,
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "yearly".into(),
+            data_hash: [0u8; 32],
+            initial_timestamp: Some(t0()),
+            resolution: Some(Period::Months(12)),
+            length: Some(3),
+            horizon: None,
+            interval: None,
+            count: None,
+            timestamps: None,
+            features: Features::new(),
+            units: None,
+            percentiles: None,
+            dtype: Dtype::F64,
+            element_shape: vec![],
+            ext: None,
+        };
+        let pb = metadata_to_pb(&meta);
+        assert_eq!(pb.resolution.as_deref(), Some("P1Y"));
+        assert_eq!(
+            metadata_from_pb(pb).unwrap().resolution,
+            Some(Period::Months(12))
+        );
+    }
+
+    #[test]
+    fn months_periods_round_trip_in_a_key() {
+        let identity = KeyIdentity {
+            owner_id: 9,
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::Deterministic,
+            name: "monthly".into(),
+            resolution: Some(Period::Months(1)),
+            interval: Some(Period::Months(1)),
+            features: Features::new(),
+        };
+        let key = TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
+            identity: identity.clone(),
+            initial_timestamp: t0(),
+            horizon: Period::Months(3),
+            count: 4,
+        });
+
+        let pb = full_key_to_pb(&key);
+        assert_eq!(pb.resolution, "P1M");
+        assert_eq!(pb.interval, "P1M");
+        assert_eq!(pb.horizon.as_deref(), Some("P3M"));
+
+        let back = full_key_from_pb(pb).unwrap();
+        assert_eq!(back, key);
+        assert_eq!(back.identity().resolution, Some(Period::Months(1)));
+
+        // The identity-only encoding too.
+        let pb = key_to_pb(&identity);
+        assert_eq!(pb.resolution, "P1M");
+        assert_eq!(key_from_pb(pb).unwrap(), identity);
+    }
+
+    #[test]
+    fn the_empty_string_sentinel_decodes_an_absent_period_in_a_key() {
+        // A key message keeps `resolution`/`interval` as plain `string` fields
+        // with the empty string standing in for "absent". A NonSequential key
+        // has neither, so both must come back `None` — and a non-empty value
+        // must never decode to `None`.
+        let key = TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
+            identity: KeyIdentity {
+                owner_id: 1,
+                owner_category: OwnerCategory::Component,
+                time_series_type: TimeSeriesType::NonSequentialTimeSeries,
+                name: "events".into(),
+                resolution: None,
+                interval: None,
+                features: Features::new(),
+            },
+            length: 3,
+        });
+
+        let pb = full_key_to_pb(&key);
+        assert_eq!(pb.resolution, "", "absent period is the empty string");
+        assert_eq!(pb.interval, "");
+        let back = full_key_from_pb(pb).unwrap();
+        assert_eq!(back, key);
+        assert_eq!(back.identity().resolution, None);
+        assert_eq!(back.identity().interval, None);
+    }
+
+    #[test]
+    fn a_malformed_period_string_in_a_key_errors() {
+        let mut pb = key_to_pb(&KeyIdentity {
+            owner_id: 1,
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "load".into(),
+            resolution: Some(Period::fixed(Duration::hours(1))),
+            interval: None,
+            features: Features::new(),
+        });
+        pb.resolution = "not-a-period".into();
+        assert!(matches!(
+            key_from_pb(pb),
+            Err(ConvertError::InvalidValue {
+                field: "period",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn months_periods_round_trip_through_get_resp() {
+        let data = typed(Dtype::F64, vec![3, 4]);
+        let det = Deterministic::new(
+            t0(),
+            Period::Months(1),
+            Period::Months(3),
+            Period::Months(1),
+            4,
+            data,
+            "monthly",
+        )
+        .unwrap();
+        let original = TimeSeriesData::Deterministic(det);
+
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.resolution, "P1M");
+        assert_eq!(resp.horizon, "P3M");
+        assert_eq!(resp.interval, "P1M");
+
+        let back = get_resp_to_time_series_data(resp, "monthly".to_string()).unwrap();
+        assert_eq!(back, original);
+        let det = back.as_deterministic().unwrap();
+        assert!(det.resolution.is_irregular());
+        assert!(det.horizon.is_irregular());
+        assert!(det.interval.is_irregular());
+    }
+
+    #[test]
+    fn months_periods_round_trip_in_summary_rows() {
+        let static_row = StaticSummaryRow {
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "monthly".into(),
+            initial_timestamp: Some(t0()),
+            resolution: Some(Period::Months(1)),
+            time_step_count: Some(12),
+            count: 2,
+        };
+        let pb = static_summary_row_to_pb(&static_row);
+        assert_eq!(pb.resolution.as_deref(), Some("P1M"));
+        assert_eq!(static_summary_row_from_pb(pb).unwrap(), static_row);
+
+        let forecast_row = ForecastSummaryRow {
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::Deterministic,
+            name: "monthly_fc".into(),
+            initial_timestamp: Some(t0()),
+            resolution: Some(Period::Months(1)),
+            horizon: Some(Period::Months(3)),
+            interval: Some(Period::Months(1)),
+            window_count: Some(4),
+            count: 1,
+        };
+        let pb = forecast_summary_row_to_pb(&forecast_row);
+        assert_eq!(pb.resolution.as_deref(), Some("P1M"));
+        assert_eq!(pb.horizon.as_deref(), Some("P3M"));
+        assert_eq!(pb.interval.as_deref(), Some("P1M"));
+        assert_eq!(forecast_summary_row_from_pb(pb).unwrap(), forecast_row);
+    }
+
+    // ---- full_key_from_pb failure modes -----------------------------------
+
+    fn single_key_pb() -> pb::TimeSeriesKey {
+        full_key_to_pb(&TimeSeriesKey::Single(SingleTimeSeriesKey {
+            identity: KeyIdentity {
+                owner_id: 1,
+                owner_category: OwnerCategory::Component,
+                time_series_type: TimeSeriesType::SingleTimeSeries,
+                name: "load".into(),
+                resolution: Some(Period::fixed(Duration::hours(1))),
+                interval: None,
+                features: Features::new(),
+            },
+            initial_timestamp: t0(),
+            length: 24,
+        }))
+    }
+
+    #[test]
+    fn full_key_from_pb_requires_the_initial_timestamp() {
+        let mut pb = single_key_pb();
+        pb.initial_timestamp_rfc3339 = None;
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::MissingField(
+                "TimeSeriesKey.initial_timestamp_rfc3339"
+            ))
+        ));
+    }
+
+    #[test]
+    fn full_key_from_pb_requires_the_length() {
+        let mut pb = single_key_pb();
+        pb.length = None;
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::MissingField("TimeSeriesKey.length"))
+        ));
+
+        // NonSequential needs it too (and does *not* need a timestamp).
+        let mut pb = full_key_to_pb(&TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey {
+            identity: KeyIdentity {
+                owner_id: 1,
+                owner_category: OwnerCategory::Component,
+                time_series_type: TimeSeriesType::NonSequentialTimeSeries,
+                name: "events".into(),
+                resolution: None,
+                interval: None,
+                features: Features::new(),
+            },
+            length: 3,
+        }));
+        assert!(pb.initial_timestamp_rfc3339.is_none());
+        pb.length = None;
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::MissingField("TimeSeriesKey.length"))
+        ));
+    }
+
+    #[test]
+    fn full_key_from_pb_requires_the_forecast_horizon_and_count() {
+        let forecast = TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
+            identity: KeyIdentity {
+                owner_id: 1,
+                owner_category: OwnerCategory::Component,
+                time_series_type: TimeSeriesType::Deterministic,
+                name: "det".into(),
+                resolution: Some(Period::fixed(Duration::hours(1))),
+                interval: Some(Period::fixed(Duration::hours(6))),
+                features: Features::new(),
+            },
+            initial_timestamp: t0(),
+            horizon: Period::fixed(Duration::hours(4)),
+            count: 3,
+        });
+
+        let mut pb = full_key_to_pb(&forecast);
+        pb.horizon = None;
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::MissingField("TimeSeriesKey.horizon"))
+        ));
+
+        let mut pb = full_key_to_pb(&forecast);
+        pb.count = None;
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::MissingField("TimeSeriesKey.count"))
+        ));
+    }
+
+    #[test]
+    fn full_key_from_pb_rejects_an_unknown_type_enum() {
+        let mut pb = single_key_pb();
+        pb.time_series_type = 999;
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::InvalidValue {
+                field: "time_series_type",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn key_from_pb_rejects_an_unknown_owner_category_enum() {
+        let mut pb = single_key_pb();
+        pb.owner_category = 999;
+        assert!(matches!(
+            key_from_pb(pb.clone()),
+            Err(ConvertError::InvalidValue {
+                field: "owner_category",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::InvalidValue {
+                field: "owner_category",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn full_key_from_pb_rejects_a_malformed_initial_timestamp() {
+        let mut pb = single_key_pb();
+        pb.initial_timestamp_rfc3339 = Some("not a timestamp".into());
+        assert!(matches!(
+            full_key_from_pb(pb),
+            Err(ConvertError::BadTimestamp(_))
+        ));
+    }
+
+    // ---- DeterministicSingleTimeSeries on the wire ------------------------
+
+    #[test]
+    fn a_deterministic_single_time_series_metadata_row_round_trips() {
+        // A DST is never returned as a distinct *data* variant (it reads back as
+        // a Deterministic), but the tag remains visible in catalog surfaces, so
+        // the metadata and key encodings must carry it exactly.
+        let meta = TimeSeriesMetadata {
+            owner_id: 4,
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
+            name: "load".into(),
+            data_hash: [1u8; 32],
+            initial_timestamp: Some(t0()),
+            resolution: Some(Period::fixed(Duration::hours(1))),
+            length: Some(8),
+            horizon: Some(Period::fixed(Duration::hours(4))),
+            interval: Some(Period::fixed(Duration::hours(2))),
+            count: Some(3),
+            timestamps: None,
+            features: Features::new(),
+            units: Some("MW".into()),
+            percentiles: None,
+            dtype: Dtype::F64,
+            element_shape: vec![],
+            ext: Some("QuadraticFunctionData".into()),
+        };
+
+        let pb = metadata_to_pb(&meta);
+        assert_eq!(
+            pb.time_series_type,
+            pb::TimeSeriesType::DeterministicSingleTimeSeries as i32
+        );
+        // The metadata path *does* carry `ext` (unlike GetResp — see
+        // `ext_is_currently_dropped_in_get_resp`).
+        assert_eq!(pb.ext.as_deref(), Some("QuadraticFunctionData"));
+        assert_eq!(metadata_from_pb(pb).unwrap(), meta);
+    }
+
+    #[test]
+    fn a_deterministic_single_time_series_key_round_trips() {
+        let key = TimeSeriesKey::Forecast(ForecastTimeSeriesKey {
+            identity: KeyIdentity {
+                owner_id: 4,
+                owner_category: OwnerCategory::Component,
+                time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
+                name: "load".into(),
+                resolution: Some(Period::fixed(Duration::hours(1))),
+                interval: Some(Period::fixed(Duration::hours(2))),
+                features: Features::new(),
+            },
+            initial_timestamp: t0(),
+            horizon: Period::fixed(Duration::hours(4)),
+            count: 3,
+        });
+        let pb = full_key_to_pb(&key);
+        assert_eq!(
+            pb.time_series_type,
+            pb::TimeSeriesType::DeterministicSingleTimeSeries as i32
+        );
+        assert_eq!(full_key_from_pb(pb).unwrap(), key);
+    }
+
+    #[test]
+    fn requested_type_round_trips_for_every_form() {
+        for requested in [
+            RequestedType::Concrete(TimeSeriesType::Deterministic),
+            RequestedType::Concrete(TimeSeriesType::DeterministicSingleTimeSeries),
+            RequestedType::Concrete(TimeSeriesType::Probabilistic),
+            RequestedType::Concrete(TimeSeriesType::Scenarios),
+            RequestedType::Concrete(TimeSeriesType::SingleTimeSeries),
+            RequestedType::Concrete(TimeSeriesType::NonSequentialTimeSeries),
+            RequestedType::AbstractDeterministic,
+        ] {
+            let pb = requested_type_to_pb(requested);
+            assert_eq!(
+                requested_type_from_pb(pb).unwrap(),
+                requested,
+                "{requested:?}"
+            );
+        }
+
+        // An unset oneof is a clean error.
+        assert!(matches!(
+            requested_type_from_pb(pb::RequestedType { kind: None }),
+            Err(ConvertError::MissingField("RequestedType.kind"))
+        ));
+        // An unknown concrete code is a clean error.
+        assert!(matches!(
+            requested_type_from_pb(pb::RequestedType {
+                kind: Some(pb::requested_type::Kind::Concrete(999)),
+            }),
+            Err(ConvertError::InvalidValue {
+                field: "time_series_type",
+                ..
+            })
+        ));
+    }
+
+    // ---- 3.2: `ext` on the GetResp path ----------------------------------
+
+    #[test]
+    fn ext_is_currently_dropped_in_get_resp() {
+        // FINDING F1 (TEST_COVERAGE_PLAN.md §9):
+        // `time_series_data_to_get_resp` hardcodes `ext: String::new()` on all
+        // five variants, while `metadata_to_pb` carries `ext` through. A gRPC
+        // client that reads a series therefore never sees its `ext`, even though
+        // listing its metadata does.
+        //
+        // This is pinned, NOT fixed: changing it is a wire-behavior change and
+        // needs a decision. Note the core `TimeSeriesData` variants do not carry
+        // `ext` at all — it lives on the association row — so "fixing" this
+        // means threading the metadata's `ext` into the response at the server,
+        // not into this function.
+        let data = typed(Dtype::F64, vec![3]);
+        for original in [
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                t0(),
+                Duration::hours(1),
+                data.clone(),
+                "load",
+            )),
+            TimeSeriesData::NonSequentialTimeSeries(
+                NonSequentialTimeSeries::new(
+                    vec![t0(), t0() + Duration::hours(1), t0() + Duration::hours(5)],
+                    data.clone(),
+                    "events",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::Deterministic(
+                Deterministic::new(
+                    t0(),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                    3,
+                    typed(Dtype::F64, vec![1, 3]),
+                    "det",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::Probabilistic(
+                Probabilistic::new(
+                    t0(),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                    3,
+                    vec![0.5],
+                    typed(Dtype::F64, vec![1, 1, 3]),
+                    "prob",
+                )
+                .unwrap(),
+            ),
+            TimeSeriesData::Scenarios(
+                Scenarios::new(
+                    t0(),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                    Duration::hours(1),
+                    3,
+                    2,
+                    typed(Dtype::F64, vec![2, 1, 3]),
+                    "scen",
+                )
+                .unwrap(),
+            ),
+        ] {
+            let resp = time_series_data_to_get_resp(&original);
+            assert_eq!(
+                resp.ext,
+                "",
+                "PIN: GetResp blanks ext for {:?}",
+                original.time_series_type()
+            );
+        }
+    }
+
+    // ---- Non-finite and extreme values across the wire -------------------
+
+    #[test]
+    fn non_finite_floats_survive_the_wire_encoding_bit_exactly() {
+        let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0, 0.0];
+        let data = TypedArray::from_slice(vec![values.len()], &values).unwrap();
+        let original = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+            t0(),
+            Duration::hours(1),
+            data.clone(),
+            "load",
+        ));
+        let resp = time_series_data_to_get_resp(&original);
+        assert_eq!(resp.value_bytes, data.bytes);
+        let back = get_resp_to_time_series_data(resp, "load".to_string()).unwrap();
+        // `TypedArray`'s PartialEq compares raw bytes, so this is a bitwise
+        // comparison even for NaN.
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn a_bad_hash_length_in_metadata_errors() {
+        let mut pb = metadata_to_pb(&TimeSeriesMetadata {
+            owner_id: 1,
+            owner_type: "Generator".into(),
+            owner_category: OwnerCategory::Component,
+            time_series_type: TimeSeriesType::SingleTimeSeries,
+            name: "load".into(),
+            data_hash: [0u8; 32],
+            initial_timestamp: Some(t0()),
+            resolution: Some(Period::fixed(Duration::hours(1))),
+            length: Some(3),
+            horizon: None,
+            interval: None,
+            count: None,
+            timestamps: None,
+            features: Features::new(),
+            units: None,
+            percentiles: None,
+            dtype: Dtype::F64,
+            element_shape: vec![],
+            ext: None,
+        });
+        pb.data_hash = vec![0u8; 31];
+        assert!(matches!(
+            metadata_from_pb(pb),
+            Err(ConvertError::BadHashLen(31))
+        ));
+    }
+}
