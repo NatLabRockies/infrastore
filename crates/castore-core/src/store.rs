@@ -2651,6 +2651,86 @@ fn validate_forecast_shape(arr: &TypedArray, expected_prefix: &[usize], label: &
 }
 
 #[cfg(test)]
+mod slice_count_axis_tests {
+    use super::*;
+
+    fn f64_arr(shape: Vec<usize>, vals: &[f64]) -> TypedArray {
+        TypedArray::from_f64(shape, vals)
+    }
+
+    #[test]
+    fn axis0() {
+        // Shape [4]: axis 0 = leading axis, equivalent to leading-axis slicing.
+        // vals = [10, 20, 30, 40] (f64).
+        let arr = f64_arr(vec![4], &[10.0, 20.0, 30.0, 40.0]);
+        let sliced = slice_count_axis(&arr, 0, 1, 3);
+        assert_eq!(sliced.shape, vec![2]);
+        assert_eq!(sliced.to_f64_vec().unwrap(), vec![20.0, 30.0]);
+    }
+
+    #[test]
+    fn axis1_of_3d() {
+        // Simulate Deterministic shape [H=2, C=4, E=1]: [2, 4, 1].
+        // vals[s][w][e] = s*100 + w*10 + e
+        let vals: Vec<f64> = (0..2_usize)
+            .flat_map(|s| {
+                (0..4_usize)
+                    .flat_map(move |w| (0..1_usize).map(move |e| (s * 100 + w * 10 + e) as f64))
+            })
+            .collect();
+        let arr = f64_arr(vec![2, 4, 1], &vals);
+
+        // Select windows w=1..3 along axis 1.
+        let sliced = slice_count_axis(&arr, 1, 1, 3);
+        assert_eq!(sliced.shape, vec![2, 2, 1]);
+
+        // Expected: s=0, w=1: [10.0], s=0, w=2: [20.0], s=1, w=1: [110.0], s=1, w=2: [120.0]
+        let expected = vec![10.0, 20.0, 110.0, 120.0];
+        assert_eq!(sliced.to_f64_vec().unwrap(), expected);
+    }
+
+    #[test]
+    fn axis2_of_4d() {
+        // Simulate Probabilistic/Scenarios shape [P=2, H=2, C=3]: [2, 2, 3].
+        // vals[p][s][w] = p*1000 + s*100 + w*10
+        let vals: Vec<f64> = (0..2_usize)
+            .flat_map(|p| {
+                (0..2_usize).flat_map(move |s| {
+                    (0..3_usize).map(move |w| (p * 1000 + s * 100 + w * 10) as f64)
+                })
+            })
+            .collect();
+        let arr = f64_arr(vec![2, 2, 3], &vals);
+
+        // Select windows w=0..2 (first two) along axis 2.
+        let sliced = slice_count_axis(&arr, 2, 0, 2);
+        assert_eq!(sliced.shape, vec![2, 2, 2]);
+
+        // p=0, s=0: [0, 10]; p=0, s=1: [100, 110]; p=1, s=0: [1000, 1010]; p=1, s=1: [1100, 1110]
+        let expected = vec![0.0, 10.0, 100.0, 110.0, 1000.0, 1010.0, 1100.0, 1110.0];
+        assert_eq!(sliced.to_f64_vec().unwrap(), expected);
+    }
+
+    #[test]
+    fn full_range_is_identity() {
+        // Slicing the full range should return identical bytes.
+        let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let arr = f64_arr(vec![3, 4], &vals);
+        let sliced = slice_count_axis(&arr, 1, 0, 4);
+        assert_eq!(sliced.shape, arr.shape);
+        assert_eq!(sliced.bytes, arr.bytes);
+    }
+
+    #[test]
+    fn empty_range() {
+        let arr = f64_arr(vec![2, 4], &[0.0; 8]);
+        let sliced = slice_count_axis(&arr, 1, 2, 2);
+        assert_eq!(sliced.shape, vec![2, 0]);
+        assert!(sliced.bytes.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod resolve_windows_tests {
     use super::*;
     use chrono::{DateTime, Duration, TimeZone, Utc};

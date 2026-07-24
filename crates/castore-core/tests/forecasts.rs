@@ -14,76 +14,12 @@
 use castore_core::{
     Deterministic, Dtype, Features, ForecastTimeSeriesKey, OwnerCategory, Period, Probabilistic,
     Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray,
-    create_store, open_store,
+    create_store,
 };
 use chrono::{Duration, TimeZone, Utc};
 
-// Re-export slice_count_axis through a test-visible path.  The helper is
-// `pub(crate)` in store.rs; expose it here by calling it via the public API
-// indirectly, but for the unit tests (case 9) we test it directly using a
-// thin wrapper below.
-mod slice_axis {
-    use castore_core::TypedArray;
-
-    // Use the test-crate access: we compile with `#[cfg(test)]` integration
-    // tests which can see public items only.  `slice_count_axis` is
-    // `pub(crate)` so we can't call it from an integration test directly.
-    // Instead we expose the same logic inline here so we can test the
-    // algorithm independently.
-    pub fn slice_count_axis(arr: &TypedArray, axis: usize, w0: usize, w1: usize) -> TypedArray {
-        assert!(axis < arr.shape.len());
-        assert!(w0 <= w1);
-        let axis_len = arr.shape[axis];
-        assert!(w1 <= axis_len);
-
-        let outer: usize = arr.shape[..axis].iter().product();
-        let inner_bytes: usize = arr.shape[axis + 1..].iter().product::<usize>() * arr.dtype.size();
-        let window_bytes = (w1 - w0) * inner_bytes;
-
-        let mut out_bytes = Vec::with_capacity(outer * window_bytes);
-        for o in 0..outer {
-            let block_start = o * axis_len * inner_bytes;
-            let src_start = block_start + w0 * inner_bytes;
-            let src_end = block_start + w1 * inner_bytes;
-            out_bytes.extend_from_slice(&arr.bytes[src_start..src_end]);
-        }
-
-        let mut new_shape = arr.shape.clone();
-        new_shape[axis] = w1 - w0;
-
-        TypedArray {
-            dtype: arr.dtype,
-            shape: new_shape,
-            bytes: out_bytes,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Two-backend harness (mirrors indexing.rs exactly)
-// ---------------------------------------------------------------------------
-
-fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&Store, &T, &str)) {
-    // In-memory backend.
-    {
-        let mut store = create_store(None, true).unwrap();
-        let state = populate(&mut store);
-        verify(&store, &state, "memory");
-    }
-    // NetCDF backend: persist, reopen read-only, then read.
-    {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
-        let state = {
-            let mut store = create_store(Some(path.as_path()), false).unwrap();
-            let state = populate(&mut store);
-            store.flush().unwrap();
-            state
-        };
-        let store = open_store(path.as_path(), true).unwrap();
-        verify(&store, &state, "netcdf");
-    }
-}
+mod common;
+use common::for_each_backend;
 
 // ---------------------------------------------------------------------------
 // Helper: add a forecast and return the key.
@@ -782,79 +718,6 @@ fn deterministic_i64_dtype_preserved() {
             assert_eq!(to_i64_vec(&det2.data), expected, "{backend}: sliced values");
         },
     );
-}
-
-// ---------------------------------------------------------------------------
-// Case 9: Direct unit tests of slice_count_axis on known small arrays
-// ---------------------------------------------------------------------------
-
-#[test]
-fn slice_count_axis_axis0() {
-    // Shape [4]: axis 0 = leading axis, equivalent to leading-axis slicing.
-    // vals = [10, 20, 30, 40] (f64).
-    let arr = f64_arr(vec![4], &[10.0, 20.0, 30.0, 40.0]);
-    let sliced = slice_axis::slice_count_axis(&arr, 0, 1, 3);
-    assert_eq!(sliced.shape, vec![2]);
-    assert_eq!(sliced.to_f64_vec().unwrap(), vec![20.0, 30.0]);
-}
-
-#[test]
-fn slice_count_axis_axis1_of_3d() {
-    // Simulate Deterministic shape [H=2, C=4, E=1]: [2, 4, 1].
-    // vals[s][w][e] = s*100 + w*10 + e
-    let vals: Vec<f64> = (0..2_usize)
-        .flat_map(|s| {
-            (0..4_usize).flat_map(move |w| (0..1_usize).map(move |e| (s * 100 + w * 10 + e) as f64))
-        })
-        .collect();
-    let arr = f64_arr(vec![2, 4, 1], &vals);
-
-    // Select windows w=1..3 along axis 1.
-    let sliced = slice_axis::slice_count_axis(&arr, 1, 1, 3);
-    assert_eq!(sliced.shape, vec![2, 2, 1]);
-
-    // Expected: s=0, w=1: [10.0], s=0, w=2: [20.0], s=1, w=1: [110.0], s=1, w=2: [120.0]
-    let expected = vec![10.0, 20.0, 110.0, 120.0];
-    assert_eq!(sliced.to_f64_vec().unwrap(), expected);
-}
-
-#[test]
-fn slice_count_axis_axis2_of_4d() {
-    // Simulate Probabilistic/Scenarios shape [P=2, H=2, C=3]: [2, 2, 3].
-    // vals[p][s][w] = p*1000 + s*100 + w*10
-    let vals: Vec<f64> = (0..2_usize)
-        .flat_map(|p| {
-            (0..2_usize)
-                .flat_map(move |s| (0..3_usize).map(move |w| (p * 1000 + s * 100 + w * 10) as f64))
-        })
-        .collect();
-    let arr = f64_arr(vec![2, 2, 3], &vals);
-
-    // Select windows w=0..2 (first two) along axis 2.
-    let sliced = slice_axis::slice_count_axis(&arr, 2, 0, 2);
-    assert_eq!(sliced.shape, vec![2, 2, 2]);
-
-    // p=0, s=0: [0, 10]; p=0, s=1: [100, 110]; p=1, s=0: [1000, 1010]; p=1, s=1: [1100, 1110]
-    let expected = vec![0.0, 10.0, 100.0, 110.0, 1000.0, 1010.0, 1100.0, 1110.0];
-    assert_eq!(sliced.to_f64_vec().unwrap(), expected);
-}
-
-#[test]
-fn slice_count_axis_full_range_is_identity() {
-    // Slicing the full range should return identical bytes.
-    let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
-    let arr = f64_arr(vec![3, 4], &vals);
-    let sliced = slice_axis::slice_count_axis(&arr, 1, 0, 4);
-    assert_eq!(sliced.shape, arr.shape);
-    assert_eq!(sliced.bytes, arr.bytes);
-}
-
-#[test]
-fn slice_count_axis_empty_range() {
-    let arr = f64_arr(vec![2, 4], &[0.0; 8]);
-    let sliced = slice_axis::slice_count_axis(&arr, 1, 2, 2);
-    assert_eq!(sliced.shape, vec![2, 0]);
-    assert!(sliced.bytes.is_empty());
 }
 
 // ---------------------------------------------------------------------------

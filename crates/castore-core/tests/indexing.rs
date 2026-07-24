@@ -14,34 +14,12 @@
 
 use castore_core::{
     Dtype, Features, NonSequentialTimeSeries, OwnerCategory, SingleTimeSeries, Store,
-    TimeSeriesData, TimeSeriesKey, TypedArray, create_store, open_store,
+    TimeSeriesData, TimeSeriesKey, TypedArray,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 
-/// Run `populate` to write data, then `verify` to read it back, once per
-/// backend. For NetCDF the store is flushed, dropped, and reopened read-only
-/// between the two phases, exercising the persisted format.
-fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&Store, &T, &str)) {
-    // In-memory backend: same store instance for write and read.
-    {
-        let mut store = create_store(None, true).unwrap();
-        let state = populate(&mut store);
-        verify(&store, &state, "memory");
-    }
-    // NetCDF backend: persist, reopen read-only, then read.
-    {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
-        let state = {
-            let mut store = create_store(Some(path.as_path()), false).unwrap();
-            let state = populate(&mut store);
-            store.flush().unwrap();
-            state
-        };
-        let store = open_store(path.as_path(), true).unwrap();
-        verify(&store, &state, "netcdf");
-    }
-}
+mod common;
+use common::for_each_backend;
 
 fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesKey {
     store
