@@ -457,3 +457,458 @@ impl TimeSeriesData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::array::Dtype;
+    use chrono::{Duration, TimeZone};
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    fn arr(shape: Vec<usize>) -> TypedArray {
+        let n: usize = shape.iter().product();
+        let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        TypedArray::from_f64(shape, &values)
+    }
+
+    // ---- TimeSeriesType round trip ----------------------------------------
+
+    #[test]
+    fn time_series_type_str_round_trip_is_exhaustive() {
+        for t in [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            assert_eq!(TimeSeriesType::parse(t.as_str()), Some(t));
+            assert_eq!(t.as_str().parse::<TimeSeriesType>(), Ok(t));
+        }
+        assert_eq!(TimeSeriesType::parse("NotAType"), None);
+        // Case sensitivity is part of the contract: the catalog stores exactly
+        // `as_str()`, so a lower-cased spelling must not silently match.
+        assert_eq!(TimeSeriesType::parse("singletimeseries"), None);
+        assert!("".parse::<TimeSeriesType>().is_err());
+    }
+
+    #[test]
+    fn abstract_deterministic_matches_both_concrete_types() {
+        let abs = RequestedType::AbstractDeterministic;
+        assert!(abs.matches(TimeSeriesType::Deterministic));
+        assert!(abs.matches(TimeSeriesType::DeterministicSingleTimeSeries));
+        assert!(!abs.matches(TimeSeriesType::Probabilistic));
+        assert!(!abs.matches(TimeSeriesType::SingleTimeSeries));
+
+        let concrete = RequestedType::Concrete(TimeSeriesType::Deterministic);
+        assert!(concrete.matches(TimeSeriesType::Deterministic));
+        assert!(!concrete.matches(TimeSeriesType::DeterministicSingleTimeSeries));
+    }
+
+    // ---- SingleTimeSeries -------------------------------------------------
+
+    #[test]
+    fn single_time_series_length_comes_from_the_leading_dim() {
+        let s = SingleTimeSeries::new(t0(), Duration::hours(1), arr(vec![4, 3]), "load");
+        assert_eq!(s.length, 4);
+        assert_eq!(s.data.element_shape(), &[3]);
+        assert_eq!(s.resolution, Period::Fixed(Duration::hours(1)));
+
+        // A rank-0 array holds exactly one element (the empty shape's product
+        // is 1) but has no leading dim, so `length()` reports 0.
+        let scalar = TypedArray::from_f64(vec![], &[1.0]);
+        assert_eq!(scalar.num_elements(), 1);
+        assert_eq!(scalar.bytes.len(), Dtype::F64.size());
+        let s = SingleTimeSeries::new(t0(), Duration::hours(1), scalar, "rank0");
+        assert_eq!(s.length, 0);
+    }
+
+    // ---- NonSequentialTimeSeries -----------------------------------------
+
+    #[test]
+    fn non_sequential_single_point_is_accepted() {
+        // A one-timestamp series has no adjacent pair, so the strictly-
+        // increasing check trivially holds.
+        let s = NonSequentialTimeSeries::new(vec![t0()], arr(vec![1]), "one").unwrap();
+        assert_eq!(s.length, 1);
+        assert_eq!(s.timestamps, vec![t0()]);
+    }
+
+    #[test]
+    fn non_sequential_empty_is_accepted() {
+        // PIN: zero timestamps + a zero-length array is currently accepted.
+        let empty = TypedArray::from_f64(vec![0], &[]);
+        let s = NonSequentialTimeSeries::new(vec![], empty, "none").unwrap();
+        assert_eq!(s.length, 0);
+    }
+
+    #[test]
+    fn non_sequential_rejects_count_mismatch_and_non_increasing() {
+        let err = NonSequentialTimeSeries::new(vec![t0()], arr(vec![3]), "x").unwrap_err();
+        assert!(err.contains("does not match data length"), "{err}");
+
+        // Equal adjacent timestamps are rejected (strictly increasing).
+        let err = NonSequentialTimeSeries::new(vec![t0(), t0()], arr(vec![2]), "x").unwrap_err();
+        assert!(err.contains("strictly increasing"), "{err}");
+
+        // Decreasing is rejected.
+        let err =
+            NonSequentialTimeSeries::new(vec![t0() + Duration::hours(1), t0()], arr(vec![2]), "x")
+                .unwrap_err();
+        assert!(err.contains("strictly increasing"), "{err}");
+    }
+
+    // ---- compute_h / validate_positive_periods ----------------------------
+
+    #[test]
+    fn compute_h_requires_exact_positive_division() {
+        let h = Period::Fixed(Duration::hours(6));
+        let r = Period::Fixed(Duration::hours(2));
+        assert_eq!(compute_h(h, r).unwrap(), 3);
+
+        // Non-divisible: 5h horizon over a 2h resolution.
+        let err = compute_h(Period::Fixed(Duration::hours(5)), r).unwrap_err();
+        assert!(err.contains("not a positive integer multiple"), "{err}");
+
+        // Horizon shorter than resolution divides to 0, which is rejected.
+        let err = compute_h(Period::Fixed(Duration::hours(1)), r).unwrap_err();
+        assert!(err.contains("not a positive integer multiple"), "{err}");
+
+        // Mixing kinds is rejected rather than coerced.
+        let err = compute_h(Period::Months(3), r).unwrap_err();
+        assert!(err.contains("different kinds"), "{err}");
+
+        // Calendar months divide exactly.
+        assert_eq!(compute_h(Period::Months(12), Period::Months(3)).unwrap(), 4);
+        let err = compute_h(Period::Months(5), Period::Months(2)).unwrap_err();
+        assert!(err.contains("not a positive integer multiple"), "{err}");
+    }
+
+    #[test]
+    fn validate_positive_periods_rejects_zero_and_negative() {
+        let ok = Period::Fixed(Duration::hours(1));
+        let zero = Period::Fixed(Duration::zero());
+        let neg = Period::Fixed(Duration::hours(-1));
+
+        assert!(validate_positive_periods(ok, ok, ok).is_ok());
+        for (r, h, i, which) in [
+            (zero, ok, ok, "resolution"),
+            (neg, ok, ok, "resolution"),
+            (ok, zero, ok, "horizon"),
+            (ok, neg, ok, "horizon"),
+            (ok, ok, zero, "interval"),
+            (ok, ok, neg, "interval"),
+        ] {
+            let err = validate_positive_periods(r, h, i).unwrap_err();
+            assert_eq!(err, format!("{which} must be strictly positive"));
+        }
+        // Calendar months follow the same rule.
+        assert!(
+            validate_positive_periods(Period::Months(0), Period::Months(1), Period::Months(1))
+                .is_err()
+        );
+        assert!(
+            validate_positive_periods(Period::Months(-1), Period::Months(1), Period::Months(1))
+                .is_err()
+        );
+    }
+
+    // ---- Deterministic::new ----------------------------------------------
+
+    #[test]
+    fn deterministic_accepts_the_canonical_shape() {
+        // H = 3 (6h / 2h), count = 4, element shape [2].
+        let d = Deterministic::new(
+            t0(),
+            Duration::hours(2),
+            Duration::hours(6),
+            Duration::hours(6),
+            4,
+            arr(vec![3, 4, 2]),
+            "f",
+        )
+        .unwrap();
+        assert_eq!(d.count, 4);
+        assert_eq!(d.data.shape, vec![3, 4, 2]);
+    }
+
+    #[test]
+    fn deterministic_rejects_fewer_than_two_dims() {
+        for shape in [vec![], vec![6]] {
+            let err = Deterministic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(2),
+                Duration::hours(1),
+                3,
+                arr(shape.clone()),
+                "f",
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("must have at least 2 dims"),
+                "shape {shape:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_rejects_shape_mismatch() {
+        // H = 2, count = 3 expected -> [2, 3]. Wrong H:
+        let err = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            arr(vec![5, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("expected shape [2, 3]"), "{err}");
+
+        // Wrong count:
+        let err = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            arr(vec![2, 7]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("expected shape [2, 3]"), "{err}");
+    }
+
+    #[test]
+    fn deterministic_rejects_non_divisible_horizon() {
+        let err = Deterministic::new(
+            t0(),
+            Duration::hours(2),
+            Duration::hours(5),
+            Duration::hours(2),
+            3,
+            arr(vec![2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("not a positive integer multiple"), "{err}");
+    }
+
+    #[test]
+    fn deterministic_rejects_non_positive_periods() {
+        let err = Deterministic::new(
+            t0(),
+            Duration::zero(),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            arr(vec![2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert_eq!(err, "resolution must be strictly positive");
+
+        let err = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(-1),
+            3,
+            arr(vec![2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert_eq!(err, "interval must be strictly positive");
+    }
+
+    // ---- Probabilistic::new ----------------------------------------------
+
+    #[test]
+    fn probabilistic_accepts_the_canonical_shape() {
+        // P = 2, H = 2, count = 3 -> [2, 2, 3].
+        let p = Probabilistic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            vec![0.1, 0.9],
+            arr(vec![2, 2, 3]),
+            "f",
+        )
+        .unwrap();
+        assert_eq!(p.percentiles, vec![0.1, 0.9]);
+    }
+
+    #[test]
+    fn probabilistic_rejects_empty_percentiles() {
+        let err = Probabilistic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            vec![],
+            arr(vec![0, 2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("percentiles must be non-empty"), "{err}");
+    }
+
+    #[test]
+    fn probabilistic_rejects_non_increasing_percentiles() {
+        for pcts in [
+            vec![0.9, 0.1],      // decreasing
+            vec![0.5, 0.5],      // equal
+            vec![0.1, 0.5, 0.4], // dip at the tail
+        ] {
+            let err = Probabilistic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(2),
+                Duration::hours(1),
+                3,
+                pcts.clone(),
+                arr(vec![pcts.len(), 2, 3]),
+                "f",
+            )
+            .unwrap_err();
+            assert!(
+                err.contains("strictly increasing"),
+                "{pcts:?} should be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn probabilistic_rejects_percentile_length_mismatch() {
+        // Two percentiles declared, three planes of data.
+        let err = Probabilistic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            vec![0.1, 0.9],
+            arr(vec![3, 2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("expected shape [2, 2, 3]"), "{err}");
+    }
+
+    #[test]
+    fn probabilistic_rejects_fewer_than_three_dims() {
+        let err = Probabilistic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            vec![0.5],
+            arr(vec![2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("must have at least 3 dims"), "{err}");
+    }
+
+    // ---- Scenarios::new --------------------------------------------------
+
+    #[test]
+    fn scenarios_accepts_the_canonical_shape() {
+        // S = 4, H = 2, count = 3 -> [4, 2, 3].
+        let s = Scenarios::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            4,
+            arr(vec![4, 2, 3]),
+            "f",
+        )
+        .unwrap();
+        assert_eq!(s.scenario_count, 4);
+    }
+
+    #[test]
+    fn scenarios_rejects_scenario_count_mismatch() {
+        let err = Scenarios::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            4,
+            arr(vec![2, 2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("expected shape [4, 2, 3]"), "{err}");
+        assert!(err.contains("scenario_count=4"), "{err}");
+    }
+
+    #[test]
+    fn scenarios_rejects_too_few_dims() {
+        // A rank-2 array can never match [S, H, count]; the elem-dims branch
+        // treats `shape.len() <= 3` as "no element dims" and the comparison
+        // fails on rank.
+        let err = Scenarios::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::hours(1),
+            3,
+            1,
+            arr(vec![2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("expected shape [1, 2, 3]"), "{err}");
+    }
+
+    // ---- TimeSeriesData accessors ----------------------------------------
+
+    #[test]
+    fn time_series_data_accessors_are_variant_exact() {
+        let single = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+            t0(),
+            Duration::hours(1),
+            arr(vec![2]),
+            "s",
+        ));
+        let det = TimeSeriesData::Deterministic(
+            Deterministic::new(
+                t0(),
+                Duration::hours(1),
+                Duration::hours(2),
+                Duration::hours(1),
+                3,
+                arr(vec![2, 3]),
+                "d",
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(single.time_series_type(), TimeSeriesType::SingleTimeSeries);
+        assert_eq!(single.name(), "s");
+        assert!(single.as_single().is_some());
+        assert!(single.as_deterministic().is_none());
+        assert!(single.as_non_sequential().is_none());
+        assert!(single.as_probabilistic().is_none());
+        assert!(single.as_scenarios().is_none());
+
+        assert_eq!(det.time_series_type(), TimeSeriesType::Deterministic);
+        assert_eq!(det.name(), "d");
+        assert!(det.as_deterministic().is_some());
+        assert!(det.as_single().is_none());
+    }
+}

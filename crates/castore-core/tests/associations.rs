@@ -881,3 +881,424 @@ fn opening_for_writing_renames_the_legacy_time_series_indexes() {
         "legacy indexes survived the rename: {names:?}"
     );
 }
+
+// ===========================================================================
+// Association edge cases
+// ===========================================================================
+
+#[test]
+fn a_supplemental_self_pair_is_accepted() {
+    // PIN: nothing rejects `component_id == attribute_id`. The catalog stores
+    // two opaque ids and a pair identity; it has no notion that a component and
+    // an attribute come from different id spaces, so a self-pair is a legal row.
+    // A consumer that shares one id space across both would silently create it.
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_association(attach(5, 5))
+        .unwrap();
+
+    assert_eq!(
+        store
+            .list_supplemental_attribute_associations(&all_attachments())
+            .unwrap(),
+        vec![attach(5, 5)]
+    );
+    // It is visible from both directions of the same id.
+    assert_eq!(
+        store
+            .list_supplemental_attribute_ids(&SupplementalAttributeFilter::new().component_id(5))
+            .unwrap(),
+        vec![5]
+    );
+    assert_eq!(
+        store
+            .list_components_with_attributes(&SupplementalAttributeFilter::new().attribute_id(5))
+            .unwrap(),
+        vec![5]
+    );
+    // And the pair identity still applies: adding it again collides.
+    assert!(matches!(
+        store.add_supplemental_attribute_association(attach(5, 5)),
+        Err(TimeSeriesError::DuplicateAssociation(_))
+    ));
+}
+
+#[test]
+fn a_parent_child_self_edge_is_accepted() {
+    // PIN: a component may be its own parent. The identity is the ordered pair,
+    // so `(5, 5)` is a legal — if physically meaningless — edge, and it appears
+    // as both a child of and a parent of 5.
+    let mut store = create_store(None, true).unwrap();
+    store.add_parent_child_association(edge(5, 5)).unwrap();
+
+    assert_eq!(
+        store
+            .list_children(&ParentChildFilter::new().parent_id(5))
+            .unwrap(),
+        vec![5]
+    );
+    assert_eq!(
+        store
+            .list_parents(&ParentChildFilter::new().child_id(5))
+            .unwrap(),
+        vec![5]
+    );
+    assert!(matches!(
+        store.add_parent_child_association(edge(5, 5)),
+        Err(TimeSeriesError::DuplicateAssociation(_))
+    ));
+}
+
+#[test]
+fn replace_component_id_with_old_equal_to_new_is_a_self_move() {
+    // PIN: `old == new` rewrites each matching row with the value it already
+    // has. It must report the rows it touched (not zero) and must not trip the
+    // collision check against itself.
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_associations(vec![attach(1, 10), attach(1, 11), attach(2, 10)])
+        .unwrap();
+
+    let moved = store
+        .replace_supplemental_attribute_component_id(1, 1)
+        .unwrap();
+    assert_eq!(moved, 2, "both of component 1's attachments were rewritten");
+
+    // Nothing changed.
+    let mut rows = store
+        .list_supplemental_attribute_associations(&all_attachments())
+        .unwrap();
+    rows.sort_by_key(|r| (r.component_id, r.attribute_id));
+    assert_eq!(rows, vec![attach(1, 10), attach(1, 11), attach(2, 10)]);
+}
+
+#[test]
+fn replace_parent_child_component_id_with_old_equal_to_new_is_a_self_move() {
+    let mut store = create_store(None, true).unwrap();
+    // Component 1 appears as a parent once and as a child once, so a self-move
+    // must find it on both sides without colliding.
+    store
+        .add_parent_child_associations(vec![edge(1, 20), edge(30, 1)])
+        .unwrap();
+
+    let moved = store.replace_parent_child_component_id(1, 1).unwrap();
+    assert_eq!(moved, 2, "both endpoints referencing 1 were rewritten");
+
+    let mut rows = store.list_parent_child_associations(&all_edges()).unwrap();
+    rows.sort_by_key(|r| (r.parent_id, r.child_id));
+    assert_eq!(rows, vec![edge(1, 20), edge(30, 1)]);
+}
+
+#[test]
+fn replace_component_id_for_an_unreferenced_id_is_zero() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_associations(vec![attach(1, 10), attach(2, 11)])
+        .unwrap();
+
+    assert_eq!(
+        store
+            .replace_supplemental_attribute_component_id(999, 1000)
+            .unwrap(),
+        0
+    );
+    // The attachments are untouched, and 1000 gained nothing.
+    assert_eq!(
+        store
+            .count_supplemental_attribute_associations(&all_attachments())
+            .unwrap(),
+        2
+    );
+    assert!(
+        store
+            .list_supplemental_attribute_ids(&SupplementalAttributeFilter::new().component_id(1000))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn replace_parent_child_component_id_for_an_unreferenced_id_is_zero() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_parent_child_associations(vec![edge(1, 20), edge(2, 21)])
+        .unwrap();
+
+    assert_eq!(
+        store.replace_parent_child_component_id(999, 1000).unwrap(),
+        0
+    );
+    assert_eq!(
+        store.count_parent_child_associations(&all_edges()).unwrap(),
+        2
+    );
+}
+
+#[test]
+fn a_type_list_filter_with_over_a_thousand_entries_still_works() {
+    // The type filters render as a literal SQL `IN (?, ?, …)` list, one bind
+    // variable per entry. SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is the
+    // ceiling that caps how many an expanded abstract type may contribute; a
+    // caller expanding a wide hierarchy can plausibly reach four figures. Pin
+    // that ~1,200 entries is under the limit and still selects correctly.
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_associations(vec![
+            typed_attach(1, "Generator", 10, "GeographicInfo"),
+            typed_attach(2, "Bus", 11, "Outage"),
+        ])
+        .unwrap();
+
+    // 1,200 names, exactly one of which exists in the catalog.
+    let mut component_types: Vec<String> = (0..1_199).map(|i| format!("Synthetic{i}")).collect();
+    component_types.push("Generator".to_string());
+    assert_eq!(component_types.len(), 1_200);
+
+    let filter = SupplementalAttributeFilter::new().component_types(component_types.clone());
+    let rows = store
+        .list_supplemental_attribute_associations(&filter)
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![typed_attach(1, "Generator", 10, "GeographicInfo")]
+    );
+    assert_eq!(
+        store
+            .count_supplemental_attribute_associations(&filter)
+            .unwrap(),
+        1
+    );
+    assert!(
+        store
+            .has_supplemental_attribute_association(&filter)
+            .unwrap()
+    );
+
+    // A 1,200-entry list of names that match nothing selects nothing (rather
+    // than erroring or degenerating into "match all").
+    let none = SupplementalAttributeFilter::new()
+        .component_types((0..1_200).map(|i| format!("Synthetic{i}")));
+    assert!(
+        store
+            .list_supplemental_attribute_associations(&none)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Both sides of the filter, and the parent/child catalog, take the same path.
+    let both = SupplementalAttributeFilter::new()
+        .component_types(component_types)
+        .attribute_types(
+            (0..1_199)
+                .map(|i| format!("Synthetic{i}"))
+                .chain(["GeographicInfo".to_string()]),
+        );
+    assert_eq!(
+        store
+            .count_supplemental_attribute_associations(&both)
+            .unwrap(),
+        1
+    );
+
+    store
+        .add_parent_child_associations(vec![edge(1, 20)])
+        .unwrap();
+    let wide_edges = ParentChildFilter::new().parent_types(
+        (0..1_199)
+            .map(|i| format!("Synthetic{i}"))
+            .chain(["Generator".to_string()]),
+    );
+    assert_eq!(
+        store.list_parent_child_associations(&wide_edges).unwrap(),
+        vec![edge(1, 20)]
+    );
+}
+
+/// Brute-force the counts a fan-in / fan-out graph should produce, straight from
+/// the association list, so the SQL aggregates are checked against an
+/// independent computation rather than a hand-copied number.
+#[test]
+fn counts_and_summary_match_brute_force_on_a_fan_in_and_fan_out_graph() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Fan-in: one attribute (9000, "SharedInfo") on 50 components 1..=50.
+    // Fan-out: one component (7000) carrying 50 attributes 1..=50.
+    // The two overlap nowhere, so every expected count is a clean sum.
+    let mut rows = Vec::new();
+    for c in 1..=50i64 {
+        rows.push(typed_attach(c, "Generator", 9_000, "SharedInfo"));
+    }
+    for a in 1..=50i64 {
+        rows.push(typed_attach(7_000, "Bus", a, "PerBusInfo"));
+    }
+
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_supplemental_attribute_associations(rows.clone())
+        .unwrap();
+
+    // ---- brute force ----
+    let total = rows.len() as i64;
+    let distinct_attributes = rows.iter().map(|r| r.attribute_id).collect::<BTreeSet<_>>();
+    let distinct_components = rows.iter().map(|r| r.component_id).collect::<BTreeSet<_>>();
+    let mut by_type: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut by_pair: BTreeMap<(&str, &str), i64> = BTreeMap::new();
+    for r in &rows {
+        *by_type.entry(r.attribute_type.as_str()).or_default() += 1;
+        *by_pair
+            .entry((r.component_type.as_str(), r.attribute_type.as_str()))
+            .or_default() += 1;
+    }
+
+    // ---- totals ----
+    assert_eq!(
+        store
+            .count_supplemental_attribute_associations(&all_attachments())
+            .unwrap(),
+        total
+    );
+    assert_eq!(
+        store
+            .count_supplemental_attributes(&all_attachments())
+            .unwrap(),
+        distinct_attributes.len() as i64,
+        "distinct attributes"
+    );
+    assert_eq!(
+        store
+            .count_components_with_attributes(&all_attachments())
+            .unwrap(),
+        distinct_components.len() as i64,
+        "distinct components"
+    );
+
+    // ---- counts by type ----
+    let mut got: Vec<(String, i64)> = store.supplemental_attribute_counts_by_type().unwrap();
+    got.sort();
+    let mut want: Vec<(String, i64)> = by_type
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    want.sort();
+    assert_eq!(got, want);
+
+    // ---- grouped summary ----
+    let mut got: Vec<(String, String, i64)> = store
+        .supplemental_attribute_summary()
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.component_type, r.attribute_type, r.count))
+        .collect();
+    got.sort();
+    let mut want: Vec<(String, String, i64)> = by_pair
+        .into_iter()
+        .map(|((c, a), n)| (c.to_string(), a.to_string(), n))
+        .collect();
+    want.sort();
+    assert_eq!(got, want);
+
+    // ---- the fan-in side, per-attribute ----
+    let fan_in = SupplementalAttributeFilter::new().attribute_id(9_000);
+    assert_eq!(
+        store
+            .count_supplemental_attribute_associations(&fan_in)
+            .unwrap(),
+        50
+    );
+    assert_eq!(
+        store.count_components_with_attributes(&fan_in).unwrap(),
+        50,
+        "50 components share the one attribute"
+    );
+    assert_eq!(store.count_supplemental_attributes(&fan_in).unwrap(), 1);
+    let mut components = store.list_components_with_attributes(&fan_in).unwrap();
+    components.sort();
+    assert_eq!(components, (1..=50i64).collect::<Vec<_>>());
+
+    // ---- the fan-out side, per-component ----
+    let fan_out = SupplementalAttributeFilter::new().component_id(7_000);
+    assert_eq!(
+        store
+            .count_supplemental_attribute_associations(&fan_out)
+            .unwrap(),
+        50
+    );
+    assert_eq!(store.count_supplemental_attributes(&fan_out).unwrap(), 50);
+    assert_eq!(store.count_components_with_attributes(&fan_out).unwrap(), 1);
+    let mut attributes = store.list_supplemental_attribute_ids(&fan_out).unwrap();
+    attributes.sort();
+    assert_eq!(attributes, (1..=50i64).collect::<Vec<_>>());
+
+    // ---- and the aggregates survive a disk round trip ----
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("assoc.nc");
+    store.persist_to(path.as_path()).unwrap();
+    let reopened = open_store(path.as_path(), true).unwrap();
+    assert_eq!(
+        reopened
+            .count_supplemental_attribute_associations(&all_attachments())
+            .unwrap(),
+        total
+    );
+    assert_eq!(
+        reopened.supplemental_attribute_summary().unwrap(),
+        store.supplemental_attribute_summary().unwrap()
+    );
+}
+
+#[test]
+fn parent_child_counts_match_brute_force_on_a_fan_in_and_fan_out_graph() {
+    use std::collections::BTreeSet;
+
+    // Fan-out: one parent 7000 with 50 children. Fan-in: one child 9000 with 50
+    // parents. Both directions must aggregate independently.
+    let mut rows = Vec::new();
+    for c in 1..=50i64 {
+        rows.push(typed_edge(7_000, "Generator", c, "Bus"));
+    }
+    for p in 100..150i64 {
+        rows.push(typed_edge(p, "Generator", 9_000, "Bus"));
+    }
+
+    let mut store = create_store(None, true).unwrap();
+    store.add_parent_child_associations(rows.clone()).unwrap();
+
+    assert_eq!(
+        store.count_parent_child_associations(&all_edges()).unwrap(),
+        rows.len() as i64
+    );
+
+    let mut children = store
+        .list_children(&ParentChildFilter::new().parent_id(7_000))
+        .unwrap();
+    children.sort();
+    assert_eq!(children, (1..=50i64).collect::<Vec<_>>());
+    assert_eq!(
+        store
+            .count_parent_child_associations(&ParentChildFilter::new().parent_id(7_000))
+            .unwrap(),
+        50
+    );
+
+    let mut parents = store
+        .list_parents(&ParentChildFilter::new().child_id(9_000))
+        .unwrap();
+    parents.sort();
+    assert_eq!(parents, (100..150i64).collect::<Vec<_>>());
+    assert_eq!(
+        store
+            .count_parent_child_associations(&ParentChildFilter::new().child_id(9_000))
+            .unwrap(),
+        50
+    );
+
+    // `list_children` / `list_parents` return distinct ids, so the unfiltered
+    // forms are the id sets, not the row count.
+    let expected_children: BTreeSet<i64> = rows.iter().map(|r| r.child_id).collect();
+    let mut all_children = store.list_children(&all_edges()).unwrap();
+    all_children.sort();
+    assert_eq!(
+        all_children,
+        expected_children.into_iter().collect::<Vec<_>>()
+    );
+}

@@ -6,8 +6,8 @@
 
 use castore_core::{
     Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesType, TypedArray, create_store,
-    create_store_with_compression, open_store,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesKey, TimeSeriesType, TypedArray,
+    create_store, create_store_with_compression, open_store,
 };
 use chrono::{Duration, TimeZone, Utc};
 
@@ -918,4 +918,298 @@ fn opening_a_store_from_an_older_format_is_rejected() {
         }
         other => panic!("expected IncompatibleFormat, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Failure-side persistence: a failing integrity report, torn artifacts, and
+// version mismatches other than "older".
+// ---------------------------------------------------------------------------
+
+/// Build a small on-disk store and return `(dir, nc_path, key)`. The temp dir is
+/// returned so the caller keeps it alive.
+fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+    let key = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let key = store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+        key
+    };
+    (dir, path, key)
+}
+
+fn sqlite_path_of(nc: &std::path::Path) -> std::path::PathBuf {
+    let mut p = nc.as_os_str().to_owned();
+    p.push(".sqlite");
+    std::path::PathBuf::from(p)
+}
+
+/// The name of the packed data variable (not its `_h` companion, not a
+/// standalone `arr_*`) inside the `time_series/single` group of a store file.
+fn packed_data_variable(path: &std::path::Path) -> String {
+    let f = netcdf::open(path).unwrap();
+    // `File::group` returns `Result<Option<_>>`; `Group::group` returns `Option<_>`.
+    let ts = f.group("time_series").unwrap().expect("time_series group");
+    let single = ts.group("single").expect("single group");
+    single
+        .variables()
+        .map(|v| v.name())
+        .find(|n| !n.ends_with("_h") && !n.starts_with("arr_"))
+        .expect("a packed data variable exists")
+}
+
+#[test]
+fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
+    // `verify_integrity` recomputes each array's content hash and compares it
+    // with the hash recorded alongside it in the file. Perturbing one stored
+    // element without touching the recorded hash is exactly the corruption the
+    // check exists to catch — and until now nothing anywhere produced a
+    // *failing* report, so the error-reporting path was untested.
+    let (_dir, path, _key) = store_on_disk();
+    let dataset = packed_data_variable(&path);
+
+    {
+        let mut f = netcdf::append(&path).unwrap();
+        let mut ts = f
+            .group_mut("time_series")
+            .unwrap()
+            .expect("time_series group");
+        let mut single = ts.group_mut("single").expect("single group");
+        let mut var = single.variable_mut(&dataset).expect("data variable");
+        // Flip row 0, column 0 to a value the recorded hash does not describe.
+        var.put_value(-999.5f64, [0, 0]).unwrap();
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let report = store.verify_integrity().unwrap();
+    assert!(
+        !report.ok(),
+        "corrupting stored bytes must produce a failing report"
+    );
+    assert_eq!(report.errors.len(), 1, "errors: {:?}", report.errors);
+    assert!(
+        report.errors[0].starts_with("hash mismatch: stored="),
+        "unexpected diagnostic: {}",
+        report.errors[0]
+    );
+}
+
+#[test]
+fn verify_integrity_does_not_inspect_the_sqlite_catalog() {
+    // FINDING F3 (TEST_COVERAGE_PLAN.md §9): `Store::verify_integrity`
+    // delegates straight to the NetCDF backend, which walks only its own
+    // hash index. A `data_hash` corrupted in the SQLite catalog — the half that
+    // maps a key to an array — is therefore NOT reported, even though every
+    // read of that key now fails or returns the wrong array. Pinned as-is; the
+    // fix (cross-checking catalog hashes against the backend index) is a
+    // behavior change and out of scope here.
+    let (_dir, path, key) = store_on_disk();
+
+    {
+        let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+        let n = conn
+            .execute(
+                "UPDATE time_series_associations SET data_hash = ?1",
+                [&"0".repeat(64)],
+            )
+            .unwrap();
+        assert_eq!(n, 1, "one association to corrupt");
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let report = store.verify_integrity().unwrap();
+    assert!(
+        report.ok(),
+        "PIN: a catalog-side hash corruption is invisible to verify_integrity; \
+         got errors {:?}",
+        report.errors
+    );
+    // But the key genuinely no longer resolves to its array, which is what the
+    // report failed to surface.
+    assert!(
+        store.get_time_series(key.identity(), None).is_err(),
+        "the corrupted association must not still read successfully"
+    );
+}
+
+#[test]
+fn opening_a_store_whose_sqlite_half_is_missing_creates_an_empty_catalog() {
+    // PIN: the two artifacts are one logical store, but nothing enforces that.
+    // Deleting the catalog and opening read-write silently yields a store with
+    // the arrays still on disk and *no* time series — a torn artifact reads as
+    // an empty one rather than erroring.
+    let (_dir, path, key) = store_on_disk();
+    std::fs::remove_file(sqlite_path_of(&path)).unwrap();
+
+    let store = open_store(path.as_path(), false).unwrap();
+    assert!(
+        store.list_keys(ListFilter::new()).unwrap().is_empty(),
+        "PIN: the catalog is recreated empty, not restored"
+    );
+    assert!(matches!(
+        store.get_metadata(key.identity()),
+        Err(TimeSeriesError::NotFound)
+    ));
+    // The array is still physically present, so it is now unreachable garbage.
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+#[test]
+fn opening_a_store_whose_sqlite_half_is_missing_read_only_errors() {
+    // A read-only open cannot create the catalog file, so unlike the read-write
+    // case above it fails loudly rather than presenting an empty store. The
+    // error comes from SQLite, so the diagnostic names the missing `.sqlite`
+    // path rather than explaining that the store is torn.
+    let (_dir, path, _key) = store_on_disk();
+    std::fs::remove_file(sqlite_path_of(&path)).unwrap();
+
+    let Err(err) = open_store(path.as_path(), true) else {
+        panic!("a read-only open with no catalog must fail");
+    };
+    assert!(
+        matches!(err, TimeSeriesError::Sqlite(_)),
+        "expected a Sqlite error, got {err:?}"
+    );
+    assert!(err.to_string().contains(".sqlite"), "{err}");
+}
+
+#[test]
+fn opening_a_zero_byte_netcdf_file_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.nc");
+    std::fs::write(&path, b"").unwrap();
+
+    let Err(err) = open_store(path.as_path(), true) else {
+        panic!("a zero-byte file is not a store");
+    };
+    // It is not a NetCDF file at all, so the failure comes from the HDF5 open,
+    // not from the format-version check.
+    assert!(
+        !matches!(err, TimeSeriesError::IncompatibleFormat { .. }),
+        "expected an open failure, got {err:?}"
+    );
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn opening_a_truncated_netcdf_file_is_rejected() {
+    // A file with a plausible prefix but no valid trailer.
+    let (_dir, path, _key) = store_on_disk();
+    let bytes = std::fs::read(&path).unwrap();
+    let dir2 = tempfile::tempdir().unwrap();
+    let truncated = dir2.path().join("truncated.nc");
+    std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
+
+    assert!(
+        open_store(truncated.as_path(), true).is_err(),
+        "a truncated store file must not open"
+    );
+}
+
+#[test]
+fn opening_a_directory_as_a_store_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let subdir = dir.path().join("not_a_store.nc");
+    std::fs::create_dir(&subdir).unwrap();
+
+    let Err(err) = open_store(subdir.as_path(), true) else {
+        panic!("a directory is not a store");
+    };
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn opening_a_nonexistent_path_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does_not_exist.nc");
+    assert!(open_store(missing.as_path(), true).is_err());
+}
+
+#[test]
+fn opening_a_store_from_a_newer_format_is_rejected() {
+    // The version check is exact equality in both directions: a store written
+    // by a *newer* build is just as unreadable as an older one, and must say so
+    // rather than being parsed hopefully.
+    let (_dir, path, _key) = store_on_disk();
+    {
+        let mut f = netcdf::append(&path).unwrap();
+        f.add_attribute("data_format_version", "99.0.0").unwrap();
+    }
+
+    let Err(err) = open_store(path.as_path(), true) else {
+        panic!("expected a newer-format store to be rejected");
+    };
+    match err {
+        TimeSeriesError::IncompatibleFormat { found, expected } => {
+            assert_eq!(found, "99.0.0");
+            assert_eq!(expected, castore_core::DATA_FORMAT_VERSION);
+        }
+        other => panic!("expected IncompatibleFormat, got {other:?}"),
+    }
+}
+
+#[test]
+fn opening_a_store_with_no_format_attribute_is_rejected_as_unspecified() {
+    // A file that predates the attribute entirely reports `found:
+    // "unspecified"`. Build one from scratch with the netcdf crate: a store
+    // created by this build always carries the attribute, and the crate has no
+    // attribute-removal API.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.nc");
+    {
+        let _f = netcdf::create(&path).unwrap();
+    }
+
+    // Opened read-write so the companion catalog is created; a read-only open
+    // would fail on the absent catalog first (see
+    // `the_catalog_half_is_opened_before_the_format_check`).
+    let Err(err) = open_store(path.as_path(), false) else {
+        panic!("expected a store with no format attribute to be rejected");
+    };
+    match err {
+        TimeSeriesError::IncompatibleFormat { found, expected } => {
+            assert_eq!(found, "unspecified");
+            assert_eq!(expected, castore_core::DATA_FORMAT_VERSION);
+        }
+        other => panic!("expected IncompatibleFormat, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_catalog_half_is_opened_before_the_format_check() {
+    // PIN the ordering inside `Store::open`: the SQLite catalog is opened
+    // first, so when *both* halves are wrong the caller sees the catalog error,
+    // not the more informative format-version error. Worth knowing when reading
+    // a bug report: a `Sqlite(CannotOpen)` does not rule out a version
+    // mismatch underneath it.
+    let (_dir, path, _key) = store_on_disk();
+    {
+        let mut f = netcdf::append(&path).unwrap();
+        f.add_attribute("data_format_version", "99.0.0").unwrap();
+    }
+    std::fs::remove_file(sqlite_path_of(&path)).unwrap();
+
+    let Err(err) = open_store(path.as_path(), true) else {
+        panic!("expected an error");
+    };
+    assert!(
+        matches!(err, TimeSeriesError::Sqlite(_)),
+        "PIN: the catalog error wins over the format error; got {err:?}"
+    );
+
+    // Opened read-write the catalog is created, and the format check then fires.
+    assert!(matches!(
+        open_store(path.as_path(), false),
+        Err(TimeSeriesError::IncompatibleFormat { .. })
+    ));
 }

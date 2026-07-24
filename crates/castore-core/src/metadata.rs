@@ -2066,3 +2066,210 @@ pub fn forecast_family_conflict(
         .optional()?;
     Ok(exists.is_some())
 }
+
+#[cfg(test)]
+mod index_plan_tests {
+    //! Guards on the query planner's index choices.
+    //!
+    //! The five secondary indexes in `schema::DDL` (`idx_ts_type`, `idx_name`,
+    //! `idx_owner_type`, `idx_category_owner`, `idx_interval`) were added after
+    //! measuring 3–34x speedups on a 405k-row catalog — see the long comment
+    //! beside them. Those measurements live in a comment; nothing stopped a
+    //! later schema edit from quietly returning a hot predicate to a full table
+    //! scan.
+    //!
+    //! Each test below applies the real DDL to a fresh in-memory database, runs
+    //! `EXPLAIN QUERY PLAN` for one hot query *shape*, and asserts the expected
+    //! index appears in the plan. These are planner-choice assertions, not
+    //! timings: they need no data and are stable because SQLite's planner is
+    //! deterministic for a fixed schema and query.
+    //!
+    //! A failure here means "this predicate no longer uses its index", which is
+    //! a performance regression to investigate, not necessarily a bug.
+
+    use super::schema;
+
+    fn schema_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(schema::DDL).unwrap();
+        conn
+    }
+
+    /// The `EXPLAIN QUERY PLAN` output for `sql`, joined into one string.
+    ///
+    /// Each `?` in `sql` is bound to NULL. The plan is fixed at prepare time, so
+    /// the bound values cannot influence which index the planner picks — they
+    /// only need to be present for the statement to step.
+    fn plan(conn: &rusqlite::Connection, sql: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap_or_else(|e| panic!("preparing plan for {sql}: {e}"));
+        let nulls = vec![rusqlite::types::Null; sql.matches('?').count()];
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params_from_iter(nulls), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.join("\n")
+    }
+
+    /// Assert the plan for `sql` names `index`, and that it is not a full scan
+    /// of the wide association table.
+    fn assert_uses_index(sql: &str, index: &str) {
+        let conn = schema_conn();
+        let p = plan(&conn, sql);
+        assert!(
+            p.contains(index),
+            "expected {index} in the plan for:\n  {sql}\ngot:\n{p}"
+        );
+        assert!(
+            !p.contains("SCAN time_series_associations\n")
+                && !p.ends_with("SCAN time_series_associations"),
+            "plan for {sql} fell back to a full table scan:\n{p}"
+        );
+    }
+
+    #[test]
+    fn exact_name_filter_uses_idx_name() {
+        assert_uses_index(
+            "SELECT * FROM time_series_associations WHERE name = ?",
+            "idx_name",
+        );
+    }
+
+    #[test]
+    fn prefix_name_glob_uses_idx_name() {
+        // The column has SQLite's default BINARY collation, which lets GLOB
+        // range-seek on a literal prefix instead of scanning.
+        assert_uses_index(
+            "SELECT * FROM time_series_associations WHERE name GLOB 'wind_*'",
+            "idx_name",
+        );
+    }
+
+    #[test]
+    fn time_series_type_count_uses_idx_ts_type() {
+        assert_uses_index(
+            "SELECT COUNT(*) FROM time_series_associations WHERE time_series_type = ?",
+            "idx_ts_type",
+        );
+    }
+
+    #[test]
+    fn owner_type_filter_uses_idx_owner_type() {
+        assert_uses_index(
+            "SELECT * FROM time_series_associations WHERE owner_type = ?",
+            "idx_owner_type",
+        );
+    }
+
+    #[test]
+    fn distinct_owner_type_uses_idx_owner_type() {
+        // A covering scan of the narrow index, not the wide table.
+        assert_uses_index(
+            "SELECT DISTINCT owner_type FROM time_series_associations",
+            "idx_owner_type",
+        );
+    }
+
+    #[test]
+    fn category_scoped_owner_enumeration_uses_idx_category_owner() {
+        // `idx_owner` leads with owner_id so it cannot serve a category-only
+        // predicate; `idx_category_owner` leads with the category and keeps
+        // `DISTINCT owner_id` covered.
+        assert_uses_index(
+            "SELECT DISTINCT owner_id FROM time_series_associations WHERE owner_category = ?",
+            "idx_category_owner",
+        );
+    }
+
+    #[test]
+    fn distinct_interval_uses_idx_interval() {
+        assert_uses_index(
+            "SELECT DISTINCT interval FROM time_series_associations WHERE interval IS NOT NULL",
+            "idx_interval",
+        );
+    }
+
+    #[test]
+    fn distinct_resolution_uses_idx_resolution() {
+        assert_uses_index(
+            "SELECT DISTINCT resolution FROM time_series_associations WHERE resolution IS NOT NULL",
+            "idx_resolution",
+        );
+    }
+
+    #[test]
+    fn data_hash_lookup_uses_idx_hash() {
+        // Regression side: `idx_hash` predates the five above and drives array
+        // reference counting on every delete.
+        assert_uses_index(
+            "SELECT * FROM time_series_associations WHERE data_hash = ?",
+            "idx_hash",
+        );
+    }
+
+    #[test]
+    fn owner_lookup_uses_idx_category_owner() {
+        // `(owner_id, owner_category)` is served by `idx_category_owner`, not by
+        // `idx_owner`: both cover the predicate, and the planner prefers the
+        // narrower two-small-column index. Pinned as the observed choice — this
+        // is why `idx_owner` alone was not enough for the category-scoped
+        // enumeration above.
+        assert_uses_index(
+            "SELECT * FROM time_series_associations WHERE owner_id = ? AND owner_category = ?",
+            "idx_category_owner",
+        );
+    }
+
+    #[test]
+    fn the_full_identity_lookup_uses_the_unique_index() {
+        // The hot single-key read: `get_by_key` resolves one row by its whole
+        // identity and must land on the unique index, not scan.
+        assert_uses_index(
+            "SELECT * FROM time_series_associations
+             WHERE owner_id = ? AND owner_category = ? AND time_series_type = ?
+               AND name = ? AND COALESCE(resolution, '') = ?
+               AND COALESCE(interval, '') = ? AND features_hash = ?",
+            "uq_ts_assoc_coalesced",
+        );
+    }
+
+    #[test]
+    fn every_expected_index_exists_after_applying_the_ddl() {
+        // Cheap tripwire against an index being deleted outright: the plan
+        // assertions above would then fail with a confusing message.
+        let conn = schema_conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = 'time_series_associations'
+                 ORDER BY name",
+            )
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for expected in [
+            "idx_category_owner",
+            "idx_hash",
+            "idx_interval",
+            "idx_name",
+            "idx_owner",
+            "idx_owner_type",
+            "idx_resolution",
+            "idx_ts_type",
+            "uq_ts_assoc",
+            "uq_ts_assoc_coalesced",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "index {expected} is missing; present: {names:?}"
+            );
+        }
+    }
+}

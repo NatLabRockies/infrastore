@@ -12,9 +12,9 @@
 //! synthesized into `Deterministic`.
 
 use castore_core::{
-    Deterministic, Dtype, Features, ForecastTimeSeriesKey, OwnerCategory, Period, Probabilistic,
-    Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey, TimeSeriesType, TypedArray,
-    create_store,
+    Deterministic, Dtype, Features, ForecastTimeSeriesKey, ListFilter, OwnerCategory, Period,
+    Probabilistic, Scenarios, SingleTimeSeries, Store, TimeSeriesData, TimeSeriesKey,
+    TimeSeriesType, TypedArray, create_store, open_store,
 };
 use chrono::{Duration, TimeZone, Utc};
 
@@ -1337,5 +1337,427 @@ fn count_array_references_counts_sts_and_dst() {
         (sts, dst),
         (1, 1),
         "one STS and one DST reference the array"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Calendar (`Period::Months`) forecasts
+//
+// Nothing else exercises a calendar period as a forecast horizon or interval —
+// only static resolutions. A `Months` grid is *not* a fixed span, so every
+// window-index computation goes down the calendar-aware branch of
+// `Period::{add_to, steps_between, floor_steps}`.
+// ---------------------------------------------------------------------------
+
+/// A Deterministic on a monthly grid: resolution P1M, horizon P3M (H = 3),
+/// interval P1M, 4 windows. Initial timestamp is the 15th so a naive
+/// month-arithmetic implementation that normalizes to the 1st would be caught.
+fn monthly_det(initial: chrono::DateTime<chrono::Utc>, count: usize) -> Deterministic {
+    // vals[h][w] = h * 100 + w
+    let vals: Vec<f64> = (0..3_usize)
+        .flat_map(|h| (0..count).map(move |w| (h * 100 + w) as f64))
+        .collect();
+    Deterministic::new(
+        initial,
+        Period::Months(1),
+        Period::Months(3),
+        Period::Months(1),
+        count,
+        f64_arr(vec![3, count], &vals),
+        "monthly_forecast",
+    )
+    .unwrap()
+}
+
+#[test]
+fn monthly_deterministic_round_trips_on_both_backends() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+    for_each_backend(
+        move |store| {
+            store
+                .add_time_series(
+                    9,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::Deterministic(monthly_det(initial, 4)),
+                    Features::new(),
+                    None,
+                )
+                .unwrap()
+        },
+        move |store, key, backend| {
+            // The calendar periods survive the ISO-8601 encoding as `Months`,
+            // never collapsing into an equivalent-looking `Fixed` span.
+            assert_eq!(key.resolution(), Some(Period::Months(1)), "{backend}");
+            assert_eq!(key.interval(), Some(Period::Months(1)), "{backend}");
+
+            let got = store.get_time_series(key.identity(), None).unwrap();
+            let det = got.as_deterministic().unwrap();
+            assert_eq!(det.resolution, Period::Months(1), "{backend}");
+            assert_eq!(det.horizon, Period::Months(3), "{backend}");
+            assert_eq!(det.interval, Period::Months(1), "{backend}");
+            assert_eq!(det.count, 4, "{backend}");
+            assert_eq!(det.initial_timestamp, initial, "{backend}");
+            assert_eq!(det.data.shape, vec![3, 4], "{backend}");
+
+            let params = store.get_forecast_parameters(None, None).unwrap();
+            assert_eq!(params.horizon, Some(Period::Months(3)), "{backend}");
+            assert_eq!(params.interval, Some(Period::Months(1)), "{backend}");
+        },
+    );
+}
+
+#[test]
+fn monthly_deterministic_window_selection_at_calendar_boundaries() {
+    // Windows start at 2024-01-15, 02-15, 03-15, 04-15 — spans of 31, 29
+    // (leap February), and 31 days. A fixed-span implementation cannot land on
+    // all four.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+    let w = |m: u32| Utc.with_ymd_and_hms(2024, m, 15, 0, 0, 0).unwrap();
+
+    for_each_backend(
+        move |store| {
+            store
+                .add_time_series(
+                    9,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::Deterministic(monthly_det(initial, 4)),
+                    Features::new(),
+                    None,
+                )
+                .unwrap()
+        },
+        move |store, key, backend| {
+            // Select windows 1..3 (Feb 15 and Mar 15).
+            let got = store
+                .get_time_series(key.identity(), Some((w(2), w(4))))
+                .unwrap();
+            let det = got.as_deterministic().unwrap();
+            assert_eq!(det.count, 2, "{backend}: two windows selected");
+            assert_eq!(
+                det.initial_timestamp,
+                w(2),
+                "{backend}: sliced initial is the first selected window"
+            );
+            // vals[h][w] for w in {1, 2}: h*100 + w.
+            assert_eq!(
+                det.data.to_f64_vec().unwrap(),
+                vec![1.0, 2.0, 101.0, 102.0, 201.0, 202.0],
+                "{backend}"
+            );
+
+            // The last window on its own boundary.
+            let got = store
+                .get_time_series(key.identity(), Some((w(4), w(5))))
+                .unwrap();
+            assert_eq!(got.as_deterministic().unwrap().count, 1, "{backend}");
+
+            // Off-grid start: the 20th is not a calendar step from the 15th.
+            let off = Utc.with_ymd_and_hms(2024, 2, 20, 0, 0, 0).unwrap();
+            let err = store
+                .get_time_series(key.identity(), Some((off, w(4))))
+                .unwrap_err();
+            assert!(
+                matches!(err, castore_core::TimeSeriesError::InvalidParameter(_)),
+                "{backend}: off-grid monthly start must be rejected, got {err:?}"
+            );
+
+            // A start past the last window is rejected, not silently empty.
+            let past = Utc.with_ymd_and_hms(2024, 5, 15, 0, 0, 0).unwrap();
+            assert!(
+                store
+                    .get_time_series(key.identity(), Some((past, past + Duration::days(31))))
+                    .is_err(),
+                "{backend}: start past the last window must be rejected"
+            );
+        },
+    );
+}
+
+#[test]
+fn monthly_deterministic_end_of_month_initial_timestamp() {
+    // 2024-01-31 + 1 calendar month is 2024-02-29 (clamped), and + 2 is
+    // 2024-03-31. `steps_between` verifies the exact landing, so the clamped
+    // window boundary must be addressable and the "unclamped" 03-29 must not be.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    let key = store
+        .add_time_series(
+            9,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(monthly_det(initial, 3)),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    let feb29 = Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
+    let apr = Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap();
+    let got = store
+        .get_time_series(key.identity(), Some((feb29, apr)))
+        .unwrap();
+    let det = got.as_deterministic().unwrap();
+    assert_eq!(det.initial_timestamp, feb29, "clamped boundary is window 1");
+    assert_eq!(det.count, 2);
+
+    // 2024-03-29 is not on the grid (window 2 is 03-31).
+    let mar29 = Utc.with_ymd_and_hms(2024, 3, 29, 0, 0, 0).unwrap();
+    assert!(
+        store
+            .get_time_series(key.identity(), Some((mar29, apr)))
+            .is_err(),
+        "an unclamped day-of-month must not be treated as a window boundary"
+    );
+}
+
+#[test]
+fn transform_single_time_series_on_a_monthly_grid() {
+    // A monthly SingleTimeSeries transformed into a DST at horizon P3M,
+    // interval P1M. `H = 3`, `interval_steps = 1`, so window k covers source
+    // months k..k+3 and the last valid window is `length - H`.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+    let values: Vec<f64> = (0..12).map(|i| 100.0 + i as f64).collect();
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            4,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                Period::Months(1),
+                f64_arr(vec![12], &values),
+                "monthly_load",
+            )),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    let n = store
+        .transform_single_time_series(Period::Months(3), Period::Months(1), None, None)
+        .unwrap();
+    assert_eq!(n, 1, "one series transformed");
+
+    let dst_keys = store
+        .list_keys(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap();
+    assert_eq!(dst_keys.len(), 1);
+    assert_eq!(dst_keys[0].resolution(), Some(Period::Months(1)));
+    assert_eq!(dst_keys[0].interval(), Some(Period::Months(1)));
+
+    // Reads back as a Deterministic view (storage-level view, by design).
+    let got = store.get_time_series(dst_keys[0].identity(), None).unwrap();
+    let det = got.as_deterministic().unwrap();
+    assert_eq!(det.resolution, Period::Months(1));
+    assert_eq!(det.horizon, Period::Months(3));
+    assert_eq!(det.interval, Period::Months(1));
+    // 12 source months, H = 3 -> windows 0..=9, i.e. 10 windows.
+    assert_eq!(det.count, 10);
+    assert_eq!(det.data.shape, vec![3, 10]);
+    // Window k, horizon step h -> source index k + h.
+    let vals = det.data.to_f64_vec().unwrap();
+    for h in 0..3_usize {
+        for k in 0..10_usize {
+            assert_eq!(
+                vals[h * 10 + k],
+                values[k + h],
+                "window {k}, horizon step {h}"
+            );
+        }
+    }
+
+    // Window selection on the calendar grid: March 15 is window 2.
+    let mar = Utc.with_ymd_and_hms(2024, 3, 15, 0, 0, 0).unwrap();
+    let apr = Utc.with_ymd_and_hms(2024, 4, 15, 0, 0, 0).unwrap();
+    let got = store
+        .get_time_series(dst_keys[0].identity(), Some((mar, apr)))
+        .unwrap();
+    let det = got.as_deterministic().unwrap();
+    assert_eq!(det.count, 1);
+    assert_eq!(det.initial_timestamp, mar);
+    assert_eq!(
+        det.data.to_f64_vec().unwrap(),
+        vec![values[2], values[3], values[4]]
+    );
+}
+
+#[test]
+fn forecast_reader_sweeps_a_monthly_grid() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("monthly_forecast.nc");
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                9,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(monthly_det(initial, 4)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+    let store = open_store(path.as_path(), true).unwrap();
+    let mut reader = store
+        .build_forecast_reader(
+            ListFilter::new()
+                .time_series_type(TimeSeriesType::Deterministic)
+                .resolution(Period::Months(1)),
+        )
+        .unwrap();
+    assert_eq!(reader.resolution(), Period::Months(1));
+    assert_eq!(reader.interval(), Period::Months(1));
+    assert_eq!(reader.count(), 4);
+
+    // The reader's own timeline is calendar-aware.
+    let expected: Vec<_> = (1..=4)
+        .map(|m| Utc.with_ymd_and_hms(2024, m, 15, 0, 0, 0).unwrap())
+        .collect();
+    assert_eq!(reader.timestamps().collect::<Vec<_>>(), expected);
+
+    // Sweep every window; slot values must equal vals[h][k] = h*100 + k.
+    for (k, at) in expected.iter().enumerate() {
+        store.forecast_read(&mut reader, *at).unwrap();
+        assert_eq!(reader.window_index(*at).unwrap(), k);
+        let slot = reader.entry_slot(0);
+        assert_eq!(slot.window_shape(), &[3], "window {k} shape");
+        let got = slot.window_to_vec::<f64>().unwrap();
+        let want: Vec<f64> = (0..3).map(|h| (h * 100 + k) as f64).collect();
+        assert_eq!(got, want, "window {k}");
+    }
+
+    // Off-grid (mid-month) is a hard error, not a rounded read.
+    assert!(
+        store
+            .forecast_read(
+                &mut reader,
+                Utc.with_ymd_and_hms(2024, 2, 20, 0, 0, 0).unwrap()
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn monthly_and_fixed_periods_never_over_match() {
+    // A `Fixed` 30-day resolution and a `Months(1)` resolution are distinct
+    // catalog keys even though their spans coincide for some months. This is
+    // what keeps a monthly series from being served to a fixed-span query.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    for (res, name) in [
+        (Period::Months(1), "monthly"),
+        (Period::fixed(Duration::days(30)), "thirty_day"),
+    ] {
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    res,
+                    f64_arr(vec![4], &[1.0, 2.0, 3.0, 4.0]),
+                    name,
+                )),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+    }
+
+    let monthly = store
+        .list_keys(ListFilter::new().resolution(Period::Months(1)))
+        .unwrap();
+    assert_eq!(monthly.len(), 1);
+    assert_eq!(monthly[0].name(), "monthly");
+
+    let fixed = store
+        .list_keys(ListFilter::new().resolution(Period::fixed(Duration::days(30))))
+        .unwrap();
+    assert_eq!(fixed.len(), 1);
+    assert_eq!(fixed[0].name(), "thirty_day");
+
+    let mut resolutions = store.get_resolutions(None).unwrap();
+    resolutions.sort_by_key(|p| p.to_iso8601());
+    assert_eq!(
+        resolutions,
+        vec![Period::Months(1), Period::fixed(Duration::days(30))]
+    );
+}
+
+#[test]
+fn non_positive_forecast_periods_are_rejected_through_the_add_path() {
+    // `validate_positive_periods` runs inside the forecast constructors, so a
+    // zero or negative resolution/horizon/interval can never reach the store.
+    // This pins that the *only* way in is blocked, in both period kinds.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let data = f64_arr(vec![2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+    let zero = Period::fixed(Duration::zero());
+    let neg = Period::fixed(Duration::hours(-1));
+    let ok = Period::fixed(Duration::hours(1));
+    let ok_h = Period::fixed(Duration::hours(2));
+
+    for (res, hor, iv) in [
+        (zero, ok_h, ok),
+        (neg, ok_h, ok),
+        (ok, zero, ok),
+        (ok, neg, ok),
+        (ok, ok_h, zero),
+        (ok, ok_h, neg),
+        (Period::Months(0), Period::Months(3), Period::Months(1)),
+        (Period::Months(-1), Period::Months(3), Period::Months(1)),
+        (Period::Months(1), Period::Months(0), Period::Months(1)),
+        (Period::Months(1), Period::Months(3), Period::Months(0)),
+    ] {
+        assert!(
+            Deterministic::new(initial, res, hor, iv, 3, data.clone(), "bad").is_err(),
+            "Deterministic accepted non-positive periods {res:?}/{hor:?}/{iv:?}"
+        );
+    }
+
+    // `transform_single_time_series` is the other forecast-creating entry
+    // point; it must reject a non-positive horizon/interval too.
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                Duration::hours(1),
+                f64_arr(vec![8], &dst_source_vals()),
+                "load",
+            )),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    assert!(
+        store
+            .transform_single_time_series(Duration::zero(), Duration::hours(1), None, None)
+            .is_err(),
+        "a zero horizon must be rejected"
+    );
+    assert!(
+        store
+            .transform_single_time_series(Duration::hours(2), Duration::zero(), None, None)
+            .is_err(),
+        "a zero interval must be rejected"
+    );
+    assert!(
+        store
+            .transform_single_time_series(Duration::hours(-2), Duration::hours(1), None, None)
+            .is_err(),
+        "a negative horizon must be rejected"
     );
 }

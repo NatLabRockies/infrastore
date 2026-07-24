@@ -1,12 +1,20 @@
 //! Tests for `ListFilter::name_glob` (round-2 plan item 1.1): SQLite `GLOB`
 //! pattern matching on the series name, threaded through every
 //! `ListFilter`-taking query path.
+//!
+//! Every case runs against both backends. Glob matching itself is pure SQLite
+//! and so cannot differ, but the filter feeds `build_static_reader` and
+//! `remove_by_filter`, whose array-side work does differ between the in-memory
+//! and NetCDF backends — and the persisted variant additionally proves the
+//! filter still selects the same rows after a catalog write/reopen cycle.
 
 use castore_core::{
-    AddRequest, ListFilter, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
-    create_store,
+    AddRequest, ListFilter, OwnerCategory, SingleTimeSeries, Store, TimeSeriesData, TypedArray,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
+
+mod common;
+use common::{for_each_backend, for_each_backend_mut};
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap()
@@ -23,8 +31,7 @@ fn sts(name: &str, base: f64, length: usize) -> SingleTimeSeries {
 }
 
 /// owner 1 gets wind_speed/wind_dir, owner 2 gets solar_irradiance/Wind_gust.
-fn populated() -> castore_core::Store {
-    let mut store = create_store(None, true).unwrap();
+fn populate(store: &mut Store) {
     for (owner, name, base) in [
         (1, "wind_speed", 1.0),
         (1, "wind_dir", 2.0),
@@ -40,93 +47,136 @@ fn populated() -> castore_core::Store {
             ))
             .unwrap();
     }
-    store
 }
 
 #[test]
 fn glob_star_and_question_wildcards() {
-    let store = populated();
+    for_each_backend(populate, |store, (), backend| {
+        let names = store
+            .list_names(ListFilter::new().name_glob("wind_*"))
+            .unwrap();
+        assert_eq!(names, vec!["wind_dir", "wind_speed"], "{backend}");
 
-    let names = store
-        .list_names(ListFilter::new().name_glob("wind_*"))
-        .unwrap();
-    assert_eq!(names, vec!["wind_dir", "wind_speed"]);
+        // `?` matches exactly one character.
+        let names = store
+            .list_names(ListFilter::new().name_glob("wind_di?"))
+            .unwrap();
+        assert_eq!(names, vec!["wind_dir"], "{backend}");
 
-    // `?` matches exactly one character.
-    let names = store
-        .list_names(ListFilter::new().name_glob("wind_di?"))
-        .unwrap();
-    assert_eq!(names, vec!["wind_dir"]);
-
-    // GLOB is case-sensitive: capital-W series is not matched.
-    let keys = store
-        .list_keys(ListFilter::new().name_glob("wind*"))
-        .unwrap();
-    assert_eq!(keys.len(), 2);
-    let keys = store
-        .list_keys(ListFilter::new().name_glob("Wind*"))
-        .unwrap();
-    assert_eq!(keys.len(), 1);
+        // GLOB is case-sensitive: capital-W series is not matched.
+        let keys = store
+            .list_keys(ListFilter::new().name_glob("wind*"))
+            .unwrap();
+        assert_eq!(keys.len(), 2, "{backend}");
+        let keys = store
+            .list_keys(ListFilter::new().name_glob("Wind*"))
+            .unwrap();
+        assert_eq!(keys.len(), 1, "{backend}");
+    });
 }
 
 #[test]
 fn glob_composes_with_other_filters_as_and() {
-    let store = populated();
+    for_each_backend(populate, |store, (), backend| {
+        // Glob + owner filter.
+        let keys = store
+            .list_keys(ListFilter::new().owner_id(2).name_glob("*ind*"))
+            .unwrap();
+        assert_eq!(keys.len(), 1, "{backend}");
+        assert_eq!(keys[0].identity().name, "Wind_gust", "{backend}");
 
-    // Glob + owner filter.
-    let keys = store
-        .list_keys(ListFilter::new().owner_id(2).name_glob("*ind*"))
-        .unwrap();
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].identity().name, "Wind_gust");
+        // Exact name + glob both apply (AND): consistent pair matches...
+        let keys = store
+            .list_keys(ListFilter::new().name("wind_speed").name_glob("wind_*"))
+            .unwrap();
+        assert_eq!(keys.len(), 1, "{backend}");
+        // ...contradictory pair matches nothing.
+        let keys = store
+            .list_keys(ListFilter::new().name("wind_speed").name_glob("solar_*"))
+            .unwrap();
+        assert!(keys.is_empty(), "{backend}");
 
-    // Exact name + glob both apply (AND): consistent pair matches...
-    let keys = store
-        .list_keys(ListFilter::new().name("wind_speed").name_glob("wind_*"))
-        .unwrap();
-    assert_eq!(keys.len(), 1);
-    // ...contradictory pair matches nothing.
-    let keys = store
-        .list_keys(ListFilter::new().name("wind_speed").name_glob("solar_*"))
-        .unwrap();
-    assert!(keys.is_empty());
-
-    // list_time_series and list_owner_types honor it too.
-    let rows = store
-        .list_time_series(ListFilter::new().name_glob("solar_*"))
-        .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].name, "solar_irradiance");
-    let owner_types = store
-        .list_owner_types(ListFilter::new().name_glob("nope_*"))
-        .unwrap();
-    assert!(owner_types.is_empty());
+        // list_time_series and list_owner_types honor it too.
+        let rows = store
+            .list_time_series(ListFilter::new().name_glob("solar_*"))
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{backend}");
+        assert_eq!(rows[0].name, "solar_irradiance", "{backend}");
+        let owner_types = store
+            .list_owner_types(ListFilter::new().name_glob("nope_*"))
+            .unwrap();
+        assert!(owner_types.is_empty(), "{backend}");
+    });
 }
 
 #[test]
 fn glob_no_match_is_empty_not_error() {
-    let store = populated();
-    assert!(
-        store
-            .list_keys(ListFilter::new().name_glob("xyz*"))
-            .unwrap()
-            .is_empty()
-    );
-    // Reader build over an empty match keeps its existing error semantics.
-    assert!(
-        store
-            .build_static_reader(ListFilter::new().name_glob("xyz*"))
-            .is_err()
-    );
+    for_each_backend(populate, |store, (), backend| {
+        assert!(
+            store
+                .list_keys(ListFilter::new().name_glob("xyz*"))
+                .unwrap()
+                .is_empty(),
+            "{backend}"
+        );
+        // Reader build over an empty match keeps its existing error semantics.
+        assert!(
+            store
+                .build_static_reader(ListFilter::new().name_glob("xyz*"))
+                .is_err(),
+            "{backend}"
+        );
+    });
+}
+
+#[test]
+fn glob_selects_the_same_series_for_a_static_reader() {
+    for_each_backend(populate, |store, (), backend| {
+        let reader = store
+            .build_static_reader(
+                ListFilter::new()
+                    .name_glob("wind_*")
+                    .resolution(Duration::hours(1)),
+            )
+            .unwrap();
+        let mut names: Vec<&str> = reader
+            .groups()
+            .iter()
+            .flat_map(|g| g.keys().iter().map(|k| k.name()))
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["wind_dir", "wind_speed"], "{backend}");
+    });
 }
 
 #[test]
 fn remove_by_filter_with_glob() {
-    let mut store = populated();
-    let removed = store
-        .remove_by_filter(ListFilter::new().name_glob("wind_*"))
-        .unwrap();
-    assert_eq!(removed, 2);
-    let names = store.list_names(ListFilter::new()).unwrap();
-    assert_eq!(names, vec!["Wind_gust", "solar_irradiance"]);
+    for_each_backend_mut(populate, |store, (), backend| {
+        assert_eq!(store.num_distinct_arrays().unwrap(), 4, "{backend}");
+        let removed = store
+            .remove_by_filter(ListFilter::new().name_glob("wind_*"))
+            .unwrap();
+        assert_eq!(removed, 2, "{backend}");
+        let names = store.list_names(ListFilter::new()).unwrap();
+        assert_eq!(names, vec!["Wind_gust", "solar_irradiance"], "{backend}");
+        // The two removed series' arrays are now unreferenced and reclaimed on
+        // both backends.
+        assert_eq!(store.num_distinct_arrays().unwrap(), 2, "{backend}");
+    });
+}
+
+#[test]
+fn remove_by_filter_with_a_no_match_glob_removes_nothing() {
+    for_each_backend_mut(populate, |store, (), backend| {
+        let removed = store
+            .remove_by_filter(ListFilter::new().name_glob("nope_*"))
+            .unwrap();
+        assert_eq!(removed, 0, "{backend}");
+        assert_eq!(
+            store.list_keys(ListFilter::new()).unwrap().len(),
+            4,
+            "{backend}"
+        );
+        assert_eq!(store.num_distinct_arrays().unwrap(), 4, "{backend}");
+    });
 }
