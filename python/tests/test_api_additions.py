@@ -14,6 +14,7 @@ from castore import (
     OwnerCategory,
     SingleTimeSeries,
     Store,
+    TimeSeriesError,
     TimeSeriesType,
 )
 
@@ -135,8 +136,8 @@ def test_static_reader():
     assert vals.shape == (2,)
     np.testing.assert_array_equal(np.sort(vals), np.array([12.0, 22.0]))
 
-    # Off-grid raises.
-    with pytest.raises(Exception):
+    # Off-grid raises the concrete type, not just "something".
+    with pytest.raises(InvalidParameterError):
         store.static_read(reader, _t0() + timedelta(minutes=30))
 
 
@@ -208,8 +209,8 @@ def test_close_and_repr():
 
     store.close()
     assert "closed" in repr(store)
-    # Subsequent operations raise.
-    with pytest.raises(Exception):
+    # Subsequent operations raise the base binding error with a clear message.
+    with pytest.raises(TimeSeriesError, match="store is closed"):
         store.list_names()
     # close() is idempotent.
     store.close()
@@ -224,7 +225,7 @@ def test_context_manager_reopen(tmp_path):
         )
         store.flush()
     # The with-block closed the store; operations now raise.
-    with pytest.raises(Exception):
+    with pytest.raises(TimeSeriesError, match="store is closed"):
         store.list_names()
 
     # Reopen read-only via the context manager and read the data back.

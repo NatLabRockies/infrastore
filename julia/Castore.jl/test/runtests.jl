@@ -1873,3 +1873,442 @@ end
     close!(target)
     close!(store)
 end
+
+# ---- Coverage parity: dtypes, error paths, and untested exports -------------
+#
+# The suite above stores Float64 and Int64 and infers Int32 from a constructor,
+# but never stores UInt64, Int32 or a Float32 forecast; it never operates on a
+# closed store, never checks a mapped exception *type* on a bad `open_store`,
+# and never calls `replace_owner!` or `clear!` at all.
+
+@testset "stored round trips for UInt64 and Int32" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    # UInt64 values above typemax(Int64) would corrupt under any signed hop.
+    u = UInt64[0, 1, UInt64(typemax(Int64)), typemax(UInt64)]
+    add_time_series!(
+        store, 2001, "Generator", Component, SingleTimeSeries(t0, res, u, "u64")
+    )
+    mu = get_metadata(store, 2001, Component, "u64"; resolution=res)
+    @test mu.dtype == UInt64
+    @test get_array_by_hash(store, mu.data_hash, UInt64) == u
+    @test get_time_series(SingleTimeSeries, store, 2001, Component, "u64").data == u
+
+    i = Int32[typemin(Int32), -1, 0, typemax(Int32)]
+    add_time_series!(
+        store, 2002, "Generator", Component, SingleTimeSeries(t0, res, i, "i32")
+    )
+    mi = get_metadata(store, 2002, Component, "i32"; resolution=res)
+    @test mi.dtype == Int32
+    @test get_array_by_hash(store, mi.data_hash, Int32) == i
+    got = get_time_series(SingleTimeSeries, store, 2002, Component, "i32")
+    @test eltype(got.data) == Int32
+    @test got.data == i
+
+    b = Bool[true, false, true]
+    add_time_series!(
+        store, 2003, "Generator", Component, SingleTimeSeries(t0, res, b, "bools")
+    )
+    mb = get_metadata(store, 2003, Component, "bools"; resolution=res)
+    @test mb.dtype == Bool
+    @test get_array_by_hash(store, mb.data_hash, Bool) == b
+
+    f = Float32[1.5, -2.25, 3.125]
+    add_time_series!(
+        store, 2004, "Generator", Component, SingleTimeSeries(t0, res, f, "f32")
+    )
+    mf = get_metadata(store, 2004, Component, "f32"; resolution=res)
+    @test mf.dtype == Float32
+    @test get_array_by_hash(store, mf.data_hash, Float32) == f
+end
+
+@testset "UInt64 and Int32 survive a disk round trip" begin
+    mktempdir() do dir
+        path = joinpath(dir, "dtypes.nc")
+        t0 = DateTime(2024, 1, 1)
+        res = Hour(1)
+        u = UInt64[0, 1, typemax(UInt64)]
+        i = Int32[typemin(Int32), 0, typemax(Int32)]
+
+        store = Store(in_memory=false, path=path)
+        add_time_series!(
+            store, 1, "Generator", Component, SingleTimeSeries(t0, res, u, "u64")
+        )
+        add_time_series!(
+            store, 2, "Generator", Component, SingleTimeSeries(t0, res, i, "i32")
+        )
+        flush!(store)
+        close!(store)
+
+        reopened = open_store(path; read_only=true)
+        @test get_time_series(SingleTimeSeries, reopened, 1, Component, "u64").data == u
+        got = get_time_series(SingleTimeSeries, reopened, 2, Component, "i32")
+        @test eltype(got.data) == Int32
+        @test got.data == i
+        @test verify_integrity(reopened) == 0
+        close!(reopened)
+    end
+end
+
+@testset "Float32 forecast round trip" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 5, 1)
+    res = Hour(1)
+    hor = Hour(2)
+    ivl = Hour(2)
+    count = 3
+    H = 2
+    data = Float32[h * 1.5 + c for h in 1:H, c in 1:count]
+
+    add_time_series!(
+        store,
+        2100,
+        "Generator",
+        Component,
+        Deterministic(t0, res, hor, ivl, count, data, "pf_f32"),
+    )
+    fc = get_time_series(Deterministic, store, 2100, Component, "pf_f32")
+    @test eltype(fc.data) == Float32
+    @test fc.data == data
+
+    # And a window-selected read keeps the dtype.
+    win = get_time_series(
+        Deterministic,
+        store,
+        2100,
+        Component,
+        "pf_f32";
+        time_range=(t0 + Hour(2), t0 + Hour(4)),
+    )
+    @test eltype(win.data) == Float32
+    @test win.count == 1
+    @test win.data == data[:, 2:2]
+end
+
+@testset "Float32 Probabilistic and Scenarios round trips" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    hor = Hour(2)
+    ivl = Hour(2)
+    count = 2
+    H = 2
+
+    prob = Float32[p * 1000 + h * 10 + c for p in 1:2, h in 1:H, c in 1:count]
+    add_time_series!(
+        store,
+        2110,
+        "Generator",
+        Component,
+        Probabilistic(t0, res, hor, ivl, count, [0.1, 0.9], prob, "prob_f32"),
+    )
+    got = get_time_series(Probabilistic, store, 2110, Component, "prob_f32")
+    @test eltype(got.data) == Float32
+    @test got.data == prob
+    @test got.percentiles == [0.1, 0.9]
+
+    scen = Float32[s * 1000 + h * 10 + c for s in 1:3, h in 1:H, c in 1:count]
+    add_time_series!(
+        store,
+        2111,
+        "Generator",
+        Component,
+        # `scenario_count` is inferred from the leading dimension.
+        Scenarios(t0, res, hor, ivl, count, scen, "scen_f32"),
+    )
+    got = get_time_series(Scenarios, store, 2111, Component, "scen_f32")
+    @test eltype(got.data) == Float32
+    @test got.data == scen
+    @test got.scenario_count == 3
+end
+
+@testset "NaN, Inf and -0.0 round trip bit-exactly" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    values = Float64[NaN, Inf, -Inf, -0.0, 0.0, floatmax(Float64)]
+
+    add_time_series!(
+        store, 2200, "Generator", Component, SingleTimeSeries(t0, res, values, "nonfinite")
+    )
+    got = get_time_series(SingleTimeSeries, store, 2200, Component, "nonfinite").data
+
+    # `==` is useless here: NaN != NaN and -0.0 == 0.0. Compare the bits.
+    @test reinterpret(UInt64, got) == reinterpret(UInt64, values)
+    @test isnan(got[1])
+    @test got[2] == Inf
+    @test got[3] == -Inf
+    @test signbit(got[4]) && got[4] == 0.0
+    @test !signbit(got[5])
+
+    # Two arrays differing only in NaN payload deduplicate to one stored array:
+    # the core canonicalizes NaN before hashing.
+    alt = copy(values)
+    reinterpret(UInt64, alt)[1] = 0x7ff8000000000001
+    @test reinterpret(UInt64, alt) != reinterpret(UInt64, values)
+    @test isnan(alt[1])
+    add_time_series!(
+        store, 2201, "Generator", Component, SingleTimeSeries(t0, res, alt, "nonfinite")
+    )
+    @test num_distinct_arrays(store) == 1
+end
+
+@testset "operations on a closed store raise, and close! is idempotent" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    key = add_time_series!(
+        store,
+        2300,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "load"),
+    )
+
+    close!(store)
+    # PIN: the handle is nulled, so every call goes through the ABI's
+    # null-handle path, which `_check` maps to InvalidParameterError. This is
+    # the Julia counterpart of Python's "store is closed" TimeSeriesError; the
+    # two bindings report a closed store differently.
+    @test_throws Castore.InvalidParameterError list_names(store)
+    @test_throws Castore.InvalidParameterError get_time_series(store, key)
+    @test_throws Castore.InvalidParameterError has_time_series(store, key)
+    @test_throws Castore.InvalidParameterError get_counts(store)
+    @test_throws Castore.InvalidParameterError num_distinct_arrays(store)
+
+    # close! is idempotent: a second call is a no-op, not a double free.
+    close!(store)
+    close!(store)
+    @test store.handle == C_NULL
+end
+
+@testset "open_store failures raise mapped exception types" begin
+    mktempdir() do dir
+        missing_path = joinpath(dir, "does_not_exist.nc")
+        # The catalog half is opened first, so a wholly absent store surfaces as
+        # the generic mapped error rather than IOError. Pin the type, not just
+        # "it throws".
+        @test_throws Castore.TimeSeriesException open_store(missing_path; read_only=true)
+
+        # A file that is not a NetCDF store at all.
+        junk = joinpath(dir, "junk.nc")
+        write(junk, "not a netcdf file")
+        @test_throws Castore.TimeSeriesException open_store(junk; read_only=true)
+
+        # A directory is not a store either.
+        subdir = joinpath(dir, "adir.nc")
+        mkdir(subdir)
+        @test_throws Castore.TimeSeriesException open_store(subdir; read_only=true)
+    end
+end
+
+@testset "forecast time_range error cases mirror the Python suite" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    hor = Hour(6)
+    ivl = Hour(12)
+    count = 4
+    H = 6
+    data = Float64[h * 10 + c for h in 1:H, c in 1:count]
+    add_time_series!(
+        store,
+        2400,
+        "Generator",
+        Component,
+        Deterministic(t0, res, hor, ivl, count, data, "det_errs"),
+    )
+
+    # 1. A start that is not a window boundary (windows are every 12h).
+    @test_throws Castore.InvalidParameterError get_time_series(
+        Deterministic,
+        store,
+        2400,
+        Component,
+        "det_errs";
+        time_range=(t0 + Hour(1), t0 + Hour(24)),
+    )
+
+    # 2. end < start.
+    @test_throws Castore.InvalidParameterError get_time_series(
+        Deterministic, store, 2400, Component, "det_errs"; time_range=(t0 + Hour(24), t0)
+    )
+
+    # 3. A grid-aligned start past the last window (windows are 0..3).
+    past = t0 + count * ivl
+    @test_throws Castore.InvalidParameterError get_time_series(
+        Deterministic, store, 2400, Component, "det_errs"; time_range=(past, past + ivl)
+    )
+
+    # A zero-width range over an in-range start legitimately selects nothing.
+    win = t0 + ivl
+    empty = get_time_series(
+        Deterministic, store, 2400, Component, "det_errs"; time_range=(win, win)
+    )
+    @test empty.count == 0
+end
+
+@testset "replace_owner! moves every series of one owner" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    for (owner, name, base) in
+        [(2500, "load", 1.0), (2500, "voltage", 2.0), (2501, "load", 3.0)]
+        add_time_series!(
+            store,
+            owner,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, res, Float64[base, base + 1, base + 2], name),
+        )
+    end
+
+    moved = replace_owner!(store, 2500, 2600, Component)
+    @test moved == 2
+
+    @test isempty(list_keys(store; owner_id=2500))
+    moved_names = sort([k.name for k in list_keys(store; owner_id=2600)])
+    @test moved_names == ["load", "voltage"]
+
+    # The untouched owner still reads its own values.
+    other = get_time_series(SingleTimeSeries, store, 2501, Component, "load")
+    @test other.data == Float64[3, 4, 5]
+
+    # Arrays are shared by hash, so nothing was copied.
+    @test num_distinct_arrays(store) == 3
+
+    # An owner with no series moves nothing.
+    @test replace_owner!(store, 999_999, 999_998, Component) == 0
+
+    # Moving into an identity that already exists is rejected, and nothing moves.
+    @test_throws Castore.DuplicateTimeSeriesError replace_owner!(
+        store, 2501, 2600, Component
+    )
+    @test length(list_keys(store; owner_id=2501)) == 1
+    @test length(list_keys(store; owner_id=2600)) == 2
+end
+
+@testset "clear! removes everything, or just one owner" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    for owner in (2700, 2701)
+        add_time_series!(
+            store,
+            owner,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, res, Float64[owner, owner + 1], "load"),
+        )
+    end
+    @test length(list_keys(store)) == 2
+
+    # Scoped to one owner: the other survives and its array is kept.
+    clear!(store; owner_id=2700, owner_category=Component)
+    remaining = list_keys(store)
+    @test length(remaining) == 1
+    @test remaining[1].owner_id == 2701
+    @test num_distinct_arrays(store) == 1
+
+    # Unscoped: everything goes, arrays included.
+    clear!(store)
+    @test isempty(list_keys(store))
+    @test num_distinct_arrays(store) == 0
+    # Clearing an already-empty store is not an error.
+    clear!(store)
+
+    # `owner_id` without `owner_category` is an argument error, caught in Julia
+    # before any FFI call ("both or neither", mirroring the Python binding).
+    @test_throws ArgumentError clear!(store; owner_id=2700)
+    # `owner_category` alone is accepted and clears that whole category.
+    add_time_series!(
+        store,
+        2702,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2], "load"),
+    )
+    clear!(store; owner_category=Component)
+end
+
+@testset "clear! and replace_owner! are rejected on a read-only store" begin
+    mktempdir() do dir
+        path = joinpath(dir, "ro.nc")
+        t0 = DateTime(2024, 1, 1)
+        store = Store(in_memory=false, path=path)
+        add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "load"),
+        )
+        flush!(store)
+        close!(store)
+
+        ro = open_store(path; read_only=true)
+        @test read_only(ro) == true
+        @test_throws Castore.ReadOnlyStoreError clear!(ro)
+        @test_throws Castore.ReadOnlyStoreError replace_owner!(ro, 1, 2, Component)
+        @test_throws Castore.ReadOnlyStoreError compact!(ro)
+        # Reads still work.
+        @test get_time_series(SingleTimeSeries, ro, 1, Component, "load").data ==
+            Float64[1, 2, 3]
+        close!(ro)
+    end
+end
+
+@testset "an embedded NUL in a name is rejected at the wrapper level" begin
+    # PIN: Julia's `Cstring` conversion refuses a String containing a NUL, so the
+    # call throws `ArgumentError` before any bytes reach the FFI. The C ABI would
+    # otherwise see a silently truncated name.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    bad = "wind\0gust"
+    @test_throws ArgumentError add_time_series!(
+        store,
+        2800,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], bad),
+    )
+    # Nothing was added.
+    @test isempty(list_keys(store))
+
+    # The same guard applies on the read path and to the owner type.
+    @test_throws ArgumentError get_time_series(
+        SingleTimeSeries, store, 2800, Component, bad
+    )
+    @test_throws ArgumentError add_time_series!(
+        store,
+        2801,
+        "Gen\0erator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], "load"),
+    )
+end
+
+@testset "non-ASCII names and units round trip" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    name = "负荷_ø"
+    add_time_series!(
+        store,
+        2900,
+        "Générateur",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3], name);
+        units="MW·h⁻¹",
+    )
+    # `get_metadata` returns the array-side fields; the name and owner type come
+    # back through the catalog row.
+    m = get_metadata(store, 2900, Component, name; resolution=Hour(1))
+    @test m.units == "MW·h⁻¹"
+    rows = list_time_series(store; owner_id=2900)
+    @test length(rows) == 1
+    @test rows[1].name == name
+    @test rows[1].owner_type == "Générateur"
+    @test list_names(store) == [name]
+    @test list_owner_types(store) == ["Générateur"]
+end

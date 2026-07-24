@@ -7630,3 +7630,1228 @@ mod reader_ffi_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod abi_tests {
+    //! Tests that drive the C ABI the way a foreign caller does.
+    //!
+    //! The `reader_ffi_tests` module above constructs `CastoreStoreHandle`
+    //! directly and never calls `castore_store_create` / `_open` / `_persist` /
+    //! `_free`, so the lifecycle exports had no coverage at all. Nor did any test
+    //! assert an **error code by value** — a change that returned
+    //! `CASTORE_ERR_INTERNAL` where a caller expects `CASTORE_ERR_NOT_FOUND`
+    //! would have gone unnoticed, and the numeric codes are the ABI contract
+    //! every binding switches on.
+    //!
+    //! Deliberately not covered: double-free and use-after-free. Those are
+    //! documented undefined behavior, not defined behavior worth pinning.
+
+    use super::*;
+    use std::ffi::CString;
+
+    const T0_MS: i64 = 1_700_000_000_000;
+    const HOUR: &str = "PT1H";
+
+    /// `castore_last_error_message`'s current value.
+    fn last_error() -> String {
+        let mut needed = 0u64;
+        assert_eq!(
+            unsafe { castore_last_error_message(ptr::null_mut(), 0, &mut needed) },
+            CASTORE_OK
+        );
+        if needed == 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u8; needed as usize + 1];
+        assert_eq!(
+            unsafe {
+                castore_last_error_message(
+                    buf.as_mut_ptr() as *mut c_char,
+                    buf.len() as u64,
+                    &mut needed,
+                )
+            },
+            CASTORE_OK
+        );
+        let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..nul]).into_owned()
+    }
+
+    /// Add one f64 SingleTimeSeries through the ABI; returns the key handle.
+    #[allow(clippy::too_many_arguments)]
+    fn abi_add_f64(
+        store: *mut CastoreStoreHandle,
+        owner: i64,
+        name: &str,
+        vals: &[f64],
+    ) -> *mut CastoreKeyHandle {
+        let (rc, key) = abi_try_add(
+            store,
+            owner,
+            name,
+            core_lib::Dtype::F64.code(),
+            &to_le(vals),
+            vals.len(),
+        );
+        assert_eq!(rc, CASTORE_OK, "add failed: {}", last_error());
+        key
+    }
+
+    fn to_le(vals: &[f64]) -> Vec<u8> {
+        vals.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// Add through the ABI without asserting success.
+    fn abi_try_add(
+        store: *mut CastoreStoreHandle,
+        owner: i64,
+        name: &str,
+        dtype: i32,
+        bytes: &[u8],
+        length: usize,
+    ) -> (i32, *mut CastoreKeyHandle) {
+        let owner_type = CString::new("Generator").unwrap();
+        let name_c = CString::new(name).unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let dims = [length as u64];
+        let mut key: *mut CastoreKeyHandle = ptr::null_mut();
+        let rc = unsafe {
+            castore_store_add_single(
+                store,
+                owner,
+                owner_type.as_ptr(),
+                0,
+                name_c.as_ptr(),
+                T0_MS,
+                res.as_ptr(),
+                dtype,
+                1,
+                dims.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut key,
+            )
+        };
+        (rc, key)
+    }
+
+    fn abi_create_in_memory() -> *mut CastoreStoreHandle {
+        let mut store: *mut CastoreStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_store_create(ptr::null(), true, &mut store) },
+            CASTORE_OK
+        );
+        assert!(!store.is_null());
+        store
+    }
+
+    // ---- Store lifecycle through the ABI ----------------------------------
+
+    #[test]
+    fn create_add_flush_free_then_reopen_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abi.nc");
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+
+        // create on a real path
+        let mut store: *mut CastoreStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_store_create(path_c.as_ptr(), false, &mut store) },
+            CASTORE_OK
+        );
+        assert!(!store.is_null());
+
+        // the handle reports the path it was created at, and is writable
+        let mut read_only = true;
+        assert_eq!(
+            unsafe { castore_store_read_only(store, &mut read_only) },
+            CASTORE_OK
+        );
+        assert!(!read_only);
+
+        let mut has_path = false;
+        let mut needed = 0u64;
+        assert_eq!(
+            unsafe {
+                castore_store_get_path(store, &mut has_path, ptr::null_mut(), 0, &mut needed)
+            },
+            CASTORE_OK
+        );
+        assert!(has_path);
+        let mut buf = vec![0u8; needed as usize + 1];
+        assert_eq!(
+            unsafe {
+                castore_store_get_path(
+                    store,
+                    &mut has_path,
+                    buf.as_mut_ptr() as *mut c_char,
+                    buf.len() as u64,
+                    &mut needed,
+                )
+            },
+            CASTORE_OK
+        );
+        let nul = buf.iter().position(|&b| b == 0).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&buf[..nul]).unwrap(),
+            path.to_str().unwrap()
+        );
+
+        // add, then flush and free
+        let key = abi_add_f64(store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
+        let mut present = false;
+        assert_eq!(
+            unsafe { castore_store_has(store, key, &mut present) },
+            CASTORE_OK
+        );
+        assert!(present);
+        assert_eq!(unsafe { castore_store_flush(store) }, CASTORE_OK);
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+
+        // reopen read-only through the ABI and read the values back
+        let mut ro: *mut CastoreStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_store_open(path_c.as_ptr(), true, &mut ro) },
+            CASTORE_OK
+        );
+        let mut read_only = false;
+        assert_eq!(
+            unsafe { castore_store_read_only(ro, &mut read_only) },
+            CASTORE_OK
+        );
+        assert!(read_only);
+
+        let vals = abi_read_f64(ro, 1, "load");
+        assert_eq!(vals, vec![10.0, 11.0, 12.0, 13.0]);
+
+        let mut errors = u64::MAX;
+        assert_eq!(unsafe { castore_store_verify(ro, &mut errors) }, CASTORE_OK);
+        assert_eq!(errors, 0);
+
+        unsafe { castore_store_free(ro) };
+    }
+
+    /// Read one f64 SingleTimeSeries by attributes, through the ABI.
+    fn abi_read_f64(store: *mut CastoreStoreHandle, owner: i64, name: &str) -> Vec<f64> {
+        let (dtype, shape, bytes) = abi_get_single(store, owner, name);
+        assert_eq!(dtype, core_lib::Dtype::F64.code());
+        assert_eq!(shape.len(), 1);
+        bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    /// `castore_store_get_single` through the ABI, returning
+    /// `(dtype_code, shape, raw bytes)` with every out-buffer freed.
+    fn abi_get_single(
+        store: *mut CastoreStoreHandle,
+        owner: i64,
+        name: &str,
+    ) -> (i32, Vec<i64>, Vec<u8>) {
+        let name_c = CString::new(name).unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let mut key: *mut CastoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_make_key_from_attrs(
+                    owner,
+                    0,
+                    name_c.as_ptr(),
+                    0,
+                    res.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut key,
+                )
+            },
+            CASTORE_OK
+        );
+
+        let (mut initial, mut dtype) = (0i64, -1i32);
+        let mut res_out: *mut c_char = ptr::null_mut();
+        let mut shape_ptr: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        let rc = unsafe {
+            castore_store_get_single(
+                store,
+                key,
+                false,
+                0,
+                0,
+                &mut initial,
+                &mut res_out,
+                &mut dtype,
+                &mut shape_ptr,
+                &mut shape_len,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        assert_eq!(rc, CASTORE_OK, "get_single failed: {}", last_error());
+        assert_eq!(initial, T0_MS);
+
+        let shape = unsafe { slice::from_raw_parts(shape_ptr, shape_len as usize) }.to_vec();
+        let bytes = unsafe { slice::from_raw_parts(data_ptr, data_len as usize) }.to_vec();
+        unsafe {
+            castore_string_free(res_out);
+            castore_buffer_free_i64(shape_ptr, shape_len);
+            castore_buffer_free_u8(data_ptr, data_len);
+            castore_key_free(key);
+        }
+        (dtype, shape, bytes)
+    }
+
+    #[test]
+    fn persist_materializes_an_in_memory_store_and_reopens() {
+        let store = abi_create_in_memory();
+        let key = abi_add_f64(store, 3, "load", &[1.5, 2.5, 3.5]);
+
+        // An in-memory store reports no path.
+        let (mut has_path, mut len) = (true, 99u64);
+        assert_eq!(
+            unsafe { castore_store_get_path(store, &mut has_path, ptr::null_mut(), 0, &mut len) },
+            CASTORE_OK
+        );
+        assert!(!has_path);
+        assert_eq!(len, 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("persisted.nc");
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            unsafe { castore_store_persist(store, path_c.as_ptr()) },
+            CASTORE_OK
+        );
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+
+        let mut reopened: *mut CastoreStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_store_open(path_c.as_ptr(), true, &mut reopened) },
+            CASTORE_OK
+        );
+        assert_eq!(abi_read_f64(reopened, 3, "load"), vec![1.5, 2.5, 3.5]);
+        unsafe { castore_store_free(reopened) };
+    }
+
+    #[test]
+    fn opening_a_missing_path_reports_an_error_and_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.nc");
+        let path_c = CString::new(missing.to_str().unwrap()).unwrap();
+        let mut store: *mut CastoreStoreHandle = ptr::null_mut();
+        let rc = unsafe { castore_store_open(path_c.as_ptr(), true, &mut store) };
+        assert_ne!(rc, CASTORE_OK);
+        assert!(store.is_null(), "no handle may be produced on failure");
+        assert!(
+            !last_error().is_empty(),
+            "a failed open must leave a diagnostic"
+        );
+    }
+
+    #[test]
+    fn freeing_a_null_store_handle_is_a_no_op() {
+        // Documented: `castore_store_free` accepts null. Every `*_free` export
+        // does, so bindings need no null guard of their own.
+        unsafe {
+            castore_store_free(ptr::null_mut());
+            castore_key_free(ptr::null_mut());
+            castore_string_free(ptr::null_mut());
+            castore_buffer_free_u8(ptr::null_mut(), 0);
+            castore_buffer_free_i64(ptr::null_mut(), 0);
+            castore_buffer_free_f64(ptr::null_mut(), 0);
+            castore_buffer_free_u64(ptr::null_mut(), 0);
+            castore_static_reader_free(ptr::null_mut());
+            castore_forecast_reader_free(ptr::null_mut());
+            castore_bulk_result_free(ptr::null_mut());
+            castore_batch_free(ptr::null_mut());
+        }
+    }
+
+    // ---- Null-pointer sweep -----------------------------------------------
+
+    #[test]
+    fn null_handles_and_out_params_return_err_null_pointer() {
+        // One representative export per family. The code must be exactly 1:
+        // bindings map it to their own "null argument" exception.
+        assert_eq!(CASTORE_ERR_NULL_POINTER, 1, "the ABI value is the contract");
+
+        let store = abi_create_in_memory();
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+
+        // -- store op: null handle, then null out-param
+        let mut present = false;
+        assert_eq!(
+            unsafe { castore_store_has(ptr::null(), key, &mut present) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        assert_eq!(
+            unsafe { castore_store_has(store, key, ptr::null_mut()) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        // null key handle
+        assert_eq!(
+            unsafe { castore_store_has(store, ptr::null(), &mut present) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        // create with a null out pointer
+        assert_eq!(
+            unsafe { castore_store_create(ptr::null(), true, ptr::null_mut()) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        // probe-style store op with a null out_len
+        assert_eq!(
+            unsafe { castore_store_counts_by_type(store, ptr::null_mut(), 0, ptr::null_mut()) },
+            CASTORE_ERR_NULL_POINTER
+        );
+
+        // -- reader op
+        let res = CString::new(HOUR).unwrap();
+        let mut reader: *mut CastoreStaticReaderHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_store_build_static_reader(
+                    ptr::null(),
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    res.as_ptr(),
+                    ptr::null(),
+                    &mut reader,
+                )
+            },
+            CASTORE_ERR_NULL_POINTER
+        );
+        let mut n = 0u64;
+        assert_eq!(
+            unsafe { castore_static_reader_num_groups(ptr::null(), &mut n) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        // build a real reader, then pass a null out-param to it
+        assert_eq!(
+            unsafe {
+                castore_store_build_static_reader(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    res.as_ptr(),
+                    ptr::null(),
+                    &mut reader,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(
+            unsafe { castore_static_reader_num_groups(reader, ptr::null_mut()) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        let (mut dtype, mut ncols) = (0i32, 0u64);
+        assert_eq!(
+            unsafe {
+                castore_static_reader_group_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    &mut ncols,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                )
+            },
+            CASTORE_ERR_NULL_POINTER
+        );
+        // reader read against a null store handle
+        assert_eq!(
+            unsafe { castore_static_reader_read(reader, ptr::null(), T0_MS) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        unsafe { castore_static_reader_free(reader) };
+
+        // -- key op
+        let name = CString::new("load").unwrap();
+        assert_eq!(
+            unsafe {
+                castore_make_key_from_attrs(
+                    1,
+                    0,
+                    name.as_ptr(),
+                    0,
+                    res.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                )
+            },
+            CASTORE_ERR_NULL_POINTER
+        );
+        // a null name string is a null pointer, not invalid UTF-8
+        let mut out_key: *mut CastoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_make_key_from_attrs(
+                    1,
+                    0,
+                    ptr::null(),
+                    0,
+                    res.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut out_key,
+                )
+            },
+            CASTORE_ERR_NULL_POINTER
+        );
+        let mut eq = false;
+        assert_eq!(
+            unsafe { castore_key_eq(ptr::null(), key, &mut eq) },
+            CASTORE_ERR_NULL_POINTER
+        );
+        let mut hash = 0u64;
+        assert_eq!(
+            unsafe { castore_key_identity_hash(ptr::null(), &mut hash) },
+            CASTORE_ERR_NULL_POINTER
+        );
+
+        // -- buffer op (probe-then-fetch with a null out_len)
+        assert_eq!(
+            unsafe {
+                castore_store_list_keys(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                )
+            },
+            CASTORE_ERR_NULL_POINTER
+        );
+
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+    }
+
+    // ---- Invalid UTF-8 -----------------------------------------------------
+
+    #[test]
+    fn invalid_utf8_name_returns_err_invalid_utf8_with_a_message() {
+        assert_eq!(CASTORE_ERR_INVALID_UTF8, 2, "the ABI value is the contract");
+        let store = abi_create_in_memory();
+
+        // `wind\xff` is not valid UTF-8; the trailing NUL terminates the C string.
+        let bad_name: &[u8] = b"wind\xff\x00";
+        let owner_type = CString::new("Generator").unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let vals = [1.0f64, 2.0];
+        let bytes = to_le(&vals);
+        let dims = [2u64];
+        let mut key: *mut CastoreKeyHandle = ptr::null_mut();
+        let rc = unsafe {
+            castore_store_add_single(
+                store,
+                1,
+                owner_type.as_ptr(),
+                0,
+                bad_name.as_ptr() as *const c_char,
+                T0_MS,
+                res.as_ptr(),
+                core_lib::Dtype::F64.code(),
+                1,
+                dims.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut key,
+            )
+        };
+        assert_eq!(rc, CASTORE_ERR_INVALID_UTF8);
+        assert!(key.is_null());
+        let msg = last_error();
+        assert!(
+            !msg.is_empty(),
+            "castore_last_error_message must describe the failure"
+        );
+
+        // Nothing was added.
+        let (mut components, mut total, mut arrays) = (0i64, 0i64, 0i64);
+        assert_eq!(
+            unsafe { castore_store_counts(store, &mut components, &mut total, &mut arrays) },
+            CASTORE_OK
+        );
+        assert_eq!(total, 0);
+
+        // A successful call clears the message.
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        assert!(
+            last_error().is_empty(),
+            "a successful call must clear the thread-local error"
+        );
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+    }
+
+    #[test]
+    fn an_invalid_period_string_is_an_invalid_parameter() {
+        assert_eq!(CASTORE_ERR_INVALID_PARAMETER, 3);
+        let store = abi_create_in_memory();
+        let owner_type = CString::new("Generator").unwrap();
+        let name = CString::new("load").unwrap();
+        let bad_res = CString::new("not-a-period").unwrap();
+        let bytes = to_le(&[1.0f64, 2.0]);
+        let dims = [2u64];
+        let mut key: *mut CastoreKeyHandle = ptr::null_mut();
+        let rc = unsafe {
+            castore_store_add_single(
+                store,
+                1,
+                owner_type.as_ptr(),
+                0,
+                name.as_ptr(),
+                T0_MS,
+                bad_res.as_ptr(),
+                core_lib::Dtype::F64.code(),
+                1,
+                dims.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                &mut key,
+            )
+        };
+        assert_eq!(rc, CASTORE_ERR_INVALID_PARAMETER);
+        assert!(!last_error().is_empty());
+        unsafe { castore_store_free(store) };
+    }
+
+    #[test]
+    fn an_unknown_dtype_code_is_an_invalid_parameter() {
+        let store = abi_create_in_memory();
+        let (rc, key) = abi_try_add(store, 1, "load", 99, &to_le(&[1.0, 2.0]), 2);
+        assert_eq!(rc, CASTORE_ERR_INVALID_PARAMETER);
+        assert!(key.is_null());
+        assert!(!last_error().is_empty());
+        unsafe { castore_store_free(store) };
+    }
+
+    #[test]
+    fn a_byte_length_that_contradicts_the_shape_is_an_invalid_parameter() {
+        let store = abi_create_in_memory();
+        // Shape says 4 elements, only 2 f64s of bytes are supplied.
+        let (rc, key) = abi_try_add(
+            store,
+            1,
+            "load",
+            core_lib::Dtype::F64.code(),
+            &to_le(&[1.0, 2.0]),
+            4,
+        );
+        assert_eq!(rc, CASTORE_ERR_INVALID_PARAMETER);
+        assert!(key.is_null());
+        unsafe { castore_store_free(store) };
+    }
+
+    // ---- Error codes by value ---------------------------------------------
+
+    #[test]
+    fn not_found_duplicate_and_read_only_codes_come_back_by_value() {
+        assert_eq!(
+            (
+                CASTORE_ERR_NOT_FOUND,
+                CASTORE_ERR_DUPLICATE,
+                CASTORE_ERR_READ_ONLY
+            ),
+            (4, 5, 7),
+            "the ABI values are the contract"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codes.nc");
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+
+        let mut store: *mut CastoreStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_store_create(path_c.as_ptr(), false, &mut store) },
+            CASTORE_OK
+        );
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+
+        // NOT_FOUND: remove a key that names a series that does not exist.
+        let absent = CString::new("absent").unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let mut missing: *mut CastoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_make_key_from_attrs(
+                    1,
+                    0,
+                    absent.as_ptr(),
+                    0,
+                    res.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut missing,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(
+            unsafe { castore_store_remove(store, missing) },
+            CASTORE_ERR_NOT_FOUND
+        );
+        assert!(!last_error().is_empty());
+
+        // DUPLICATE: add the same identity twice.
+        let (rc, dup) = abi_try_add(
+            store,
+            1,
+            "load",
+            core_lib::Dtype::F64.code(),
+            &to_le(&[1.0, 2.0]),
+            2,
+        );
+        assert_eq!(rc, CASTORE_ERR_DUPLICATE);
+        assert!(dup.is_null());
+
+        assert_eq!(unsafe { castore_store_flush(store) }, CASTORE_OK);
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+
+        // READ_ONLY: every write through a read-only handle.
+        let mut ro: *mut CastoreStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_store_open(path_c.as_ptr(), true, &mut ro) },
+            CASTORE_OK
+        );
+        let (rc, k) = abi_try_add(
+            ro,
+            2,
+            "new",
+            core_lib::Dtype::F64.code(),
+            &to_le(&[1.0, 2.0]),
+            2,
+        );
+        assert_eq!(rc, CASTORE_ERR_READ_ONLY);
+        assert!(k.is_null());
+        assert_eq!(
+            unsafe { castore_store_remove(ro, missing) },
+            CASTORE_ERR_READ_ONLY
+        );
+        assert_eq!(unsafe { castore_store_compact(ro) }, CASTORE_ERR_READ_ONLY);
+
+        unsafe {
+            castore_key_free(missing);
+            castore_store_free(ro);
+        }
+    }
+
+    #[test]
+    fn get_single_on_a_missing_key_is_not_found() {
+        let store = abi_create_in_memory();
+        let name = CString::new("absent").unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let mut key: *mut CastoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_make_key_from_attrs(
+                    1,
+                    0,
+                    name.as_ptr(),
+                    0,
+                    res.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut key,
+                )
+            },
+            CASTORE_OK
+        );
+
+        let (mut initial, mut dtype) = (0i64, -1i32);
+        let mut res_out: *mut c_char = ptr::null_mut();
+        let mut shape_ptr: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        let rc = unsafe {
+            castore_store_get_single(
+                store,
+                key,
+                false,
+                0,
+                0,
+                &mut initial,
+                &mut res_out,
+                &mut dtype,
+                &mut shape_ptr,
+                &mut shape_len,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        assert_eq!(rc, CASTORE_ERR_NOT_FOUND);
+        // No buffers were handed out, so there is nothing to free.
+        assert!(res_out.is_null() && shape_ptr.is_null() && data_ptr.is_null());
+
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+    }
+
+    #[test]
+    fn get_array_by_hash_with_an_unknown_hash_errors() {
+        let store = abi_create_in_memory();
+        // `data_hash` is 32 raw bytes, not hex. An all-zero hash never exists.
+        let zero = [0u8; 32];
+        let (mut dtype, mut data_len) = (-1i32, 0u64);
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let rc = unsafe {
+            castore_store_get_array_by_hash(
+                store,
+                zero.as_ptr(),
+                &mut dtype,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        assert_ne!(rc, CASTORE_OK);
+        assert!(data_ptr.is_null(), "no buffer may be handed out on failure");
+        assert!(!last_error().is_empty());
+
+        // A null hash pointer is a null-pointer error, not an integrity error.
+        assert_eq!(
+            unsafe {
+                castore_store_get_array_by_hash(
+                    store,
+                    ptr::null(),
+                    &mut dtype,
+                    &mut data_ptr,
+                    &mut data_len,
+                )
+            },
+            CASTORE_ERR_NULL_POINTER
+        );
+        unsafe { castore_store_free(store) };
+    }
+
+    // ---- Buffer-probe edges ------------------------------------------------
+
+    #[test]
+    fn a_string_probe_buffer_smaller_than_needed_truncates_and_still_reports_the_full_length() {
+        // Probe-then-fetch contract: `out_len` is always the full byte length,
+        // whatever `cap` was, and a non-zero `cap` yields a NUL-terminated
+        // prefix. A binding that trusted `cap` instead of `out_len` would
+        // silently read a truncated JSON document.
+        let store = abi_create_in_memory();
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+
+        let mut needed = 0u64;
+        assert_eq!(
+            unsafe { castore_store_counts_by_type(store, ptr::null_mut(), 0, &mut needed) },
+            CASTORE_OK
+        );
+        assert!(needed > 8, "the JSON must be longer than the tiny buffer");
+
+        // cap = 8: 7 bytes of payload plus the NUL.
+        let mut small = vec![0xAAu8; 8];
+        let mut reported = 0u64;
+        assert_eq!(
+            unsafe {
+                castore_store_counts_by_type(
+                    store,
+                    small.as_mut_ptr() as *mut c_char,
+                    small.len() as u64,
+                    &mut reported,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(reported, needed, "out_len must report the full length");
+        assert_eq!(small[7], 0, "the buffer must stay NUL-terminated");
+
+        // The full read agrees with the truncated prefix.
+        let mut full = vec![0u8; needed as usize + 1];
+        assert_eq!(
+            unsafe {
+                castore_store_counts_by_type(
+                    store,
+                    full.as_mut_ptr() as *mut c_char,
+                    full.len() as u64,
+                    &mut reported,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(reported, needed);
+        assert_eq!(&small[..7], &full[..7]);
+
+        // cap = 1 leaves room only for the terminator.
+        let mut one = vec![0xAAu8; 1];
+        assert_eq!(
+            unsafe {
+                castore_store_counts_by_type(
+                    store,
+                    one.as_mut_ptr() as *mut c_char,
+                    1,
+                    &mut reported,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(reported, needed);
+        assert_eq!(one[0], 0);
+
+        unsafe {
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+    }
+
+    #[test]
+    fn a_shape_probe_buffer_smaller_than_needed_truncates() {
+        let store = abi_create_in_memory();
+        // element shape [2, 3] -> stored array shape [2, 2, 3].
+        let owner_type = CString::new("Generator").unwrap();
+        let name = CString::new("multi").unwrap();
+        let res = CString::new(HOUR).unwrap();
+        let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let bytes = to_le(&vals);
+        let dims = [2u64, 2, 3];
+        let mut key: *mut CastoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_store_add_single(
+                    store,
+                    1,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    T0_MS,
+                    res.as_ptr(),
+                    core_lib::Dtype::F64.code(),
+                    3,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut key,
+                )
+            },
+            CASTORE_OK
+        );
+
+        let mut reader: *mut CastoreStaticReaderHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_store_build_static_reader(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    res.as_ptr(),
+                    ptr::null(),
+                    &mut reader,
+                )
+            },
+            CASTORE_OK
+        );
+
+        // Probe: element shape is [2, 3], so 2 entries.
+        let (mut dtype, mut ncols, mut shape_len) = (-1i32, 0u64, 0u64);
+        assert_eq!(
+            unsafe {
+                castore_static_reader_group_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    &mut ncols,
+                    ptr::null_mut(),
+                    0,
+                    &mut shape_len,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(shape_len, 2);
+
+        // cap = 1: only the first dim is written, but the length still reports 2.
+        let mut one = [-1i64; 2];
+        assert_eq!(
+            unsafe {
+                castore_static_reader_group_info(
+                    reader,
+                    0,
+                    &mut dtype,
+                    &mut ncols,
+                    one.as_mut_ptr(),
+                    1,
+                    &mut shape_len,
+                )
+            },
+            CASTORE_OK
+        );
+        assert_eq!(shape_len, 2, "out_len reports the full rank");
+        assert_eq!(one[0], 2, "the first dim was written");
+        assert_eq!(one[1], -1, "the caller's second slot was left untouched");
+
+        unsafe {
+            castore_static_reader_free(reader);
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_group_or_entry_index_is_an_invalid_parameter() {
+        let store = abi_create_in_memory();
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0]);
+        let res = CString::new(HOUR).unwrap();
+
+        let mut reader: *mut CastoreStaticReaderHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_store_build_static_reader(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    res.as_ptr(),
+                    ptr::null(),
+                    &mut reader,
+                )
+            },
+            CASTORE_OK
+        );
+        let mut num_groups = 0u64;
+        assert_eq!(
+            unsafe { castore_static_reader_num_groups(reader, &mut num_groups) },
+            CASTORE_OK
+        );
+        assert_eq!(num_groups, 1);
+
+        // group_idx == num_groups is one past the end.
+        let (mut dtype, mut ncols, mut shape_len) = (-1i32, 0u64, 0u64);
+        assert_eq!(
+            unsafe {
+                castore_static_reader_group_info(
+                    reader,
+                    num_groups,
+                    &mut dtype,
+                    &mut ncols,
+                    ptr::null_mut(),
+                    0,
+                    &mut shape_len,
+                )
+            },
+            CASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(!last_error().is_empty());
+
+        // A column index past the group's width, and the group index again.
+        let mut out_key: *mut CastoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { castore_static_reader_group_key(reader, 0, 99, &mut out_key) },
+            CASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(out_key.is_null());
+        assert_eq!(
+            unsafe { castore_static_reader_group_key(reader, 99, 0, &mut out_key) },
+            CASTORE_ERR_INVALID_PARAMETER
+        );
+
+        // Values before any read, and for an out-of-range group.
+        let (mut p, mut blen) = (ptr::null::<u8>(), 0u64);
+        assert_eq!(
+            unsafe { castore_static_reader_group_values(reader, 99, &mut p, &mut blen) },
+            CASTORE_ERR_INVALID_PARAMETER
+        );
+        unsafe { castore_static_reader_free(reader) };
+
+        // The forecast reader's entry index behaves the same way.
+        let det_store = abi_create_in_memory();
+        abi_add_deterministic(det_store, 7, "gen");
+        let mut freader: *mut CastoreForecastReaderHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                castore_store_build_forecast_reader(
+                    det_store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    2, // Deterministic
+                    ptr::null(),
+                    res.as_ptr(),
+                    ptr::null(),
+                    &mut freader,
+                )
+            },
+            CASTORE_OK
+        );
+        let mut num_entries = 0u64;
+        assert_eq!(
+            unsafe { castore_forecast_reader_num_entries(freader, &mut num_entries) },
+            CASTORE_OK
+        );
+        assert_eq!(num_entries, 1);
+        let (mut dtype, mut shape_len) = (-1i32, 0u64);
+        assert_eq!(
+            unsafe {
+                castore_forecast_reader_entry_info(
+                    freader,
+                    num_entries,
+                    &mut dtype,
+                    ptr::null_mut(),
+                    0,
+                    &mut shape_len,
+                )
+            },
+            CASTORE_ERR_INVALID_PARAMETER
+        );
+        let mut slot = 0u64;
+        assert_eq!(
+            unsafe { castore_forecast_reader_entry_slot(freader, 99, &mut slot) },
+            CASTORE_ERR_INVALID_PARAMETER
+        );
+        unsafe {
+            castore_forecast_reader_free(freader);
+            castore_store_free(det_store);
+            castore_key_free(key);
+            castore_store_free(store);
+        }
+    }
+
+    /// A Deterministic H=2, count=3 scalar forecast, added through the core API
+    /// (the ABI's forecast add takes a much wider argument list and is exercised
+    /// by the Julia suite).
+    fn abi_add_deterministic(store: *mut CastoreStoreHandle, owner: i64, name: &str) {
+        use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+        let initial = Utc.timestamp_millis_opt(T0_MS).single().unwrap();
+        let data = core_lib::TypedArray::from_f64(vec![2, 3], &[0.0, 10.0, 20.0, 1.0, 11.0, 21.0]);
+        let det = core_lib::Deterministic::new(
+            initial,
+            ChronoDuration::hours(1),
+            ChronoDuration::hours(2),
+            ChronoDuration::hours(1),
+            3,
+            data,
+            name,
+        )
+        .unwrap();
+        let store = unsafe { store.as_mut() }.unwrap();
+        store
+            .inner
+            .add_time_series(
+                owner,
+                "Generator",
+                core_lib::OwnerCategory::Component,
+                core_lib::TimeSeriesData::Deterministic(det),
+                Default::default(),
+                None,
+            )
+            .unwrap();
+    }
+
+    // ---- Dtype codes -------------------------------------------------------
+
+    #[test]
+    fn every_dtype_code_round_trips_through_get_single() {
+        // Only F64 (0) and I64 (2) were asserted before. The codes are the ABI
+        // contract each binding maps to its own element type.
+        assert_eq!(
+            [
+                core_lib::Dtype::F64.code(),
+                core_lib::Dtype::F32.code(),
+                core_lib::Dtype::I64.code(),
+                core_lib::Dtype::I32.code(),
+                core_lib::Dtype::U64.code(),
+                core_lib::Dtype::Bool.code(),
+            ],
+            [0, 1, 2, 3, 4, 5],
+            "the ABI dtype codes are the contract"
+        );
+
+        let store = abi_create_in_memory();
+
+        // (name, dtype code, raw little-endian bytes, element count)
+        let f32_bytes: Vec<u8> = [1.5f32, -2.5, f32::INFINITY]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let i32_bytes: Vec<u8> = [i32::MIN, 0, i32::MAX]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let u64_bytes: Vec<u8> = [0u64, 1, u64::MAX]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let bool_bytes: Vec<u8> = vec![1u8, 0, 1];
+        let i64_bytes: Vec<u8> = [i64::MIN, 0, i64::MAX]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let f64_bytes = to_le(&[1.0, 2.0, 3.0]);
+
+        let cases: Vec<(&str, i32, Vec<u8>)> = vec![
+            ("f64", 0, f64_bytes),
+            ("f32", 1, f32_bytes),
+            ("i64", 2, i64_bytes),
+            ("i32", 3, i32_bytes),
+            ("u64", 4, u64_bytes),
+            ("bool", 5, bool_bytes),
+        ];
+
+        for (i, (name, code, bytes)) in cases.iter().enumerate() {
+            let (rc, key) = abi_try_add(store, i as i64 + 1, name, *code, bytes, 3);
+            assert_eq!(rc, CASTORE_OK, "adding {name}: {}", last_error());
+            unsafe { castore_key_free(key) };
+
+            let (got_dtype, shape, got_bytes) = abi_get_single(store, i as i64 + 1, name);
+            assert_eq!(got_dtype, *code, "{name}: dtype code");
+            assert_eq!(shape, vec![3], "{name}: shape");
+            assert_eq!(&got_bytes, bytes, "{name}: bytes are not byte-exact");
+        }
+
+        unsafe { castore_store_free(store) };
+    }
+}

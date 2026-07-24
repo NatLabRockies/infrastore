@@ -291,6 +291,15 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
   format-version check, so when both halves are wrong the caller sees `Sqlite(CannotOpen)` rather
   than the more informative `IncompatibleFormat`. Pinned by
   `the_catalog_half_is_opened_before_the_format_check` (1.7).
+- F7: a closed store reports differently in the two bindings. Python raises
+  `TimeSeriesError("store is closed")` from its own guard; Julia nulls the handle so the call
+  reaches the ABI's null-handle path and `_check` maps code 1 to `InvalidParameterError`. Both are
+  pinned (`test_api_additions.py`, `operations on a closed store raise`), but a caller porting code
+  between the bindings cannot catch the same type. Needs a user decision on whether to unify.
+- F8: `castore-core/src/metadata.rs` summary rows return `initial_timestamp` as an RFC3339
+  **string** in Python (`static_summary`, `forecast_summary`, `check_static_consistency`), while
+  `SingleTimeSeries.initial_timestamp` is a `datetime`. Pinned by `test_parity.py`; inconsistent but
+  a behavior change to fix.
 - F6: `castore-core/src/store.rs:69` (`ListFilter::name_glob`) — there is no escaping API, so a name
   containing `*`, `?`, or `[...]` is not addressable by passing its own text as a `name_glob`
   pattern; `wind[1]` used as a pattern matches nothing. Callers needing literal matching must use

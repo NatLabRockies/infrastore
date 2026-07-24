@@ -23,3 +23,7 @@ tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 cbindgen = { workspace = true }
+
+[dev-dependencies]
+# The ABI lifecycle tests create and reopen real store files on disk.
+tempfile = "3"
