@@ -11,6 +11,14 @@ description = "Command-line tool for loading and inspecting a castore store dire
 name = "cas"
 path = "src/main.rs"
 
+# Statically link netcdf-c/HDF5 so the `cas` binary is self-contained; see
+# `castore-core`'s manifest for the full tradeoff. The `netcdf` dev-dependency
+# below picks this up through feature unification -- there is only ever one
+# `netcdf-sys` in the graph.
+[features]
+default = ["vendored"]
+vendored = ["castore-core/vendored"]
+
 [dependencies]
 chrono = { workspace = true }
 clap = { workspace = true, features = ["env", "color"] }

@@ -11,6 +11,12 @@ description = "Python bindings for castore"
 name = "castore"
 crate-type = ["cdylib"]
 
+# Statically link netcdf-c/HDF5 so a built wheel needs no system libraries; see
+# `castore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["castore-core/vendored"]
+
 [dependencies]
 chrono = { workspace = true }
 ndarray = { workspace = true }

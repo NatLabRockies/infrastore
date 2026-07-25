@@ -119,21 +119,28 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ### Prerequisites
 
-System libraries are required for the NetCDF and protobuf builds. On macOS:
+NetCDF, HDF5, and zlib are built from vendored sources and linked statically by default, via the
+`vendored` feature that every crate enables (defined in `castore-core`, forwarded by the rest). The
+build therefore needs `cmake` and a C compiler rather than system NetCDF/HDF5, plus `protobuf` for
+the gRPC codegen:
 
 ```bash
-brew install hdf5 netcdf protobuf maturin
+brew install cmake protobuf maturin                 # macOS
+sudo apt-get install cmake protobuf-compiler        # Linux (Debian/Ubuntu)
 ```
 
-If `cargo build` fails with `Unable to locate HDF5 root directory and/or headers`, point the build
-script at Homebrew explicitly:
+The first build compiles netcdf-c and HDF5 from source (a few minutes), then caches the result.
 
-```bash
-export HDF5_DIR="$(brew --prefix hdf5)"
-```
+`--no-default-features` switches back to system libraries, which then need
+`brew install hdf5 netcdf` / `sudo apt-get install libhdf5-dev libnetcdf-dev`, and possibly
+`HDF5_DIR` if the `hdf5-metno-sys` build script cannot locate HDF5. Because `netcdf-sys` declares
+`links = "netcdf"`, Cargo's feature unification makes vendored-vs-system all-or-nothing across the
+whole dependency graph — an individual crate cannot choose independently.
 
-On Linux (Debian/Ubuntu): `sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler` (set
-`HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial` if the build script can't find HDF5).
+Note that `--all-features` implies `vendored`. The workspace dependencies on `castore-core` and
+`castore-proto` set `default-features = false` in the root manifest, because a workspace member
+cannot override an inherited dependency's `default-features`; each member re-enables vendoring
+through its own `vendored` feature.
 
 On Windows, CI installs prebuilt `libnetcdf` and `hdf5` from conda-forge and sets `NETCDF_DIR`,
 `HDF5_DIR`, and `PKG_CONFIG_PATH` to the conda prefix's `Library` directory. Do not switch this back

@@ -11,6 +11,12 @@ description = "gRPC server + Rust client for castore"
 name = "castore-server"
 path = "src/bin/server.rs"
 
+# Statically link netcdf-c/HDF5 so the server binary is self-contained; see
+# `castore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["castore-core/vendored", "castore-proto/vendored"]
+
 [dependencies]
 chrono = { workspace = true }
 clap = { workspace = true }

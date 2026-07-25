@@ -73,31 +73,48 @@ examples/                    # Sample server config, basic_rust.rs, and cli/ sam
 
 ## Prerequisites
 
-System libraries (macOS via `brew`):
+NetCDF, HDF5, and zlib are **built from vendored sources and linked statically by default**, so you
+do not need to install them. What the build does need is `cmake` and a C compiler, plus `protobuf`
+for the gRPC codegen.
+
+On macOS via `brew`:
 
 ```sh
-brew install hdf5 netcdf protobuf maturin
+brew install cmake protobuf maturin
 ```
 
-`hdf5` is a transitive dependency of `netcdf`, but the `hdf5-metno-sys` build script does not always
-locate it on its own. If `cargo build` fails with
-`Unable to locate HDF5 root directory and/or headers`, point it at the Homebrew install explicitly:
+On Linux (Debian/Ubuntu):
 
 ```sh
-export HDF5_DIR="$(brew --prefix hdf5)"
+sudo apt-get install cmake protobuf-compiler
 ```
 
-Add that line to your shell profile to make it permanent.
-
-On Linux (Debian/Ubuntu), install the equivalent packages:
-
-```sh
-sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
-# if the build script can't find HDF5:
-export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial
-```
+The first build compiles netcdf-c and HDF5 from source, which takes a few minutes; the result is
+cached and later builds are unaffected.
 
 The cdylib tests need a Python interpreter (3.10+) and Julia (1.10+).
+
+### Linking against system NetCDF instead
+
+Every crate enables a `vendored` feature by default. Turn it off to link the system libraries:
+
+```sh
+cargo build --workspace --no-default-features
+```
+
+That path needs the development packages — `brew install hdf5 netcdf` or
+`sudo apt-get install libhdf5-dev libnetcdf-dev` — and the `hdf5-metno-sys` build script does not
+always locate HDF5 on its own. If the build fails with
+`Unable to locate HDF5 root directory and/or headers`, point it at the install explicitly:
+
+```sh
+export HDF5_DIR="$(brew --prefix hdf5)"           # macOS
+export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial   # Debian/Ubuntu
+```
+
+Because `netcdf-sys` declares `links = "netcdf"`, there is exactly one copy of it in any dependency
+graph and Cargo unifies features across the whole graph. Vendored-vs-system is therefore an
+all-or-nothing choice for a given build, not something an individual crate can pick.
 
 ## Build
 
