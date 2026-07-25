@@ -109,7 +109,15 @@ sed -i 's/sha2 = { workspace = true, features = \["asm"\] }/sha2 = { workspace =
 # has exactly one libhdf5. Do not drop this flag.
 cargo build --release --no-default-features --target ${rust_target} -p infrastore-ffi
 
-install -Dvm755 "target/${rust_target}/release/libinfrastore_ffi.${dlext}" \
+# Rust does not prefix cdylibs with `lib` on Windows: the artifact there is
+# `infrastore_ffi.dll` (next to a `libinfrastore_ffi.dll.a` import library),
+# while Linux and macOS produce `libinfrastore_ffi.{so,dylib}`. Glob over the
+# prefix and install under the `lib`-prefixed name on every platform, so the
+# LibraryProduct declared below resolves identically everywhere.
+#
+# `${libdir}` already resolves to `${prefix}/bin` on Windows, which is where
+# BinaryBuilder expects DLLs, so the destination needs no special-casing.
+install -Dvm755 target/${rust_target}/release/*infrastore_ffi.${dlext} \
     "${libdir}/libinfrastore_ffi.${dlext}"
 install -Dvm644 "crates/infrastore-ffi/include/infrastore.h" \
     "${includedir}/infrastore.h"
