@@ -48,6 +48,41 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install llvm-tools
+        if: matrix.os == 'ubuntu-latest'
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Coverage is collected on Linux only; one platform's numbers are enough.
+      #
+      # Every step after this one inherits the instrumentation, so a single pass
+      # covers all three suites: the Rust tests, the wheel pytest imports, and
+      # the cdylib Julia dlopens. Doctests still execute -- rustdoc does not go
+      # through RUSTC_WRAPPER, so they run uninstrumented rather than being
+      # skipped.
+      #
+      # `clean --workspace` is mandatory, and must run after the cache restore.
+      # Cargo does not treat RUSTC_WRAPPER as a fingerprint input, so a restored
+      # uninstrumented target dir would be reused and every .profraw would
+      # silently go missing -- the failure surfaces only as an empty report.
+      - name: Enable coverage instrumentation
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cov-env.sh"
+          source "$RUNNER_TEMP/cov-env.sh"
+          # Re-export through $GITHUB_ENV so later steps inherit it. The heredoc
+          # form is required because one value is 0x1f-separated, which the
+          # plain KEY=value form would mangle.
+          grep '^export ' "$RUNNER_TEMP/cov-env.sh" | sed 's/^export //; s/=.*//' |
+            while read -r key; do
+              printf '%s<<CASTORE_COV_ENV\n%s\nCASTORE_COV_ENV\n' "$key" "${!key}"
+            done >> "$GITHUB_ENV"
+
       - name: Build workspace
         run: cargo build --workspace --all-features
 
@@ -102,44 +137,31 @@ jobs:
           julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
           julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
 
-      # Coverage is collected on Linux only. `cargo llvm-cov` sets its own
-      # RUSTFLAGS, so the instrumented build recompiles the whole graph --
-      # including the vendored netcdf-c/HDF5 stack -- and one platform's
-      # numbers are enough to track.
+      # Render both reports from the profiles all three suites just wrote.
+      # `--ignore-filename-regex` drops the protobuf code castore-proto's build
+      # script generates into target/; build scripts are themselves excluded
+      # unless --include-build-script is passed, so the vendored netcdf-c/HDF5
+      # build stays out of the numbers.
       #
-      # This is a second pass rather than a replacement for `cargo test` above:
-      # on stable, cargo-llvm-cov does not instrument doctests, so running the
-      # suite only under it would quietly drop doctests from this leg.
-      - name: Install llvm-tools
+      # `--remap-path-prefix` is deliberately absent: it only takes effect at
+      # compile time, and the builds above are plain cargo invocations, so it
+      # would be silently inert here. The job summary is shortened with sed
+      # instead; lcov.info keeps absolute paths.
+      - name: Report coverage
         if: matrix.os == 'ubuntu-latest'
-        run: rustup component add llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      # Run the suite once under instrumentation, then render two reports from
-      # that single profile: lcov.info for tooling, and the text table for the
-      # run's job summary. `--remap-path-prefix` makes both use workspace-
-      # relative paths; `--ignore-filename-regex` drops the protobuf code that
-      # castore-proto's build script generates into target/. Build scripts
-      # themselves are already excluded unless --include-build-script is passed,
-      # so the vendored netcdf-c/HDF5 build stays out of the numbers.
-      - name: Collect coverage
-        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
-          cargo llvm-cov --no-report --workspace --all-features --remap-path-prefix
+          ignore='(^|/)target/'
           cargo llvm-cov report --lcov --output-path lcov.info \
-            --remap-path-prefix --ignore-filename-regex '(^|/)target/'
+            --ignore-filename-regex "$ignore"
           {
             echo '### Coverage (cargo llvm-cov)'
+            echo ''
+            echo 'Rust, Python, and Julia suites combined.'
             echo '```'
-            cargo llvm-cov report --remap-path-prefix \
-              --ignore-filename-regex '(^|/)target/'
+            cargo llvm-cov report --ignore-filename-regex "$ignore" | sed "s|$PWD/||"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          RUST_BACKTRACE: 1
 
       - name: Upload coverage report
         if: matrix.os == 'ubuntu-latest'
