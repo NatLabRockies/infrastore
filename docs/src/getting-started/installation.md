@@ -1,8 +1,8 @@
 # Installation
 
-castore is a Rust workspace. Building any of its interfaces requires a Rust toolchain plus the HDF5,
-NetCDF, and Protobuf system libraries. The Python and Julia bindings additionally need a Python
-interpreter (3.10+) or Julia (1.10+).
+infrastore is a Rust workspace. Building any of its interfaces requires a Rust toolchain plus the
+HDF5, NetCDF, and Protobuf system libraries. The Python and Julia bindings additionally need a
+Python interpreter (3.10+) or Julia (1.10+).
 
 ## System Libraries
 
@@ -44,7 +44,7 @@ rustup update stable
 
 ```sh
 git clone https://github.com/NatLabRockies/time-series-store
-cd castore
+cd infrastore
 cargo build --workspace --all-features
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -56,15 +56,15 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 
 ## Crates in the Workspace
 
-| Crate            | What it builds                                                |
-| ---------------- | ------------------------------------------------------------- |
-| `castore-core`   | Types, NetCDF + SQLite storage, hashing, Rust API             |
-| `castore-proto`  | Protobuf service definition + `tonic` codegen                 |
-| `castore-server` | gRPC server binary + Rust client                              |
-| `castore-py`     | PyO3 bindings, `abi3-py310` wheel                             |
-| `castore-ffi`    | C ABI cdylib (the foundation of the Julia binding)            |
-| `castore-cli`    | `cas` CLI binary (CSV add/read, inspect on-disk stores)       |
-| `castore-bench`  | `cas-bench` binary (bulk-ingest + simulation-read benchmarks) |
+| Crate               | What it builds                                                       |
+| ------------------- | -------------------------------------------------------------------- |
+| `infrastore-core`   | Types, NetCDF + SQLite storage, hashing, Rust API                    |
+| `infrastore-proto`  | Protobuf service definition + `tonic` codegen                        |
+| `infrastore-server` | gRPC server binary + Rust client                                     |
+| `infrastore-py`     | PyO3 bindings, `abi3-py310` wheel                                    |
+| `infrastore-ffi`    | C ABI cdylib (the foundation of the Julia binding)                   |
+| `infrastore-cli`    | `infrastore` CLI binary (CSV add/read, inspect on-disk stores)       |
+| `infrastore-bench`  | `infrastore-bench` binary (bulk-ingest + simulation-read benchmarks) |
 
 ## Next Steps
 

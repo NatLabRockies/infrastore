@@ -1,8 +1,8 @@
 [book]
-authors = ["castore Contributors"]
+authors = ["infrastore Contributors"]
 language = "en"
 src = "src"
-title = "castore Documentation"
+title = "infrastore Documentation"
 description = "Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings"
 
 [build]

@@ -1,17 +1,17 @@
 # Packaging & distribution
 
 > **Status: local development.** Nothing is published to a registry yet (the repo isn't open
-> source). `Castore.jl` is consumed via `Pkg.develop`, and the cdylib via the `CASTORE_LIB` env var.
-> The steps below are the publish plan for when the repo can be open-sourced.
+> source). `InfraStore.jl` is consumed via `Pkg.develop`, and the cdylib via the `INFRASTORE_LIB`
+> env var. The steps below are the publish plan for when the repo can be open-sourced.
 
-This repo is the single source of truth for the castore engine and the language bindings that wrap
-it. Layout (monorepo):
+This repo is the single source of truth for the infrastore engine and the language bindings that
+wrap it. Layout (monorepo):
 
 ```
-crates/castore-ffi/   # Rust cdylib (the C ABI)
-crates/castore-py/    # PyO3 crate  →  PyPI: castore
-julia/Castore.jl/       # Julia API   →  General: Castore.jl
-yggdrasil/build_tarballs.jl     # BinaryBuilder recipe → General: Castore_jll
+crates/infrastore-ffi/   # Rust cdylib (the C ABI)
+crates/infrastore-py/    # PyO3 crate  →  PyPI: infrastore
+julia/InfraStore.jl/       # Julia API   →  General: InfraStore.jl
+yggdrasil/build_tarballs.jl     # BinaryBuilder recipe → General: InfraStore_jll
 ```
 
 ## NetCDF linkage
@@ -22,13 +22,13 @@ interchangeable:
 | Channel                   | Linkage                                  | How                                                                  |
 | ------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
 | Rust crates, Python wheel | vendored netcdf-c + HDF5 + zlib, static  | the `vendored` feature, enabled by default in every crate            |
-| `Castore_jll` (Julia)     | dynamic, against `NetCDF_jll`/`HDF5_jll` | `cargo build --no-default-features` in `yggdrasil/build_tarballs.jl` |
+| `InfraStore_jll` (Julia)  | dynamic, against `NetCDF_jll`/`HDF5_jll` | `cargo build --no-default-features` in `yggdrasil/build_tarballs.jl` |
 
-Vendoring is what lets a downstream package get NetCDF for free — `pip install castore` and
-`cargo add castore-core` need no system libraries, only `cmake` and a C compiler at build time. The
-JLL is the exception: Julia's ecosystem already ships HDF5, and a statically vendored copy inside
-`libcastore_ffi` would put **two libhdf5 instances in one process** alongside any other JLL that
-links it. The recipe therefore passes `--no-default-features`; that flag is load-bearing.
+Vendoring is what lets a downstream package get NetCDF for free — `pip install infrastore` and
+`cargo add infrastore-core` need no system libraries, only `cmake` and a C compiler at build time.
+The JLL is the exception: Julia's ecosystem already ships HDF5, and a statically vendored copy
+inside `libinfrastore_ffi` would put **two libhdf5 instances in one process** alongside any other
+JLL that links it. The recipe therefore passes `--no-default-features`; that flag is load-bearing.
 
 The same hazard is the open question for Python wheels — see the Python section below.
 
@@ -36,36 +36,36 @@ The same hazard is the open question for Python wheels — see the Python sectio
 
 Three registered pieces, all consumable from the General registry:
 
-| Package                    | What it is                                                                        | Source                                                |
-| -------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `Castore_jll`              | the compiled `libcastore_ffi` binary, per platform                                | built by Yggdrasil from `yggdrasil/build_tarballs.jl` |
-| `Castore.jl`               | the `ccall` wrapper + high-level Julia API (module `Castore`, store type `Store`) | `julia/Castore.jl/` (registered via `subdir`)         |
-| `InfrastructureSystems.jl` | depends on `Castore.jl` for its Rust time-series backend                          | separate repo                                         |
+| Package                    | What it is                                                                           | Source                                                |
+| -------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `InfraStore_jll`           | the compiled `libinfrastore_ffi` binary, per platform                                | built by Yggdrasil from `yggdrasil/build_tarballs.jl` |
+| `InfraStore.jl`            | the `ccall` wrapper + high-level Julia API (module `InfraStore`, store type `Store`) | `julia/InfraStore.jl/` (registered via `subdir`)      |
+| `InfrastructureSystems.jl` | depends on `InfraStore.jl` for its Rust time-series backend                          | separate repo                                         |
 
-`Castore.jl` resolves the binary in this order: the `CASTORE_LIB` env var (dev builds), then
-`Castore_jll`. So it works today against a local `cargo build` and switches to the JLL automatically
-once published — no code change.
+`InfraStore.jl` resolves the binary in this order: the `INFRASTORE_LIB` env var (dev builds), then
+`InfraStore_jll`. So it works today against a local `cargo build` and switches to the JLL
+automatically once published — no code change.
 
 Steps to publish:
 
-1. **JLL** — copy `yggdrasil/build_tarballs.jl` into a Yggdrasil fork under `C/Castore/`, pin
+1. **JLL** — copy `yggdrasil/build_tarballs.jl` into a Yggdrasil fork under `C/InfraStore/`, pin
    `version` + the source commit, get it building for the target platforms, open the PR. The recipe
    links `NetCDF_jll` + `HDF5_jll` so the binary shares the ecosystem's HDF5 (one `libhdf5` per
    process).
-2. **`Castore.jl`** — once the JLL is merged, add `Castore_jll` to its `[deps]` and switch
-   `_jll_library_path()` to a direct `import Castore_jll`. Register via Registrator/JuliaRegistries
-   with the `subdir = julia/Castore.jl` option.
-3. **`InfrastructureSystems.jl`** — add `Castore` to `[deps]`; replace the raw `ccall`s in
+2. **`InfraStore.jl`** — once the JLL is merged, add `InfraStore_jll` to its `[deps]` and switch
+   `_jll_library_path()` to a direct `import InfraStore_jll`. Register via
+   Registrator/JuliaRegistries with the `subdir = julia/InfraStore.jl` option.
+3. **`InfrastructureSystems.jl`** — add `InfraStore` to `[deps]`; replace the raw `ccall`s in
    `src/rust_time_series_store.jl` with calls into the package.
 
 ## Python
 
-| Package                      | What it is                                | Source               |
-| ---------------------------- | ----------------------------------------- | -------------------- |
-| `castore` (import `castore`) | PyO3/maturin wheel exposing the store API | `crates/castore-py/` |
+| Package                            | What it is                                | Source                  |
+| ---------------------------------- | ----------------------------------------- | ----------------------- |
+| `infrastore` (import `infrastore`) | PyO3/maturin wheel exposing the store API | `crates/infrastore-py/` |
 
-The distribution name (`castore`) and module name (`castore`) are already set in
-`crates/castore-py/pyproject.toml`.
+The distribution name (`infrastore`) and module name (`infrastore`) are already set in
+`crates/infrastore-py/pyproject.toml`.
 
 Steps to publish:
 
@@ -85,8 +85,8 @@ avoids by linking dynamically. Users of the primary downstream consumer (`infras
 have `netCDF4` installed.
 
 ```sh
-pip install castore netCDF4 h5py
-python -c "import castore, netCDF4, h5py; print('ok')"
+pip install infrastore netCDF4 h5py
+python -c "import infrastore, netCDF4, h5py; print('ok')"
 ```
 
 On Linux this can fail through symbol interposition rather than a clean error, so exercise an actual
@@ -105,5 +105,5 @@ is a separate change that needs its own CI run.
 
 ## Versioning
 
-The Rust crates, the JLL, `Castore.jl`, and the Python package share the workspace version; bump
+The Rust crates, the JLL, `InfraStore.jl`, and the Python package share the workspace version; bump
 together and tag the repo per release so Yggdrasil and the registries pin the same commit.

@@ -1,12 +1,12 @@
 # Introduction
 
-**castore** is a Rust library for managing time-series data in power-systems and energy simulations.
-It separates persistence into two concerns: numerical arrays are stored in NetCDF4, while the
-metadata that associates each array with an owning component lives in SQLite. Identical arrays are
-stored once and shared through content addressing.
+**infrastore** is a Rust library for managing time-series data in power-systems and energy
+simulations. It separates persistence into two concerns: numerical arrays are stored in NetCDF4,
+while the metadata that associates each array with an owning component lives in SQLite. Identical
+arrays are stored once and shared through content addressing.
 
-The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the `cas`
-command-line tool and a read-only gRPC server with a Rust client.
+The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the
+`infrastore` command-line tool and a read-only gRPC server with a Rust client.
 
 ```mermaid
 flowchart TB
@@ -14,10 +14,10 @@ flowchart TB
         RUST["Rust<br/>(native crate)"]
         PY["Python<br/>(PyO3 wheel)"]
         JL["Julia<br/>(C ABI)"]
-        CLI["cas<br/>(CLI)"]
+        CLI["infrastore<br/>(CLI)"]
     end
 
-    subgraph core["castore-core"]
+    subgraph core["infrastore-core"]
         STORE["Store"]
         STORE --> NC[("NetCDF4<br/>arrays")]
         STORE --> SQL[("SQLite<br/>metadata")]
@@ -59,8 +59,9 @@ flowchart TB
 - **Typed, N-dimensional arrays** — Store `f64`, `f32`, `i64`, `i32`, `u64`, or `bool` values, with
   an optional per-step element shape (e.g. the coefficient tuple of a cost curve)
 - **Three language bindings** — Use it from Rust, Python, or Julia with the same on-disk format
-- **A `cas` command-line tool** — Load time series from CSV, and list, read, and inspect a store
-  straight from a terminal, with `table` / `json` / `csv` output ([CLI how-to](./how-to/use-cli.md))
+- **A `infrastore` command-line tool** — Load time series from CSV, and list, read, and inspect a
+  store straight from a terminal, with `table` / `json` / `csv` output
+  ([CLI how-to](./how-to/use-cli.md))
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
 - **Designed for power-systems data** — The data model maps onto
@@ -74,7 +75,7 @@ flowchart TB
 | **Python package developers**   | [Python Developer Guide](./guides/python.md)      |
 | **Julia package developers**    | [Julia Developer Guide](./guides/julia.md)        |
 | **Rust developers**             | [Rust Developer Guide](./guides/rust.md)          |
-| **Command-line users**          | [Use the `cas` CLI](./how-to/use-cli.md)          |
+| **Command-line users**          | [Use the `infrastore` CLI](./how-to/use-cli.md)   |
 | **Anyone deploying the server** | [gRPC Server & Client](./guides/server.md)        |
 | **Tooling & forensics**         | [On-Disk File Format](./reference/file-format.md) |
 

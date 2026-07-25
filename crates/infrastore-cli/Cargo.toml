@@ -1,0 +1,39 @@
+[package]
+name = "infrastore-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tool for loading and inspecting a infrastore store directly on disk"
+
+[[bin]]
+name = "infrastore"
+path = "src/main.rs"
+
+# Statically link netcdf-c/HDF5 so the `infrastore` binary is self-contained; see
+# `infrastore-core`'s manifest for the full tradeoff. The `netcdf` dev-dependency
+# below picks this up through feature unification -- there is only ever one
+# `netcdf-sys` in the graph.
+[features]
+default = ["vendored"]
+vendored = ["infrastore-core/vendored"]
+
+[dependencies]
+chrono = { workspace = true }
+clap = { workspace = true, features = ["env", "color"] }
+clap_complete = "4"
+csv = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tabled = { workspace = true }
+infrastore-core = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# `cli_errors.rs` builds deliberately corrupt stores: `netcdf` to perturb a
+# stored array behind its recorded hash, `rusqlite` to corrupt the catalog half.
+netcdf = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = "3"

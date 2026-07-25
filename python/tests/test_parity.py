@@ -8,7 +8,7 @@ Two gaps this file closes:
    element shape (the Julia suite tests ``(4, 2, 3)``), and no non-finite value
    went through numpy.
 2. **Untested ``Store`` methods.** Fourteen methods were declared in
-   ``castore.pyi`` and exercised by no test. Each is called at least once here,
+   ``infrastore.pyi`` and exercised by no test. Each is called at least once here,
    with its result checked against an independently computed expectation rather
    than just "it didn't raise".
 
@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from castore import (
+from infrastore import (
     Deterministic,
     DuplicateTimeSeriesError,
     IntegrityError,

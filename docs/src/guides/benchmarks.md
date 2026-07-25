@@ -1,19 +1,19 @@
 # Benchmarks
 
-`castore-bench` is a standalone binary (`cas-bench`) for measuring two critical performance
-dimensions: **bulk ingestion** and **simulation-loop reads**.
+`infrastore-bench` is a standalone binary (`infrastore-bench`) for measuring two critical
+performance dimensions: **bulk ingestion** and **simulation-loop reads**.
 
 ## Build
 
 ```sh
 # Debug build (fast to compile, slower to run)
-cargo build -p castore-bench
+cargo build -p infrastore-bench
 
 # Release build (recommended for any real measurement)
-cargo build --release -p castore-bench
+cargo build --release -p infrastore-bench
 ```
 
-The binary is placed at `target/release/cas-bench`.
+The binary is placed at `target/release/infrastore-bench`.
 
 ## Subcommands
 
@@ -39,10 +39,10 @@ simulation timesteps are benchmarked.
 
 ```sh
 # 10 000 components, 1 week hourly, in-memory
-cas-bench add --count 10000 --length 168 --in-memory
+infrastore-bench add --count 10000 --length 168 --in-memory
 
 # 100 000 components, same length, on-disk (tests real I/O + OS page cache)
-cas-bench add --count 100000 --length 168
+infrastore-bench add --count 100000 --length 168
 ```
 
 Reports for both `SingleTimeSeries` and `Deterministic`:
@@ -60,13 +60,13 @@ single-transaction SQLite commit.
 
 ```sh
 # 1 000 components, 168 timesteps, in-memory (pure CPU / metadata cost)
-cas-bench read --count 1000 --length 168 --in-memory
+infrastore-bench read --count 1000 --length 168 --in-memory
 
 # Same, but on-disk — store is written, dropped, then reopened read-only
-cas-bench read --count 1000 --length 168
+infrastore-bench read --count 1000 --length 168
 
 # Benchmark only the first 24 simulation steps of a 168-step series
-cas-bench read --count 10000 --length 168 --steps 24
+infrastore-bench read --count 10000 --length 168 --steps 24
 ```
 
 The read benchmark simulates the access pattern of an energy-simulation step loop:
@@ -110,15 +110,15 @@ built-in tracing spans with `--log-level`:
 
 ```sh
 # Show all debug-level spans from the store core only (least noise)
-cas-bench --log-level castore_core=debug add --count 100 --in-memory
+infrastore-bench --log-level infrastore_core=debug add --count 100 --in-memory
 
-# Show everything — useful when the bottleneck might be in cas-bench itself
-cas-bench --log-level debug add --count 100
+# Show everything — useful when the bottleneck might be in infrastore-bench itself
+infrastore-bench --log-level debug add --count 100
 ```
 
 `RUST_LOG` is also accepted as a fallback when `--log-level` is not provided.
 
-The key spans emitted by `castore-core`:
+The key spans emitted by `infrastore-core`:
 
 | Span                      | Layer          | Key fields                                       |
 | ------------------------- | -------------- | ------------------------------------------------ |
@@ -144,4 +144,4 @@ per standalone item; a single `add_time_series` call instead emits one `put_arra
 span. This makes it straightforward to see whether time is spent in metadata insertion, NetCDF I/O,
 or the `debug_span` overhead itself.
 
-The `cas` CLI supports the same `--log-level` flag for diagnosing a live store.
+The `infrastore` CLI supports the same `--log-level` flag for diagnosing a live store.

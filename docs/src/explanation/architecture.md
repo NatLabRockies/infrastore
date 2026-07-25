@@ -1,25 +1,26 @@
 # Architecture
 
-castore is a Rust workspace with one core library and a ring of interface crates around it. Every
-interface — native Rust, Python, Julia, the `cas` CLI, and the gRPC server — ultimately drives the
-same `Store` type in `castore-core`, and every interface reads and writes the same on-disk format.
+infrastore is a Rust workspace with one core library and a ring of interface crates around it. Every
+interface — native Rust, Python, Julia, the `infrastore` CLI, and the gRPC server — ultimately
+drives the same `Store` type in `infrastore-core`, and every interface reads and writes the same
+on-disk format.
 
 ## Crate Layout
 
 ```mermaid
 flowchart TB
     subgraph ifaces["Interface crates"]
-        PY["castore-py<br/>PyO3 wheel"]
-        FFI["castore-ffi<br/>C ABI cdylib"]
-        SRV["castore-server<br/>gRPC server + Rust client"]
-        CLI["castore-cli<br/>cas binary"]
+        PY["infrastore-py<br/>PyO3 wheel"]
+        FFI["infrastore-ffi<br/>C ABI cdylib"]
+        SRV["infrastore-server<br/>gRPC server + Rust client"]
+        CLI["infrastore-cli<br/>infrastore binary"]
     end
 
-    PYMOD["castore<br/>(Python module)"]
-    JL["Castore.jl<br/>(Julia package)"]
-    PROTO["castore-proto<br/>protobuf + tonic"]
+    PYMOD["infrastore<br/>(Python module)"]
+    JL["InfraStore.jl<br/>(Julia package)"]
+    PROTO["infrastore-proto<br/>protobuf + tonic"]
 
-    subgraph core["castore-core"]
+    subgraph core["infrastore-core"]
         STORE["Store"]
         META["MetadataStore<br/>(SQLite)"]
         BACK["StorageBackend<br/>(trait)"]
@@ -53,17 +54,17 @@ flowchart TB
     style CLI fill:#fd7e14,color:#fff
 ```
 
-| Crate / package  | Role                                                                    |
-| ---------------- | ----------------------------------------------------------------------- |
-| `castore-core`   | The whole engine: types, storage backends, hashing, the `Store` API     |
-| `castore-proto`  | The `.proto` service compiled with `tonic`; shared message types        |
-| `castore-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`  |
-| `castore-py`     | PyO3 classes exposing `Store` as the `castore` module                   |
-| `castore`        | The importable Python module — user-facing surface of the PyO3 wheel    |
-| `castore-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`            |
-| `Castore.jl`     | A Julia package that `ccall`s into the FFI cdylib                       |
-| `castore-cli`    | The `cas` binary: read+write access to an on-disk store from a terminal |
-| `castore-bench`  | The `cas-bench` binary: ingestion and simulation-read benchmarks        |
+| Crate / package     | Role                                                                           |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `infrastore-core`   | The whole engine: types, storage backends, hashing, the `Store` API            |
+| `infrastore-proto`  | The `.proto` service compiled with `tonic`; shared message types               |
+| `infrastore-server` | A `tonic` gRPC server wrapping a `Store`, plus an async `RemoteClient`         |
+| `infrastore-py`     | PyO3 classes exposing `Store` as the `infrastore` module                       |
+| `infrastore`        | The importable Python module — user-facing surface of the PyO3 wheel           |
+| `infrastore-ffi`    | A `extern "C"` cdylib with an opaque-handle API over `Store`                   |
+| `InfraStore.jl`     | A Julia package that `ccall`s into the FFI cdylib                              |
+| `infrastore-cli`    | The `infrastore` binary: read+write access to an on-disk store from a terminal |
+| `infrastore-bench`  | The `infrastore-bench` binary: ingestion and simulation-read benchmarks        |
 
 ## The Core: `Store`
 
@@ -101,7 +102,7 @@ matter where the arrays live. Tests run against the memory backend; production u
 
 Numerical arrays and their descriptive metadata have different access patterns. Arrays are large,
 append-mostly, and read by content; metadata is small, frequently queried, and benefits from indexes
-and transactions. castore puts each where it is strongest:
+and transactions. infrastore puts each where it is strongest:
 
 - **Arrays → NetCDF4.** Chunked, compressed, columnar storage that HDF5 tooling already understands.
 - **Metadata → SQLite.** A queryable, transactional catalog at `<path>.nc.sqlite`.

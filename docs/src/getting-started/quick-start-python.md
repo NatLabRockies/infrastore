@@ -1,8 +1,9 @@
 # Quick Start (Python)
 
 This walkthrough creates an in-memory store, adds a `SingleTimeSeries`, and reads it back — the
-shortest path to a working round-trip. It assumes the `castore` wheel is installed in the active
-environment; if `import castore` fails, see [Integrate with Python](../how-to/integrate-python.md).
+shortest path to a working round-trip. It assumes the `infrastore` wheel is installed in the active
+environment; if `import infrastore` fails, see
+[Integrate with Python](../how-to/integrate-python.md).
 
 ## A Minimal Round-Trip
 
@@ -10,7 +11,7 @@ environment; if `import castore` fails, see [Integrate with Python](../how-to/in
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-from castore import OwnerCategory, SingleTimeSeries, Store
+from infrastore import OwnerCategory, SingleTimeSeries, Store
 
 # `in_memory=True` means no filesystem I/O. Pass `path=` instead to write a
 # NetCDF file plus its SQLite catalog.

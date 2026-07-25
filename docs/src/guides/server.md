@@ -33,9 +33,9 @@ files.
 3. Launch:
 
    ```sh
-   cargo run -p castore-server -- --config my_server.toml
+   cargo run -p infrastore-server -- --config my_server.toml
    # or, from a release build:
-   ./target/release/castore-server --config my_server.toml
+   ./target/release/infrastore-server --config my_server.toml
    ```
 
 On startup the server validates the auth section, opens the first `[data].files` entry read-only,
@@ -48,8 +48,8 @@ codes are mapped back onto `TimeSeriesError`, so remote and local calls surface 
 taxonomy.
 
 ```rust
-use castore_core::OwnerCategory;
-use castore_server::client::RemoteClient;
+use infrastore_core::OwnerCategory;
+use infrastore_server::client::RemoteClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -93,8 +93,8 @@ rejected without a byte-wise compare, on the assumption that length is not secre
 generated client with an interceptor that injects the header:
 
 ```rust
-use castore_proto::pb::catalog_store_client::CatalogStoreClient;
-use castore_proto::pb::CountsReq;
+use infrastore_proto::pb::catalog_store_client::CatalogStoreClient;
+use infrastore_proto::pb::CountsReq;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
@@ -110,6 +110,6 @@ let counts = client.get_counts(CountsReq {}).await?.into_inner();
 
 ## Clients in Other Languages
 
-The proto file at `proto/castore/v1/store.proto` is a standard proto3 definition. Generate a client
-for any gRPC-supported language from it, sending the `x-api-key` metadata header when the server
-requires authentication.
+The proto file at `proto/infrastore/v1/store.proto` is a standard proto3 definition. Generate a
+client for any gRPC-supported language from it, sending the `x-api-key` metadata header when the
+server requires authentication.

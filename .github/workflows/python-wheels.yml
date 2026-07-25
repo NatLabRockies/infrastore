@@ -1,7 +1,7 @@
-# Build (and, on tags, publish) the `castore` Python wheels.
+# Build (and, on tags, publish) the `infrastore` Python wheels.
 #
 # The PyO3 crate statically links netcdf-c + HDF5 + zlib, built from vendored
-# sources by castore's default `vendored` feature, so cibuildwheel only has to
+# sources by infrastore's default `vendored` feature, so cibuildwheel only has to
 # install Rust in `before-all` (see [tool.cibuildwheel] in pyproject.toml) and
 # the wheels carry no external NetCDF/HDF5 to repair in.
 name: python-wheels
@@ -10,7 +10,7 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: ["crates/castore-py/**", "crates/castore-core/**"]
+    paths: ["crates/infrastore-py/**", "crates/infrastore-core/**"]
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
           - os: windows-latest
     defaults:
       run:
-        working-directory: crates/castore-py
+        working-directory: crates/infrastore-py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,12 +45,12 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target }}
         with:
-          package-dir: crates/castore-py
+          package-dir: crates/infrastore-py
           output-dir: wheelhouse
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: crates/castore-py/wheelhouse/*.whl
+          path: crates/infrastore-py/wheelhouse/*.whl
 
   publish:
     name: publish to PyPI

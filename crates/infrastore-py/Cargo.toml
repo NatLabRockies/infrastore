@@ -1,0 +1,26 @@
+[package]
+name = "infrastore-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for infrastore"
+
+[lib]
+name = "infrastore"
+crate-type = ["cdylib"]
+
+# Statically link netcdf-c/HDF5 so a built wheel needs no system libraries; see
+# `infrastore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["infrastore-core/vendored"]
+
+[dependencies]
+chrono = { workspace = true }
+ndarray = { workspace = true }
+numpy = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py310", "chrono"] }
+infrastore-core = { workspace = true }
+tracing-subscriber = { workspace = true }

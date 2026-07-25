@@ -1,9 +1,9 @@
 # Rust API
 
-The public surface of `castore-core`. Import paths below are relative to the crate root.
+The public surface of `infrastore-core`. Import paths below are relative to the crate root.
 
 ```rust
-use castore_core::{
+use infrastore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, RequestedType, Period,
@@ -18,8 +18,8 @@ use castore_core::{
 };
 
 // `array_hash` and `hash_hex` are also re-exported at the crate root; `features_hash` is not:
-use castore_core::hash::{array_hash, features_hash, hash_hex};
-use castore_core::storage::StorageBackend;
+use infrastore_core::hash::{array_hash, features_hash, hash_hex};
+use infrastore_core::storage::StorageBackend;
 ```
 
 All time spans in this API — resolutions, horizons, and intervals — are the crate's
@@ -377,7 +377,7 @@ shape against the windowing parameters (`horizon`, `interval`, `count`, and for 
 `percentiles`):
 
 ```rust
-use castore_core::{Deterministic, TimeSeriesData};
+use infrastore_core::{Deterministic, TimeSeriesData};
 
 let forecast = Deterministic::new(
     initial_timestamp, resolution, horizon, interval, count, data, name,
@@ -522,7 +522,7 @@ still a duplicate. One attribute may be attached to many components.
   ordered by attribute type then component type). The core groups; the caller formats.
 
 ```rust
-use castore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+use infrastore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 
 store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
     component_id: 1,
@@ -573,7 +573,7 @@ grouped summary, because there is no consumer for them yet. Both are additive if
   duplicate an edge `new_id` already has.
 
 ```rust
-use castore_core::{ParentChildAssociation, ParentChildFilter};
+use infrastore_core::{ParentChildAssociation, ParentChildFilter};
 
 store.add_parent_child_association(ParentChildAssociation {
     parent_id: 1,
@@ -599,7 +599,7 @@ target.add_parent_child_associations(exported)?;
 ```
 
 Neither association catalog is exposed over the [gRPC server](./grpc-api.md) or the
-[`cas` CLI](./cli.md).
+[`infrastore` CLI](./cli.md).
 
 ## Types
 
@@ -1208,7 +1208,7 @@ rarely call it directly, but it documents the backend contract. It is **not** re
 crate root — import it (and the backends) from the `storage` module:
 
 ```rust
-use castore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+use infrastore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
 ```
 
 Every method below with a default is a performance override: the default is correct but naive, and
@@ -1279,8 +1279,8 @@ pub trait StorageBackend: Send + Sync {
 
 ## Hashing
 
-In the `hash` module (`castore_core::hash`). `array_hash` and `hash_hex` are also re-exported at the
-crate root; `features_hash` is only reachable through the module.
+In the `hash` module (`infrastore_core::hash`). `array_hash` and `hash_hex` are also re-exported at
+the crate root; `features_hash` is only reachable through the module.
 
 ```rust
 pub fn array_hash(data: &TypedArray) -> [u8; 32];   // domain: dtype tag + shape + typed bytes

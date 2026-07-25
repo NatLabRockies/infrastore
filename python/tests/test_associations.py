@@ -6,8 +6,8 @@ class and a final pair of tests pins the fact that they do not interfere.
 """
 
 import pytest
-import castore as cas
-from castore import (
+import infrastore
+from infrastore import (
     ParentChildAssociation,
     SupplementalAttributeAssociation,
     Store,
@@ -110,14 +110,14 @@ class TestSupplementalAttributeRoundTrip:
 class TestSupplementalAttributeUniqueness:
     def test_duplicate_pair_rejected_regardless_of_type_names(self):
         store = store_with_attachments(attached(1, 100))
-        with pytest.raises(cas.DuplicateAssociationError):
+        with pytest.raises(infrastore.DuplicateAssociationError):
             store.add_supplemental_attribute_association(
                 attached_typed(1, "Load", 100, "Outage")
             )
         assert store.count_supplemental_attribute_associations() == 1
 
     def test_duplicate_error_is_in_the_hierarchy(self):
-        assert issubclass(cas.DuplicateAssociationError, cas.TimeSeriesError)
+        assert issubclass(infrastore.DuplicateAssociationError, infrastore.TimeSeriesError)
 
     def test_swapped_ids_are_a_different_row(self):
         # Component and attribute id streams are independent, so the same two
@@ -249,7 +249,7 @@ class TestSupplementalAttributeReplaceComponentId:
 
     def test_collision_rolls_back(self):
         store = store_with_attachments(attached(1, 100), attached(2, 100))
-        with pytest.raises(cas.DuplicateAssociationError):
+        with pytest.raises(infrastore.DuplicateAssociationError):
             store.replace_supplemental_attribute_component_id(1, 2)
         assert store.list_supplemental_attribute_associations() == [
             attached(1, 100),
@@ -286,7 +286,7 @@ class TestSupplementalAttributeBulk:
 
     def test_all_or_nothing(self):
         store = Store.create(in_memory=True)
-        with pytest.raises(cas.DuplicateAssociationError):
+        with pytest.raises(infrastore.DuplicateAssociationError):
             store.add_supplemental_attribute_associations(
                 [attached(1, 100), attached(2, 100), attached(1, 100)]
             )
@@ -347,7 +347,7 @@ class TestParentChildDirection:
 
     def test_duplicate_ordered_pair_rejected_regardless_of_type_names(self):
         store = store_with_edges(edge(1, 10))
-        with pytest.raises(cas.DuplicateAssociationError):
+        with pytest.raises(infrastore.DuplicateAssociationError):
             store.add_parent_child_association(edge_typed(1, "Load", 10, "Area"))
         assert store.count_parent_child_associations() == 1
 
@@ -435,7 +435,7 @@ class TestParentChildReplaceComponentId:
 
     def test_collision_rolls_back(self):
         store = store_with_edges(edge(1, 10), edge(2, 10))
-        with pytest.raises(cas.DuplicateAssociationError):
+        with pytest.raises(infrastore.DuplicateAssociationError):
             store.replace_parent_child_component_id(1, 2)
         assert store.list_parent_child_associations() == [edge(1, 10), edge(2, 10)]
 
@@ -462,7 +462,7 @@ class TestParentChildBulk:
 
     def test_all_or_nothing(self):
         store = Store.create(in_memory=True)
-        with pytest.raises(cas.DuplicateAssociationError):
+        with pytest.raises(infrastore.DuplicateAssociationError):
             store.add_parent_child_associations([edge(1, 10), edge(2, 10), edge(1, 10)])
         assert store.count_parent_child_associations() == 0
 
@@ -493,13 +493,13 @@ class TestPersistence:
         store.close()
 
         ro = Store.open(str(path), read_only=True)
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.add_supplemental_attribute_association(attached(2, 100))
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.add_supplemental_attribute_associations([attached(2, 100)])
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.remove_supplemental_attribute_associations()
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.replace_supplemental_attribute_component_id(1, 2)
         # Reads still work.
         assert ro.list_supplemental_attribute_associations() == [attached(1, 100)]
@@ -512,13 +512,13 @@ class TestPersistence:
         store.close()
 
         ro = Store.open(str(path), read_only=True)
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.add_parent_child_association(edge(2, 10))
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.add_parent_child_associations([edge(2, 10)])
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.remove_parent_child_associations()
-        with pytest.raises(cas.ReadOnlyStoreError):
+        with pytest.raises(infrastore.ReadOnlyStoreError):
             ro.replace_parent_child_component_id(1, 2)
         assert ro.list_parent_child_associations() == [edge(1, 10)]
         ro.close()

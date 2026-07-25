@@ -25,9 +25,9 @@ export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial  # Linux
 **The C ABI cdylib** (used by Julia and any C consumer):
 
 ```sh
-cargo build -p castore-ffi --release
-# -> target/release/libcastore_ffi.{dylib,so,dll}
-# Regenerates the C header at crates/castore-ffi/include/castore.h
+cargo build -p infrastore-ffi --release
+# -> target/release/libinfrastore_ffi.{dylib,so,dll}
+# Regenerates the C header at crates/infrastore-ffi/include/infrastore.h
 ```
 
 **The whole workspace** (core, server, proto, ffi):
@@ -45,7 +45,7 @@ The Python wheel is built separately with `maturin` — see
 The Julia binding and other C consumers locate the cdylib via an environment variable:
 
 ```sh
-export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
+export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 ```
 
 Add it to your shell profile to make it permanent.

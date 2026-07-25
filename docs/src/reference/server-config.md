@@ -4,7 +4,7 @@ The gRPC server is configured by a single TOML file passed with `--config`. The 
 `examples/server.toml`.
 
 ```sh
-castore-server --config my_server.toml
+infrastore-server --config my_server.toml
 ```
 
 ## File Structure
@@ -82,7 +82,7 @@ On launch the server:
 Logging honors the `RUST_LOG` environment variable (default `info`):
 
 ```sh
-RUST_LOG=debug castore-server --config my_server.toml
+RUST_LOG=debug infrastore-server --config my_server.toml
 ```
 
 See the [gRPC Server guide](../guides/server.md) for the end-to-end workflow and the

@@ -1,6 +1,6 @@
 # Integrate with Python
 
-Get the `castore` module into a Python environment. For API usage once it imports, see the
+Get the `infrastore` module into a Python environment. For API usage once it imports, see the
 [Python Developer Guide](../guides/python.md).
 
 ## Prerequisites
@@ -14,7 +14,7 @@ The binding is built with [maturin](https://www.maturin.rs/). `maturin develop` 
 extension and installs it into the active virtual environment:
 
 ```sh
-cd crates/castore-py
+cd crates/infrastore-py
 python3 -m venv .venv && source .venv/bin/activate
 pip install maturin pytest numpy
 maturin develop
@@ -23,7 +23,7 @@ maturin develop
 Verify the install:
 
 ```sh
-python -c "import castore; print(castore.__version__)"
+python -c "import infrastore; print(infrastore.__version__)"
 pytest ../../python/tests
 ```
 
@@ -32,10 +32,10 @@ pytest ../../python/tests
 To produce a wheel you can install elsewhere:
 
 ```sh
-cd crates/castore-py
+cd crates/infrastore-py
 maturin build --release
-# -> target/wheels/castore-<version>-cp310-abi3-<platform>.whl
-pip install ../../target/wheels/castore-*.whl
+# -> target/wheels/infrastore-<version>-cp310-abi3-<platform>.whl
+pip install ../../target/wheels/infrastore-*.whl
 ```
 
 The wheel is built against the **`abi3-py310`** stable ABI, so a single wheel works on CPython 3.10
@@ -46,7 +46,7 @@ and every newer 3.x without recompiling.
 ```python
 from datetime import datetime, timedelta, timezone
 import numpy as np
-from castore import Store, SingleTimeSeries, OwnerCategory
+from infrastore import Store, SingleTimeSeries, OwnerCategory
 
 store = Store.create(in_memory=True)
 ts = SingleTimeSeries(

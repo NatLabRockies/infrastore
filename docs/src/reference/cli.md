@@ -1,27 +1,28 @@
 # CLI Reference
 
-`castore-cli` builds the `cas` binary, which reads and writes a store directly on disk (NetCDF +
-SQLite). For a task-oriented walkthrough, see [Use the `cas` CLI](../how-to/use-cli.md).
+`infrastore-cli` builds the `infrastore` binary, which reads and writes a store directly on disk
+(NetCDF + SQLite). For a task-oriented walkthrough, see
+[Use the `infrastore` CLI](../how-to/use-cli.md).
 
 The CLI covers time series only. The
 [association catalogs](../explanation/data-model.md#associations-between-entities) in the same
-catalog file have no `cas` commands; reach them through the Rust, Python, or Julia API.
+catalog file have no `infrastore` commands; reach them through the Rust, Python, or Julia API.
 
 ## Synopsis
 
 ```text
-cas [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
+infrastore [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 ```
 
 ### Global options
 
-| Option           | Description                                                                                                                     |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `CASTORE_STORE` environment variable. |
-| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                             |
-| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                  |
+| Option           | Description                                                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable. |
+| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                                |
+| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                     |
 
-`--store` (or `CASTORE_STORE`) is required by every command except `template` and `completions`.
+`--store` (or `INFRASTORE_STORE`) is required by every command except `template` and `completions`.
 
 `-f`/`--format` affects the read/inspection commands (`list`, `get`, `info`, `export`, `stats`,
 `summary`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`). It is accepted
@@ -56,27 +57,27 @@ prints a JSON descriptor. `export` requires `-f csv` or `-f json` (there is no t
 | `template`          | Print an example descriptor for a given type to stdout.                         |
 
 ```text
-cas --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>] [--compression <none|deflate[:LEVEL]>] [--no-shuffle]
-cas --store <PATH> list    [SELECTOR...]
-cas --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
-cas --store <PATH> info    [SELECTOR...]
-cas --store <PATH> -f csv|json export [SELECTOR...] [--dir <DIR>]
-cas --store <PATH> remove  [SELECTOR...] [--all] [--force] [--dry-run]
-cas --store <PATH> rename  [SELECTOR...] --new-name <NAME> [--dry-run]
-cas --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>] [--dry-run]
-cas --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
-cas --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
-cas --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
-cas --store <PATH> persist --dest <PATH.nc>
-cas --store <PATH> compact [--force]
-cas --store <PATH> stats
-cas completions <SHELL>
-cas --store <PATH> summary [--static-only | --forecast-only]
-cas --store <PATH> verify
-cas --store <PATH> check-consistency [--resolution <DUR>]
-cas --store <PATH> resolutions
-cas --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
-cas template <single|non_sequential|deterministic|probabilistic|scenarios>
+infrastore --store <PATH> add --descriptor <FILE.json> [--csv <FILE.csv>] [--compression <none|deflate[:LEVEL]>] [--no-shuffle]
+infrastore --store <PATH> list    [SELECTOR...]
+infrastore --store <PATH> get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
+infrastore --store <PATH> info    [SELECTOR...]
+infrastore --store <PATH> -f csv|json export [SELECTOR...] [--dir <DIR>]
+infrastore --store <PATH> remove  [SELECTOR...] [--all] [--force] [--dry-run]
+infrastore --store <PATH> rename  [SELECTOR...] --new-name <NAME> [--dry-run]
+infrastore --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-type <T> [--new-name <NAME>] [--dry-run]
+infrastore --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
+infrastore --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
+infrastore --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
+infrastore --store <PATH> persist --dest <PATH.nc>
+infrastore --store <PATH> compact [--force]
+infrastore --store <PATH> stats
+infrastore completions <SHELL>
+infrastore --store <PATH> summary [--static-only | --forecast-only]
+infrastore --store <PATH> verify
+infrastore --store <PATH> check-consistency [--resolution <DUR>]
+infrastore --store <PATH> resolutions
+infrastore --store <PATH> params [--resolution <DUR>] [--interval <DUR>]
+infrastore template <single|non_sequential|deterministic|probabilistic|scenarios>
 ```
 
 `--csv` overrides the `csv` path inside the descriptor, and only works for a descriptor that
@@ -120,10 +121,10 @@ value:
 | `--resolution <DUR>`   | Resolution, e.g. `1h`, `15min`, or ISO-8601 like `PT1H`, `P1M`.            |
 | `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
 
-If a selector matches more than one series, `cas` errors and lists the candidates so the query can
-be narrowed. The owner identity is the pair `(owner_id, owner_category)`, so a component and a
-supplemental attribute may share a numeric `owner_id`; add `--owner-category` to disambiguate when
-both exist.
+If a selector matches more than one series, `infrastore` errors and lists the candidates so the
+query can be narrowed. The owner identity is the pair `(owner_id, owner_category)`, so a component
+and a supplemental attribute may share a numeric `owner_id`; add `--owner-category` to disambiguate
+when both exist.
 
 ### Type Spellings
 
@@ -142,7 +143,7 @@ ignores underscores, so each type has a short form and a full form:
 `deterministic_single` is not writable from a descriptor (use `transform`), but it _is_ selectable,
 and it is often required: `transform` derives a series that shares `(owner_id, name, resolution)`
 with its source `SingleTimeSeries`, so after a transform a query like
-`cas get --owner-id 42 --name load` matches two series and errors. `--type single` or
+`infrastore get --owner-id 42 --name load` matches two series and errors. `--type single` or
 `--type deterministic_single` is the only way to pick one.
 
 Note that inputs and outputs use different spellings. You _pass_ the short, lowercase forms
@@ -196,7 +197,7 @@ silently dropping a setting.
 
 ## CSV Layout
 
-`cas` computes the full array shape from the descriptor and reads the CSV's value cells in
+`infrastore` computes the full array shape from the descriptor and reads the CSV's value cells in
 **row-major** order to fill it. The total cell count must equal the product of the shape.
 
 | Type             | Shape                             | CSV                                                                    |
