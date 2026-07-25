@@ -72,35 +72,36 @@ Steps to publish:
 1. Build wheels with `maturin` under `cibuildwheel` (abi3, manylinux + macOS + windows), publish to
    PyPI on tagged releases.
 
-### Pending: move wheels onto the vendored build
+### Open: verify HDF5 duplication in the wheels
 
-The wheel build still provisions system NetCDF/HDF5 and bundles them via `auditwheel`/`delvewheel`,
-which predates the `vendored` feature. Switching over removes the provisioning entirely, but is
-gated on one compatibility check.
+The wheels are already vendored. Making `vendored` the default feature switched them over
+immediately — the `before-all` system-library installs were simply being ignored from that moment,
+which is why they have since been deleted from `pyproject.toml` and `python-wheels.yml`. So this is
+a verification still owed, not a gate that was cleared.
 
-1. **Verify HDF5 duplication is safe.** A statically vendored HDF5 inside the extension module,
-   alongside the copy that `netCDF4`/`h5py` bring, means two libhdf5 instances in one interpreter —
-   the same problem the JLL avoids by linking dynamically. Users of the primary downstream consumer
-   (`infrasys`) very likely have `netCDF4` installed. The check, on manylinux:
+**The risk.** A statically vendored HDF5 inside the extension module, alongside the copy that
+`netCDF4`/`h5py` bring, means two libhdf5 instances in one interpreter — the same problem the JLL
+avoids by linking dynamically. Users of the primary downstream consumer (`infrasys`) very likely
+have `netCDF4` installed.
 
-   ```sh
-   python -c "import castore, netCDF4, h5py; print('ok')"
-   ```
+```sh
+pip install castore netCDF4 h5py
+python -c "import castore, netCDF4, h5py; print('ok')"
+```
 
-   On Linux this can fail through symbol interposition rather than a clean error, so exercise an
-   actual read/write from both libraries in the same process, not just the imports.
-2. **If it passes**, delete the `before-all` provisioning from `[tool.cibuildwheel.*]` in
-   `crates/castore-py/pyproject.toml` (brew on macOS, yum/dnf on Linux) and the conda/vcpkg
-   HDF5/NetCDF step in `.github/workflows/python-wheels.yml`. Keep `rustup`; add `cmake`.
-3. **Un-skip musllinux.** The current `skip = "*-musllinux* *-win32"` justifies the musl exclusion
-   by the RPM-based `before-all` being unable to install HDF5 there — a reason that disappears once
-   the sources are vendored. `win32` stays skipped (no 32-bit HDF5 from the current provider).
-4. **If it fails**, keep Linux wheels on the system-library path with `--no-default-features` and
-   apply vendoring only where it is clean, or hide the HDF5 symbols with a version script.
+On Linux this can fail through symbol interposition rather than a clean error, so exercise an actual
+read/write from both libraries in the same process, not just the imports. If it does fail, the
+fallback is to build Linux wheels with `--no-default-features` against system libraries and keep
+vendoring only where it is clean, or to hide the HDF5 symbols with a version script.
 
-Unrelated to the wheels, `.github/workflows/test.yml` still installs system HDF5/NetCDF on all three
-platforms. Those are now redundant (the default build vendors), and removing them trades a package
-install for a few minutes of cold compile per cache miss.
+**musllinux** stays in `skip` for now. Vendoring removed the original blocker (the RPM-based
+`before-all` could not install HDF5 on musl), but the target has never been built, so un-skipping it
+is a separate change that needs its own CI run.
+
+> **Never set `HDF5_DIR` or `NETCDF_DIR` in CI.** The vendored netcdf-c build forwards them to cmake
+> as `HDF5_ROOT` while still requesting static libraries; against a shared-only install such as
+> conda-forge's this fails with `Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)`.
+> This broke the Windows job once already. Use `--no-default-features` to select system libraries.
 
 ## Versioning
 
