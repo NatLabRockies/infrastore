@@ -20,7 +20,7 @@ version = v"0.1.0"
 # for the submission PR).
 sources = [
     GitSource(
-        "https://github.com/NatLabRockies/castore.git",
+        "https://github.com/NatLabRockies/time-series-store.git",
         "fde88b96d1ad53c64f03dba761cc903f75d78d42",
     ),
 ]

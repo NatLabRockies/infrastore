@@ -60,11 +60,11 @@ The documentation follows the [Diataxis](https://diataxis.fr/) framework:
 ## Publishing
 
 The site is published to GitHub Pages from the `gh-pages` branch at
-<https://natlabrockies.github.io/castore/>.
+`https://natlabrockies.github.io/time-series-store/`.
 
 `.github/workflows/docs.yml` runs on every push to `main` that touches `docs/`, builds the book with
-`site-url` rewritten to `/castore/latest/`, verifies internal and external links, and commits the
-result to `gh-pages` under `latest/`. The branch root holds `index.html` (a copy of
+`site-url` rewritten to `/time-series-store/latest/`, verifies internal and external links, and
+commits the result to `gh-pages` under `latest/`. The branch root holds `index.html` (a copy of
 `redirect.html`), which reads `versions.json` and forwards visitors to the newest release, or to
 `latest/` when no release has been published.
 

@@ -12,9 +12,9 @@ create-missing = true
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/NatLabRockies/castore"
-edit-url-template = "https://github.com/NatLabRockies/castore/edit/main/docs/{path}"
-site-url = "/castore/"
+git-repository-url = "https://github.com/NatLabRockies/time-series-store"
+edit-url-template = "https://github.com/NatLabRockies/time-series-store/edit/main/docs/{path}"
+site-url = "/time-series-store/"
 cname = ""
 additional-css = ["custom.css", "pagetoc.css", "version-selector.css"]
 additional-js = ["mermaid.min.js", "mermaid-init.js", "pagetoc.js", "version-selector.js"]

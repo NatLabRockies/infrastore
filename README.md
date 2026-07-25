@@ -4,7 +4,8 @@ Rust library for managing time-series data in power-systems / energy simulations
 split between numerical arrays in NetCDF4 and metadata associations in SQLite. Bindings: native
 Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI), and the `cas` CLI.
 
-Spec: [NatLabRockies/castore#1](https://github.com/NatLabRockies/castore/issues/1).
+Spec:
+[NatLabRockies/time-series-store#1](https://github.com/NatLabRockies/time-series-store/issues/1).
 
 Project status: under development
 

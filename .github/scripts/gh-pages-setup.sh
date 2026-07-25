@@ -4,7 +4,7 @@
 #
 # Required environment variables:
 #   GITHUB_TOKEN  — access token for pushing to the repository
-#   GITHUB_REPOSITORY — owner/repo (e.g., NatLabRockies/castore)
+#   GITHUB_REPOSITORY — owner/repo (e.g., NatLabRockies/time-series-store)
 set -e
 
 REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"

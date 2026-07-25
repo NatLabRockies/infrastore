@@ -1,13 +1,13 @@
 (function () {
   "use strict";
 
-  // Determine the base path (e.g., "/castore/")
-  var basePath = "/castore/";
+  // Determine the base path (e.g., "/time-series-store/")
+  var basePath = "/time-series-store/";
 
   // Parse current version from URL path
   function getCurrentVersion() {
     var path = window.location.pathname;
-    // Match /castore/<version>/ where version is "latest" or a tag like v1.2.3, v1.2.3-rc1
+    // Match /time-series-store/<version>/ where version is "latest" or a tag like v1.2.3, v1.2.3-rc1
     var match = path.match(/^\/torc\/(v[^/]+|latest)\//);
     return match ? match[1] : "latest";
   }

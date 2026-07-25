@@ -43,7 +43,7 @@ rustup update stable
 ## Build the Workspace
 
 ```sh
-git clone https://github.com/NatLabRockies/castore
+git clone https://github.com/NatLabRockies/time-series-store
 cd castore
 cargo build --workspace --all-features
 cargo test --workspace --all-features
