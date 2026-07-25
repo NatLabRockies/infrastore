@@ -1,0 +1,326 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Design Choices - castore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">castore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/explanation/design-choices.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="design-choices"><a class="header" href="#design-choices">Design Choices</a></h1>
+<p>castore is a foundation library. End users rarely call it directly — they reach it through a parent
+package such as <a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a>
+(IS.jl) or <a href="https://github.com/natlabrockies/infrasys">infrasys</a>, which embed castore to persist the
+time-series data behind their component models. This page records the decisions that shape the API
+and the on-disk format, and the reasoning behind them, so that developers of those parent packages
+understand what castore optimizes for — and, just as importantly, what it deliberately does not.</p>
+<h2 id="data-orientation-optimize-for-reading-every-component-at-one-timestamp"><a class="header" href="#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Data Orientation: Optimize for Reading Every Component at One Timestamp</a></h2>
+<p><strong>The decision.</strong> In the NetCDF file, <code>SingleTimeSeries</code> arrays that share a
+<code>(dtype, element_shape, length, resolution)</code> are packed as columns of one dataset: <strong>columns are
+series, rows are timesteps</strong>, and the HDF5 chunking is <code>(1, cols, *element_shape)</code> so that a single
+chunk holds one timestamp across every column. We optimize for reading <strong>all components' values at a
+given timestamp</strong>, and accept that reading <strong>one component's entire array</strong> is comparatively slow.</p>
+<p><strong>Why.</strong> The workload that matters is simulation. A production-cost or power-flow model steps
+through time and, at each step, needs the value of every generator, load, and branch for that one
+timestamp — a slice <em>across</em> series, not <em>down</em> one. With this layout that slice is a single chunk
+read; the <a href="./storage-model.html#the-array-side-netcdf4"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar
+surface is built directly on it. The inverse access — pulling one component's full history — has to
+touch every chunk band and is slow by design. That trade is deliberate: the simulation read path is
+the hot one, and it is the one parent packages hand to their users.</p>
+<p><strong>What this means for parent-package developers.</strong></p>
+<ul>
+<li>Lay out bulk writes so that series sharing a shape land in the same dataset — that is what fills
+whole chunks in one pass and keeps the timestamp-slice read fast. See
+<a href="./storage-model.html#keeping-the-two-files-consistent"><code>add_time_series_bulk</code> and <code>bulk_add</code></a>.</li>
+<li>Do not build a user-facing feature whose common path is "read this one component's entire array"
+and expect it to be cheap. It works, but it is the slow direction. If a downstream workload
+genuinely needs that orientation, that is a signal to raise with castore, not to work around with
+many single-series reads.</li>
+<li>The orientation is a property of the <em>packed</em> NetCDF layout only. <code>NonSequentialTimeSeries</code> and
+the dense forecast types are stored as standalone per-array variables and do not participate in
+it.</li>
+</ul>
+<p><strong>Values are immutable.</strong> There is no API — in any binding, by design — to edit a single value,
+slice, row, or column of an array already in the store. A stored array is added or deleted as a
+whole; changing data means writing a <em>new</em> array (content-addressed, so unchanged neighbors are not
+rewritten) and deleting the old one. This falls out of the two priorities above. A chunk holds one
+timestamp across many series, so editing one value would force a read-modify-write of a whole chunk
+band — the slow direction turned into the write path. And because arrays are content-addressed, an
+array's identity <em>is</em> its bytes: mutating it in place would invalidate the hash that every
+association row and every dedup reference depends on. Parent packages that expose "update this
+value" to their users must implement it as replace-the-array, not edit-in-place.</p>
+<h2 id="forecast-storage-chunked-so-one-window-is-cheap"><a class="header" href="#forecast-storage-chunked-so-one-window-is-cheap">Forecast Storage: Chunked So One Window Is Cheap</a></h2>
+<p>Dense forecasts (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>) do <strong>not</strong> use the packed,
+cross-component layout above — each forecast is stored as its own standalone array, <code>[H, count, *E]</code>
+for a <code>Deterministic</code>, where <code>H</code> is the horizon length and <code>count</code> the number of forecast windows.
+But reading one window at a time is a first-class access pattern (a simulation stepping the forecast
+timeline, one issue time per step), so the array is <strong>chunked in bounded blocks along the <code>count</code>
+axis</strong> rather than as one whole-array chunk. A window read then decompresses one block instead of
+the entire year of windows.</p>
+<p>Two consequences a parent-package developer should know:</p>
+<ul>
+<li><strong>A window sweep is cheap; naive per-window reads are not, unless you go through the reader.</strong>
+Because a chunk is the decompression unit, reading a single window still pulls its whole block.
+The <a href="./storage-model.html"><code>ForecastReader</code></a> sizes its in-memory cache to that same block width, so
+stepping the window timeline decompresses each block exactly once. Reach for <code>ForecastReader</code> (or
+read the whole array once and index it) rather than issuing an independent whole-array read per
+window — the latter re-decompresses overlapping data.</li>
+<li><strong>Cross-component savings come from dedup, not packing.</strong> Where static series share storage by
+packing many components into one dataset, forecasts share it by
+<a href="./content-addressing.html">content addressing</a>: identical forecast arrays are stored once, and
+<code>ForecastReader</code> reads each unique array a single time and fans it out to every component that
+references it.</li>
+</ul>
+<p>The block width is a write-time storage choice only — it reads transparently regardless of the width
+a store was written with, so it does not change the on-disk format version.</p>
+<h2 id="split-arrays-from-metadata"><a class="header" href="#split-arrays-from-metadata">Split Arrays From Metadata</a></h2>
+<p>Numerical arrays live in NetCDF4 and metadata associations live in a companion SQLite catalog,
+because the two have opposite size, access, and mutation profiles and each format is strongest at
+one of them. The full rationale, the consistency ordering that keeps the two files in step, and the
+compaction behavior are covered in the <a href="./storage-model.html">Storage Model</a>.</p>
+<h2 id="content-address-and-deduplicate-arrays"><a class="header" href="#content-address-and-deduplicate-arrays">Content-Address and Deduplicate Arrays</a></h2>
+<p>Arrays are keyed by the SHA-256 of their contents, so two associations with identical data share one
+stored array and writes are idempotent on hash. This is what lets many components reference the same
+profile without duplicating storage, and it is why deletes are reference-counted. See
+<a href="./content-addressing.html">Content Addressing</a>.</p>
+<h2 id="keep-the-multi-language-surface-consistent"><a class="header" href="#keep-the-multi-language-surface-consistent">Keep the Multi-Language Surface Consistent</a></h2>
+<p><code>castore-core</code> is the single source of truth; the Rust, Python (PyO3), Julia (C ABI), CLI, and gRPC
+interfaces are thin wrappers over the same <code>Store</code>. A capability is not considered done until it
+behaves the same across the bindings that support it, and unsupported operations return an explicit
+error rather than silently changing semantics. This keeps a parent package free to move between
+bindings — for example, Julia via the C ABI and Python via the wheel — without the data model
+shifting underneath it. See <a href="./bindings.html">Language Bindings</a>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanation/architecture.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../explanation/data-model.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanation/architecture.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../explanation/data-model.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

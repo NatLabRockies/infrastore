@@ -1,0 +1,437 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>CLI - castore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">castore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/reference/cli.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="cli-reference"><a class="header" href="#cli-reference">CLI Reference</a></h1>
+<p><code>castore-cli</code> builds the <code>cas</code> binary, which reads and writes a store directly on disk (NetCDF +
+SQLite). For a task-oriented walkthrough, see <a href="../how-to/use-cli.html">Use the <code>cas</code> CLI</a>.</p>
+<p>The CLI covers time series only. The
+<a href="../explanation/data-model.html#associations-between-entities">association catalogs</a> in the same
+catalog file have no <code>cas</code> commands; reach them through the Rust, Python, or Julia API.</p>
+<h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
+<pre><code class="language-text">cas [--store &lt;PATH.nc&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
+</code></pre>
+<h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the NetCDF store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>CASTORE_STORE</code> environment variable.</td></tr>
+<tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, or <code>csv</code>.</td></tr>
+<tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
+</tbody></table>
+</div>
+<p><code>--store</code> (or <code>CASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
+<p><code>-f</code>/<code>--format</code> affects the read/inspection commands (<code>list</code>, <code>get</code>, <code>info</code>, <code>export</code>, <code>stats</code>,
+<code>summary</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>). It is accepted
+anywhere because it is global, but the write commands (<code>add</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>,
+<code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>) ignore it and print plain text; <code>template</code> always
+prints a JSON descriptor. <code>export</code> requires <code>-f csv</code> or <code>-f json</code> (there is no table export).</p>
+<h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV.</td></tr>
+<tr><td><code>list</code></td><td>List stored series matching the selector filters.</td></tr>
+<tr><td><code>get</code></td><td>Read and display a single series' values.</td></tr>
+<tr><td><code>info</code></td><td>Show metadata plus numeric stats for a single series.</td></tr>
+<tr><td><code>export</code></td><td>Write series values to CSV/JSON files (<code>--dir</code>), or stdout for one match.</td></tr>
+<tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
+<tr><td><code>rename</code></td><td>Rename the single series a selector resolves to (<code>--new-name</code>).</td></tr>
+<tr><td><code>copy</code></td><td>Copy the single series a selector resolves to onto another owner.</td></tr>
+<tr><td><code>replace-owner</code></td><td>Reassign every series from one owner to another.</td></tr>
+<tr><td><code>clear</code></td><td>Remove all series, or all for one owner (prompts unless <code>--force</code>).</td></tr>
+<tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
+<tr><td><code>persist</code></td><td>Write the store to a new NetCDF + SQLite artifact (<code>--dest</code>).</td></tr>
+<tr><td><code>compact</code></td><td>Reclaim reusable space (prompts unless <code>--force</code>); print the report.</td></tr>
+<tr><td><code>completions</code></td><td>Generate shell completions to stdout (bash/zsh/fish/…).</td></tr>
+<tr><td><code>stats</code></td><td>Overall + detailed + per-type counts and distinct-array count.</td></tr>
+<tr><td><code>summary</code></td><td>Grouped static and/or forecast summaries (<code>--static-only</code>/<code>--forecast-only</code>).</td></tr>
+<tr><td><code>verify</code></td><td>Verify store integrity; nonzero exit if errors are present.</td></tr>
+<tr><td><code>check-consistency</code></td><td>Verify the per-resolution static grid (<code>--resolution</code>).</td></tr>
+<tr><td><code>resolutions</code></td><td>List distinct resolutions and forecast intervals.</td></tr>
+<tr><td><code>params</code></td><td>Show the store's forecast parameters (<code>--resolution</code>/<code>--interval</code>).</td></tr>
+<tr><td><code>template</code></td><td>Print an example descriptor for a given type to stdout.</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-text">cas --store &lt;PATH&gt; add --descriptor &lt;FILE.json&gt; [--csv &lt;FILE.csv&gt;] [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle]
+cas --store &lt;PATH&gt; list    [SELECTOR...]
+cas --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
+cas --store &lt;PATH&gt; info    [SELECTOR...]
+cas --store &lt;PATH&gt; -f csv|json export [SELECTOR...] [--dir &lt;DIR&gt;]
+cas --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
+cas --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
+cas --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; --dst-owner-type &lt;T&gt; [--new-name &lt;NAME&gt;] [--dry-run]
+cas --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
+cas --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
+cas --store &lt;PATH&gt; transform --horizon &lt;DUR&gt; --interval &lt;DUR&gt; [--owner-category &lt;C&gt;] [--resolution &lt;DUR&gt;]
+cas --store &lt;PATH&gt; persist --dest &lt;PATH.nc&gt;
+cas --store &lt;PATH&gt; compact [--force]
+cas --store &lt;PATH&gt; stats
+cas completions &lt;SHELL&gt;
+cas --store &lt;PATH&gt; summary [--static-only | --forecast-only]
+cas --store &lt;PATH&gt; verify
+cas --store &lt;PATH&gt; check-consistency [--resolution &lt;DUR&gt;]
+cas --store &lt;PATH&gt; resolutions
+cas --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
+cas template &lt;single|non_sequential|deterministic|probabilistic|scenarios&gt;
+</code></pre>
+<p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works for a descriptor that
+describes a single series. Passing it alongside a descriptor array holding more than one object
+fails with <code>--csv cannot be used with an array descriptor</code>.</p>
+<p><code>transform</code> takes no selector: it rewrites <strong>every</strong> <code>SingleTimeSeries</code> in the store, deriving a
+<code>DeterministicSingleTimeSeries</code> from each. <code>--owner-category</code> and <code>--resolution</code> optionally scope it
+to one category and/or resolution. <code>--horizon</code> must not exceed the shortest matched series
+(<code>horizon / resolution</code> steps must fit within its <code>length</code>), or the command fails.</p>
+<p><code>remove --all</code> uses the selector as a filter that may match several series, removing them all in one
+transaction; without <code>--all</code>, the selector must resolve to exactly one series. <code>stats</code>, <code>summary</code>,
+<code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, and <code>params</code> are read-only inspection commands and
+honor <code>-f/--format</code>; <code>verify</code> exits nonzero when the integrity report lists any errors.</p>
+<p><code>export</code> is the read-direction inverse of the batch <code>add</code>: the selector may match many series, and
+each is written to <code>&lt;owner_id&gt;_&lt;owner_type&gt;_&lt;name&gt;_&lt;type&gt;.csv|json</code> inside <code>--dir</code>. Without <code>--dir</code>
+the selector must match exactly one series, which goes to stdout. CSV output carries real timestamps
+(see the CSV Layout section); JSON output is one structured object per series.</p>
+<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, and <code>copy</code> prints what would change and
+exits without opening the store for writing. <code>add --compression</code> sets the NetCDF compression policy
+for a store this command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to
+disable byte-shuffle); passing it for an existing store is an error, since the persisted policy
+governs.</p>
+<h3 id="selectors"><a class="header" href="#selectors">Selectors</a></h3>
+<p><code>get</code>, <code>info</code>, and <code>remove</code> identify exactly one series with these flags; <code>list</code> accepts the same
+flags as filters. Every flag is optional. Only <code>--feature</code> may be repeated; the rest take a single
+value:</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>--owner-id &lt;I&gt;</code></td><td>Owner identifier (<code>i64</code> integer).</td></tr>
+<tr><td><code>--owner-category &lt;C&gt;</code></td><td>Restrict to <code>component</code> or <code>supplemental_attribute</code>; omit to match either.</td></tr>
+<tr><td><code>--name &lt;N&gt;</code></td><td>Series name (exact match).</td></tr>
+<tr><td><code>--name-glob &lt;P&gt;</code></td><td>Name pattern (SQLite <code>GLOB</code>: case-sensitive <code>*</code>/<code>?</code>). ANDed with <code>--name</code>.</td></tr>
+<tr><td><code>--type &lt;T&gt;</code></td><td>See the type spellings below.</td></tr>
+<tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution, e.g. <code>1h</code>, <code>15min</code>, or ISO-8601 like <code>PT1H</code>, <code>P1M</code>.</td></tr>
+<tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
+</tbody></table>
+</div>
+<p>If a selector matches more than one series, <code>cas</code> errors and lists the candidates so the query can
+be narrowed. The owner identity is the pair <code>(owner_id, owner_category)</code>, so a component and a
+supplemental attribute may share a numeric <code>owner_id</code>; add <code>--owner-category</code> to disambiguate when
+both exist.</p>
+<h3 id="type-spellings"><a class="header" href="#type-spellings">Type Spellings</a></h3>
+<p><code>--type</code> (and the descriptor's <code>type</code> key) accepts six values. Matching is case-insensitive and
+ignores underscores, so each type has a short form and a full form:</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Accepted spellings</th></tr></thead><tbody>
+<tr><td><code>SingleTimeSeries</code></td><td><code>single</code>, <code>SingleTimeSeries</code></td></tr>
+<tr><td><code>NonSequentialTimeSeries</code></td><td><code>non_sequential</code>, <code>NonSequentialTimeSeries</code></td></tr>
+<tr><td><code>Deterministic</code></td><td><code>deterministic</code></td></tr>
+<tr><td><code>DeterministicSingleTimeSeries</code></td><td><code>deterministic_single</code>, <code>DeterministicSingleTimeSeries</code></td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>probabilistic</code></td></tr>
+<tr><td><code>Scenarios</code></td><td><code>scenarios</code></td></tr>
+</tbody></table>
+</div>
+<p><code>deterministic_single</code> is not writable from a descriptor (use <code>transform</code>), but it <em>is</em> selectable,
+and it is often required: <code>transform</code> derives a series that shares <code>(owner_id, name, resolution)</code>
+with its source <code>SingleTimeSeries</code>, so after a transform a query like
+<code>cas get --owner-id 42 --name load</code> matches two series and errors. <code>--type single</code> or
+<code>--type deterministic_single</code> is the only way to pick one.</p>
+<p>Note that inputs and outputs use different spellings. You <em>pass</em> the short, lowercase forms
+(<code>--type single</code>, <code>--owner-category component</code>), but <code>list</code>, <code>get</code>, and <code>info</code> <em>render</em> the
+canonical CamelCase names (<code>SingleTimeSeries</code>, <code>Component</code>). Piping <code>-f json list</code> output straight
+back into a filter therefore needs no translation — the CamelCase form is accepted as input too —
+but string-comparing rendered output against the short form will not match.</p>
+<h2 id="durations-and-timestamps"><a class="header" href="#durations-and-timestamps">Durations and Timestamps</a></h2>
+<ul>
+<li><strong>Durations</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>): an integer plus a unit — <code>ms</code>, <code>s</code>, <code>min</code>,
+<code>h</code>, <code>d</code> (e.g. <code>500ms</code>, <code>15min</code>, <code>24h</code>, <code>7d</code>). A bare integer is milliseconds. These three also
+accept ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>); a calendar grid
+(monthly/quarterly/annual) can only be expressed this way, since the human-unit form is always a
+fixed span.</li>
+<li><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column): RFC3339 (e.g.
+<code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds.</li>
+<li><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open), where each
+side is parsed as a timestamp. For example
+<code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
+rejected with <code>invalid --time-range '1h' (expected START..END)</code>.</li>
+</ul>
+<h2 id="descriptor-schema"><a class="header" href="#descriptor-schema">Descriptor Schema</a></h2>
+<p>A descriptor JSON file is either a single object (one series) or an array of objects (batch add).
+The CSV holds only numbers (plus a leading timestamp column for <code>non_sequential</code>).</p>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Required for</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>owner_id</code></td><td>all</td><td>Integer component identifier (<code>i64</code>).</td></tr>
+<tr><td><code>owner_type</code></td><td>all</td><td></td></tr>
+<tr><td><code>owner_category</code></td><td>optional</td><td><code>component</code> (default) or <code>supplemental_attribute</code>.</td></tr>
+<tr><td><code>name</code></td><td>all</td><td></td></tr>
+<tr><td><code>type</code></td><td>all</td><td>One of the five writable types.</td></tr>
+<tr><td><code>dtype</code></td><td>all</td><td><code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>, <code>bool</code>.</td></tr>
+<tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
+<tr><td><code>has_header</code></td><td>optional</td><td>Skip the first CSV row. Default <code>true</code>.</td></tr>
+<tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>
+<tr><td><code>units</code></td><td>optional</td><td>Free-form label.</td></tr>
+<tr><td><code>ext</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
+<tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values.</td></tr>
+<tr><td><code>initial_timestamp</code></td><td>all except <code>non_sequential</code></td><td></td></tr>
+<tr><td><code>resolution</code></td><td>all except <code>non_sequential</code></td><td></td></tr>
+<tr><td><code>horizon</code>, <code>interval</code>, <code>count</code></td><td>forecasts</td><td></td></tr>
+<tr><td><code>percentiles</code></td><td><code>probabilistic</code></td><td>Strictly increasing list of floats.</td></tr>
+<tr><td><code>scenario_count</code></td><td><code>scenarios</code> (optional)</td><td>Inferred from the data length if omitted.</td></tr>
+</tbody></table>
+</div>
+<p>Unknown keys are rejected. Any key not in the table above — including a typo like <code>resolutionn</code> — is
+a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than
+silently dropping a setting.</p>
+<h2 id="csv-layout"><a class="header" href="#csv-layout">CSV Layout</a></h2>
+<p><code>cas</code> computes the full array shape from the descriptor and reads the CSV's value cells in
+<strong>row-major</strong> order to fill it. The total cell count must equal the product of the shape.</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th><th>CSV</th></tr></thead><tbody>
+<tr><td><code>single</code></td><td><code>[length, *element_shape]</code></td><td>One value column (or <code>prod(element_shape)</code> columns), one row per step.</td></tr>
+<tr><td><code>non_sequential</code></td><td><code>[length, *element_shape]</code></td><td>First column is the timestamp, then value columns.</td></tr>
+<tr><td><code>deterministic</code></td><td><code>[H, count, *E]</code></td><td>Flat row-major values; <code>H = horizon / resolution</code>.</td></tr>
+<tr><td><code>probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
+<tr><td><code>scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
+</tbody></table>
+</div>
+<p><code>bool</code> cells accept <code>true</code>/<code>false</code>/<code>1</code>/<code>0</code>. For <code>single</code> and <code>non_sequential</code> series, <code>get -f csv</code>
+re-emits the same layout <code>add</code> consumes, so values round-trip. That output always starts with a
+header row (<code>value</code>, or <code>timestamp,value...</code> for <code>non_sequential</code>), which is what the
+<code>has_header: true</code> default — and every <code>template</code> — expects.</p>
+<p>For forecasts, <code>get -f csv</code> and <code>export -f csv</code> emit <strong>timestamped</strong> rows instead of the flat ingest
+layout: one row per <code>(window, step)</code> with <code>issue_time</code> and <code>target_time</code> columns, and one value
+column per percentile (<code>value[p10]</code>), scenario (<code>value[s0]</code>), or element entry. This output is for
+analysis, not re-ingestion — re-adding a forecast needs the flat row-major CSV described above.</p>
+<h2 id="exit-status"><a class="header" href="#exit-status">Exit Status</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>0</code></td><td>Success.</td></tr>
+<tr><td><code>1</code></td><td>Runtime error. The message is printed to stderr, prefixed with <code>Error:</code>.</td></tr>
+<tr><td><code>2</code></td><td>Usage error from argument parsing (unknown flag, missing <code>--descriptor</code>, …).</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/server-config.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../contributing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/server-config.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../contributing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
