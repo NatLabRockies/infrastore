@@ -16,9 +16,27 @@
 #   mkdir -p Yggdrasil/I/InfraStore
 #   cp build_tarballs.jl Yggdrasil/I/InfraStore/
 #   cd Yggdrasil/I/InfraStore
-#   julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
+#   julia build_tarballs.jl --verbose --debug \
+#       x86_64-linux-gnu-libgfortran5-cxx11-mpi+mpich
 #
 # Yggdrasil groups recipes by first letter, hence `I/InfraStore/`.
+#
+# PASS THE FULL TAGGED TRIPLET, not a bare `x86_64-linux-gnu`. A platform
+# argument does not filter the `platforms` list below -- `build_tarballs`
+# *replaces* it outright:
+#
+#     # If the user passed in a platform (or a few, comma-separated) on the
+#     # command-line, use that instead of our default platforms
+#     if length(ARGS) > 0
+#         platforms = BinaryBuilderBase.parse_platform.(split(ARGS[1], ","))
+#     end
+#
+# A bare triplet therefore builds for an *untagged* platform that this recipe
+# never lists, no HDF5_jll artifact matches it, nothing is installed into
+# ${prefix}, and the build fails deep inside cargo with hdf5-metno-sys
+# reporting an "Invalid HDF5 headers directory" -- with the recipe's own
+# platform list never consulted. Omit the argument entirely to build the full
+# list. `julia build_tarballs.jl --help` prints the valid triplets.
 # ---------------------------------------------------------------------------
 #
 # Why the MPI machinery below, for a library that never calls MPI:
