@@ -123,14 +123,33 @@ Two registrations, in order. The JLL must exist before `InfraStore.jl` can depen
 
 1. Update the `GitSource` SHA in `yggdrasil/build_tarballs.jl` to the release commit
    (`git rev-parse v0.1.0^{commit}`) and `version` to match. Yggdrasil requires a full commit SHA; a
-   tag name is not accepted.
-2. Test locally before submitting:
+   tag name is not accepted. Only changes under `crates/`, `Cargo.toml`, or `Cargo.lock` need a new
+   SHA — edits to the recipe itself do not, since Yggdrasil builds from its own copy of it.
+2. Test from inside a Yggdrasil checkout — **not** from this repository. The recipe's
+   `YGGDRASIL_DIR` include of `platforms/mpi.jl` resolves relative to the Yggdrasil tree:
    ```sh
-   julia yggdrasil/build_tarballs.jl --verbose --debug x86_64-linux-gnu
+   git clone https://github.com/JuliaPackaging/Yggdrasil
+   mkdir -p Yggdrasil/I/InfraStore
+   cp yggdrasil/build_tarballs.jl Yggdrasil/I/InfraStore/
+   cd Yggdrasil/I/InfraStore
+   julia build_tarballs.jl --verbose --debug \
+       x86_64-linux-gnu-libgfortran5-cxx11-mpi+mpich
    ```
+   **Pass the full tagged triplet.** A platform argument does not filter the recipe's `platforms`
+   list, it replaces it, so a bare `x86_64-linux-gnu` builds for an untagged platform that no
+   `HDF5_jll` artifact matches. Nothing is then installed into `${prefix}` and the build dies far
+   away, inside cargo, with `hdf5-metno-sys` reporting an `Invalid HDF5 headers directory` — while
+   the recipe's own platform list is never consulted. Omit the argument to build all 17.
 3. Copy the recipe into a [Yggdrasil](https://github.com/JuliaPackaging/Yggdrasil) fork under
-   `I/InfraStore/` and open a PR. Merging is done by Yggdrasil maintainers, so allow for review
-   time.
+   `I/InfraStore/` and open a PR. Their CI builds every platform in the list and all must pass.
+   Merging is done by Yggdrasil maintainers, so allow for review time.
+
+`NetCDF_jll` and `HDF5_jll` are both MPI-augmented and publish only tagged artifacts, so the recipe
+mirrors that: it runs its platforms through `MPI.augment_platforms` and pins
+`libgfortran_version`/`cxxstring_abi` to the single combination `HDF5_jll` ships. Those tags are not
+a claim about this crate's ABI — it is a pure C ABI cdylib — they are the coordinates BinaryBuilder
+selects a dependency's artifact by. Re-check them against `HDF5_jll`'s release assets whenever its
+compat bound moves.
 
 The recipe patches two things in the source tree, both deliberate:
 
