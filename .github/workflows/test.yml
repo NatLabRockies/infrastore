@@ -48,6 +48,41 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install llvm-tools
+        if: matrix.os == 'ubuntu-latest'
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Coverage is collected on Linux only; one platform's numbers are enough.
+      #
+      # Every step after this one inherits the instrumentation, so a single pass
+      # covers all three suites: the Rust tests, the wheel pytest imports, and
+      # the cdylib Julia dlopens. Doctests still execute -- rustdoc does not go
+      # through RUSTC_WRAPPER, so they run uninstrumented rather than being
+      # skipped.
+      #
+      # `clean --workspace` is mandatory, and must run after the cache restore.
+      # Cargo does not treat RUSTC_WRAPPER as a fingerprint input, so a restored
+      # uninstrumented target dir would be reused and every .profraw would
+      # silently go missing -- the failure surfaces only as an empty report.
+      - name: Enable coverage instrumentation
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cov-env.sh"
+          source "$RUNNER_TEMP/cov-env.sh"
+          # Re-export through $GITHUB_ENV so later steps inherit it. The heredoc
+          # form is required because one value is 0x1f-separated, which the
+          # plain KEY=value form would mangle.
+          grep '^export ' "$RUNNER_TEMP/cov-env.sh" | sed 's/^export //; s/=.*//' |
+            while read -r key; do
+              printf '%s<<CASTORE_COV_ENV\n%s\nCASTORE_COV_ENV\n' "$key" "${!key}"
+            done >> "$GITHUB_ENV"
+
       - name: Build workspace
         run: cargo build --workspace --all-features
 
@@ -55,3 +90,82 @@ jobs:
         run: cargo test --workspace --all-features
         env:
           RUST_BACKTRACE: 1
+
+      # `cargo test` does not reach the PyO3 or C ABI surfaces, so the Python
+      # and Julia suites run here too. Both reuse the build above rather than
+      # provisioning NetCDF/HDF5 of their own.
+      #
+      # The extension is installed as a built wheel: `maturin develop` (what
+      # CLAUDE.md documents for local work) requires an active virtualenv,
+      # which setup-python does not provide. target/wheels is cleared first so
+      # a cached wheel from an earlier run cannot be installed instead.
+      - name: Install Python test dependencies
+        shell: bash
+        run: python -m pip install --upgrade maturin pytest numpy
+
+      - name: Build and install the Python extension
+        shell: bash
+        run: |
+          rm -rf target/wheels
+          maturin build --manifest-path crates/castore-py/Cargo.toml --out target/wheels
+          python -m pip install target/wheels/*.whl
+
+      - name: Run Python tests
+        shell: bash
+        run: python -m pytest python/tests -q
+
+      - name: Setup Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+
+      # Castore.jl dlopens the cdylib that `cargo build --workspace` already
+      # produced, located via CASTORE_LIB.
+      - name: Run Julia tests
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) root=$PWD; lib=libcastore_ffi.so ;;
+            macOS) root=$PWD; lib=libcastore_ffi.dylib ;;
+            # `pwd -W` yields a native D:/... path. Bash's own /d/... form is
+            # not something the Windows loader can dlopen.
+            Windows) root=$(pwd -W); lib=castore_ffi.dll ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          export CASTORE_LIB="$root/target/debug/$lib"
+          test -f "$CASTORE_LIB" || { echo "missing cdylib: $CASTORE_LIB" >&2; exit 1; }
+          julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
+          julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
+
+      # Render both reports from the profiles all three suites just wrote.
+      # `--ignore-filename-regex` drops the protobuf code castore-proto's build
+      # script generates into target/; build scripts are themselves excluded
+      # unless --include-build-script is passed, so the vendored netcdf-c/HDF5
+      # build stays out of the numbers.
+      #
+      # `--remap-path-prefix` is deliberately absent: it only takes effect at
+      # compile time, and the builds above are plain cargo invocations, so it
+      # would be silently inert here. The job summary is shortened with sed
+      # instead; lcov.info keeps absolute paths.
+      - name: Report coverage
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          ignore='(^|/)target/'
+          cargo llvm-cov report --lcov --output-path lcov.info \
+            --ignore-filename-regex "$ignore"
+          {
+            echo '### Coverage (cargo llvm-cov)'
+            echo ''
+            echo 'Rust, Python, and Julia suites combined.'
+            echo '```'
+            cargo llvm-cov report --ignore-filename-regex "$ignore" | sed "s|$PWD/||"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info

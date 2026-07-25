@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# Coverage (cargo llvm-cov)
+/lcov.info
+
 # Python
 __pycache__/
 *.pyc
