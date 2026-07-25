@@ -6,7 +6,7 @@
 # process (no Homebrew dependency, no version drift).
 #
 # To publish: copy this directory into a Yggdrasil fork under
-# `C/InfraStore/`, pin `version` + the source commit, and open a PR.
+# `I/InfraStore/`, pin `version` + the source commit, and open a PR.
 # Run locally first with:
 #   julia build_tarballs.jl --verbose --debug <triplet>
 
@@ -26,7 +26,7 @@ version = v"0.1.0"
 sources = [
     GitSource(
         "https://github.com/NatLabRockies/infrastore.git",
-        "fde88b96d1ad53c64f03dba761cc903f75d78d42",
+        "be5a3d01015d8d18a3c91a9cdfe93f6769d9ab76",
     ),
 ]
 
@@ -98,4 +98,16 @@ build_tarballs(
     ARGS, name, version, sources, script, platforms, products, dependencies;
     compilers = [:c, :rust],
     julia_compat = "1.10",
+    # Must be >= the workspace's `rust-version`, and the workspace is on edition
+    # 2024 (Rust >= 1.85). BinaryBuilder otherwise defaults to whatever its
+    # newest Rust shard happens to be, which makes the toolchain drift silently.
+    #
+    # This is a tight constraint worth watching: 1.94.0 is currently BOTH the
+    # workspace MSRV and the newest shard BinaryBuilderBase ships. Raising
+    # `rust-version` in the root Cargo.toml above 1.94 makes this JLL
+    # unbuildable until Yggdrasil publishes a matching RustBase artifact, so
+    # check the available versions before bumping the MSRV:
+    #
+    #   https://github.com/JuliaPackaging/BinaryBuilderBase.jl/blob/master/Artifacts.toml
+    preferred_rust_version = v"1.94.0",
 )

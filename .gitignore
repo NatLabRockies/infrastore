@@ -15,6 +15,12 @@ __pycache__/
 # Julia
 **/Manifest.toml
 
+# BinaryBuilder scratch from testing yggdrasil/build_tarballs.jl locally.
+# These hold unpacked JLL artifacts, whose vendored docs otherwise get picked
+# up by `dprint` and fail the pre-commit hook.
+/build/
+/products/
+
 # macOS
 .DS_Store
 
