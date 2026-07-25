@@ -283,12 +283,13 @@ const _DTYPE_JULIA = (Float64, Float32, Int64, Int32, UInt64, Bool)
 _julia_dtype(code::Integer) = _DTYPE_JULIA[Int(code) + 1]
 
 # Row-major little-endian bytes for a (possibly multi-dimensional) array. Julia
-# is column-major, so transpose the axis order before flattening.
+# is column-major, so transpose the axis order before flattening. A 1-D `Vector`
+# needs no reordering, so its bytes are produced with a single copy.
 function _row_major_bytes(arr::AbstractArray)
     flat = if ndims(arr) <= 1
-        Vector(vec(arr))
+        arr isa Vector ? arr : Vector(vec(arr))
     else
-        Vector(vec(permutedims(arr, reverse(ntuple(identity, ndims(arr))))))
+        vec(permutedims(arr, reverse(ntuple(identity, ndims(arr)))))
     end
     return collect(reinterpret(UInt8, flat))
 end
@@ -577,7 +578,7 @@ function Store(;
         )
     end
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    cpath = path === nothing ? C_NULL : pointer(String(path))
+    cpath = path === nothing ? C_NULL : String(path)
     code = ccall(
         (:castore_store_create_with_compression, lib_path()),
         Int32,
@@ -794,9 +795,9 @@ function add_time_series!(
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    units_ptr = units === nothing ? C_NULL : pointer(String(units))
-    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
+    units_ptr = units === nothing ? C_NULL : String(units)
+    ext_ptr = ext === nothing ? C_NULL : String(ext)
 
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
@@ -856,9 +857,9 @@ function add_time_series!(
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
-    units_ptr = units === nothing ? C_NULL : pointer(String(units))
-    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
+    units_ptr = units === nothing ? C_NULL : String(units)
+    ext_ptr = ext === nothing ? C_NULL : String(ext)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:castore_store_add_non_sequential, lib_path()),
@@ -924,7 +925,7 @@ function get_metadata(
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
     out_length = Ref{UInt64}(0)
@@ -1030,7 +1031,7 @@ function get_forecast_metadata(
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_initial = Ref{Int64}(0);
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
     out_horizon = Ref{Ptr{Cchar}}(C_NULL);
@@ -1144,7 +1145,7 @@ function get_probabilistic_metadata(
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_initial = Ref{Int64}(0);
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
     out_horizon = Ref{Ptr{Cchar}}(C_NULL);
@@ -1281,7 +1282,7 @@ function resolve_forecast_key(
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = ccall(
         (:castore_store_resolve_forecast_key, lib_path()),
@@ -1405,7 +1406,7 @@ function has_time_series(
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Bool}(false)
     code = ccall(
         (:castore_store_has_by_attrs, lib_path()),
@@ -1469,7 +1470,7 @@ function remove_time_series!(
     features::AbstractDict=Dict{String,Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     code = ccall(
         (:castore_store_remove_by_attrs, lib_path()),
         Int32,
@@ -2186,7 +2187,7 @@ function list_keys(
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_len = Ref{UInt64}(0)
     code = ccall(
         (:castore_store_list_keys, lib_path()),
@@ -2296,7 +2297,7 @@ function list_time_series(
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     json = _filter_probe(
         store,
         (buf, cap, out_len) -> ccall(
@@ -2358,7 +2359,7 @@ function list_names(
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     json = _filter_probe(
         store,
         (buf, cap, out_len) -> ccall(
@@ -2420,7 +2421,7 @@ function list_owner_types(
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     json = _filter_probe(
         store,
         (buf, cap, out_len) -> ccall(
@@ -2482,7 +2483,7 @@ function remove_by_filter!(
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_removed = Ref{UInt64}(0)
     code = ccall(
         (:castore_store_remove_by_filter, lib_path()),
@@ -2548,7 +2549,7 @@ function list_array_groups(
     type_arg = has_type ? Int32(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : pointer(JSON.json(features))
+    features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_len = Ref{UInt64}(0)
     code = ccall(
         (:castore_store_list_array_groups, lib_path()),
@@ -4381,7 +4382,7 @@ function _add_dense_forecast!(
 )
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
-    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
+    ext_ptr = ext === nothing ? C_NULL : String(ext)
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
@@ -4632,7 +4633,7 @@ function add_time_series!(
     data = ts.data
     features_json = _features_arg(features)
     units_ptr = units === nothing ? C_NULL : String(units)
-    ext_ptr = ext === nothing ? C_NULL : pointer(String(ext))
+    ext_ptr = ext === nothing ? C_NULL : String(ext)
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
