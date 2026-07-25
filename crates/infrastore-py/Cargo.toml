@@ -7,8 +7,14 @@ license.workspace = true
 repository.workspace = true
 description = "Python bindings for infrastore"
 
+# The lib target is deliberately NOT named `infrastore`: the CLI's bin target
+# already is, and on MSVC both would emit `target/debug/deps/infrastore.pdb`,
+# which fails the parallel `cargo build --workspace` with LNK1201. The Python
+# module is still `infrastore` -- it comes from `#[pymodule] fn infrastore`
+# (the `PyInit_infrastore` symbol) and `module-name` in `pyproject.toml`, not
+# from this name.
 [lib]
-name = "infrastore"
+name = "infrastore_py"
 crate-type = ["cdylib"]
 
 # Statically link netcdf-c/HDF5 so a built wheel needs no system libraries; see
