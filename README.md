@@ -6,6 +6,8 @@ Rust, gRPC server + Rust client, Python (via PyO3), Julia (via C ABI), and the `
 
 Spec: [NatLabRockies/castore#1](https://github.com/NatLabRockies/castore/issues/1).
 
+Project status: under development
+
 ## Why the name
 
 **castore** = **CA**talog + **STORE** — the two halves of what this library is: a
