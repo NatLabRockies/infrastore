@@ -55,3 +55,49 @@ jobs:
         run: cargo test --workspace --all-features
         env:
           RUST_BACKTRACE: 1
+
+      # Coverage is collected on Linux only. `cargo llvm-cov` sets its own
+      # RUSTFLAGS, so the instrumented build recompiles the whole graph --
+      # including the vendored netcdf-c/HDF5 stack -- and one platform's
+      # numbers are enough to track.
+      #
+      # This is a second pass rather than a replacement for `cargo test` above:
+      # on stable, cargo-llvm-cov does not instrument doctests, so running the
+      # suite only under it would quietly drop doctests from this leg.
+      - name: Install llvm-tools
+        if: matrix.os == 'ubuntu-latest'
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Run the suite once under instrumentation, then render two reports from
+      # that single profile: lcov.info for tooling, and the text table for the
+      # run's job summary. `--remap-path-prefix` makes both use workspace-
+      # relative paths; `--ignore-filename-regex` drops the protobuf code that
+      # castore-proto's build script generates into target/. Build scripts
+      # themselves are already excluded unless --include-build-script is passed,
+      # so the vendored netcdf-c/HDF5 build stays out of the numbers.
+      - name: Collect coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo llvm-cov --no-report --workspace --all-features --remap-path-prefix
+          cargo llvm-cov report --lcov --output-path lcov.info \
+            --remap-path-prefix --ignore-filename-regex '(^|/)target/'
+          {
+            echo '### Coverage (cargo llvm-cov)'
+            echo '```'
+            cargo llvm-cov report --remap-path-prefix \
+              --ignore-filename-regex '(^|/)target/'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Upload coverage report
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
