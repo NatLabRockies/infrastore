@@ -3,8 +3,8 @@
 This guide covers using `infrastore-core` from Rust. For exact signatures see the
 [Rust API reference](../reference/rust-api.md).
 
-For a runnable end-to-end round-trip, `examples/basic_rust.rs` creates an in-memory store, adds a
-`SingleTimeSeries`, and reads it back:
+For a runnable end-to-end round-trip, `crates/infrastore-core/examples/basic.rs` creates an
+in-memory store, adds a `SingleTimeSeries`, and reads it back:
 
 ```sh
 cargo run --manifest-path crates/infrastore-core/Cargo.toml --example basic

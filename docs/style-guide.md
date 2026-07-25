@@ -60,7 +60,7 @@ direction: bindings depend on `infrastore-core`, never the reverse.
 | `infrastore-core`   | Types, NetCDF + SQLite storage, hashing, public Rust API |
 | `infrastore-proto`  | Protobuf service definition, tonic codegen, conversions  |
 | `infrastore-server` | gRPC server binary + Rust client                         |
-| `infrastore-py`     | PyO3 bindings (abi3-py310 wheel)                         |
+| `infrastore-py`     | PyO3 bindings (abi3-py311 wheel)                         |
 | `infrastore-ffi`    | C ABI cdylib consumed by the Julia binding               |
 
 Shared dependency versions are declared once in the root `Cargo.toml` `[workspace.dependencies]`.
@@ -72,17 +72,17 @@ The defining constraint of this repo: a single core feature is exposed through f
 you add or change something in the core public API, propagate it through every binding before
 considering the work done.
 
-| Surface       | Location                                                              | Notes                                          |
-| ------------- | --------------------------------------------------------------------- | ---------------------------------------------- |
-| Core Rust API | `infrastore-core/src/store.rs`                                        | The source of truth                            |
-| gRPC          | `proto/`, `infrastore-proto/src/`, `infrastore-server/src/service.rs` | Read-only server; writes need local filesystem |
-| Rust client   | `infrastore-server/src/client.rs`                                     | Mirrors the gRPC surface                       |
-| Python        | `infrastore-py/src/lib.rs`                                            | PyO3; keep `python/tests/` in sync             |
-| Julia / FFI   | `infrastore-ffi/src/lib.rs`, `julia/TimeSeries.jl/src/`               | C ABI; regenerate the header (below)           |
+| Surface       | Location                                                                               | Notes                                          |
+| ------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Core Rust API | `infrastore-core/src/store.rs`                                                         | The source of truth                            |
+| gRPC          | `infrastore-proto/proto/`, `infrastore-proto/src/`, `infrastore-server/src/service.rs` | Read-only server; writes need local filesystem |
+| Rust client   | `infrastore-server/src/client.rs`                                                      | Mirrors the gRPC surface                       |
+| Python        | `infrastore-py/src/lib.rs`                                                             | PyO3; keep `python/tests/` in sync             |
+| Julia / FFI   | `infrastore-ffi/src/lib.rs`, `julia/TimeSeries.jl/src/`                                | C ABI; regenerate the header (below)           |
 
 ### Proto / gRPC changes
 
-1. Edit the `.proto` source under `proto/`.
+1. Edit the `.proto` source under `crates/infrastore-proto/proto/`.
 2. The proto crate's build script regenerates the tonic code; add hand-written conversions in
    `infrastore-proto/src/convert.rs`.
 3. Update the server (`service.rs`) and Rust client (`client.rs`) to cover the new surface.

@@ -7,12 +7,12 @@ SQLite. Identical arrays are stored once and shared through content addressing.
 It ships native Rust, Python (PyO3), and Julia (C ABI) interfaces, the `infrastore` command-line
 tool, and a read-only gRPC server with a Rust client.
 
-**Documentation:** <https://natlabrockies.github.io/time-series-store/latest/> — start with the
-[Quick Start](https://natlabrockies.github.io/time-series-store/latest/getting-started/quick-start-python.html)
+**Documentation:** <https://natlabrockies.github.io/infrastore/latest/> — start with the
+[Quick Start](https://natlabrockies.github.io/infrastore/latest/getting-started/quick-start-python.html)
 or the
-[Architecture](https://natlabrockies.github.io/time-series-store/latest/explanation/architecture.html).
+[Architecture](https://natlabrockies.github.io/infrastore/latest/explanation/architecture.html).
 
-**Status:** under development, integrating with parent packages
+**Status:** under development, unstable API, integrating with parent packages
 
 ## Features
 
@@ -41,21 +41,34 @@ or the
   concepts.
 
 Not every type is available in every binding — the
-[feature matrix](https://natlabrockies.github.io/time-series-store/latest/explanation/data-model.html)
-is authoritative.
+[feature matrix](https://natlabrockies.github.io/infrastore/latest/explanation/data-model.html) is
+authoritative.
 
 ## Installation
 
-Nothing is published to a registry yet, so every consumer builds from source. See
-[Building from source](#building-from-source) below for the toolchain prerequisites, and
-[`PACKAGING.md`](PACKAGING.md) for the publish plan.
+| Language | Install                        |
+| -------- | ------------------------------ |
+| Rust     | `cargo add infrastore-core`    |
+| Python   | `pip install infrastore`       |
+| Julia    | `Pkg.add("InfraStore")`        |
+| CLI      | `cargo install infrastore-cli` |
 
-| Language | Today                                                             |
+The Rust crates and the Python wheel statically link NetCDF, HDF5, and zlib, so there are no system
+libraries to install. Building the crates from source needs `cmake` and a C compiler; the wheels are
+prebuilt. The Julia package links the ecosystem's `NetCDF_jll` / `HDF5_jll` instead, so a Julia
+process has exactly one `libhdf5` — see [Releasing](docs/src/releasing.md) for why the two channels
+differ.
+
+To work against a checkout instead:
+
+| Language | From source                                                       |
 | -------- | ----------------------------------------------------------------- |
 | Rust     | path or git dependency on `infrastore-core`                       |
 | Python   | `maturin develop --manifest-path crates/infrastore-py/Cargo.toml` |
 | Julia    | `Pkg.develop(path="julia/InfraStore.jl")` plus `INFRASTORE_LIB`   |
 | CLI      | `cargo install --path crates/infrastore-cli`                      |
+
+See [Building from source](#building-from-source) below for the toolchain prerequisites.
 
 ## Quick start
 
@@ -89,7 +102,8 @@ let key = store.add_time_series(
 let got = store.get_time_series(key.identity(), None)?;
 ```
 
-The full program is [`examples/basic_rust.rs`](examples/basic_rust.rs); run it with
+The full program is
+[`crates/infrastore-core/examples/basic.rs`](crates/infrastore-core/examples/basic.rs); run it with
 `cargo run -p infrastore-core --example basic`.
 
 ### Python
@@ -179,7 +193,7 @@ Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, 
 file per series), and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
 `remove --all`). Destructive commands take `--dry-run`. `infrastore completions <shell>` emits shell
 completions. Full reference:
-[CLI](https://natlabrockies.github.io/time-series-store/latest/reference/cli.html).
+[CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
 
 ## Server
 
@@ -205,24 +219,23 @@ hex hash, with an empty string marking a free slot. Standalone arrays are stored
 
 Deletion frees packed slots for reuse rather than shrinking the file — NetCDF cannot shrink in
 place, so reclaiming space is an explicit `Store::compact()`. The exact bytes are specified in the
-[On-Disk File Format](https://natlabrockies.github.io/time-series-store/latest/reference/file-format.html).
+[On-Disk File Format](https://natlabrockies.github.io/infrastore/latest/reference/file-format.html).
 
 ## Repo layout
 
 ```
 crates/
   infrastore-core/     # Types, NetCDF + SQLite storage, hashing, public Rust API
-  infrastore-proto/    # Protobuf service definition + tonic codegen
+  infrastore-proto/    # Protobuf service definition (proto/) + tonic codegen
   infrastore-server/   # gRPC server binary + Rust client
-  infrastore-py/       # PyO3 bindings, abi3-py310 wheel
+  infrastore-py/       # PyO3 bindings, abi3-py311 wheel
   infrastore-ffi/      # C ABI cdylib (used by the Julia binding)
   infrastore-cli/      # `infrastore` CLI: load CSV + inspect a store on disk
   infrastore-bench/    # `infrastore-bench` binary: ingestion + simulation-read benchmarks
-proto/                 # .proto sources
 julia/InfraStore.jl/   # Julia package wrapping the C ABI
 python/tests/          # pytest suite
 docs/                  # mdBook sources for the documentation site
-examples/              # Sample server config, basic_rust.rs, and cli/ sample CSV + descriptor
+examples/              # Sample server config and cli/ sample CSV + descriptor
 ```
 
 ## Building from source
@@ -239,7 +252,7 @@ sudo apt-get install cmake protobuf-compiler     # Linux (Debian/Ubuntu)
 ```
 
 The first build compiles netcdf-c and HDF5 from source, which takes a few minutes; the result is
-cached and later builds are unaffected. The cdylib tests additionally need Python 3.10+ and Julia
+cached and later builds are unaffected. The cdylib tests additionally need Python 3.11+ and Julia
 1.10+.
 
 ### Build and test
@@ -280,7 +293,7 @@ all-or-nothing choice for a given build, not something an individual crate can p
 
 Changes must pass `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, `dprint check`, and
 `cargo deny check` — see
-[Contributing](https://natlabrockies.github.io/time-series-store/latest/contributing.html) for the
+[Contributing](https://natlabrockies.github.io/infrastore/latest/contributing.html) for the
 conventions, including the rules that govern the on-disk format contract.
 
 ## License

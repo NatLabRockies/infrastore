@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Performance benchmarks for infrastore"
+# Internal development tool: useful only against this workspace's own crates,
+# so it is not published to crates.io.
+publish = false
 
 [[bin]]
 name = "infrastore-bench"

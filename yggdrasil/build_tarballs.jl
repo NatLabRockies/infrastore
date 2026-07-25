@@ -15,12 +15,17 @@ using BinaryBuilder, Pkg
 name = "InfraStore"
 version = v"0.1.0"
 
-# Pin to a tagged release/commit of the Rust workspace. NOTE: this commit must be
-# pushed to origin before the Yggdrasil build can fetch it (switch to a release tag
-# for the submission PR).
+# Pin to the commit the release tag points at. Yggdrasil requires a full commit
+# SHA here -- a tag name is not accepted -- so this has to be updated to the
+# `v$(version)` commit before opening the submission PR, and that commit must
+# already be pushed to origin. Get it with:
+#
+#   git rev-parse v0.1.0^{commit}
+#
+# RELEASE CHECKLIST: this SHA is a placeholder until the tag exists.
 sources = [
     GitSource(
-        "https://github.com/NatLabRockies/time-series-store.git",
+        "https://github.com/NatLabRockies/infrastore.git",
         "fde88b96d1ad53c64f03dba761cc903f75d78d42",
     ),
 ]
@@ -64,11 +69,21 @@ install -Dvm644 "crates/infrastore-ffi/include/infrastore.h" \
     "${includedir}/infrastore.h"
 """
 
-# Start from the platforms NetCDF_jll/HDF5_jll support; the Rust toolchain in
-# BinaryBuilder covers the usual glibc/musl/macOS/windows targets. Narrow this
-# list to whatever actually builds when iterating in Yggdrasil.
-platforms = supported_platforms()
-platforms = expand_cxxstring_abis(platforms)
+# The tier-1 targets that cover essentially every InfrastructureSystems.jl user,
+# deliberately narrower than `supported_platforms()`. A full expansion mostly
+# produces targets the Rust toolchain or NetCDF_jll/HDF5_jll cannot satisfy, and
+# each failure costs a Yggdrasil CI round trip. Add platforms once these build.
+#
+# No `expand_cxxstring_abis`: this is a pure C ABI cdylib with no C++ in its
+# link closure, so the libstdc++ string ABI does not apply and expanding it
+# would just double the build matrix.
+platforms = [
+    Platform("x86_64", "linux"; libc = "glibc"),
+    Platform("aarch64", "linux"; libc = "glibc"),
+    Platform("x86_64", "macos"),
+    Platform("aarch64", "macos"),
+    Platform("x86_64", "windows"),
+]
 
 products = [
     LibraryProduct("libinfrastore_ffi", :libinfrastore_ffi),

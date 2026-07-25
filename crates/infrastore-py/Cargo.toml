@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Python bindings for infrastore"
+# Distributed as the `infrastore` wheel on PyPI, not on crates.io: this is a
+# `cdylib` extension module built by maturin and cannot be used as a Rust
+# dependency.
+publish = false
 
 # The lib target is deliberately NOT named `infrastore`: the CLI's bin target
 # already is, and on MSVC both would emit `target/debug/deps/infrastore.pdb`,
@@ -27,6 +31,6 @@ vendored = ["infrastore-core/vendored"]
 chrono = { workspace = true }
 ndarray = { workspace = true }
 numpy = { workspace = true }
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py310", "chrono"] }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py311", "chrono"] }
 infrastore-core = { workspace = true }
 tracing-subscriber = { workspace = true }

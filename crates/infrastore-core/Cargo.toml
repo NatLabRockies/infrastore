@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Core types, storage, and metadata for infrastore"
+homepage = "https://natlabrockies.github.io/infrastore/"
+keywords = ["time-series", "netcdf", "hdf5", "energy", "simulation"]
+categories = ["science", "database-implementations"]
 
 # `vendored` builds netcdf-c, HDF5, and zlib from source (via `netcdf-src` and
 # `hdf5-metno-src`) and links them statically, so consumers need no system
@@ -45,7 +49,3 @@ sha2 = { workspace = true }
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "user-hooks"] }
 tempfile = "3"
-
-[[example]]
-name = "basic"
-path = "../../examples/basic_rust.rs"

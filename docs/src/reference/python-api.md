@@ -1,7 +1,7 @@
 # Python API
 
 The PyO3 binding is importable as the `infrastore` module (package `infrastore`). It is built as an
-`abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
+`abi3-py311` wheel, so one build runs on CPython 3.11 and newer.
 
 ```python
 from infrastore import (

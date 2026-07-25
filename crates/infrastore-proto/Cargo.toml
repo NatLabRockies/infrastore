@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Protobuf definitions and conversions for infrastore"
+homepage = "https://natlabrockies.github.io/infrastore/"
+keywords = ["time-series", "protobuf", "grpc", "infrastore"]
+categories = ["encoding", "network-programming"]
 
 # Forwarded so that opting out of vendoring is possible graph-wide; see
 # `infrastore-core`'s manifest for the full tradeoff.

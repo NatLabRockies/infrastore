@@ -12,7 +12,7 @@ SQLite. It exposes multiple bindings over a shared core:
 - **Native Rust** — `infrastore-core` public API
 - **gRPC server + Rust client** — `infrastore-server` (read-only server; writes need local
   filesystem access)
-- **Python** — `infrastore-py` via PyO3 (abi3-py310 wheel)
+- **Python** — `infrastore-py` via PyO3 (abi3-py311 wheel)
 - **Julia** — `infrastore-ffi` C ABI cdylib, wrapped by `julia/InfraStore.jl`
 - **CLI** — `infrastore-cli` (`infrastore` binary): loads time series from CSV + a descriptor JSON
   and inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no
@@ -97,16 +97,15 @@ crates/
     src/store.rs             #   Store: the top-level public API
     src/reader.rs            #   StaticReader / ForecastReader: columnar bulk-read surface
     src/hash.rs              #   SHA-256 column hashing
-  infrastore-proto/   # Protobuf service definition + tonic codegen, conversions
+  infrastore-proto/   # Protobuf service definition (proto/) + tonic codegen, conversions
   infrastore-server/  # gRPC server binary (src/bin/server.rs) + Rust client
   infrastore-py/      # PyO3 bindings
   infrastore-ffi/     # C ABI cdylib (used by the Julia binding)
   infrastore-cli/     # `infrastore` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
   infrastore-bench/   # `infrastore-bench` binary: bulk-ingest + simulation-read benchmarks
-proto/                       # .proto sources
 julia/InfraStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite
-examples/                    # Sample server config, basic_rust.rs, and cli/ (sample CSV + descriptor)
+examples/                    # Sample server config and cli/ (sample CSV + descriptor)
 .github/workflows/           # Cross-platform tests, linting, security, wheel builds
 ```
 

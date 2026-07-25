@@ -5,7 +5,7 @@ Get the `infrastore` module into a Python environment. For API usage once it imp
 
 ## Prerequisites
 
-- Python 3.10 or newer.
+- Python 3.11 or newer.
 - The [system libraries](./install.md#1-install-system-libraries) (HDF5, NetCDF, Protobuf).
 
 ## Build and Install the Wheel (development)
@@ -34,11 +34,11 @@ To produce a wheel you can install elsewhere:
 ```sh
 cd crates/infrastore-py
 maturin build --release
-# -> target/wheels/infrastore-<version>-cp310-abi3-<platform>.whl
+# -> target/wheels/infrastore-<version>-cp311-abi3-<platform>.whl
 pip install ../../target/wheels/infrastore-*.whl
 ```
 
-The wheel is built against the **`abi3-py310`** stable ABI, so a single wheel works on CPython 3.10
+The wheel is built against the **`abi3-py311`** stable ABI, so a single wheel works on CPython 3.11
 and every newer 3.x without recompiling.
 
 ## Smoke Test

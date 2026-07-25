@@ -1,8 +1,8 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("proto");
+    // Kept inside the crate (not at the workspace root) so the `.proto` sources
+    // ship in the published `.crate` tarball and this build script still works
+    // for downstream consumers.
+    let proto_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proto");
     let proto_file = proto_root.join("infrastore").join("v1").join("store.proto");
 
     println!("cargo:rerun-if-changed={}", proto_file.display());

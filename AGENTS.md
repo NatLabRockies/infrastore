@@ -9,7 +9,7 @@ SQLite. It exposes multiple bindings over a shared core:
 - **Native Rust** — `infrastore-core` public API
 - **gRPC server + Rust client** — `infrastore-server` (read-only server; writes need local
   filesystem access)
-- **Python** — `infrastore-py` via PyO3 (abi3-py310 wheel)
+- **Python** — `infrastore-py` via PyO3 (abi3-py311 wheel)
 - **Julia** — `infrastore-ffi` C ABI cdylib, wrapped by `julia/InfraStore.jl`
 - **CLI** — `infrastore-cli` (`infrastore` binary): loads time series from CSV + a descriptor JSON
   and inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no
@@ -73,16 +73,15 @@ crates/
     src/store.rs             #   Store: the top-level public API
     src/reader.rs            #   StaticReader / ForecastReader: columnar bulk-read surface
     src/hash.rs              #   SHA-256 column hashing
-  infrastore-proto/   # Protobuf service definition + tonic codegen, conversions
+  infrastore-proto/   # Protobuf service definition (proto/) + tonic codegen, conversions
   infrastore-server/  # gRPC server binary (src/bin/server.rs) + Rust client
   infrastore-py/      # PyO3 bindings
   infrastore-ffi/     # C ABI cdylib (used by the Julia binding)
   infrastore-cli/     # `infrastore` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
   infrastore-bench/   # `infrastore-bench` binary: bulk-ingest + simulation-read benchmarks
-proto/                       # .proto sources
 julia/InfraStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite
-examples/                    # Sample server config, basic_rust.rs, and cli/ (sample CSV + descriptor)
+examples/                    # Sample server config and cli/ (sample CSV + descriptor)
 .github/workflows/           # Cross-platform tests, linting, security, wheel builds
 ```
 
@@ -96,21 +95,24 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ### Prerequisites
 
-System libraries are required for the NetCDF and protobuf builds. On macOS:
+NetCDF, HDF5, and zlib are built from vendored sources and linked statically by default, via the
+`vendored` feature that every crate enables (defined in `infrastore-core`, forwarded by the rest).
+The build therefore needs `cmake` and a C compiler rather than system NetCDF/HDF5, plus `protobuf`
+for the gRPC codegen:
 
 ```bash
-brew install hdf5 netcdf protobuf maturin
+brew install cmake protobuf maturin                 # macOS
+sudo apt-get install cmake protobuf-compiler        # Linux (Debian/Ubuntu)
 ```
 
-If `cargo build` fails with `Unable to locate HDF5 root directory and/or headers`, point the build
-script at Homebrew explicitly:
+The first build compiles netcdf-c and HDF5 from source (a few minutes), then caches the result.
 
-```bash
-export HDF5_DIR="$(brew --prefix hdf5)"
-```
-
-On Linux (Debian/Ubuntu): `sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler` (set
-`HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial` if the build script can't find HDF5).
+`--no-default-features` switches back to system libraries, which then need
+`brew install hdf5 netcdf` / `sudo apt-get install libhdf5-dev libnetcdf-dev`. Never set `HDF5_DIR`
+or `NETCDF_DIR` to work around a vendored build failure: they redirect the vendored netcdf-c build
+at an external HDF5 while still requesting static libraries, which fails. Because `netcdf-sys`
+declares `links = "netcdf"`, Cargo's feature unification makes vendored-vs-system all-or-nothing
+across the whole dependency graph.
 
 On Windows, CI installs prebuilt `libnetcdf` and `hdf5` from conda-forge and sets `NETCDF_DIR`,
 `HDF5_DIR`, and `PKG_CONFIG_PATH` to the conda prefix's `Library` directory. Do not switch this back

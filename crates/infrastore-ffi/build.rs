@@ -3,6 +3,20 @@ use std::path::PathBuf;
 
 fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=cbindgen.toml");
+
+    // Regenerating the header is a development convenience for this workspace.
+    // When the crate is consumed from crates.io it is built out of Cargo's
+    // registry cache, where `include/` is read-only and the shipped
+    // `infrastore.h` is already the committed one -- so skip generation there.
+    // `Cargo.toml.orig` exists only in an unpacked `.crate`, which makes it a
+    // reliable marker for that case.
+    if PathBuf::from(&crate_dir).join("Cargo.toml.orig").exists() {
+        return;
+    }
+
     let out_path = PathBuf::from(&crate_dir)
         .join("include")
         .join("infrastore.h");
@@ -26,7 +40,4 @@ fn main() {
             println!("cargo:warning=cbindgen failed: {e}");
         }
     }
-
-    println!("cargo:rerun-if-changed=src/lib.rs");
-    println!("cargo:rerun-if-changed=cbindgen.toml");
 }

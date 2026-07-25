@@ -42,3 +42,5 @@
 ---
 
 [Contributing](./contributing.md)
+
+[Releasing](./releasing.md)

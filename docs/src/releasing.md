@@ -1,0 +1,152 @@
+# Releasing
+
+infrastore ships from one repository to three registries. This page is the procedure.
+
+| Channel | Package(s)                                                                                     | Registry      |
+| ------- | ---------------------------------------------------------------------------------------------- | ------------- |
+| Rust    | `infrastore-core`, `infrastore-proto`, `infrastore-ffi`, `infrastore-server`, `infrastore-cli` | crates.io     |
+| Python  | `infrastore`                                                                                   | PyPI          |
+| Julia   | `InfraStore_jll`, then `InfraStore`                                                            | Julia General |
+
+`infrastore-py` and `infrastore-bench` set `publish = false`: the first ships as the `infrastore`
+wheel on PyPI rather than as a crate, and the second is an internal benchmarking tool.
+
+## Versioning
+
+The Rust crates, the JLL, `InfraStore.jl`, and the Python package share the workspace version. Bump
+them together and tag the repo once per release, so every registry pins the same commit.
+
+The version lives in three places that must agree:
+
+| File                                  | Field                         |
+| ------------------------------------- | ----------------------------- |
+| `Cargo.toml`                          | `[workspace.package] version` |
+| `crates/infrastore-py/pyproject.toml` | `[project] version`           |
+| `julia/InfraStore.jl/Project.toml`    | `version`                     |
+
+The `crates-release` workflow refuses to publish if the tag does not match the workspace version.
+
+## NetCDF linkage
+
+The two distribution channels link NetCDF differently, and the choice is **not** interchangeable:
+
+| Channel                   | Linkage                                  | How                                                                  |
+| ------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
+| Rust crates, Python wheel | vendored netcdf-c + HDF5 + zlib, static  | the `vendored` feature, enabled by default in every crate            |
+| `InfraStore_jll` (Julia)  | dynamic, against `NetCDF_jll`/`HDF5_jll` | `cargo build --no-default-features` in `yggdrasil/build_tarballs.jl` |
+
+Vendoring is what lets a downstream consumer get NetCDF for free — `pip install infrastore` and
+`cargo add infrastore-core` need no system libraries, only `cmake` and a C compiler at build time.
+
+The JLL is the exception. Julia's ecosystem already ships HDF5, and a statically vendored copy
+inside `libinfrastore_ffi` would put **two libhdf5 instances in one process** alongside any other
+JLL that links it. The recipe therefore passes `--no-default-features`; that flag is load-bearing.
+
+> **Never set `HDF5_DIR` or `NETCDF_DIR` in CI.** The vendored netcdf-c build forwards them to cmake
+> as `HDF5_ROOT` while still requesting static libraries; against a shared-only install such as
+> conda-forge's this fails with `Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)`.
+> To build against system libraries, use `--no-default-features` instead.
+
+### Multiple HDF5 copies in one Python interpreter
+
+The same hazard applies in reverse to the wheels, which carry a statically linked HDF5 while a
+typical downstream environment also has `netCDF4` and `h5py`, each bundling its own. This is a
+tested property, not an assumption: `python/tests/test_hdf5_interop.py` drives real reads and writes
+through all three libraries in one process, in both initialization orders, and cibuildwheel runs the
+suite against every built wheel in its target environment (`test-requires` / `test-command` in
+`pyproject.toml`). Imports alone are not enough — on Linux a collision surfaces as silent symbol
+interposition rather than a clean error, which is why the test exercises I/O.
+
+If that check ever fails on a new platform, the fallbacks are to build that platform's wheels with
+`--no-default-features` against system libraries, or to hide the HDF5 symbols with a version script.
+
+**musllinux** stays in `skip` in `pyproject.toml`. Vendoring removed the original blocker (the
+RPM-based `before-all` could not install HDF5 on musl), but the target has never been built, so
+un-skipping it is a separate change that needs its own CI run.
+
+## Cutting a release
+
+### 1. Bump and tag
+
+Update the three version fields above, then:
+
+```sh
+cargo publish --workspace --dry-run   # verifies every crate packages and builds
+git commit -am "Release v0.1.0"
+git tag v0.1.0
+git push origin main --tags
+```
+
+Pushing the tag triggers both the `crates-release` and `python-wheels` workflows.
+
+### 2. Rust → crates.io
+
+Handled by `.github/workflows/crates-release.yml` on the tag.
+
+`cargo publish --workspace` resolves the intra-workspace order itself (`infrastore-core` →
+`infrastore-proto` → `infrastore-ffi` / `infrastore-server` / `infrastore-cli`) and waits for each
+crate to land in the index before publishing its dependents, so the crates must not be published
+individually.
+
+Authentication uses crates.io [trusted publishing](https://crates.io/docs/trusted-publishing), which
+needs a one-time setup per crate on crates.io: add a GitHub Actions publisher for repository
+`NatLabRockies/infrastore`, workflow `crates-release.yml`, environment `crates-io`. No token is
+stored in the repository.
+
+To rehearse without uploading, run the workflow manually with `dry_run` left checked.
+
+### 3. Python → PyPI
+
+Handled by `.github/workflows/python-wheels.yml` on the tag. cibuildwheel builds one abi3 wheel per
+platform, runs the full pytest suite against each, and the `publish` job uploads to PyPI via trusted
+publishing (environment `pypi`).
+
+The abi3 floor is `abi3-py311`, set in three places that must agree: the `pyo3` feature in
+`crates/infrastore-py/Cargo.toml`, `build = "cp311-*"` in `pyproject.toml`, and `requires-python`.
+
+### 4. Julia → General
+
+Two registrations, in order. The JLL must exist before `InfraStore.jl` can depend on it.
+
+**4a. `InfraStore_jll`** — the compiled `libinfrastore_ffi`, one binary per platform.
+
+1. Update the `GitSource` SHA in `yggdrasil/build_tarballs.jl` to the release commit
+   (`git rev-parse v0.1.0^{commit}`) and `version` to match. Yggdrasil requires a full commit SHA; a
+   tag name is not accepted.
+2. Test locally before submitting:
+   ```sh
+   julia yggdrasil/build_tarballs.jl --verbose --debug x86_64-linux-gnu
+   ```
+3. Copy the recipe into a [Yggdrasil](https://github.com/JuliaPackaging/Yggdrasil) fork under
+   `I/InfraStore/` and open a PR. Merging is done by Yggdrasil maintainers, so allow for review
+   time.
+
+The recipe patches two things in the source tree, both deliberate:
+
+- it neutralizes `hdf5-metno-sys`'s runtime version probe, which `dlopen`s libhdf5 and therefore
+  cannot work when cross-compiling — the header version from `HDF5_jll` is authoritative;
+- it drops sha2's `asm` feature, because BinaryBuilder forbids forcing an arch via `-march` and the
+  ARMv8 crypto kernels cannot be assembled there (x86-64 still detects SHA-NI at runtime).
+
+**4b. `InfraStore.jl`** — the `ccall` wrapper and high-level API.
+
+Once the JLL is merged and registered:
+
+1. Add `InfraStore_jll` to `[deps]` and `[compat]` in `julia/InfraStore.jl/Project.toml`.
+2. Replace the soft `Base.identify_package` lookup in `_jll_library_path()` with a direct
+   `import InfraStore_jll`. Keep the `INFRASTORE_LIB` override ahead of it — that is what lets a
+   development build shadow the JLL with no code change.
+3. Register with [Registrator](https://github.com/JuliaRegistries/Registrator.jl), passing the
+   subdirectory:
+   ```
+   @JuliaRegistrator register subdir=julia/InfraStore.jl
+   ```
+
+General's AutoMerge requires a public repository, an OSI-approved license file in the package
+directory, and `[compat]` bounds for every dependency including `julia`.
+
+### 5. Downstream
+
+`InfrastructureSystems.jl` depends on `InfraStore.jl` for its Rust time-series backend: add
+`InfraStore` to its `[deps]` and replace the raw `ccall`s in `src/rust_time_series_store.jl` with
+calls into the package. `infrasys` consumes the PyPI wheel.

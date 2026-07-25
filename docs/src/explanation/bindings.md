@@ -34,7 +34,7 @@ importable as `infrastore`. The binding:
 - Translates the typed `TimeSeriesError` variants into a Python exception hierarchy rooted at
   `TimeSeriesError` (`NotFoundError`, `DuplicateTimeSeriesError`, `InvalidParameterError`,
   `IntegrityError`, `ReadOnlyStoreError`).
-- Builds an `abi3-py310` wheel, so one wheel works across CPython 3.10+ without recompiling.
+- Builds an `abi3-py311` wheel, so one wheel works across CPython 3.11+ without recompiling.
 
 The metadata side is owned entirely by Rust; Python never touches SQLite directly. See the
 [Python guide](../guides/python.md) and [Python API reference](../reference/python-api.md).

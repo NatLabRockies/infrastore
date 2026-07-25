@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Command-line tool for loading and inspecting a infrastore store directly on disk"
+readme.workspace = true
+description = "Command-line tool for loading and inspecting an infrastore store directly on disk"
+homepage = "https://natlabrockies.github.io/infrastore/"
+keywords = ["time-series", "cli", "netcdf", "energy", "infrastore"]
+categories = ["command-line-utilities", "science"]
 
 [[bin]]
 name = "infrastore"

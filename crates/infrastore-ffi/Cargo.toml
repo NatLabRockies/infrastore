@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "C ABI for infrastore (used by the Julia binding)"
+homepage = "https://natlabrockies.github.io/infrastore/"
+keywords = ["time-series", "ffi", "julia", "c-abi", "infrastore"]
+categories = ["external-ffi-bindings", "science"]
 
 [lib]
 name = "infrastore_ffi"

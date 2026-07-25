@@ -1,34 +1,41 @@
 # Installation
 
-infrastore is a Rust workspace. Building any of its interfaces requires a Rust toolchain plus the
-HDF5, NetCDF, and Protobuf system libraries. The Python and Julia bindings additionally need a
-Python interpreter (3.10+) or Julia (1.10+).
+Most users install a published package and need no build tools at all:
 
-## System Libraries
+| Language | Install                        |
+| -------- | ------------------------------ |
+| Rust     | `cargo add infrastore-core`    |
+| Python   | `pip install infrastore`       |
+| Julia    | `Pkg.add("InfraStore")`        |
+| CLI      | `cargo install infrastore-cli` |
 
-### macOS (Homebrew)
+The Python wheels are prebuilt and self-contained. The Rust crates build NetCDF, HDF5, and zlib from
+vendored sources and link them statically, so they need `cmake` and a C compiler but **no system
+NetCDF or HDF5**. The Julia package links the ecosystem's `NetCDF_jll` / `HDF5_jll` instead, so a
+Julia process has exactly one `libhdf5`.
 
-```sh
-brew install hdf5 netcdf protobuf maturin
-```
+The rest of this page covers building the workspace from a checkout.
 
-`hdf5` is a transitive dependency of `netcdf`, but the `hdf5-metno-sys` build script does not always
-locate it on its own. If `cargo build` fails with
-`Unable to locate HDF5 root directory and/or headers`, point it at the Homebrew install explicitly:
+## Build Prerequisites
 
-```sh
-export HDF5_DIR="$(brew --prefix hdf5)"
-```
-
-Add that line to your shell profile to make it permanent.
-
-### Linux (Debian / Ubuntu)
+A Rust toolchain, `cmake`, a C compiler, and `protobuf` for the gRPC codegen. The Python and Julia
+bindings additionally need a Python interpreter (3.11+) or Julia (1.10+).
 
 ```sh
-sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
-# If the build script can't find HDF5:
-export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial
+brew install cmake protobuf maturin              # macOS
+sudo apt-get install cmake protobuf-compiler     # Linux (Debian / Ubuntu)
 ```
+
+The first build compiles netcdf-c and HDF5 from source — a few minutes — and then caches the result.
+
+> **Do not set `HDF5_DIR` or `NETCDF_DIR`.** The vendored netcdf-c build forwards them to cmake as
+> `HDF5_ROOT` while still requesting static libraries, which fails against a shared-only install. To
+> build against system libraries instead, turn vendoring off with `--no-default-features` and
+> install them (`brew install hdf5 netcdf` / `apt-get install libhdf5-dev libnetcdf-dev`).
+>
+> Because `netcdf-sys` declares `links = "netcdf"`, Cargo's feature unification makes the
+> vendored-versus-system choice all-or-nothing across the whole dependency graph — an individual
+> crate cannot opt out on its own.
 
 ## Rust Toolchain
 
@@ -43,7 +50,7 @@ rustup update stable
 ## Build the Workspace
 
 ```sh
-git clone https://github.com/NatLabRockies/time-series-store
+git clone https://github.com/NatLabRockies/infrastore
 cd infrastore
 cargo build --workspace --all-features
 cargo test --workspace --all-features
@@ -61,7 +68,7 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 | `infrastore-core`   | Types, NetCDF + SQLite storage, hashing, Rust API                    |
 | `infrastore-proto`  | Protobuf service definition + `tonic` codegen                        |
 | `infrastore-server` | gRPC server binary + Rust client                                     |
-| `infrastore-py`     | PyO3 bindings, `abi3-py310` wheel                                    |
+| `infrastore-py`     | PyO3 bindings, `abi3-py311` wheel                                    |
 | `infrastore-ffi`    | C ABI cdylib (the foundation of the Julia binding)                   |
 | `infrastore-cli`    | `infrastore` CLI binary (CSV add/read, inspect on-disk stores)       |
 | `infrastore-bench`  | `infrastore-bench` binary (bulk-ingest + simulation-read benchmarks) |

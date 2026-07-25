@@ -1668,7 +1668,7 @@ mod convert_coverage_tests {
         //
         // If that ever changes, this assertion is the thing to revisit
         // deliberately — along with the comment on field 10 in
-        // `proto/infrastore/v1/store.proto`.
+        // `crates/infrastore-proto/proto/infrastore/v1/store.proto`.
         let data = typed(Dtype::F64, vec![3]);
         for original in [
             TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
