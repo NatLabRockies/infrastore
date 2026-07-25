@@ -41,8 +41,8 @@
 #
 # Why the MPI machinery below, for a library that never calls MPI:
 # NetCDF_jll and HDF5_jll are both MPI-augmented -- they ship one artifact per
-# MPI ABI (none/mpich/openmpi/mpitrampoline) and select between them with an
-# `mpi` platform tag. A dependent that requests plain, untagged platforms has
+# MPI ABI (mpiabi/mpich/openmpi/mpitrampoline, microsoftmpi on Windows; there is
+# no serial `none` variant) and select between them with an `mpi` platform tag. A dependent that requests plain, untagged platforms has
 # no artifact to resolve against, so nothing is installed into ${prefix} and
 # the build fails later and confusingly (hdf5-metno-sys panicking on a missing
 # H5pubconf.h). Any consumer of those JLLs has to mirror the augmentation.
