@@ -1,28 +1,52 @@
 # Yggdrasil build recipe for InfraStore_jll.
 #
-# This produces the `libinfrastore_ffi` binary that `InfraStore.jl`
-# (and, through it, InfrastructureSystems.jl) loads. It is built against the
+# This produces the `libinfrastore_ffi` binary that `InfraStore.jl` (and,
+# through it, InfrastructureSystems.jl) loads. It is built against the
 # ecosystem's NetCDF_jll + HDF5_jll so there is a single libhdf5 in any Julia
 # process (no Homebrew dependency, no version drift).
 #
-# To publish: copy this directory into a Yggdrasil fork under
-# `I/InfraStore/`, pin `version` + the source commit, and open a PR.
-# Run locally first with:
-#   julia build_tarballs.jl --verbose --debug <triplet>
+# ---------------------------------------------------------------------------
+# THIS RECIPE ONLY RUNS FROM INSIDE A YGGDRASIL CHECKOUT.
+#
+# `YGGDRASIL_DIR` below resolves `platforms/mpi.jl` relative to the Yggdrasil
+# tree, so `julia build_tarballs.jl` from this repository will fail on the
+# include. To work on it:
+#
+#   git clone https://github.com/JuliaPackaging/Yggdrasil   # or your fork
+#   mkdir -p Yggdrasil/I/InfraStore
+#   cp build_tarballs.jl Yggdrasil/I/InfraStore/
+#   cd Yggdrasil/I/InfraStore
+#   julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
+#
+# Yggdrasil groups recipes by first letter, hence `I/InfraStore/`.
+# ---------------------------------------------------------------------------
+#
+# Why the MPI machinery below, for a library that never calls MPI:
+# NetCDF_jll and HDF5_jll are both MPI-augmented -- they ship one artifact per
+# MPI ABI (none/mpich/openmpi/mpitrampoline) and select between them with an
+# `mpi` platform tag. A dependent that requests plain, untagged platforms has
+# no artifact to resolve against, so nothing is installed into ${prefix} and
+# the build fails later and confusingly (hdf5-metno-sys panicking on a missing
+# H5pubconf.h). Any consumer of those JLLs has to mirror the augmentation.
 
 using BinaryBuilder, Pkg
+using Base.BinaryPlatforms
+
+const YGGDRASIL_DIR = "../.."
+include(joinpath(YGGDRASIL_DIR, "platforms", "mpi.jl"))
 
 name = "InfraStore"
 version = v"0.1.0"
 
 # Pin to the commit the release tag points at. Yggdrasil requires a full commit
-# SHA here -- a tag name is not accepted -- so this has to be updated to the
-# `v$(version)` commit before opening the submission PR, and that commit must
-# already be pushed to origin. Get it with:
+# SHA here -- a tag name is not accepted -- and the commit must already be
+# pushed. Get it with:
 #
 #   git rev-parse v0.1.0^{commit}
 #
-# RELEASE CHECKLIST: this SHA is a placeholder until the tag exists.
+# This is v0.1.0 of https://github.com/NatLabRockies/infrastore. Note that only
+# changes under crates/, Cargo.toml, or Cargo.lock require a new SHA here;
+# edits to this recipe do not, since Yggdrasil builds from its own copy.
 sources = [
     GitSource(
         "https://github.com/NatLabRockies/infrastore.git",
@@ -46,6 +70,10 @@ cargo fetch --target ${rust_target}
 # hdf5-metno-sys (via netcdf-sys) probes the HDF5 runtime version by dlopen()ing
 # libhdf5 — impossible when cross-compiling. The header version from HDF5_jll is
 # authoritative, so neutralize the runtime probe.
+#
+# This is a brittle match against upstream source: if it stops matching, the sed
+# silently does nothing and the build fails at the probe instead. Verify against
+# the hdf5-metno-sys version in Cargo.lock when bumping dependencies.
 for f in $(find "${CARGO_HOME:-$HOME/.cargo}" /opt -type f -path '*hdf5-metno-sys*/build.rs' 2>/dev/null | sort -u); do
     sed -i 's/[[:space:]]*validate_runtime_version(&config);/ \/\/ skipped: no cross-compile runtime probe/' "$f"
 done
@@ -69,14 +97,21 @@ install -Dvm644 "crates/infrastore-ffi/include/infrastore.h" \
     "${includedir}/infrastore.h"
 """
 
+# Teaches the generated JLL how to tag the running system with an MPI ABI, so it
+# selects the same variant its NetCDF/HDF5 dependencies resolved to.
+augment_platform_block = """
+    using Base.BinaryPlatforms
+    $(MPI.augment)
+    augment_platform!(platform::Platform) = augment_mpi!(platform)
+"""
+
 # The tier-1 targets that cover essentially every InfrastructureSystems.jl user,
-# deliberately narrower than `supported_platforms()`. A full expansion mostly
-# produces targets the Rust toolchain or NetCDF_jll/HDF5_jll cannot satisfy, and
-# each failure costs a Yggdrasil CI round trip. Add platforms once these build.
+# deliberately narrower than `supported_platforms()`. Every platform listed must
+# build for the Yggdrasil PR to merge, and MPI augmentation multiplies this list
+# by the number of MPI ABIs -- so start small and widen once these are green.
 #
-# No `expand_cxxstring_abis`: this is a pure C ABI cdylib with no C++ in its
-# link closure, so the libstdc++ string ABI does not apply and expanding it
-# would just double the build matrix.
+# No `expand_cxxstring_abis`: this is a pure C ABI cdylib with no C++ in its own
+# link closure.
 platforms = [
     Platform("x86_64", "linux"; libc = "glibc"),
     Platform("aarch64", "linux"; libc = "glibc"),
@@ -85,19 +120,31 @@ platforms = [
     Platform("x86_64", "windows"),
 ]
 
+platforms, platform_dependencies = MPI.augment_platforms(platforms)
+
 products = [
     LibraryProduct("libinfrastore_ffi", :libinfrastore_ffi),
 ]
 
+# HDF5_jll is pinned to the same compat bound NetCDF_jll declares. That
+# agreement is the whole point of this recipe: if the two resolved to different
+# HDF5_jll versions we would be back to two libhdf5 in one process, which is
+# exactly what vendoring was avoided for.
 dependencies = [
-    Dependency("NetCDF_jll"),
-    Dependency("HDF5_jll"),
+    Dependency("NetCDF_jll"; compat="401.1000.100"),
+    Dependency("HDF5_jll"; compat="2.1.2"),
 ]
+append!(dependencies, platform_dependencies)
+
+# Don't look for `mpiwrapper.so` when BinaryBuilder examines and `dlopen`s the
+# shared libraries. (MPItrampoline will skip its automatic initialization.)
+ENV["MPITRAMPOLINE_DELAY_INIT"] = "1"
 
 build_tarballs(
     ARGS, name, version, sources, script, platforms, products, dependencies;
     compilers = [:c, :rust],
     julia_compat = "1.10",
+    augment_platform_block,
     # Must be >= the workspace's `rust-version`, and the workspace is on edition
     # 2024 (Rust >= 1.85). BinaryBuilder otherwise defaults to whatever its
     # newest Rust shard happens to be, which makes the toolchain drift silently.
