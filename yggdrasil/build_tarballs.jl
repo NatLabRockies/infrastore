@@ -110,14 +110,31 @@ augment_platform_block = """
 # build for the Yggdrasil PR to merge, and MPI augmentation multiplies this list
 # by the number of MPI ABIs -- so start small and widen once these are green.
 #
-# No `expand_cxxstring_abis`: this is a pure C ABI cdylib with no C++ in its own
-# link closure.
+# The `libgfortran_version` / `cxxstring_abi` tags are NOT about this crate's own
+# ABI -- it is a pure C ABI cdylib with no Fortran or C++ in its link closure.
+# They are the coordinates BinaryBuilder uses to *select a dependency's*
+# artifact, and HDF5_jll publishes only tagged builds:
+#
+#     x86_64-linux-gnu-libgfortran5-cxx11-mpi+mpich
+#     x86_64-apple-darwin-libgfortran5-mpi+mpich        (macOS carries no cxx tag)
+#
+# A platform missing those tags matches none of them, nothing gets installed into
+# ${prefix}, and the build dies much later with hdf5-metno-sys reporting an
+# "Invalid HDF5 headers directory". NetCDF_jll, by contrast, ships artifacts
+# tagged with `mpi` alone; tags an artifact does not declare are ignored when
+# matching, so these fuller platforms select both correctly.
+#
+# Rather than `expand_cxxstring_abis` / `expand_gfortran_versions`, which would
+# multiply the matrix by combinations HDF5_jll does not publish, these are pinned
+# to the single combination it does. After MPI augmentation this yields exactly
+# the 17 triplets HDF5_jll ships. Re-check against its release assets when
+# bumping the HDF5_jll compat bound.
 platforms = [
-    Platform("x86_64", "linux"; libc = "glibc"),
-    Platform("aarch64", "linux"; libc = "glibc"),
-    Platform("x86_64", "macos"),
-    Platform("aarch64", "macos"),
-    Platform("x86_64", "windows"),
+    Platform("x86_64", "linux"; libc = "glibc", libgfortran_version = v"5", cxxstring_abi = "cxx11"),
+    Platform("aarch64", "linux"; libc = "glibc", libgfortran_version = v"5", cxxstring_abi = "cxx11"),
+    Platform("x86_64", "macos"; libgfortran_version = v"5"),
+    Platform("aarch64", "macos"; libgfortran_version = v"5"),
+    Platform("x86_64", "windows"; libgfortran_version = v"5", cxxstring_abi = "cxx11"),
 ]
 
 platforms, platform_dependencies = MPI.augment_platforms(platforms)
