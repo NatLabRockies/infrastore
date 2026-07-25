@@ -58,8 +58,42 @@ print(pkgs["infrastore-core"])')"
           fi
           echo "publishing version $manifest"
 
+      # crates.io rejects re-uploading a version that already exists, which would
+      # fail the whole job. That is not hypothetical: the very first release had
+      # to be published by hand, because a trusted publisher can only be
+      # configured on a crate that already exists. Re-running a release, or
+      # tagging after a manual publish, should be a no-op rather than a red X.
+      - name: Check what still needs publishing
+        id: pending
+        run: |
+          set -euo pipefail
+          read -r version crates <<<"$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+pkgs = json.load(sys.stdin)["packages"]
+# `publish: []` means publish = false; `null` means publishable.
+names = sorted(p["name"] for p in pkgs if p.get("publish") != [])
+print(next(p["version"] for p in pkgs if p["name"] == "infrastore-core"), " ".join(names))')"
+          pending=""
+          for crate in $crates; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -A "infrastore-release (github-actions)" \
+              "https://crates.io/api/v1/crates/$crate/$version")"
+            if [ "$code" = "200" ]; then
+              echo "$crate $version already on crates.io"
+            else
+              echo "$crate $version needs publishing (HTTP $code)"
+              pending="$pending $crate"
+            fi
+          done
+          if [ -z "$pending" ]; then
+            echo "::notice::every publishable crate is already at $version; nothing to upload"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "any=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Authenticate with crates.io
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.pending.outputs.any == 'true' }}
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
@@ -70,7 +104,7 @@ print(pkgs["infrastore-core"])')"
       # HDF5 stack per crate, so expect this step to take on the order of ten
       # minutes -- worth it for an irreversible upload.
       - name: Publish
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.pending.outputs.any == 'true' }}
         run: cargo publish --workspace
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

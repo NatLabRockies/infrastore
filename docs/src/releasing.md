@@ -89,9 +89,20 @@ crate to land in the index before publishing its dependents, so the crates must 
 individually.
 
 Authentication uses crates.io [trusted publishing](https://crates.io/docs/trusted-publishing), which
-needs a one-time setup per crate on crates.io: add a GitHub Actions publisher for repository
-`NatLabRockies/infrastore`, workflow `crates-release.yml`, environment `crates-io`. No token is
-stored in the repository.
+needs a one-time setup per crate: on the crate's page, **Settings → Trusted Publishing → Add**, with
+owner `NatLabRockies`, repository `infrastore`, workflow `crates-release.yml`, environment
+`crates-io`. No token is stored in the repository.
+
+> **Bootstrapping.** Unlike PyPI, crates.io has no "pending publisher" — a trusted publisher can
+> only be attached to a crate that already exists, so the _first_ version of any new crate must be
+> published by hand with an API token (`cargo publish --workspace` with `CARGO_REGISTRY_TOKEN` set).
+> This is how v0.1.0 went out. It applies again only if a new crate joins the workspace, not to
+> subsequent releases of the existing ones.
+
+Because of that, and because a re-run of a release should not fail, the workflow first checks the
+registry for each publishable crate at the workspace version and skips the upload entirely when they
+are all present. Publishing a version that already exists is an error on crates.io, so without that
+check, tagging after a manual publish would fail the job.
 
 To rehearse without uploading, run the workflow manually with `dry_run` left checked.
 
