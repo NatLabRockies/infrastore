@@ -56,6 +56,53 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
+      # `cargo test` does not reach the PyO3 or C ABI surfaces, so the Python
+      # and Julia suites run here too. Both reuse the build above rather than
+      # provisioning NetCDF/HDF5 of their own.
+      #
+      # The extension is installed as a built wheel: `maturin develop` (what
+      # CLAUDE.md documents for local work) requires an active virtualenv,
+      # which setup-python does not provide. target/wheels is cleared first so
+      # a cached wheel from an earlier run cannot be installed instead.
+      - name: Install Python test dependencies
+        shell: bash
+        run: python -m pip install --upgrade maturin pytest numpy
+
+      - name: Build and install the Python extension
+        shell: bash
+        run: |
+          rm -rf target/wheels
+          maturin build --manifest-path crates/castore-py/Cargo.toml --out target/wheels
+          python -m pip install target/wheels/*.whl
+
+      - name: Run Python tests
+        shell: bash
+        run: python -m pytest python/tests -q
+
+      - name: Setup Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          # Castore.jl declares julia = "1.10" in [compat]; test that floor.
+          version: "1.10"
+
+      # Castore.jl dlopens the cdylib that `cargo build --workspace` already
+      # produced, located via CASTORE_LIB.
+      - name: Run Julia tests
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) root=$PWD; lib=libcastore_ffi.so ;;
+            macOS) root=$PWD; lib=libcastore_ffi.dylib ;;
+            # `pwd -W` yields a native D:/... path. Bash's own /d/... form is
+            # not something the Windows loader can dlopen.
+            Windows) root=$(pwd -W); lib=castore_ffi.dll ;;
+            *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
+          esac
+          export CASTORE_LIB="$root/target/debug/$lib"
+          test -f "$CASTORE_LIB" || { echo "missing cdylib: $CASTORE_LIB" >&2; exit 1; }
+          julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
+          julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
+
       # Coverage is collected on Linux only. `cargo llvm-cov` sets its own
       # RUSTFLAGS, so the instrumented build recompiles the whole graph --
       # including the vendored netcdf-c/HDF5 stack -- and one platform's
