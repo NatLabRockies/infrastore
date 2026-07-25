@@ -64,7 +64,7 @@ jobs:
           {
             "latest_release": null,
             "versions": [
-              {"version": "latest", "label": "latest (main)", "path": "/time-series-store/latest/"}
+              {"version": "latest", "label": "latest (main)", "path": "/infrastore/latest/"}
             ]
           }
           VJSON
