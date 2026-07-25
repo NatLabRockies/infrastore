@@ -12,6 +12,13 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # The HDF Group's own license, carried by `hdf5-metno-src` (the vendored HDF5
+    # sources pulled in by `castore-core`'s default `vendored` feature). It is a
+    # BSD-3-Clause variant -- the text states it "is covered by the 3-clause BSD
+    # License" -- but SPDX catalogs it under its own identifier, so it has to be
+    # allowed by name. The sibling `netcdf-src` crate needs no entry: its
+    # COPYRIGHT file is verbatim BSD-3-Clause, already allowed above.
+    "HDF5",
     "ISC",
     "MIT",
     "MPL-2.0",

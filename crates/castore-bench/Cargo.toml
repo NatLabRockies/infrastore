@@ -10,6 +10,12 @@ description = "Performance benchmarks for castore"
 name = "cas-bench"
 path = "src/main.rs"
 
+# Forwarded so that opting out of vendoring is possible graph-wide; see
+# `castore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["castore-core/vendored"]
+
 [dependencies]
 castore-core = { workspace = true }
 chrono = { workspace = true }

@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Protobuf definitions and conversions for castore"
 
+# Forwarded so that opting out of vendoring is possible graph-wide; see
+# `castore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["castore-core/vendored"]
+
 [dependencies]
 chrono = { workspace = true }
 ndarray = { workspace = true }

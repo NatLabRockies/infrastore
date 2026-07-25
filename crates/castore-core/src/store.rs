@@ -2029,8 +2029,24 @@ impl Store {
 
         if let Some(src) = self.netcdf_path.clone() {
             if src != path {
-                std::fs::copy(&src, path)?;
-                std::fs::copy(catalog_sqlite_path(&src), &sqlite_path)?;
+                // HDF5 keeps a byte-range lock on an open file. On Windows that
+                // makes `fs::copy` (CopyFileEx) fail with ERROR_LOCK_VIOLATION
+                // ("another process has locked a portion of the file"), so drop
+                // the NetCDF handle for the duration of the copy and reopen it
+                // afterwards. The placeholder backend is never observed: nothing
+                // else runs between the swap and the reopen.
+                drop(std::mem::replace(
+                    &mut self.backend,
+                    Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
+                ));
+
+                let copied = std::fs::copy(&src, path)
+                    .and_then(|_| std::fs::copy(catalog_sqlite_path(&src), &sqlite_path));
+
+                // Reopen before surfacing a copy failure, so a failed persist
+                // leaves the store usable instead of stranded on the placeholder.
+                self.backend = Box::new(NetCdfBackend::open(&src, self.read_only)?);
+                copied?;
             }
             return Ok(());
         }

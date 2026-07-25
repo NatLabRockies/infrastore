@@ -11,6 +11,12 @@ description = "C ABI for castore (used by the Julia binding)"
 name = "castore_ffi"
 crate-type = ["cdylib", "staticlib"]
 
+# Statically link netcdf-c/HDF5 so the cdylib the Julia binding loads is
+# self-contained; see `castore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["castore-core/vendored"]
+
 [dependencies]
 chrono = { workspace = true }
 ndarray = { workspace = true }

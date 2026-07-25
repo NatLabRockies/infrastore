@@ -51,7 +51,12 @@ done
 sed -i 's/sha2 = { workspace = true, features = \["asm"\] }/sha2 = { workspace = true }/' \
     crates/castore-core/Cargo.toml
 
-cargo build --release --target ${rust_target} -p castore-ffi
+# `--no-default-features` turns OFF castore's `vendored` feature, which is on by
+# default and would build netcdf-c + HDF5 from source and link them statically.
+# That is right for standalone Rust/Python consumers but wrong here: this binary
+# must link the NetCDF_jll/HDF5_jll libraries declared below so a Julia process
+# has exactly one libhdf5. Do not drop this flag.
+cargo build --release --no-default-features --target ${rust_target} -p castore-ffi
 
 install -Dvm755 "target/${rust_target}/release/libcastore_ffi.${dlext}" \
     "${libdir}/libcastore_ffi.${dlext}"

@@ -59,6 +59,73 @@ fn persistent_round_trip() {
     assert!(report.ok(), "integrity errors: {:?}", report.errors);
 }
 
+/// Persisting an *on-disk* store copies both halves and leaves the source store
+/// usable. `persist_to` has to close its NetCDF handle around the copy — HDF5
+/// keeps a byte-range lock on an open file, which makes the copy fail on Windows
+/// with ERROR_LOCK_VIOLATION — so this also covers the reopen after that swap.
+#[test]
+fn on_disk_persist_copies_and_leaves_the_source_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("store.nc");
+    let dest = dir.path().join("copy.nc");
+
+    let mut store = create_store(Some(src.as_path()), false).unwrap();
+    store
+        .add_time_series(
+            42,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
+            Features::new(),
+            Some("MW".into()),
+        )
+        .unwrap();
+
+    store.persist_to(&dest).unwrap();
+    assert!(dest.exists(), "the destination .nc must exist");
+    assert!(
+        dir.path().join("copy.nc.sqlite").exists(),
+        "the companion catalog must be copied too"
+    );
+
+    // The source store survived the close/reopen: it still reads, still verifies,
+    // and still accepts writes.
+    let keys = store
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(store.verify_integrity().unwrap().ok());
+    store
+        .add_time_series(
+            43,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
+            Features::new(),
+            Some("MW".into()),
+        )
+        .unwrap();
+    drop(store);
+
+    // The copy is a complete, independent store holding the pre-persist state.
+    let copy = open_store(dest.as_path(), true).unwrap();
+    let copied = copy
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .unwrap();
+    assert_eq!(copied.len(), 1);
+    assert_eq!(
+        copy.get_time_series(copied[0].identity(), None)
+            .unwrap()
+            .as_single()
+            .unwrap()
+            .data
+            .to_f64_vec()
+            .unwrap(),
+        (0..24).map(|i| 100.0 + i as f64).collect::<Vec<_>>()
+    );
+    assert!(copy.verify_integrity().unwrap().ok());
+}
+
 /// An in-memory store must be persistable to disk: `persist_to` materializes its
 /// arrays + metadata, and the reopened store reads the same data back.
 #[test]
