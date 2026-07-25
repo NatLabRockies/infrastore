@@ -29,7 +29,7 @@ const HELP_STYLES: Styles = Styles::styled()
 #[command(
     name = "infrastore",
     version,
-    about = "Load and inspect a infrastore store on disk",
+    about = "Load and inspect an infrastore store on disk",
     styles = HELP_STYLES
 )]
 struct Cli {
