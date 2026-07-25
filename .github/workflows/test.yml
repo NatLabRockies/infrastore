@@ -82,8 +82,7 @@ jobs:
       - name: Setup Julia
         uses: julia-actions/setup-julia@v2
         with:
-          # Castore.jl declares julia = "1.10" in [compat]; test that floor.
-          version: "1.10"
+          version: "1.12"
 
       # Castore.jl dlopens the cdylib that `cargo build --workspace` already
       # produced, located via CASTORE_LIB.
