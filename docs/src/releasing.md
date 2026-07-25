@@ -160,20 +160,76 @@ The recipe patches two things in the source tree, both deliberate:
 
 **4b. `InfraStore.jl`** — the `ccall` wrapper and high-level API.
 
-Once the JLL is merged and registered:
+These changes are drafted below but **must not be applied until the JLL is registered** — adding a
+dependency on a package General does not yet carry makes `Pkg.instantiate()` fail, which would break
+the Julia test job.
 
-1. Add `InfraStore_jll` to `[deps]` and `[compat]` in `julia/InfraStore.jl/Project.toml`.
-2. Replace the soft `Base.identify_package` lookup in `_jll_library_path()` with a direct
-   `import InfraStore_jll`. Keep the `INFRASTORE_LIB` override ahead of it — that is what lets a
-   development build shadow the JLL with no code change.
-3. Register with [Registrator](https://github.com/JuliaRegistries/Registrator.jl), passing the
-   subdirectory:
-   ```
-   @JuliaRegistrator register subdir=julia/InfraStore.jl
-   ```
+**Step 1 — `julia/InfraStore.jl/Project.toml`.** Add the dependency and its compat bound:
+
+```toml
+ [deps]
+ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
++InfraStore_jll = "e72452fb-83b3-5caa-ac95-1fd73ac75842"
+ JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+ [compat]
++InfraStore_jll = "0.1"
+ JSON = "0.21, 1"
+ julia = "1.10"
+```
+
+JLL UUIDs are derived deterministically from the package name, so that value is already known —
+`BinaryBuilder.jll_uuid("InfraStore_jll")`. (The same call reproduces the published UUIDs of
+`NetCDF_jll` and `HDF5_jll` exactly, which is how it was checked.)
+
+**Step 2 — `julia/InfraStore.jl/src/InfraStore.jl`.** Replace `_jll_library_path` and `lib_path`
+with a direct import. `INFRASTORE_LIB` stays ahead of the JLL: that ordering is what lets a local
+`cargo build` shadow the released binary with no code change, and the CI job relies on it.
+
+```julia
+import InfraStore_jll
+
+const _LIB_REF = Ref{String}("")
+
+"""
+Path to the `libinfrastore_ffi` cdylib. The `INFRASTORE_LIB` environment
+variable takes precedence (development builds); otherwise the
+`InfraStore_jll` binary is used.
+"""
+function lib_path()
+    if !isempty(_LIB_REF[])
+        return _LIB_REF[]
+    end
+    p = get(ENV, "INFRASTORE_LIB", "")
+    if isempty(p)
+        # The JLL is built for a fixed platform list, so a user on a target it
+        # does not cover (musl, i686, armv7, ...) gets a loadable package with
+        # no product. Say so, rather than failing later inside a `ccall`.
+        InfraStore_jll.is_available() || error(
+            "InfraStore_jll provides no binary for this platform. Build the " *
+            "cdylib from source and point INFRASTORE_LIB at it.",
+        )
+        p = InfraStore_jll.libinfrastore_ffi
+    end
+    _LIB_REF[] = p
+    return p
+end
+```
+
+The `Base.identify_package` lookup this replaces exists only to let the package work before the JLL
+is registered; once it is a real dependency, the soft lookup is dead weight.
+
+**Step 3 — register.** Comment on the release commit with
+[Registrator](https://github.com/JuliaRegistries/Registrator.jl), passing the subdirectory, which is
+required because the package is not at the repository root:
+
+```
+@JuliaRegistrator register subdir=julia/InfraStore.jl
+```
 
 General's AutoMerge requires a public repository, an OSI-approved license file in the package
-directory, and `[compat]` bounds for every dependency including `julia`.
+directory, `[compat]` bounds for every non-stdlib dependency including `julia`, and version `0.1.0`
+for a new package. New packages also sit for a three-day waiting period before auto-merge.
 
 ### 5. Downstream
 
