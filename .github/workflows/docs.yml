@@ -1,0 +1,76 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - '.github/scripts/check-doc-links.py'
+      - '.github/workflows/docs.yml'
+
+# contents:write is required to push to the gh-pages branch directly
+permissions:
+  contents: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.4.52'
+
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid@0.16.0
+
+      - name: Build documentation
+        run: |
+          cd docs
+          # Override site-url for versioned path
+          sed -i 's|site-url = "/castore/"|site-url = "/castore/latest/"|' book.toml
+          mdbook build
+
+      - name: Check documentation links
+        run: python3 .github/scripts/check-doc-links.py --internal --external
+
+      - name: Setup gh-pages branch
+        run: .github/scripts/gh-pages-setup.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Deploy latest docs
+        run: |
+          cd gh-pages-deploy
+
+          # Replace latest/ with new build
+          rm -rf latest
+          cp -r ../docs/book latest
+
+          # Root redirect
+          cp ../docs/redirect.html index.html
+
+          # Initialize versions.json if it doesn't exist
+          if [ ! -f versions.json ]; then
+            cat > versions.json << 'VJSON'
+          {
+            "latest_release": null,
+            "versions": [
+              {"version": "latest", "label": "latest (main)", "path": "/castore/latest/"}
+            ]
+          }
+          VJSON
+          fi
+
+      - name: Commit and push
+        run: |
+          cd gh-pages-deploy
+          ../.github/scripts/gh-pages-commit.sh "Deploy docs from ${GITHUB_SHA::8}"

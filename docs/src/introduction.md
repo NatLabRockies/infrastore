@@ -64,7 +64,7 @@ flowchart TB
 - **Read-only gRPC service** — Serve a store over the network for remote readers, with optional
   API-key authentication
 - **Designed for power-systems data** — The data model maps onto
-  [InfrastructureSystems.jl](https://github.com/NLR-Sienna/InfrastructureSystems.jl) and
+  [InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl) and
   [infrasys](https://github.com/NatLabRockies/infrasys) owners, categories, and time-series concepts
 
 ## Who Should Read This

@@ -57,8 +57,27 @@ The documentation follows the [Diataxis](https://diataxis.fr/) framework:
 3. Preview with `mdbook serve`.
 4. Markdown is wrapped at 100 characters to match the rest of the repository.
 
+## Publishing
+
+The site is published to GitHub Pages from the `gh-pages` branch at
+<https://natlabrockies.github.io/castore/>.
+
+`.github/workflows/docs.yml` runs on every push to `main` that touches `docs/`, builds the book with
+`site-url` rewritten to `/castore/latest/`, verifies internal and external links, and commits the
+result to `gh-pages` under `latest/`. The branch root holds `index.html` (a copy of
+`redirect.html`), which reads `versions.json` and forwards visitors to the newest release, or to
+`latest/` when no release has been published.
+
+The layout is versioned so tagged releases can be deployed alongside `latest/` in their own
+directories, with `version-selector.js` rendering a picker in the header from `versions.json`. Until
+a release workflow adds those entries, the selector offers `latest (main)` only.
+
+Link checking also runs on pull requests via `.github/workflows/lint.yml`, restricted to internal
+links so PRs are not gated on third-party sites being reachable.
+
 ## Theme Assets
 
-The `custom.css`, `pagetoc.css`, `pagetoc.js`, `mermaid.min.js`, and `mermaid-init.js` files provide
-the page table of contents, wide-table layout, and Mermaid diagram rendering. They are shared with
-the look-and-feel of sibling NatLabRockies documentation sites.
+The `custom.css`, `pagetoc.css`, `pagetoc.js`, `mermaid.min.js`, `mermaid-init.js`,
+`version-selector.css`, and `version-selector.js` files provide the page table of contents,
+wide-table layout, Mermaid diagram rendering, and the version picker. They are shared with the
+look-and-feel of sibling NatLabRockies documentation sites.
