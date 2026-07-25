@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Rust - castore Documentation</title>
+        <title>Rust - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,16 +185,16 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="rust-developer-guide"><a class="header" href="#rust-developer-guide">Rust Developer Guide</a></h1>
-<p>This guide covers using <code>castore-core</code> from Rust. For exact signatures see the
+<p>This guide covers using <code>infrastore-core</code> from Rust. For exact signatures see the
 <a href="../reference/rust-api.html">Rust API reference</a>.</p>
 <p>For a runnable end-to-end round-trip, <code>examples/basic_rust.rs</code> creates an in-memory store, adds a
 <code>SingleTimeSeries</code>, and reads it back:</p>
-<pre><code class="language-sh">cargo run --manifest-path crates/castore-core/Cargo.toml --example basic
+<pre><code class="language-sh">cargo run --manifest-path crates/infrastore-core/Cargo.toml --example basic
 </code></pre>
 <h2 id="add-the-dependency"><a class="header" href="#add-the-dependency">Add the Dependency</a></h2>
 <p>The crate is part of this workspace. From another crate in the workspace:</p>
 <pre><code class="language-toml">[dependencies]
-castore-core = { path = "../castore-core" }
+infrastore-core = { path = "../infrastore-core" }
 chrono = "0.4"
 </code></pre>
 <p>You will use <code>chrono::Duration</code>/<code>DateTime&lt;Utc&gt;</code> for time and the crate's
@@ -204,7 +204,7 @@ the API speaks.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use std::path::Path;
-use castore_core::{create_store, open_store};
+use infrastore_core::{create_store, open_store};
 
 // In-memory (tests, scratch work): no filesystem I/O.
 let mut store = create_store(None, true)?;
@@ -219,7 +219,7 @@ let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>use chrono::{Duration, TimeZone, Utc};
-use castore_core::{
+use infrastore_core::{
     Features, FeatureValue, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
 };
 
@@ -249,7 +249,7 @@ returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
 batch atomically — any error rolls back every array and association in the call:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::AddRequest;
+</span>use infrastore_core::AddRequest;
 
 let keys = store.add_time_series_bulk(vec![
     AddRequest {
@@ -319,7 +319,7 @@ let series = store.bulk_read(&amp;ids)?;
 is ANDed, and the <code>features</code> clause is a subset match:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{ListFilter, OwnerCategory, TimeSeriesType};
+</span>use infrastore_core::{ListFilter, OwnerCategory, TimeSeriesType};
 
 let metas = store.list_time_series(
     ListFilter::new()
@@ -345,7 +345,7 @@ to, so you can group series that share stored data:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>for (key, hash) in store.list_keys_with_hash(ListFilter::new().owner_id(42))? {
-    println!("{} -&gt; {}", key.identity().name, castore_core::hash::hash_hex(&amp;hash));
+    println!("{} -&gt; {}", key.identity().name, infrastore_core::hash::hash_hex(&amp;hash));
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="the-low-level-read-path"><a class="header" href="#the-low-level-read-path">The low-level read path</a></h3>
@@ -363,7 +363,7 @@ let array = store.get_array_by_hash(&amp;meta.data_hash)?;
 conventional shapes per type); the store content-addresses it and records the windowing parameters:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
+</span>use infrastore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
 
 // A Deterministic forecast: a [H, count, *E] array (here scalar steps, so [H, count]).
 let (horizon_count, count) = (24, 7);
@@ -433,7 +433,7 @@ request is ambiguous. <code>RequestedType::AbstractDeterministic</code> matches 
 <code>DeterministicSingleTimeSeries</code>, so callers need not know which one is stored:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::RequestedType;
+</span>use infrastore_core::RequestedType;
 
 let key = store.resolve_forecast_key(
     42,
@@ -486,7 +486,7 @@ filtering and are not part of identity, so re-attaching the same pair under diff
 a duplicate and fails with <code>DuplicateAssociation</code>:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+</span>use infrastore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 
 store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
     component_id: 42,
@@ -538,7 +538,7 @@ assert_eq!(removed, 1);
 an edge is a different edge — and both endpoints are always components, so there is no category:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{ParentChildAssociation, ParentChildFilter};
+</span>use infrastore_core::{ParentChildAssociation, ParentChildFilter};
 
 store.add_parent_child_association(ParentChildAssociation {
     parent_id: 42,
@@ -555,7 +555,7 @@ assert_eq!(store.list_parents(&amp;ParentChildFilter::new().child_id(7))?, vec![
 let updated = store.replace_parent_child_component_id(42, 99)?;
 assert_eq!(updated, 1);
 <span class="boring">}</span></code></pre></pre>
-<p>Neither table is reachable over gRPC or the <code>cas</code> CLI.</p>
+<p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
 <p>The NetCDF backend buffers writes. Call <code>flush</code> before copying the files for backup:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -577,7 +577,7 @@ store.persist_to(Path::new("system.nc"))?;   // writes system.nc + system.nc.sql
 <p>Every fallible method returns <code>Result&lt;T, TimeSeriesError&gt;</code>. Match on the variant to react:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::TimeSeriesError;
+</span>use infrastore_core::TimeSeriesError;
 
 match store.get_time_series(key.identity(), None) {
     Ok(data) =&gt; { /* ... */ }

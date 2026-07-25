@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Python - castore Documentation</title>
+        <title>Python - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,13 +185,13 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="python-developer-guide"><a class="header" href="#python-developer-guide">Python Developer Guide</a></h1>
-<p>This guide covers building on the <code>castore</code> PyO3 module. For exact signatures and return shapes, see
-the <a href="../reference/python-api.html">Python API reference</a>. To install the wheel into your environment,
-see <a href="../how-to/integrate-python.html">Integrate with Python</a>.</p>
+<p>This guide covers building on the <code>infrastore</code> PyO3 module. For exact signatures and return shapes,
+see the <a href="../reference/python-api.html">Python API reference</a>. To install the wheel into your
+environment, see <a href="../how-to/integrate-python.html">Integrate with Python</a>.</p>
 <h2 id="import"><a class="header" href="#import">Import</a></h2>
 <pre><code class="language-python">from datetime import datetime, timedelta, timezone
 import numpy as np
-from castore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
+from infrastore import Store, SingleTimeSeries, OwnerCategory, TimeSeriesType
 </code></pre>
 <p>The module exposes <code>Store</code>; the static series classes <code>SingleTimeSeries</code> and
 <code>NonSequentialTimeSeries</code>; the forecast classes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code>;
@@ -340,7 +340,7 @@ directed parent/child edges between components. Removing a time series never tou
 vice versa — see
 <a href="../explanation/data-model.html#associations-between-entities">Associations Between Entities</a>.</p>
 <p>Filter arguments are keyword-only, all optional, and ANDed; passing none matches everything.</p>
-<pre><code class="language-python">from castore import (
+<pre><code class="language-python">from infrastore import (
     SupplementalAttributeAssociation,
     ParentChildAssociation,
     DuplicateAssociationError,
@@ -401,14 +401,14 @@ assert store.count_parent_child_associations() == 2
 assert store.replace_parent_child_component_id(42, 99) == 1
 assert store.list_parents(child_id=7) == [43, 99]
 </code></pre>
-<p>Neither table is reachable over gRPC or the <code>cas</code> CLI.</p>
+<p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
 <pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.nc + system.nc.sqlite can be copied
 </code></pre>
 <p>Keep the two files together — the <code>.nc</code> and <code>.nc.sqlite</code> pair is a single logical store.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
 <p>The store's own exceptions inherit from <code>TimeSeriesError</code>, so you can catch broadly or narrowly:</p>
-<pre><code class="language-python">from castore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
+<pre><code class="language-python">from infrastore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
 
 try:
     store.add_time_series(...)
@@ -426,7 +426,7 @@ first, so <code>True</code>/<code>False</code> feature values are stored as bool
 <h2 id="a-complete-round-trip"><a class="header" href="#a-complete-round-trip">A Complete Round-Trip</a></h2>
 <pre><code class="language-python">from datetime import datetime, timedelta, timezone
 import numpy as np
-from castore import Store, SingleTimeSeries, OwnerCategory
+from infrastore import Store, SingleTimeSeries, OwnerCategory
 
 store = Store.create(in_memory=True)
 ts = SingleTimeSeries(
@@ -452,12 +452,12 @@ subscriber before your first store call.</p>
 subscriber on import when this variable is set:</p>
 <pre><code class="language-sh">RUST_LOG=debug python myscript.py
 # or, to limit output to the store core only:
-RUST_LOG=castore_core=debug python myscript.py
+RUST_LOG=infrastore_core=debug python myscript.py
 </code></pre>
 <p><strong>Programmatically</strong> — call <code>init_tracing</code> with a filter directive string:</p>
-<pre><code class="language-python">from castore import init_tracing
+<pre><code class="language-python">from infrastore import init_tracing
 
-init_tracing("castore_core=debug")
+init_tracing("infrastore_core=debug")
 
 store = Store.create(in_memory=True)
 store.add_time_series(...)   # spans appear on stderr
@@ -466,7 +466,7 @@ store.add_time_series(...)   # spans appear on stderr
 <code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
 bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
-<tr><td><code>castore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
 </tbody></table>
 </div>
                     </main>

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Run the gRPC Server - castore Documentation</title>
+        <title>Run the gRPC Server - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -209,9 +209,9 @@ files = ["./system.nc"]   # the ./system.nc.sqlite catalog must sit beside it
 method = "none"
 </code></pre>
 <h2 id="3-launch"><a class="header" href="#3-launch">3. Launch</a></h2>
-<pre><code class="language-sh">cargo run -p castore-server -- --config my_server.toml
+<pre><code class="language-sh">cargo run -p infrastore-server -- --config my_server.toml
 # or a release build:
-./target/release/castore-server --config my_server.toml
+./target/release/infrastore-server --config my_server.toml
 </code></pre>
 <p>Add <code>RUST_LOG=debug</code> for verbose logging.</p>
 <h2 id="require-an-api-key"><a class="header" href="#require-an-api-key">Require an API Key</a></h2>
@@ -226,14 +226,14 @@ startup.</p>
 <p>From Rust:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_server::client::RemoteClient;
+</span>use infrastore_server::client::RemoteClient;
 
 let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
 println!("{:?}", client.get_counts().await?);
 <span class="boring">}</span></code></pre></pre>
 <p>Or with <a href="https://github.com/fullstorydev/grpcurl"><code>grpcurl</code></a> using the proto file:</p>
-<pre><code class="language-sh">grpcurl -plaintext -proto proto/castore/v1/store.proto \
-  127.0.0.1:50051 castore.v1.CatalogStore/GetCounts
+<pre><code class="language-sh">grpcurl -plaintext -proto proto/infrastore/v1/store.proto \
+  127.0.0.1:50051 infrastore.v1.CatalogStore/GetCounts
 </code></pre>
 <p>(Add <code>-H 'x-api-key: replace-me-with-a-secret'</code> when authentication is enabled.)</p>
 <h2 id="notes"><a class="header" href="#notes">Notes</a></h2>

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Installation - castore Documentation</title>
+        <title>Installation - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,9 +185,9 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
-<p>castore is a Rust workspace. Building any of its interfaces requires a Rust toolchain plus the HDF5,
-NetCDF, and Protobuf system libraries. The Python and Julia bindings additionally need a Python
-interpreter (3.10+) or Julia (1.10+).</p>
+<p>infrastore is a Rust workspace. Building any of its interfaces requires a Rust toolchain plus the
+HDF5, NetCDF, and Protobuf system libraries. The Python and Julia bindings additionally need a
+Python interpreter (3.10+) or Julia (1.10+).</p>
 <h2 id="system-libraries"><a class="header" href="#system-libraries">System Libraries</a></h2>
 <h3 id="macos-homebrew"><a class="header" href="#macos-homebrew">macOS (Homebrew)</a></h3>
 <pre><code class="language-sh">brew install hdf5 netcdf protobuf maturin
@@ -211,7 +211,7 @@ the repo pins no <code>rust-toolchain</code> file, and CI builds on stable.)</p>
 </code></pre>
 <h2 id="build-the-workspace"><a class="header" href="#build-the-workspace">Build the Workspace</a></h2>
 <pre><code class="language-sh">git clone https://github.com/NatLabRockies/time-series-store
-cd castore
+cd infrastore
 cargo build --workspace --all-features
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -220,13 +220,13 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 <code>cargo build --workspace</code> can link the PyO3 cdylib without <code>maturin</code>. On Linux those flags are inert.</p>
 <h2 id="crates-in-the-workspace"><a class="header" href="#crates-in-the-workspace">Crates in the Workspace</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Crate</th><th>What it builds</th></tr></thead><tbody>
-<tr><td><code>castore-core</code></td><td>Types, NetCDF + SQLite storage, hashing, Rust API</td></tr>
-<tr><td><code>castore-proto</code></td><td>Protobuf service definition + <code>tonic</code> codegen</td></tr>
-<tr><td><code>castore-server</code></td><td>gRPC server binary + Rust client</td></tr>
-<tr><td><code>castore-py</code></td><td>PyO3 bindings, <code>abi3-py310</code> wheel</td></tr>
-<tr><td><code>castore-ffi</code></td><td>C ABI cdylib (the foundation of the Julia binding)</td></tr>
-<tr><td><code>castore-cli</code></td><td><code>cas</code> CLI binary (CSV add/read, inspect on-disk stores)</td></tr>
-<tr><td><code>castore-bench</code></td><td><code>cas-bench</code> binary (bulk-ingest + simulation-read benchmarks)</td></tr>
+<tr><td><code>infrastore-core</code></td><td>Types, NetCDF + SQLite storage, hashing, Rust API</td></tr>
+<tr><td><code>infrastore-proto</code></td><td>Protobuf service definition + <code>tonic</code> codegen</td></tr>
+<tr><td><code>infrastore-server</code></td><td>gRPC server binary + Rust client</td></tr>
+<tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py310</code> wheel</td></tr>
+<tr><td><code>infrastore-ffi</code></td><td>C ABI cdylib (the foundation of the Julia binding)</td></tr>
+<tr><td><code>infrastore-cli</code></td><td><code>infrastore</code> CLI binary (CSV add/read, inspect on-disk stores)</td></tr>
+<tr><td><code>infrastore-bench</code></td><td><code>infrastore-bench</code> binary (bulk-ingest + simulation-read benchmarks)</td></tr>
 </tbody></table>
 </div>
 <h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>

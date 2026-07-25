@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Rust API - castore Documentation</title>
+        <title>Rust API - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,10 +185,10 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="rust-api"><a class="header" href="#rust-api">Rust API</a></h1>
-<p>The public surface of <code>castore-core</code>. Import paths below are relative to the crate root.</p>
+<p>The public surface of <code>infrastore-core</code>. Import paths below are relative to the crate root.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{
+</span>use infrastore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
     TimeSeriesData, TimeSeriesType, RequestedType, Period,
@@ -203,8 +203,8 @@
 };
 
 // `array_hash` and `hash_hex` are also re-exported at the crate root; `features_hash` is not:
-use castore_core::hash::{array_hash, features_hash, hash_hex};
-use castore_core::storage::StorageBackend;
+use infrastore_core::hash::{array_hash, features_hash, hash_hex};
+use infrastore_core::storage::StorageBackend;
 <span class="boring">}</span></code></pre></pre>
 <p>All time spans in this API — resolutions, horizons, and intervals — are the crate's
 <a href="#period"><code>Period</code></a>, a calendar-aware span. Builders and constructors take <code>impl Into&lt;Period&gt;</code>, so
@@ -554,7 +554,7 @@ shape against the windowing parameters (<code>horizon</code>, <code>interval</co
 <code>percentiles</code>):</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{Deterministic, TimeSeriesData};
+</span>use infrastore_core::{Deterministic, TimeSeriesData};
 
 let forecast = Deterministic::new(
     initial_timestamp, resolution, horizon, interval, count, data, name,
@@ -688,7 +688,7 @@ ordered by attribute type then component type). The core groups; the caller form
 </ul>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+</span>use infrastore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 
 store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
     component_id: 1,
@@ -737,7 +737,7 @@ duplicate an edge <code>new_id</code> already has.</li>
 </ul>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::{ParentChildAssociation, ParentChildFilter};
+</span>use infrastore_core::{ParentChildAssociation, ParentChildFilter};
 
 store.add_parent_child_association(ParentChildAssociation {
     parent_id: 1,
@@ -762,7 +762,7 @@ let exported = store.list_parent_child_associations(&amp;ParentChildFilter::defa
 target.add_parent_child_associations(exported)?;
 <span class="boring">}</span></code></pre></pre>
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
-<a href="./cli.html"><code>cas</code> CLI</a>.</p>
+<a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
 <h3 id="timeserieskey-and-keyidentity"><a class="header" href="#timeserieskey-and-keyidentity"><code>TimeSeriesKey</code> and <code>KeyIdentity</code></a></h3>
 <p><code>TimeSeriesKey</code> is an enum: one variant per series family, each pairing the shared identity with a
@@ -1321,7 +1321,7 @@ rarely call it directly, but it documents the backend contract. It is <strong>no
 crate root — import it (and the backends) from the <code>storage</code> module:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+</span>use infrastore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
 <span class="boring">}</span></code></pre></pre>
 <p>Every method below with a default is a performance override: the default is correct but naive, and
 <code>NetCdfBackend</code> implements a faster path (single hyperslab reads, whole-chunk block writes).</p>
@@ -1389,8 +1389,8 @@ crate root — import it (and the backends) from the <code>storage</code> module
 }
 <span class="boring">}</span></code></pre></pre>
 <h2 id="hashing"><a class="header" href="#hashing">Hashing</a></h2>
-<p>In the <code>hash</code> module (<code>castore_core::hash</code>). <code>array_hash</code> and <code>hash_hex</code> are also re-exported at the
-crate root; <code>features_hash</code> is only reachable through the module.</p>
+<p>In the <code>hash</code> module (<code>infrastore_core::hash</code>). <code>array_hash</code> and <code>hash_hex</code> are also re-exported at
+the crate root; <code>features_hash</code> is only reachable through the module.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub fn array_hash(data: &amp;TypedArray) -&gt; [u8; 32];   // domain: dtype tag + shape + typed bytes

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Server Configuration - castore Documentation</title>
+        <title>Server Configuration - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -187,7 +187,7 @@
                         <h1 id="server-configuration"><a class="header" href="#server-configuration">Server Configuration</a></h1>
 <p>The gRPC server is configured by a single TOML file passed with <code>--config</code>. The starting point is
 <code>examples/server.toml</code>.</p>
-<pre><code class="language-sh">castore-server --config my_server.toml
+<pre><code class="language-sh">infrastore-server --config my_server.toml
 </code></pre>
 <h2 id="file-structure"><a class="header" href="#file-structure">File Structure</a></h2>
 <pre><code class="language-toml">[server]
@@ -250,7 +250,7 @@ compare, treating length as non-secret.</p>
 <li>Binds <code>host:port</code> and serves the <code>CatalogStore</code> gRPC service.</li>
 </ol>
 <p>Logging honors the <code>RUST_LOG</code> environment variable (default <code>info</code>):</p>
-<pre><code class="language-sh">RUST_LOG=debug castore-server --config my_server.toml
+<pre><code class="language-sh">RUST_LOG=debug infrastore-server --config my_server.toml
 </code></pre>
 <p>See the <a href="../guides/server.html">gRPC Server guide</a> for the end-to-end workflow and the
 <a href="./grpc-api.html">gRPC API reference</a> for the served methods.</p>

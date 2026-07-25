@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Julia - castore Documentation</title>
+        <title>Julia - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,17 +185,18 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="julia-developer-guide"><a class="header" href="#julia-developer-guide">Julia Developer Guide</a></h1>
-<p>This guide covers building on <code>Castore.jl</code>, the Julia package that wraps the
+<p>This guide covers building on <code>InfraStore.jl</code>, the Julia package that wraps the
 <a href="../reference/c-abi.html">C ABI</a>. For exact signatures see the
 <a href="../reference/julia-api.html">Julia API reference</a>; to set up the package and the native library, see
 <a href="../how-to/integrate-julia.html">Integrate with Julia</a>.</p>
 <h2 id="load-the-package"><a class="header" href="#load-the-package">Load the Package</a></h2>
-<p><code>Castore.jl</code> resolves the native library from the <code>CASTORE_LIB</code> environment variable (or the
-<code>Castore_jll</code> package when installed). Build the cdylib and point at it before <code>using Castore</code>:</p>
-<pre><code class="language-sh">cargo build -p castore-ffi --release
-export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
+<p><code>InfraStore.jl</code> resolves the native library from the <code>INFRASTORE_LIB</code> environment variable (or the
+<code>InfraStore_jll</code> package when installed). Build the cdylib and point at it before
+<code>using InfraStore</code>:</p>
+<pre><code class="language-sh">cargo build -p infrastore-ffi --release
+export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 </code></pre>
-<pre><code class="language-julia">using Dates, Castore
+<pre><code class="language-julia">using Dates, InfraStore
 </code></pre>
 <p>Exported names include <code>Store</code>, <code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, the forecast structs
 (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>), <code>OwnerCategory</code> (<code>Component</code>,
@@ -246,8 +247,8 @@ column span once instead of re-reading every chunk per series:</p>
 <pre><code class="language-julia">series = bulk_read(store, keys)   # keys :: Vector{TimeSeriesKey}, all SingleTimeSeries
 </code></pre>
 <h2 id="attribute-based-lookups"><a class="header" href="#attribute-based-lookups">Attribute-Based Lookups</a></h2>
-<p>Beyond key handles, <code>Castore.jl</code> can resolve a series directly from its attributes — convenient when
-a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):</p>
+<p>Beyond key handles, <code>InfraStore.jl</code> can resolve a series directly from its attributes — convenient
+when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side store does):</p>
 <pre><code class="language-julia">meta = get_metadata(
     store,
     42,
@@ -271,7 +272,7 @@ remove_time_series!(store, 42, Component, "load"; resolution = Hour(1))
 or <code>(owner_id, owner_category, name; resolution, features)</code> attributes — the conventions are
 interchangeable for every time series type, static or forecast.</p>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
-<p><code>Castore.jl</code> exposes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code> structs that wrap a native
+<p><code>InfraStore.jl</code> exposes <code>Deterministic</code>, <code>Probabilistic</code>, and <code>Scenarios</code> structs that wrap a native
 <code>AbstractArray</code> in the type's logical shape (the wrapper derives the dtype and dims and serializes
 the buffer row-major). Construct one and add it through the generic <code>add_time_series!</code>:</p>
 <pre><code class="language-julia">data = zeros(Float64, 24, 7)   # (horizon_count, count)
@@ -427,7 +428,7 @@ not part of it, so re-attaching the same pair under different type names is stil
     add_supplemental_attribute_association!(
         store, SupplementalAttributeAssociation(42, "Load", 100, "Outage"))
 catch e
-    e isa Castore.DuplicateAssociationError || rethrow()
+    e isa InfraStore.DuplicateAssociationError || rethrow()
     @info e.msg   # attribute 100 is already attached to component 42
 end
 
@@ -448,28 +449,28 @@ count_parent_child_associations(store)  # 2
 replace_parent_child_component_id!(store, 42, 99)   # 1
 list_parents(store; child_id=7)                     # [43, 99]
 </code></pre>
-<p>Neither table is reachable over gRPC or the <code>cas</code> CLI.</p>
+<p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
 <pre><code class="language-julia">flush!(store)   # sync NetCDF + SQLite; afterwards system.nc + system.nc.sqlite can be copied
 </code></pre>
 <p>Keep the <code>.nc</code> and <code>.nc.sqlite</code> files together.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
-<p>Errors subtype <code>Castore.TimeSeriesException</code>. The exception types are not exported, so reference
+<p>Errors subtype <code>InfraStore.TimeSeriesException</code>. The exception types are not exported, so reference
 them module-qualified. Catch broadly or narrowly:</p>
 <pre><code class="language-julia">try
     add_time_series!(store, 42, "Generator", Component, ts)
 catch e
-    if e isa Castore.DuplicateTimeSeriesError
+    if e isa InfraStore.DuplicateTimeSeriesError
         @warn "already present"
     else
         rethrow()
     end
 end
 </code></pre>
-<p>The available types are <code>Castore.NotFoundError</code>, <code>Castore.DuplicateTimeSeriesError</code>,
-<code>Castore.InvalidParameterError</code>, <code>Castore.IntegrityError</code>, <code>Castore.ReadOnlyStoreError</code>,
-<code>Castore.IncompatibleFormatError</code> (the on-disk store was written by an incompatible data format
-version), and <code>Castore.GenericError</code> (which carries the raw FFI status <code>code</code>).</p>
+<p>The available types are <code>InfraStore.NotFoundError</code>, <code>InfraStore.DuplicateTimeSeriesError</code>,
+<code>InfraStore.InvalidParameterError</code>, <code>InfraStore.IntegrityError</code>, <code>InfraStore.ReadOnlyStoreError</code>,
+<code>InfraStore.IncompatibleFormatError</code> (the on-disk store was written by an incompatible data format
+version), and <code>InfraStore.GenericError</code> (which carries the raw FFI status <code>code</code>).</p>
 <h2 id="infrastructuresystemsjl-integration-notes"><a class="header" href="#infrastructuresystemsjl-integration-notes">InfrastructureSystems.jl Integration Notes</a></h2>
 <p>The model is designed to back an InfrastructureSystems.jl time-series store:</p>
 <ul>
@@ -496,13 +497,13 @@ subscriber before your first store call.</p>
 <p><strong>Via environment variable</strong> — set <code>RUST_LOG</code> before loading the package. The module's <code>__init__</code>
 hook calls <code>init_logging("")</code> automatically, which reads <code>RUST_LOG</code> if set:</p>
 <pre><code class="language-sh"># shell
-export RUST_LOG=castore_core=debug
+export RUST_LOG=infrastore_core=debug
 julia --project=. myscript.jl
 </code></pre>
 <p><strong>Programmatically</strong> — call <code>init_logging</code> with a filter directive string:</p>
-<pre><code class="language-julia">using Castore
+<pre><code class="language-julia">using InfraStore
 
-init_logging("castore_core=debug")
+init_logging("infrastore_core=debug")
 
 store = Store(in_memory=true)
 add_time_series!(store, ...)   # spans appear on stderr
@@ -511,7 +512,7 @@ add_time_series!(store, ...)   # spans appear on stderr
 <code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
 bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
-<tr><td><code>castore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
 </tbody></table>
 </div>
                     </main>

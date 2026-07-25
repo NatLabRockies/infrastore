@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Data Model - castore Documentation</title>
+        <title>Data Model - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -208,7 +208,7 @@ therefore take the category alongside the id (see <a href="#keys">Keys</a>).</p>
 metadata schema. Both static series types are implemented across every interface. The four forecast
 types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
 forecasts are written through the generic <code>add_time_series</code> across the Rust core, Python, and Julia
-(the C ABI keeps the per-type <code>castore_store_add_forecast</code> / <code>castore_store_add_probabilistic</code>
+(the C ABI keeps the per-type <code>infrastore_store_add_forecast</code> / <code>infrastore_store_add_probabilistic</code>
 transport functions), and <code>DeterministicSingleTimeSeries</code> is derived from stored <code>SingleTimeSeries</code>
 via <code>transform_single_time_series</code> (gRPC stays read-only):</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Write path</th><th>Description</th></tr></thead><tbody>
@@ -221,10 +221,10 @@ via <code>transform_single_time_series</code> (gRPC stays read-only):</p>
 </tbody></table>
 </div>
 <p>All six types can be <strong>read</strong> from every interface: the Rust core, the C ABI, Python, Julia, the
-<code>cas</code> CLI, and the gRPC server. The <strong>write</strong> paths in the table are available in the Rust core, the
-C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no interface
-adds a <code>DeterministicSingleTimeSeries</code> directly: it only ever comes into existence by transforming a
-stored <code>SingleTimeSeries</code>.</p>
+<code>infrastore</code> CLI, and the gRPC server. The <strong>write</strong> paths in the table are available in the Rust
+core, the C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no
+interface adds a <code>DeterministicSingleTimeSeries</code> directly: it only ever comes into existence by
+transforming a stored <code>SingleTimeSeries</code>.</p>
 <p><strong><code>DeterministicSingleTimeSeries</code> is a storage-level view, and reads always return a
 <code>Deterministic</code>.</strong> This is by design in every binding: <code>TimeSeriesData</code> has no
 <code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
@@ -235,7 +235,7 @@ readers can match either concrete type without caring which is stored).</p>
 <p>Reading forecast <em>values</em> is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic <code>add_time_series</code> (a <code>Deterministic</code>, <code>Probabilistic</code>, or
 <code>Scenarios</code> object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
-<code>castore_store_add_forecast</code> / <code>castore_store_add_probabilistic</code> transport; a
+<code>infrastore_store_add_forecast</code> / <code>infrastore_store_add_probabilistic</code> transport; a
 <code>DeterministicSingleTimeSeries</code> is produced by <code>transform_single_time_series</code>. The read-only gRPC
 server serves forecast reads but does not accept writes. See <a href="#forecasts">Forecasts</a> below.</p>
 <h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
@@ -396,9 +396,9 @@ described above — are also called "associations" throughout this documentation
 are unrelated to the entity-to-entity tables described in this section.</p>
 </blockquote>
 <p>Both are available in the Rust core, the C ABI, Julia, and Python; neither is exposed over gRPC or
-the <code>cas</code> CLI. The supplemental-attribute surface is the wider of the two (it carries counts and a
-grouped summary) because each of its operations is driven by an existing consumer; the parent/child
-surface is deliberately narrower for now.</p>
+the <code>infrastore</code> CLI. The supplemental-attribute surface is the wider of the two (it carries counts
+and a grouped summary) because each of its operations is driven by an existing consumer; the
+parent/child surface is deliberately narrower for now.</p>
 
                     </main>
 

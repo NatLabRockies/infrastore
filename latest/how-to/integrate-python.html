@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Integrate with Python - castore Documentation</title>
+        <title>Integrate with Python - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,7 +185,7 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="integrate-with-python"><a class="header" href="#integrate-with-python">Integrate with Python</a></h1>
-<p>Get the <code>castore</code> module into a Python environment. For API usage once it imports, see the
+<p>Get the <code>infrastore</code> module into a Python environment. For API usage once it imports, see the
 <a href="../guides/python.html">Python Developer Guide</a>.</p>
 <h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
 <ul>
@@ -195,28 +195,28 @@
 <h2 id="build-and-install-the-wheel-development"><a class="header" href="#build-and-install-the-wheel-development">Build and Install the Wheel (development)</a></h2>
 <p>The binding is built with <a href="https://www.maturin.rs/">maturin</a>. <code>maturin develop</code> compiles the
 extension and installs it into the active virtual environment:</p>
-<pre><code class="language-sh">cd crates/castore-py
+<pre><code class="language-sh">cd crates/infrastore-py
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install maturin pytest numpy
 maturin develop
 </code></pre>
 <p>Verify the install:</p>
-<pre><code class="language-sh">python -c "import castore; print(castore.__version__)"
+<pre><code class="language-sh">python -c "import infrastore; print(infrastore.__version__)"
 pytest ../../python/tests
 </code></pre>
 <h2 id="build-a-distributable-wheel"><a class="header" href="#build-a-distributable-wheel">Build a Distributable Wheel</a></h2>
 <p>To produce a wheel you can install elsewhere:</p>
-<pre><code class="language-sh">cd crates/castore-py
+<pre><code class="language-sh">cd crates/infrastore-py
 maturin build --release
-# -&gt; target/wheels/castore-&lt;version&gt;-cp310-abi3-&lt;platform&gt;.whl
-pip install ../../target/wheels/castore-*.whl
+# -&gt; target/wheels/infrastore-&lt;version&gt;-cp310-abi3-&lt;platform&gt;.whl
+pip install ../../target/wheels/infrastore-*.whl
 </code></pre>
 <p>The wheel is built against the <strong><code>abi3-py310</code></strong> stable ABI, so a single wheel works on CPython 3.10
 and every newer 3.x without recompiling.</p>
 <h2 id="smoke-test"><a class="header" href="#smoke-test">Smoke Test</a></h2>
 <pre><code class="language-python">from datetime import datetime, timedelta, timezone
 import numpy as np
-from castore import Store, SingleTimeSeries, OwnerCategory
+from infrastore import Store, SingleTimeSeries, OwnerCategory
 
 store = Store.create(in_memory=True)
 ts = SingleTimeSeries(

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Design Choices - castore Documentation</title>
+        <title>Design Choices - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,12 +185,13 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="design-choices"><a class="header" href="#design-choices">Design Choices</a></h1>
-<p>castore is a foundation library. End users rarely call it directly — they reach it through a parent
-package such as <a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a>
-(IS.jl) or <a href="https://github.com/natlabrockies/infrasys">infrasys</a>, which embed castore to persist the
+<p>infrastore is a foundation library. End users rarely call it directly — they reach it through a
+parent package such as
+<a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a> (IS.jl) or
+<a href="https://github.com/natlabrockies/infrasys">infrasys</a>, which embed infrastore to persist the
 time-series data behind their component models. This page records the decisions that shape the API
 and the on-disk format, and the reasoning behind them, so that developers of those parent packages
-understand what castore optimizes for — and, just as importantly, what it deliberately does not.</p>
+understand what infrastore optimizes for — and, just as importantly, what it deliberately does not.</p>
 <h2 id="data-orientation-optimize-for-reading-every-component-at-one-timestamp"><a class="header" href="#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Data Orientation: Optimize for Reading Every Component at One Timestamp</a></h2>
 <p><strong>The decision.</strong> In the NetCDF file, <code>SingleTimeSeries</code> arrays that share a
 <code>(dtype, element_shape, length, resolution)</code> are packed as columns of one dataset: <strong>columns are
@@ -211,8 +212,8 @@ whole chunks in one pass and keeps the timestamp-slice read fast. See
 <a href="./storage-model.html#keeping-the-two-files-consistent"><code>add_time_series_bulk</code> and <code>bulk_add</code></a>.</li>
 <li>Do not build a user-facing feature whose common path is "read this one component's entire array"
 and expect it to be cheap. It works, but it is the slow direction. If a downstream workload
-genuinely needs that orientation, that is a signal to raise with castore, not to work around with
-many single-series reads.</li>
+genuinely needs that orientation, that is a signal to raise with infrastore, not to work around
+with many single-series reads.</li>
 <li>The orientation is a property of the <em>packed</em> NetCDF layout only. <code>NonSequentialTimeSeries</code> and
 the dense forecast types are stored as standalone per-array variables and do not participate in
 it.</li>
@@ -261,12 +262,12 @@ stored array and writes are idempotent on hash. This is what lets many component
 profile without duplicating storage, and it is why deletes are reference-counted. See
 <a href="./content-addressing.html">Content Addressing</a>.</p>
 <h2 id="keep-the-multi-language-surface-consistent"><a class="header" href="#keep-the-multi-language-surface-consistent">Keep the Multi-Language Surface Consistent</a></h2>
-<p><code>castore-core</code> is the single source of truth; the Rust, Python (PyO3), Julia (C ABI), CLI, and gRPC
-interfaces are thin wrappers over the same <code>Store</code>. A capability is not considered done until it
-behaves the same across the bindings that support it, and unsupported operations return an explicit
-error rather than silently changing semantics. This keeps a parent package free to move between
-bindings — for example, Julia via the C ABI and Python via the wheel — without the data model
-shifting underneath it. See <a href="./bindings.html">Language Bindings</a>.</p>
+<p><code>infrastore-core</code> is the single source of truth; the Rust, Python (PyO3), Julia (C ABI), CLI, and
+gRPC interfaces are thin wrappers over the same <code>Store</code>. A capability is not considered done until
+it behaves the same across the bindings that support it, and unsupported operations return an
+explicit error rather than silently changing semantics. This keeps a parent package free to move
+between bindings — for example, Julia via the C ABI and Python via the wheel — without the data
+model shifting underneath it. See <a href="./bindings.html">Language Bindings</a>.</p>
 
                     </main>
 

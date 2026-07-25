@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>CLI - castore Documentation</title>
+        <title>CLI - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,22 +185,23 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="cli-reference"><a class="header" href="#cli-reference">CLI Reference</a></h1>
-<p><code>castore-cli</code> builds the <code>cas</code> binary, which reads and writes a store directly on disk (NetCDF +
-SQLite). For a task-oriented walkthrough, see <a href="../how-to/use-cli.html">Use the <code>cas</code> CLI</a>.</p>
+<p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, which reads and writes a store directly on disk
+(NetCDF + SQLite). For a task-oriented walkthrough, see
+<a href="../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</p>
 <p>The CLI covers time series only. The
 <a href="../explanation/data-model.html#associations-between-entities">association catalogs</a> in the same
-catalog file have no <code>cas</code> commands; reach them through the Rust, Python, or Julia API.</p>
+catalog file have no <code>infrastore</code> commands; reach them through the Rust, Python, or Julia API.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
-<pre><code class="language-text">cas [--store &lt;PATH.nc&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
+<pre><code class="language-text">infrastore [--store &lt;PATH.nc&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
 </code></pre>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the NetCDF store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>CASTORE_STORE</code> environment variable.</td></tr>
+<tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the NetCDF store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>INFRASTORE_STORE</code> environment variable.</td></tr>
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 </tbody></table>
 </div>
-<p><code>--store</code> (or <code>CASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
+<p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
 <p><code>-f</code>/<code>--format</code> affects the read/inspection commands (<code>list</code>, <code>get</code>, <code>info</code>, <code>export</code>, <code>stats</code>,
 <code>summary</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>). It is accepted
 anywhere because it is global, but the write commands (<code>add</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>,
@@ -231,27 +232,27 @@ prints a JSON descriptor. <code>export</code> requires <code>-f csv</code> or <c
 <tr><td><code>template</code></td><td>Print an example descriptor for a given type to stdout.</td></tr>
 </tbody></table>
 </div>
-<pre><code class="language-text">cas --store &lt;PATH&gt; add --descriptor &lt;FILE.json&gt; [--csv &lt;FILE.csv&gt;] [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle]
-cas --store &lt;PATH&gt; list    [SELECTOR...]
-cas --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
-cas --store &lt;PATH&gt; info    [SELECTOR...]
-cas --store &lt;PATH&gt; -f csv|json export [SELECTOR...] [--dir &lt;DIR&gt;]
-cas --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
-cas --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
-cas --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; --dst-owner-type &lt;T&gt; [--new-name &lt;NAME&gt;] [--dry-run]
-cas --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
-cas --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
-cas --store &lt;PATH&gt; transform --horizon &lt;DUR&gt; --interval &lt;DUR&gt; [--owner-category &lt;C&gt;] [--resolution &lt;DUR&gt;]
-cas --store &lt;PATH&gt; persist --dest &lt;PATH.nc&gt;
-cas --store &lt;PATH&gt; compact [--force]
-cas --store &lt;PATH&gt; stats
-cas completions &lt;SHELL&gt;
-cas --store &lt;PATH&gt; summary [--static-only | --forecast-only]
-cas --store &lt;PATH&gt; verify
-cas --store &lt;PATH&gt; check-consistency [--resolution &lt;DUR&gt;]
-cas --store &lt;PATH&gt; resolutions
-cas --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
-cas template &lt;single|non_sequential|deterministic|probabilistic|scenarios&gt;
+<pre><code class="language-text">infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json&gt; [--csv &lt;FILE.csv&gt;] [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle]
+infrastore --store &lt;PATH&gt; list    [SELECTOR...]
+infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
+infrastore --store &lt;PATH&gt; info    [SELECTOR...]
+infrastore --store &lt;PATH&gt; -f csv|json export [SELECTOR...] [--dir &lt;DIR&gt;]
+infrastore --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
+infrastore --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
+infrastore --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; --dst-owner-type &lt;T&gt; [--new-name &lt;NAME&gt;] [--dry-run]
+infrastore --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
+infrastore --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
+infrastore --store &lt;PATH&gt; transform --horizon &lt;DUR&gt; --interval &lt;DUR&gt; [--owner-category &lt;C&gt;] [--resolution &lt;DUR&gt;]
+infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.nc&gt;
+infrastore --store &lt;PATH&gt; compact [--force]
+infrastore --store &lt;PATH&gt; stats
+infrastore completions &lt;SHELL&gt;
+infrastore --store &lt;PATH&gt; summary [--static-only | --forecast-only]
+infrastore --store &lt;PATH&gt; verify
+infrastore --store &lt;PATH&gt; check-consistency [--resolution &lt;DUR&gt;]
+infrastore --store &lt;PATH&gt; resolutions
+infrastore --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
+infrastore template &lt;single|non_sequential|deterministic|probabilistic|scenarios&gt;
 </code></pre>
 <p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works for a descriptor that
 describes a single series. Passing it alongside a descriptor array holding more than one object
@@ -287,10 +288,10 @@ value:</p>
 <tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
 </tbody></table>
 </div>
-<p>If a selector matches more than one series, <code>cas</code> errors and lists the candidates so the query can
-be narrowed. The owner identity is the pair <code>(owner_id, owner_category)</code>, so a component and a
-supplemental attribute may share a numeric <code>owner_id</code>; add <code>--owner-category</code> to disambiguate when
-both exist.</p>
+<p>If a selector matches more than one series, <code>infrastore</code> errors and lists the candidates so the
+query can be narrowed. The owner identity is the pair <code>(owner_id, owner_category)</code>, so a component
+and a supplemental attribute may share a numeric <code>owner_id</code>; add <code>--owner-category</code> to disambiguate
+when both exist.</p>
 <h3 id="type-spellings"><a class="header" href="#type-spellings">Type Spellings</a></h3>
 <p><code>--type</code> (and the descriptor's <code>type</code> key) accepts six values. Matching is case-insensitive and
 ignores underscores, so each type has a short form and a full form:</p>
@@ -306,7 +307,7 @@ ignores underscores, so each type has a short form and a full form:</p>
 <p><code>deterministic_single</code> is not writable from a descriptor (use <code>transform</code>), but it <em>is</em> selectable,
 and it is often required: <code>transform</code> derives a series that shares <code>(owner_id, name, resolution)</code>
 with its source <code>SingleTimeSeries</code>, so after a transform a query like
-<code>cas get --owner-id 42 --name load</code> matches two series and errors. <code>--type single</code> or
+<code>infrastore get --owner-id 42 --name load</code> matches two series and errors. <code>--type single</code> or
 <code>--type deterministic_single</code> is the only way to pick one.</p>
 <p>Note that inputs and outputs use different spellings. You <em>pass</em> the short, lowercase forms
 (<code>--type single</code>, <code>--owner-category component</code>), but <code>list</code>, <code>get</code>, and <code>info</code> <em>render</em> the
@@ -354,7 +355,7 @@ The CSV holds only numbers (plus a leading timestamp column for <code>non_sequen
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than
 silently dropping a setting.</p>
 <h2 id="csv-layout"><a class="header" href="#csv-layout">CSV Layout</a></h2>
-<p><code>cas</code> computes the full array shape from the descriptor and reads the CSV's value cells in
+<p><code>infrastore</code> computes the full array shape from the descriptor and reads the CSV's value cells in
 <strong>row-major</strong> order to fill it. The total cell count must equal the product of the shape.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th><th>CSV</th></tr></thead><tbody>
 <tr><td><code>single</code></td><td><code>[length, *element_shape]</code></td><td>One value column (or <code>prod(element_shape)</code> columns), one row per step.</td></tr>

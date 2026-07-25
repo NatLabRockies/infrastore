@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Language Bindings - castore Documentation</title>
+        <title>Language Bindings - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -188,9 +188,9 @@
 <p>Every interface wraps the same <code>Store</code>. Understanding how each binding bridges to the core explains
 why the APIs look the way they do, how errors propagate, and what each layer owns.</p>
 <pre class="mermaid">flowchart TB
-    PYAPP[&quot;Python code&quot;] --&gt; PYO3[&quot;PyO3 classes&lt;br/&gt;(castore_py)&quot;]
-    JLAPP[&quot;Julia code&quot;] --&gt; JLPKG[&quot;Castore.jl&quot;]
-    JLPKG --&gt;|&quot;ccall&quot;| CABI[&quot;C ABI&lt;br/&gt;(castore_ffi)&quot;]
+    PYAPP[&quot;Python code&quot;] --&gt; PYO3[&quot;PyO3 classes&lt;br/&gt;(infrastore_py)&quot;]
+    JLAPP[&quot;Julia code&quot;] --&gt; JLPKG[&quot;InfraStore.jl&quot;]
+    JLPKG --&gt;|&quot;ccall&quot;| CABI[&quot;C ABI&lt;br/&gt;(infrastore_ffi)&quot;]
     RUSTAPP[&quot;Rust client code&quot;] --&gt; RC[&quot;RemoteClient&quot;]
     RC --&gt;|&quot;gRPC / HTTP2&quot;| GS[&quot;gRPC server&quot;]
 
@@ -206,8 +206,8 @@ why the APIs look the way they do, how errors propagate, and what each layer own
     style RC fill:#ffc107,color:#000
 </pre>
 <h2 id="python-pyo3"><a class="header" href="#python-pyo3">Python (PyO3)</a></h2>
-<p><code>castore-py</code> uses <a href="https://pyo3.rs">PyO3</a> to expose <code>Store</code> as native Python classes in a module
-importable as <code>castore</code>. The binding:</p>
+<p><code>infrastore-py</code> uses <a href="https://pyo3.rs">PyO3</a> to expose <code>Store</code> as native Python classes in a module
+importable as <code>infrastore</code>. The binding:</p>
 <ul>
 <li>Converts Python <code>datetime</code>/<code>timedelta</code> to <code>chrono</code> types and NumPy arrays (any shape) to
 <code>TypedArray</code>s at the boundary, supporting the full dtype set (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>,
@@ -220,12 +220,12 @@ importable as <code>castore</code>. The binding:</p>
 <p>The metadata side is owned entirely by Rust; Python never touches SQLite directly. See the
 <a href="../guides/python.html">Python guide</a> and <a href="../reference/python-api.html">Python API reference</a>.</p>
 <h2 id="julia-c-abi"><a class="header" href="#julia-c-abi">Julia (C ABI)</a></h2>
-<p>Julia does not call Rust directly. Instead, <code>castore-ffi</code> compiles a C-compatible cdylib with an
-opaque-handle API, and <code>Castore.jl</code> <code>ccall</code>s into it.</p>
+<p>Julia does not call Rust directly. Instead, <code>infrastore-ffi</code> compiles a C-compatible cdylib with an
+opaque-handle API, and <code>InfraStore.jl</code> <code>ccall</code>s into it.</p>
 <pre class="mermaid">flowchart LR
-    JL[&quot;Castore.jl&lt;br/&gt;structs hold Ptr{Cvoid}&quot;] --&gt;|&quot;ccall castore_store_*&quot;| LIB[&quot;libcastore_ffi&quot;]
+    JL[&quot;InfraStore.jl&lt;br/&gt;structs hold Ptr{Cvoid}&quot;] --&gt;|&quot;ccall infrastore_store_*&quot;| LIB[&quot;libinfrastore_ffi&quot;]
     LIB --&gt; STORE[&quot;Store&quot;]
-    LIB -.-&gt;|&quot;castore_last_error_message&quot;| JL
+    LIB -.-&gt;|&quot;infrastore_last_error_message&quot;| JL
 
     style JL fill:#9558b2,color:#fff
     style LIB fill:#6f42c1,color:#fff
@@ -233,50 +233,50 @@ opaque-handle API, and <code>Castore.jl</code> <code>ccall</code>s into it.</p>
 </pre>
 <p>The conventions that shape the Julia API:</p>
 <ul>
-<li><strong>Opaque handles.</strong> <code>CastoreStore</code> and <code>CastoreKey</code> are pointers; the Julia structs wrap them and
+<li><strong>Opaque handles.</strong> <code>InfraStore</code> and <code>InfraStoreKey</code> are pointers; the Julia structs wrap them and
 register finalizers (<code>close!</code>, <code>_finalize_key</code>) that call the matching <code>ts_*_free</code> function.</li>
 <li><strong>Status codes plus thread-local error messages.</strong> Every C function returns an <code>int32_t</code> code. On
-a non-zero code, Julia calls <code>castore_last_error_message</code> to retrieve the detail string and raises
-the matching Julia exception type.</li>
+a non-zero code, Julia calls <code>infrastore_last_error_message</code> to retrieve the detail string and
+raises the matching Julia exception type.</li>
 <li><strong>Out-parameters and caller-owned buffers.</strong> Arrays come back through an out-pointer plus a length
 and a dtype code; Julia copies them into a <code>Vector{T}</code> for the requested element type and frees
 the Rust buffer with the deallocator matching the buffer's element type —
-<code>castore_buffer_free_f64</code>, <code>castore_buffer_free_u8</code>, <code>castore_buffer_free_i64</code>, or
-<code>castore_buffer_free_u64</code> (shape/dims buffers).</li>
+<code>infrastore_buffer_free_f64</code>, <code>infrastore_buffer_free_u8</code>, <code>infrastore_buffer_free_i64</code>, or
+<code>infrastore_buffer_free_u64</code> (shape/dims buffers).</li>
 <li><strong>Features cross as JSON.</strong> Julia serializes the feature dict to a JSON string, which the FFI
 layer parses into a <code>Features</code> map.</li>
-<li><strong>Forecasts are wrapped.</strong> <code>Castore.jl</code> exposes <code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>
+<li><strong>Forecasts are wrapped.</strong> <code>InfraStore.jl</code> exposes <code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>
 structs passed to the generic <code>add_time_series!</code>, type-dispatched <code>get_time_series(Type, …)</code>
 getters, and <code>transform_single_time_series!</code>, so all four forecast types are usable from Julia.</li>
 <li><strong>Bulk reads use a result handle.</strong> <code>bulk_read</code> reads many full <code>SingleTimeSeries</code> at once: the
-FFI fetches them in one decompress-once pass per dataset into a <code>CastoreBulkReadHandle</code>
-(<code>castore_store_bulk_read_single</code>), and Julia reads each element out, then frees the handle.
+FFI fetches them in one decompress-once pass per dataset into a <code>InfraStoreBulkReadHandle</code>
+(<code>infrastore_store_bulk_read_single</code>), and Julia reads each element out, then frees the handle.
 Python's <code>store.bulk_read</code> exposes the same operation directly. Managed bulk <em>writes</em> already take
 the fast block-write path through the existing batch / <code>add_time_series_bulk</code> APIs.</li>
 </ul>
-<p><code>Castore.jl</code> loads the cdylib from the path in the <code>CASTORE_LIB</code> environment variable. See the
+<p><code>InfraStore.jl</code> loads the cdylib from the path in the <code>INFRASTORE_LIB</code> environment variable. See the
 <a href="../guides/julia.html">Julia guide</a>, the <a href="../reference/c-abi.html">C ABI reference</a>, and the
 <a href="../reference/julia-api.html">Julia API reference</a>.</p>
 <h3 id="infrastructuresystemsjl-integration"><a class="header" href="#infrastructuresystemsjl-integration">InfrastructureSystems.jl Integration</a></h3>
 <p>The model was shaped to drop into InfrastructureSystems.jl: owners are identified by integer
 component identifiers (<code>i64</code>), owner categories map to <code>Component</code> / <code>SupplementalAttribute</code>, and
 features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
-unchanged. The FFI exposes attribute-based metadata accessors (<code>castore_store_get_metadata</code>,
-<code>castore_store_has_by_attrs</code>, <code>castore_store_remove_by_attrs</code>) and a hash-based array fetch
-(<code>castore_store_get_array_by_hash</code>) so an InfrastructureSystems.jl-side store can keep its own key
-objects and reach the array layer directly.</p>
+unchanged. The FFI exposes attribute-based metadata accessors (<code>infrastore_store_get_metadata</code>,
+<code>infrastore_store_has_by_attrs</code>, <code>infrastore_store_remove_by_attrs</code>) and a hash-based array fetch
+(<code>infrastore_store_get_array_by_hash</code>) so an InfrastructureSystems.jl-side store can keep its own
+key objects and reach the array layer directly.</p>
 <h2 id="grpc-server-and-client"><a class="header" href="#grpc-server-and-client">gRPC Server and Client</a></h2>
-<p><code>castore-server</code> wraps a <code>Store</code> in a <code>tonic</code> gRPC service generated from <code>castore-proto</code>. It
+<p><code>infrastore-server</code> wraps a <code>Store</code> in a <code>tonic</code> gRPC service generated from <code>infrastore-proto</code>. It
 exposes a <strong>read-only</strong> slice of the API and adds optional API-key auth. The matching async
 <code>RemoteClient</code> mirrors the read methods and maps gRPC <code>Status</code> codes back to
 <code>TimeSeriesError::ConnectionError</code>, so remote calls surface the same error type as local ones.</p>
 <p>Writes are deliberately not exposed over gRPC — they require local filesystem access. The server is
 for fan-out reads of an existing store. See the <a href="../guides/server.html">gRPC Server guide</a> and the
 <a href="../reference/grpc-api.html">gRPC API reference</a>.</p>
-<h2 id="cli-cas"><a class="header" href="#cli-cas">CLI (<code>cas</code>)</a></h2>
-<p><code>castore-cli</code> builds the <code>cas</code> binary, a thin wrapper over the core <code>Store</code> for use from a terminal.
-Unlike the gRPC server it is <strong>not</strong> read-only: it opens the on-disk <code>.nc</code> + <code>.nc.sqlite</code> pair
-directly and supports both reads and writes. Its shape:</p>
+<h2 id="cli-infrastore"><a class="header" href="#cli-infrastore">CLI (<code>infrastore</code>)</a></h2>
+<p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, a thin wrapper over the core <code>Store</code> for use from a
+terminal. Unlike the gRPC server it is <strong>not</strong> read-only: it opens the on-disk <code>.nc</code> + <code>.nc.sqlite</code>
+pair directly and supports both reads and writes. Its shape:</p>
 <ul>
 <li><strong>CSV in, store out.</strong> Numeric values come from a CSV; the metadata that does not fit a flat grid
 (owner, name, type, dtype, resolution, timestamps, units, features) is described in a descriptor
@@ -285,11 +285,11 @@ JSON. All six dtypes and all five writable types are supported, forecasts includ
 <li><strong>Store access is isolated.</strong> All store opening lives behind one module, so a future remote/gRPC
 mode can be added without touching the command handlers; today there is no remote mode.</li>
 </ul>
-<p>See the <a href="../how-to/use-cli.html">Use the <code>cas</code> CLI how-to</a> and the
+<p>See the <a href="../how-to/use-cli.html">Use the <code>infrastore</code> CLI how-to</a> and the
 <a href="../reference/cli.html">CLI reference</a>.</p>
 <h2 id="what-every-binding-shares"><a class="header" href="#what-every-binding-shares">What Every Binding Shares</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Single source of truth</th></tr></thead><tbody>
-<tr><td>Types &amp; validation</td><td><code>castore-core</code> (<code>Store</code>, <code>TimeSeriesKey</code>, <code>Features</code>)</td></tr>
+<tr><td>Types &amp; validation</td><td><code>infrastore-core</code> (<code>Store</code>, <code>TimeSeriesKey</code>, <code>Features</code>)</td></tr>
 <tr><td>On-disk format</td><td><code>NetCdfBackend</code> + <code>MetadataStore</code> — identical regardless of caller</td></tr>
 <tr><td>Hashing</td><td><code>array_hash</code> / <code>features_hash</code> — the cross-language contract</td></tr>
 <tr><td>Error taxonomy</td><td><code>TimeSeriesError</code>, re-projected into each language's idiom</td></tr>

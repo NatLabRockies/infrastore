@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Install the Native Library - castore Documentation</title>
+        <title>Install the Native Library - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -200,9 +200,9 @@ export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial  # Linux
 </code></pre>
 <h2 id="2-build-what-you-need"><a class="header" href="#2-build-what-you-need">2. Build What You Need</a></h2>
 <p><strong>The C ABI cdylib</strong> (used by Julia and any C consumer):</p>
-<pre><code class="language-sh">cargo build -p castore-ffi --release
-# -&gt; target/release/libcastore_ffi.{dylib,so,dll}
-# Regenerates the C header at crates/castore-ffi/include/castore.h
+<pre><code class="language-sh">cargo build -p infrastore-ffi --release
+# -&gt; target/release/libinfrastore_ffi.{dylib,so,dll}
+# Regenerates the C header at crates/infrastore-ffi/include/infrastore.h
 </code></pre>
 <p><strong>The whole workspace</strong> (core, server, proto, ffi):</p>
 <pre><code class="language-sh">cargo build --workspace
@@ -212,7 +212,7 @@ cargo test --workspace
 <a href="./integrate-python.html">Integrate with Python</a>.</p>
 <h2 id="3-point-consumers-at-the-library"><a class="header" href="#3-point-consumers-at-the-library">3. Point Consumers at the Library</a></h2>
 <p>The Julia binding and other C consumers locate the cdylib via an environment variable:</p>
-<pre><code class="language-sh">export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
+<pre><code class="language-sh">export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 </code></pre>
 <p>Add it to your shell profile to make it permanent.</p>
 <h2 id="next"><a class="header" href="#next">Next</a></h2>

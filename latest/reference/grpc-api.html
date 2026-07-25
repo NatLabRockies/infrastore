@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>gRPC API - castore Documentation</title>
+        <title>gRPC API - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,14 +185,14 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="grpc-api"><a class="header" href="#grpc-api">gRPC API</a></h1>
-<p>The proto contract lives at <code>proto/castore/v1/store.proto</code> and is compiled into <code>castore-proto</code> with
-<code>tonic</code>. The service is <strong>read-only</strong> — every write operation (add, remove, clear, compact) requires
-local filesystem access and is intentionally absent.</p>
+<p>The proto contract lives at <code>proto/infrastore/v1/store.proto</code> and is compiled into
+<code>infrastore-proto</code> with <code>tonic</code>. The service is <strong>read-only</strong> — every write operation (add, remove,
+clear, compact) requires local filesystem access and is intentionally absent.</p>
 <p>The <a href="../explanation/data-model.html#associations-between-entities">association catalogs</a> are absent
 too, reads included: no message or RPC covers <code>supplemental_attribute_associations</code> or
 <code>parent_child_associations</code>. Consumers of those tables work against a local <code>Store</code>.</p>
 <ul>
-<li><strong>Package:</strong> <code>castore.v1</code></li>
+<li><strong>Package:</strong> <code>infrastore.v1</code></li>
 <li><strong>Service:</strong> <code>CatalogStore</code></li>
 </ul>
 <h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
@@ -382,8 +382,8 @@ comparison is not blinded against the supplied key's <em>length</em>, which is t
 missing or wrong key is rejected before the RPC runs. With <code>method = "none"</code> no metadata is
 required. See <a href="./server-config.html">Server Configuration</a>.</p>
 <h2 id="rust-client"><a class="header" href="#rust-client">Rust Client</a></h2>
-<p><code>castore-server</code> ships an async <code>RemoteClient</code> that mirrors the read methods and returns core types,
-mapping gRPC <code>Status</code> codes back onto the <code>TimeSeriesError</code> taxonomy:</p>
+<p><code>infrastore-server</code> ships an async <code>RemoteClient</code> that mirrors the read methods and returns core
+types, mapping gRPC <code>Status</code> codes back onto the <code>TimeSeriesError</code> taxonomy:</p>
 <div class="table-wrapper"><table><thead><tr><th>gRPC <code>Code</code></th><th><code>TimeSeriesError</code></th></tr></thead><tbody>
 <tr><td><code>NotFound</code></td><td><code>NotFound</code></td></tr>
 <tr><td><code>AlreadyExists</code></td><td><code>DuplicateTimeSeries</code></td></tr>
@@ -397,8 +397,8 @@ mapping gRPC <code>Status</code> codes back onto the <code>TimeSeriesError</code
 with the same variant a local <code>Store</code> would return.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_core::OwnerCategory;
-use castore_server::client::RemoteClient;
+</span>use infrastore_core::OwnerCategory;
+use infrastore_server::client::RemoteClient;
 
 let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
 let counts = client.get_counts().await?;

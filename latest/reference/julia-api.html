@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Julia API - castore Documentation</title>
+        <title>Julia API - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,10 +185,10 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="julia-api"><a class="header" href="#julia-api">Julia API</a></h1>
-<p>The Julia package is <strong><code>Castore.jl</code></strong> (module <code>Castore</code>); it wraps the <a href="./c-abi.html">C ABI</a> cdylib.
-The library is resolved from the <code>CASTORE_LIB</code> environment variable (development builds), or from
-the <code>Castore_jll</code> binary package when installed.</p>
-<pre><code class="language-julia">using Castore
+<p>The Julia package is <strong><code>InfraStore.jl</code></strong> (module <code>InfraStore</code>); it wraps the <a href="./c-abi.html">C ABI</a>
+cdylib. The library is resolved from the <code>INFRASTORE_LIB</code> environment variable (development builds),
+or from the <code>InfraStore_jll</code> binary package when installed.</p>
+<pre><code class="language-julia">using InfraStore
 </code></pre>
 <p>Exported names: <code>Store</code>, <code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
 <code>DeterministicSingleTimeSeries</code>, <code>AbstractDeterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>,
@@ -675,7 +675,7 @@ descriptive snapshot: <code>initial_timestamp</code>, <code>resolution</code>, <
 and independent, and combine as a conjunction; with none set the whole store is listed:</p>
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
-<li><code>time_series_type</code> — a <code>CASTORE_TYPE_*</code> <strong>integer code</strong> (<code>0 = SingleTimeSeries</code> …
+<li><code>time_series_type</code> — a <code>INFRASTORE_TYPE_*</code> <strong>integer code</strong> (<code>0 = SingleTimeSeries</code> …
 <code>5 = Scenarios</code>), not a Julia type. (The <code>time_series_type</code> field on a returned row <em>is</em> the Julia
 type.)</li>
 <li><code>name</code> — exact association name.</li>
@@ -809,18 +809,18 @@ list_parents(store; child_id=7)     # [1]
 remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="./grpc-api.html">gRPC server</a> or the
-<a href="./cli.html"><code>cas</code> CLI</a>.</p>
+<a href="./cli.html"><code>infrastore</code> CLI</a>.</p>
 <h2 id="errors"><a class="header" href="#errors">Errors</a></h2>
 <p>All subtype <code>TimeSeriesException</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Mapped from FFI code</th></tr></thead><tbody>
-<tr><td><code>NotFoundError</code></td><td><code>CASTORE_ERR_NOT_FOUND</code></td></tr>
-<tr><td><code>DuplicateTimeSeriesError</code></td><td><code>CASTORE_ERR_DUPLICATE</code></td></tr>
-<tr><td><code>DuplicateAssociationError</code></td><td><code>CASTORE_ERR_DUPLICATE_ASSOCIATION</code></td></tr>
-<tr><td><code>InvalidParameterError</code></td><td><code>CASTORE_ERR_INVALID_PARAMETER</code> / <code>CASTORE_ERR_INVALID_UTF8</code> / <code>CASTORE_ERR_NULL_POINTER</code></td></tr>
-<tr><td><code>IntegrityError</code></td><td><code>CASTORE_ERR_INTEGRITY</code></td></tr>
-<tr><td><code>ReadOnlyStoreError</code></td><td><code>CASTORE_ERR_READ_ONLY</code></td></tr>
-<tr><td><code>IncompatibleFormatError</code></td><td><code>CASTORE_ERR_INCOMPATIBLE_FORMAT</code></td></tr>
-<tr><td><code>IOError</code></td><td><code>CASTORE_ERR_IO</code></td></tr>
+<tr><td><code>NotFoundError</code></td><td><code>INFRASTORE_ERR_NOT_FOUND</code></td></tr>
+<tr><td><code>DuplicateTimeSeriesError</code></td><td><code>INFRASTORE_ERR_DUPLICATE</code></td></tr>
+<tr><td><code>DuplicateAssociationError</code></td><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td></tr>
+<tr><td><code>InvalidParameterError</code></td><td><code>INFRASTORE_ERR_INVALID_PARAMETER</code> / <code>INFRASTORE_ERR_INVALID_UTF8</code> / <code>INFRASTORE_ERR_NULL_POINTER</code></td></tr>
+<tr><td><code>IntegrityError</code></td><td><code>INFRASTORE_ERR_INTEGRITY</code></td></tr>
+<tr><td><code>ReadOnlyStoreError</code></td><td><code>INFRASTORE_ERR_READ_ONLY</code></td></tr>
+<tr><td><code>IncompatibleFormatError</code></td><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td></tr>
+<tr><td><code>IOError</code></td><td><code>INFRASTORE_ERR_IO</code></td></tr>
 <tr><td><code>GenericError</code></td><td>Any other non-zero code (carries the numeric <code>code</code>)</td></tr>
 </tbody></table>
 </div>
@@ -855,17 +855,17 @@ resolution as a <code>Period</code> (<code>Millisecond</code> for fixed duration
 </code></pre>
 <p>Initialize the Rust tracing subscriber. <code>level</code> is an
 <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html"><code>EnvFilter</code></a>
-directive string such as <code>"debug"</code> or <code>"castore_core=debug"</code>. Pass an empty string (the default) to
-read <code>RUST_LOG</code>; if that variable is also unset, no output is produced.</p>
+directive string such as <code>"debug"</code> or <code>"infrastore_core=debug"</code>. Pass an empty string (the default)
+to read <code>RUST_LOG</code>; if that variable is also unset, no output is produced.</p>
 <p>The subscriber is initialized at most once per process — subsequent calls are no-ops. The module's
 <code>__init__</code> hook calls <code>init_logging("")</code> automatically when <code>RUST_LOG</code> is set, so the common case
 requires no code change:</p>
-<pre><code class="language-sh">export RUST_LOG=castore_core=debug
+<pre><code class="language-sh">export RUST_LOG=infrastore_core=debug
 julia --project=. myscript.jl
 </code></pre>
 <p>For programmatic control without environment variables:</p>
-<pre><code class="language-julia">using Castore
-init_logging("castore_core=debug")
+<pre><code class="language-julia">using InfraStore
+init_logging("infrastore_core=debug")
 </code></pre>
 <p>See <a href="../guides/julia.html#diagnostics-and-tracing">Julia developer guide</a> for usage examples and a
 table of available span targets.</p>

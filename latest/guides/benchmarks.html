@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Benchmarks - castore Documentation</title>
+        <title>Benchmarks - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,16 +185,16 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h1>
-<p><code>castore-bench</code> is a standalone binary (<code>cas-bench</code>) for measuring two critical performance
-dimensions: <strong>bulk ingestion</strong> and <strong>simulation-loop reads</strong>.</p>
+<p><code>infrastore-bench</code> is a standalone binary (<code>infrastore-bench</code>) for measuring two critical
+performance dimensions: <strong>bulk ingestion</strong> and <strong>simulation-loop reads</strong>.</p>
 <h2 id="build"><a class="header" href="#build">Build</a></h2>
 <pre><code class="language-sh"># Debug build (fast to compile, slower to run)
-cargo build -p castore-bench
+cargo build -p infrastore-bench
 
 # Release build (recommended for any real measurement)
-cargo build --release -p castore-bench
+cargo build --release -p infrastore-bench
 </code></pre>
-<p>The binary is placed at <code>target/release/cas-bench</code>.</p>
+<p>The binary is placed at <code>target/release/infrastore-bench</code>.</p>
 <h2 id="subcommands"><a class="header" href="#subcommands">Subcommands</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Subcommand</th><th>What it measures</th></tr></thead><tbody>
 <tr><td><code>add</code></td><td><code>add_time_series_bulk</code> throughput — NetCDF packing and SQLite transaction cost</td></tr>
@@ -214,10 +214,10 @@ cargo build --release -p castore-bench
 simulation timesteps are benchmarked.</p>
 <h2 id="add-benchmark"><a class="header" href="#add-benchmark">Add benchmark</a></h2>
 <pre><code class="language-sh"># 10 000 components, 1 week hourly, in-memory
-cas-bench add --count 10000 --length 168 --in-memory
+infrastore-bench add --count 10000 --length 168 --in-memory
 
 # 100 000 components, same length, on-disk (tests real I/O + OS page cache)
-cas-bench add --count 100000 --length 168
+infrastore-bench add --count 100000 --length 168
 </code></pre>
 <p>Reports for both <code>SingleTimeSeries</code> and <code>Deterministic</code>:</p>
 <ul>
@@ -231,13 +231,13 @@ standalone NetCDF variables; their add cost is dominated by per-variable write o
 single-transaction SQLite commit.</p>
 <h2 id="read-benchmark"><a class="header" href="#read-benchmark">Read benchmark</a></h2>
 <pre><code class="language-sh"># 1 000 components, 168 timesteps, in-memory (pure CPU / metadata cost)
-cas-bench read --count 1000 --length 168 --in-memory
+infrastore-bench read --count 1000 --length 168 --in-memory
 
 # Same, but on-disk — store is written, dropped, then reopened read-only
-cas-bench read --count 1000 --length 168
+infrastore-bench read --count 1000 --length 168
 
 # Benchmark only the first 24 simulation steps of a 168-step series
-cas-bench read --count 10000 --length 168 --steps 24
+infrastore-bench read --count 10000 --length 168 --steps 24
 </code></pre>
 <p>The read benchmark simulates the access pattern of an energy-simulation step loop:</p>
 <pre><code>for t in 0..T:
@@ -275,13 +275,13 @@ exploration/plotting rather than hot loops).</p>
 <p>When the benchmark numbers show a problem but don't tell you which layer is slow, enable the
 built-in tracing spans with <code>--log-level</code>:</p>
 <pre><code class="language-sh"># Show all debug-level spans from the store core only (least noise)
-cas-bench --log-level castore_core=debug add --count 100 --in-memory
+infrastore-bench --log-level infrastore_core=debug add --count 100 --in-memory
 
-# Show everything — useful when the bottleneck might be in cas-bench itself
-cas-bench --log-level debug add --count 100
+# Show everything — useful when the bottleneck might be in infrastore-bench itself
+infrastore-bench --log-level debug add --count 100
 </code></pre>
 <p><code>RUST_LOG</code> is also accepted as a fallback when <code>--log-level</code> is not provided.</p>
-<p>The key spans emitted by <code>castore-core</code>:</p>
+<p>The key spans emitted by <code>infrastore-core</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Span</th><th>Layer</th><th>Key fields</th></tr></thead><tbody>
 <tr><td><code>add_time_series_bulk</code></td><td><code>Store</code></td><td><code>count</code> — number of items in the bulk request</td></tr>
 <tr><td><code>get_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code>, <code>has_time_range</code></td></tr>
@@ -305,7 +305,7 @@ cas-bench --log-level debug add --count 100
 per standalone item; a single <code>add_time_series</code> call instead emits one <code>put_array</code> → <code>put_packed</code>
 span. This makes it straightforward to see whether time is spent in metadata insertion, NetCDF I/O,
 or the <code>debug_span</code> overhead itself.</p>
-<p>The <code>cas</code> CLI supports the same <code>--log-level</code> flag for diagnosing a live store.</p>
+<p>The <code>infrastore</code> CLI supports the same <code>--log-level</code> flag for diagnosing a live store.</p>
 
                     </main>
 

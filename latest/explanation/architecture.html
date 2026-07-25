@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Architecture - castore Documentation</title>
+        <title>Architecture - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,23 +185,24 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="architecture"><a class="header" href="#architecture">Architecture</a></h1>
-<p>castore is a Rust workspace with one core library and a ring of interface crates around it. Every
-interface — native Rust, Python, Julia, the <code>cas</code> CLI, and the gRPC server — ultimately drives the
-same <code>Store</code> type in <code>castore-core</code>, and every interface reads and writes the same on-disk format.</p>
+<p>infrastore is a Rust workspace with one core library and a ring of interface crates around it. Every
+interface — native Rust, Python, Julia, the <code>infrastore</code> CLI, and the gRPC server — ultimately
+drives the same <code>Store</code> type in <code>infrastore-core</code>, and every interface reads and writes the same
+on-disk format.</p>
 <h2 id="crate-layout"><a class="header" href="#crate-layout">Crate Layout</a></h2>
 <pre class="mermaid">flowchart TB
     subgraph ifaces[&quot;Interface crates&quot;]
-        PY[&quot;castore-py&lt;br/&gt;PyO3 wheel&quot;]
-        FFI[&quot;castore-ffi&lt;br/&gt;C ABI cdylib&quot;]
-        SRV[&quot;castore-server&lt;br/&gt;gRPC server + Rust client&quot;]
-        CLI[&quot;castore-cli&lt;br/&gt;cas binary&quot;]
+        PY[&quot;infrastore-py&lt;br/&gt;PyO3 wheel&quot;]
+        FFI[&quot;infrastore-ffi&lt;br/&gt;C ABI cdylib&quot;]
+        SRV[&quot;infrastore-server&lt;br/&gt;gRPC server + Rust client&quot;]
+        CLI[&quot;infrastore-cli&lt;br/&gt;infrastore binary&quot;]
     end
 
-    PYMOD[&quot;castore&lt;br/&gt;(Python module)&quot;]
-    JL[&quot;Castore.jl&lt;br/&gt;(Julia package)&quot;]
-    PROTO[&quot;castore-proto&lt;br/&gt;protobuf + tonic&quot;]
+    PYMOD[&quot;infrastore&lt;br/&gt;(Python module)&quot;]
+    JL[&quot;InfraStore.jl&lt;br/&gt;(Julia package)&quot;]
+    PROTO[&quot;infrastore-proto&lt;br/&gt;protobuf + tonic&quot;]
 
-    subgraph core[&quot;castore-core&quot;]
+    subgraph core[&quot;infrastore-core&quot;]
         STORE[&quot;Store&quot;]
         META[&quot;MetadataStore&lt;br/&gt;(SQLite)&quot;]
         BACK[&quot;StorageBackend&lt;br/&gt;(trait)&quot;]
@@ -235,15 +236,15 @@ same <code>Store</code> type in <code>castore-core</code>, and every interface r
     style CLI fill:#fd7e14,color:#fff
 </pre>
 <div class="table-wrapper"><table><thead><tr><th>Crate / package</th><th>Role</th></tr></thead><tbody>
-<tr><td><code>castore-core</code></td><td>The whole engine: types, storage backends, hashing, the <code>Store</code> API</td></tr>
-<tr><td><code>castore-proto</code></td><td>The <code>.proto</code> service compiled with <code>tonic</code>; shared message types</td></tr>
-<tr><td><code>castore-server</code></td><td>A <code>tonic</code> gRPC server wrapping a <code>Store</code>, plus an async <code>RemoteClient</code></td></tr>
-<tr><td><code>castore-py</code></td><td>PyO3 classes exposing <code>Store</code> as the <code>castore</code> module</td></tr>
-<tr><td><code>castore</code></td><td>The importable Python module — user-facing surface of the PyO3 wheel</td></tr>
-<tr><td><code>castore-ffi</code></td><td>A <code>extern "C"</code> cdylib with an opaque-handle API over <code>Store</code></td></tr>
-<tr><td><code>Castore.jl</code></td><td>A Julia package that <code>ccall</code>s into the FFI cdylib</td></tr>
-<tr><td><code>castore-cli</code></td><td>The <code>cas</code> binary: read+write access to an on-disk store from a terminal</td></tr>
-<tr><td><code>castore-bench</code></td><td>The <code>cas-bench</code> binary: ingestion and simulation-read benchmarks</td></tr>
+<tr><td><code>infrastore-core</code></td><td>The whole engine: types, storage backends, hashing, the <code>Store</code> API</td></tr>
+<tr><td><code>infrastore-proto</code></td><td>The <code>.proto</code> service compiled with <code>tonic</code>; shared message types</td></tr>
+<tr><td><code>infrastore-server</code></td><td>A <code>tonic</code> gRPC server wrapping a <code>Store</code>, plus an async <code>RemoteClient</code></td></tr>
+<tr><td><code>infrastore-py</code></td><td>PyO3 classes exposing <code>Store</code> as the <code>infrastore</code> module</td></tr>
+<tr><td><code>infrastore</code></td><td>The importable Python module — user-facing surface of the PyO3 wheel</td></tr>
+<tr><td><code>infrastore-ffi</code></td><td>A <code>extern "C"</code> cdylib with an opaque-handle API over <code>Store</code></td></tr>
+<tr><td><code>InfraStore.jl</code></td><td>A Julia package that <code>ccall</code>s into the FFI cdylib</td></tr>
+<tr><td><code>infrastore-cli</code></td><td>The <code>infrastore</code> binary: read+write access to an on-disk store from a terminal</td></tr>
+<tr><td><code>infrastore-bench</code></td><td>The <code>infrastore-bench</code> binary: ingestion and simulation-read benchmarks</td></tr>
 </tbody></table>
 </div>
 <h2 id="the-core-store"><a class="header" href="#the-core-store">The Core: <code>Store</code></a></h2>
@@ -277,7 +278,7 @@ matter where the arrays live. Tests run against the memory backend; production u
 <h2 id="why-two-files"><a class="header" href="#why-two-files">Why Two Files</a></h2>
 <p>Numerical arrays and their descriptive metadata have different access patterns. Arrays are large,
 append-mostly, and read by content; metadata is small, frequently queried, and benefits from indexes
-and transactions. castore puts each where it is strongest:</p>
+and transactions. infrastore puts each where it is strongest:</p>
 <ul>
 <li><strong>Arrays → NetCDF4.</strong> Chunked, compressed, columnar storage that HDF5 tooling already understands.</li>
 <li><strong>Metadata → SQLite.</strong> A queryable, transactional catalog at <code>&lt;path&gt;.nc.sqlite</code>.</li>

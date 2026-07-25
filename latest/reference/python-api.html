@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Python API - castore Documentation</title>
+        <title>Python API - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -185,9 +185,9 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="python-api"><a class="header" href="#python-api">Python API</a></h1>
-<p>The PyO3 binding is importable as the <code>castore</code> module (package <code>castore</code>). It is built as an
+<p>The PyO3 binding is importable as the <code>infrastore</code> module (package <code>infrastore</code>). It is built as an
 <code>abi3-py310</code> wheel, so one build runs on CPython 3.10 and newer.</p>
-<pre><code class="language-python">from castore import (
+<pre><code class="language-python">from infrastore import (
     Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
@@ -196,7 +196,7 @@
     DuplicateAssociationError, InvalidParameterError, IntegrityError, ReadOnlyStoreError,
 )
 </code></pre>
-<p><code>castore.__version__</code> reports the wheel version.</p>
+<p><code>infrastore.__version__</code> reports the wheel version.</p>
 <blockquote>
 <p><strong>Array dtypes.</strong> The binding accepts and returns NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>,
 <code>int32</code>, <code>uint64</code>, or <code>bool</code>; whatever dtype is given round-trips unchanged. Multi-dimensional
@@ -326,8 +326,8 @@ def flush(self) -&gt; None: ...
 <blockquote>
 <p><strong>Keyword-only arguments.</strong> Every optional argument in the binding is keyword-only (the <code>*</code>
 marker): filter kwargs, <code>features=</code>/<code>units=</code>/<code>ext=</code> on the add paths, <code>time_range=</code> on the read
-paths, and so on. Positional use raises <code>TypeError</code>. The wheel ships a <code>castore.pyi</code> stub, so IDEs
-and type checkers see the full signatures.</p>
+paths, and so on. Positional use raises <code>TypeError</code>. The wheel ships a <code>infrastore.pyi</code> stub, so
+IDEs and type checkers see the full signatures.</p>
 </blockquote>
 <h4 id="return-shapes"><a class="header" href="#return-shapes">Return shapes</a></h4>
 <ul>
@@ -668,7 +668,7 @@ already carries one of the attributes being moved.</li>
 type; <strong><code>supplemental_attribute_summary</code></strong> returns one dict per distinct pair with keys
 <code>component_type</code>, <code>attribute_type</code>, <code>count</code>, ordered by attribute type then component type.</li>
 </ul>
-<pre><code class="language-python">from castore import SupplementalAttributeAssociation, Store
+<pre><code class="language-python">from infrastore import SupplementalAttributeAssociation, Store
 
 store = Store.create(in_memory=True)
 store.add_supplemental_attribute_association(
@@ -733,7 +733,7 @@ of component <code>p</code> with <code>parent_id=p</code>; <strong><code>list_pa
 edge, returning the rows updated, and raises <code>DuplicateAssociationError</code> if the rewrite would
 duplicate an edge <code>new_id</code> already has.</li>
 </ul>
-<pre><code class="language-python">from castore import ParentChildAssociation, Store
+<pre><code class="language-python">from infrastore import ParentChildAssociation, Store
 
 store = Store.create(in_memory=True)
 store.add_parent_child_association(ParentChildAssociation(1, "Generator", 7, "Bus"))
@@ -746,7 +746,7 @@ store.list_parents(child_id=7)     # -&gt; [1]
 store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 </code></pre>
 <p>Neither association catalog is exposed over the <a href="grpc-api.html">gRPC server</a> or the
-<a href="cli.html"><code>cas</code> CLI</a>.</p>
+<a href="cli.html"><code>infrastore</code> CLI</a>.</p>
 <h2 id="exceptions"><a class="header" href="#exceptions">Exceptions</a></h2>
 <p>All inherit from <code>TimeSeriesError</code>:</p>
 <div class="table-wrapper"><table><thead><tr><th>Exception</th><th>Raised when</th></tr></thead><tbody>
@@ -775,8 +775,8 @@ first, so <code>True</code>/<code>False</code> features are stored as booleans, 
 <a href="https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html"><code>EnvFilter</code></a>
 directive string. Examples:</p>
 <pre><code class="language-python">init_tracing("debug")                            # all targets at DEBUG
-init_tracing("castore_core=debug")     # store core only
-init_tracing("warn,castore_core=trace") # warn globally, trace the core
+init_tracing("infrastore_core=debug")     # store core only
+init_tracing("warn,infrastore_core=trace") # warn globally, trace the core
 </code></pre>
 <p>Silently no-ops if a subscriber is already registered (including the one auto-initialized from
 <code>RUST_LOG</code> at module import). See the

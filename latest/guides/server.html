@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>gRPC Server &amp; Client - castore Documentation</title>
+        <title>gRPC Server &amp; Client - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -215,9 +215,9 @@ method = "none"
 </li>
 <li>
 <p>Launch:</p>
-<pre><code class="language-sh">cargo run -p castore-server -- --config my_server.toml
+<pre><code class="language-sh">cargo run -p infrastore-server -- --config my_server.toml
 # or, from a release build:
-./target/release/castore-server --config my_server.toml
+./target/release/infrastore-server --config my_server.toml
 </code></pre>
 </li>
 </ol>
@@ -227,8 +227,8 @@ and serves the <code>CatalogStore</code> service on <code>host:port</code>. Set 
 <p><code>RemoteClient</code> mirrors the read methods of <code>Store</code> and returns the same core types. gRPC status
 codes are mapped back onto <code>TimeSeriesError</code>, so remote and local calls surface the same error
 taxonomy.</p>
-<pre><pre class="playground"><code class="language-rust">use castore_core::OwnerCategory;
-use castore_server::client::RemoteClient;
+<pre><pre class="playground"><code class="language-rust">use infrastore_core::OwnerCategory;
+use infrastore_server::client::RemoteClient;
 
 #[tokio::main]
 async fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
@@ -264,8 +264,8 @@ rejected without a byte-wise compare, on the assumption that length is not secre
 generated client with an interceptor that injects the header:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use castore_proto::pb::catalog_store_client::CatalogStoreClient;
-use castore_proto::pb::CountsReq;
+</span>use infrastore_proto::pb::catalog_store_client::CatalogStoreClient;
+use infrastore_proto::pb::CountsReq;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
@@ -279,9 +279,9 @@ let mut client = CatalogStoreClient::with_interceptor(channel, move |mut req: to
 let counts = client.get_counts(CountsReq {}).await?.into_inner();
 <span class="boring">}</span></code></pre></pre>
 <h2 id="clients-in-other-languages"><a class="header" href="#clients-in-other-languages">Clients in Other Languages</a></h2>
-<p>The proto file at <code>proto/castore/v1/store.proto</code> is a standard proto3 definition. Generate a client
-for any gRPC-supported language from it, sending the <code>x-api-key</code> metadata header when the server
-requires authentication.</p>
+<p>The proto file at <code>proto/infrastore/v1/store.proto</code> is a standard proto3 definition. Generate a
+client for any gRPC-supported language from it, sending the <code>x-api-key</code> metadata header when the
+server requires authentication.</p>
 
                     </main>
 

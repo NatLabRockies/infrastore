@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Quick Start (Julia) - castore Documentation</title>
+        <title>Quick Start (Julia) - infrastore Documentation</title>
 
 
         <!-- Custom HTML head -->
@@ -141,7 +141,7 @@
                         </button>
                     </div>
 
-                    <h1 class="menu-title">castore Documentation</h1>
+                    <h1 class="menu-title">infrastore Documentation</h1>
 
                     <div class="right-buttons">
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
@@ -186,10 +186,10 @@
                     <main>
                         <h1 id="quick-start-julia"><a class="header" href="#quick-start-julia">Quick Start (Julia)</a></h1>
 <p>This walkthrough creates an in-memory store, adds a <code>SingleTimeSeries</code>, and reads it back — the
-shortest path to a working round-trip. It assumes <code>Castore.jl</code> can find the native library; if the
-first store call errors, see <a href="../how-to/integrate-julia.html">Integrate with Julia</a>.</p>
+shortest path to a working round-trip. It assumes <code>InfraStore.jl</code> can find the native library; if
+the first store call errors, see <a href="../how-to/integrate-julia.html">Integrate with Julia</a>.</p>
 <h2 id="a-minimal-round-trip"><a class="header" href="#a-minimal-round-trip">A Minimal Round-Trip</a></h2>
-<pre><code class="language-julia">using Dates, Castore
+<pre><code class="language-julia">using Dates, InfraStore
 
 # `in_memory=true` means no filesystem I/O. Pass `path=` with `in_memory=false`
 # to write a NetCDF file plus its SQLite catalog.
