@@ -1,6 +1,6 @@
 # Integrate with Julia
 
-Wire `Castore.jl` to the native library. For API usage once it loads, see the
+Wire `InfraStore.jl` to the native library. For API usage once it loads, see the
 [Julia Developer Guide](../guides/julia.md).
 
 ## Prerequisites
@@ -10,36 +10,36 @@ Wire `Castore.jl` to the native library. For API usage once it loads, see the
 
 ## 1. Build the Native Library
 
-`Castore.jl` calls into the C ABI cdylib, so build it first:
+`InfraStore.jl` calls into the C ABI cdylib, so build it first:
 
 ```sh
-cargo build -p castore-ffi --release
+cargo build -p infrastore-ffi --release
 ```
 
 ## 2. Point Julia at the Library
 
-`Castore.jl` resolves the cdylib at first use, in this order:
+`InfraStore.jl` resolves the cdylib at first use, in this order:
 
-1. The `CASTORE_LIB` environment variable — the development override, pointing at a build from
+1. The `INFRASTORE_LIB` environment variable — the development override, pointing at a build from
    step 1.
-2. The `Castore_jll` binary package, if it is installed in the active environment.
+2. The `InfraStore_jll` binary package, if it is installed in the active environment.
 
 For a development build, export the variable (add it to your shell profile to make it permanent):
 
 ```sh
-export CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib  # .so on Linux
+export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linux
 ```
 
-`using Castore` always works; the resolution happens on the first call that reaches the native
+`using InfraStore` always works; the resolution happens on the first call that reaches the native
 library. If neither source yields a path, that call errors (see
-[Troubleshooting](#troubleshooting)). With `Castore_jll` installed you can skip the export entirely
-— set `CASTORE_LIB` only when you want your local build to win over the JLL.
+[Troubleshooting](#troubleshooting)). With `InfraStore_jll` installed you can skip the export
+entirely — set `INFRASTORE_LIB` only when you want your local build to win over the JLL.
 
 ## 3. Instantiate and Test the Package
 
 ```sh
-julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
-julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
+julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 ```
 
 ## 4. Use It From Your Project
@@ -48,13 +48,13 @@ Develop the package into your own environment, then activate it with the library
 
 ```julia
 using Pkg
-Pkg.develop(path="/path/to/castore/julia/Castore.jl")
+Pkg.develop(path="/path/to/infrastore/julia/InfraStore.jl")
 ```
 
 ## Smoke Test
 
 ```julia
-using Dates, Castore
+using Dates, InfraStore
 
 store = Store(in_memory=true)
 ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
@@ -75,10 +75,10 @@ println("ok")
 
 ## Troubleshooting
 
-- **`Could not locate libcastore_ffi. Set the CASTORE_LIB environment variable to
-  a built cdylib, or install Castore_jll.`**
+- **`Could not locate libinfrastore_ffi. Set the INFRASTORE_LIB environment variable to
+  a built cdylib, or install InfraStore_jll.`**
   — Neither resolution path produced a library. Export the variable (step 2) before the first store
-  call, in the same shell that launched Julia, or add `Castore_jll` to the environment.
+  call, in the same shell that launched Julia, or add `InfraStore_jll` to the environment.
 - **`could not load library`** — Check the path exists and has the right extension for your OS
   (`.dylib` on macOS, `.so` on Linux, `.dll` on Windows), and that you built with `--release` if
   your variable points at `target/release`.

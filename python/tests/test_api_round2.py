@@ -4,8 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pytest
-import castore as cas
-from castore import (
+import infrastore
+from infrastore import (
     OwnerCategory,
     SingleTimeSeries,
     Store,
@@ -40,11 +40,11 @@ class TestExceptions:
             "IncompatibleForecastError",
             "StorageError",
         ):
-            exc = getattr(cas, name)
-            assert issubclass(exc, cas.TimeSeriesError)
+            exc = getattr(infrastore, name)
+            assert issubclass(exc, infrastore.TimeSeriesError)
 
     def test_bad_period_string_raises_invalid_parameter(self):
-        with pytest.raises(cas.InvalidParameterError):
+        with pytest.raises(infrastore.InvalidParameterError):
             SingleTimeSeries(T0, "not-a-period", np.zeros(4), "x")
 
     def test_wrong_period_type_raises_type_error(self):
@@ -54,7 +54,7 @@ class TestExceptions:
     def test_storage_error_on_unopenable_path(self):
         # A missing parent directory fails in the catalog layer, staying
         # inside the library's exception hierarchy.
-        with pytest.raises(cas.StorageError):
+        with pytest.raises(infrastore.StorageError):
             Store.open("/nonexistent/dir/x.nc")
 
 
@@ -75,7 +75,7 @@ class TestDunders:
         assert fetched == original
 
     def test_forecast_len_is_count(self):
-        from castore import Deterministic
+        from infrastore import Deterministic
 
         data = np.arange(6, dtype=np.float64).reshape(2, 3)
         det = Deterministic(T0, HOUR, timedelta(hours=2), HOUR, 3, data, "fc")

@@ -28,7 +28,7 @@
   - [Integrate with Python](./how-to/integrate-python.md)
   - [Integrate with Julia](./how-to/integrate-julia.md)
   - [Run the gRPC Server](./how-to/run-server.md)
-  - [Use the `cas` CLI](./how-to/use-cli.md)
+  - [Use the `infrastore` CLI](./how-to/use-cli.md)
 - [Reference](./reference/index.md)
   - [On-Disk File Format](./reference/file-format.md)
   - [Rust API](./reference/rust-api.md)

@@ -1,12 +1,12 @@
 //! Minimal Rust example: in-memory store, add a series, read it back.
 //!
-//! Run with: `cargo run --manifest-path crates/castore-core/Cargo.toml --example basic`
+//! Run with: `cargo run --manifest-path crates/infrastore-core/Cargo.toml --example basic`
 //! Or as a workspace target if exposed.
 
-use castore_core::{
+use chrono::{Duration, TimeZone, Utc};
+use infrastore_core::{
     Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
 };
-use chrono::{Duration, TimeZone, Utc};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut store = create_store(None, true)?;

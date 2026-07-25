@@ -1,6 +1,6 @@
-# castore Documentation
+# infrastore Documentation
 
-This directory contains the source files for the castore user and developer documentation, built
+This directory contains the source files for the infrastore user and developer documentation, built
 with [mdBook](https://rust-lang.github.io/mdBook/).
 
 ## Building the Documentation

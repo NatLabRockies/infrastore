@@ -165,7 +165,7 @@ def open_url(url: str, method: str, timeout: int) -> urllib.response.addinfourl:
     request = urllib.request.Request(
         url,
         method=method,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; castore-doc-link-check/1.0)"},
+        headers={"User-Agent": "Mozilla/5.0 (compatible; infrastore-doc-link-check/1.0)"},
     )
     return urllib.request.urlopen(request, timeout=timeout)
 

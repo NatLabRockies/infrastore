@@ -1,14 +1,14 @@
 # gRPC API
 
-The proto contract lives at `proto/castore/v1/store.proto` and is compiled into `castore-proto` with
-`tonic`. The service is **read-only** — every write operation (add, remove, clear, compact) requires
-local filesystem access and is intentionally absent.
+The proto contract lives at `proto/infrastore/v1/store.proto` and is compiled into
+`infrastore-proto` with `tonic`. The service is **read-only** — every write operation (add, remove,
+clear, compact) requires local filesystem access and is intentionally absent.
 
 The [association catalogs](../explanation/data-model.md#associations-between-entities) are absent
 too, reads included: no message or RPC covers `supplemental_attribute_associations` or
 `parent_child_associations`. Consumers of those tables work against a local `Store`.
 
-- **Package:** `castore.v1`
+- **Package:** `infrastore.v1`
 - **Service:** `CatalogStore`
 
 ## Methods
@@ -213,8 +213,8 @@ required. See [Server Configuration](./server-config.md).
 
 ## Rust Client
 
-`castore-server` ships an async `RemoteClient` that mirrors the read methods and returns core types,
-mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy:
+`infrastore-server` ships an async `RemoteClient` that mirrors the read methods and returns core
+types, mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy:
 
 | gRPC `Code`          | `TimeSeriesError`                |
 | -------------------- | -------------------------------- |
@@ -229,8 +229,8 @@ mapping gRPC `Status` codes back onto the `TimeSeriesError` taxonomy:
 with the same variant a local `Store` would return.
 
 ```rust
-use castore_core::OwnerCategory;
-use castore_server::client::RemoteClient;
+use infrastore_core::OwnerCategory;
+use infrastore_server::client::RemoteClient;
 
 let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
 let counts = client.get_counts().await?;

@@ -1,10 +1,10 @@
 # Python API
 
-The PyO3 binding is importable as the `castore` module (package `castore`). It is built as an
+The PyO3 binding is importable as the `infrastore` module (package `infrastore`). It is built as an
 `abi3-py310` wheel, so one build runs on CPython 3.10 and newer.
 
 ```python
-from castore import (
+from infrastore import (
     Store, SingleTimeSeries, NonSequentialTimeSeries, TimeSeriesKey,
     Deterministic, Probabilistic, Scenarios,
     TimeSeriesType, OwnerCategory,
@@ -14,7 +14,7 @@ from castore import (
 )
 ```
 
-`castore.__version__` reports the wheel version.
+`infrastore.__version__` reports the wheel version.
 
 > **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, `int64`,
 > `int32`, `uint64`, or `bool`; whatever dtype is given round-trips unchanged. Multi-dimensional
@@ -153,8 +153,8 @@ def flush(self) -> None: ...
 
 > **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
 > marker): filter kwargs, `features=`/`units=`/`ext=` on the add paths, `time_range=` on the read
-> paths, and so on. Positional use raises `TypeError`. The wheel ships a `castore.pyi` stub, so IDEs
-> and type checkers see the full signatures.
+> paths, and so on. Positional use raises `TypeError`. The wheel ships a `infrastore.pyi` stub, so
+> IDEs and type checkers see the full signatures.
 
 #### Return shapes
 
@@ -568,7 +568,7 @@ def supplemental_attribute_summary(self) -> list[dict]: ...
   `component_type`, `attribute_type`, `count`, ordered by attribute type then component type.
 
 ```python
-from castore import SupplementalAttributeAssociation, Store
+from infrastore import SupplementalAttributeAssociation, Store
 
 store = Store.create(in_memory=True)
 store.add_supplemental_attribute_association(
@@ -642,7 +642,7 @@ def replace_parent_child_component_id(self, old_id: int, new_id: int) -> int: ..
   duplicate an edge `new_id` already has.
 
 ```python
-from castore import ParentChildAssociation, Store
+from infrastore import ParentChildAssociation, Store
 
 store = Store.create(in_memory=True)
 store.add_parent_child_association(ParentChildAssociation(1, "Generator", 7, "Bus"))
@@ -656,7 +656,7 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -> 1
 ```
 
 Neither association catalog is exposed over the [gRPC server](grpc-api.md) or the
-[`cas` CLI](cli.md).
+[`infrastore` CLI](cli.md).
 
 ## Exceptions
 
@@ -695,8 +695,8 @@ directive string. Examples:
 
 ```python
 init_tracing("debug")                            # all targets at DEBUG
-init_tracing("castore_core=debug")     # store core only
-init_tracing("warn,castore_core=trace") # warn globally, trace the core
+init_tracing("infrastore_core=debug")     # store core only
+init_tracing("warn,infrastore_core=trace") # warn globally, trace the core
 ```
 
 Silently no-ops if a subscriber is already registered (including the one auto-initialized from

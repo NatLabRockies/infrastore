@@ -1,0 +1,25 @@
+[package]
+name = "infrastore-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Performance benchmarks for infrastore"
+
+[[bin]]
+name = "infrastore-bench"
+path = "src/main.rs"
+
+# Forwarded so that opting out of vendoring is possible graph-wide; see
+# `infrastore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["infrastore-core/vendored"]
+
+[dependencies]
+infrastore-core = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true, features = ["env", "color"] }
+tempfile = "3"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

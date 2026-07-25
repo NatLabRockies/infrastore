@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/castore-core",
-    "crates/castore-proto",
-    "crates/castore-server",
-    "crates/castore-py",
-    "crates/castore-ffi",
-    "crates/castore-cli",
-    "crates/castore-bench",
+    "crates/infrastore-core",
+    "crates/infrastore-proto",
+    "crates/infrastore-server",
+    "crates/infrastore-py",
+    "crates/infrastore-ffi",
+    "crates/infrastore-cli",
+    "crates/infrastore-bench",
 ]
 
 [workspace.package]
@@ -28,11 +28,11 @@ prost-types = "0.14"
 sha2 = "0.10"
 thiserror = "1"
 # `default-features = false` here so each member crate re-enables vendoring
-# through its own `vendored` feature (see `castore-core`'s manifest). A workspace
+# through its own `vendored` feature (see `infrastore-core`'s manifest). A workspace
 # member cannot override an inherited dependency's `default-features`, so the
 # opt-out has to live at this level for `--no-default-features` to mean anything.
-castore-core = { version = "0.1.0", path = "crates/castore-core", default-features = false }
-castore-proto = { version = "0.1.0", path = "crates/castore-proto", default-features = false }
+infrastore-core = { version = "0.1.0", path = "crates/infrastore-core", default-features = false }
+infrastore-proto = { version = "0.1.0", path = "crates/infrastore-proto", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
 # `default-features = false` drops the `derive` feature (and its unmaintained
 # `proc-macro-error2` transitive dep); the CLI builds tables via the Builder API.

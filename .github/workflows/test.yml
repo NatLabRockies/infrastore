@@ -80,7 +80,7 @@ jobs:
           # plain KEY=value form would mangle.
           grep '^export ' "$RUNNER_TEMP/cov-env.sh" | sed 's/^export //; s/=.*//' |
             while read -r key; do
-              printf '%s<<CASTORE_COV_ENV\n%s\nCASTORE_COV_ENV\n' "$key" "${!key}"
+              printf '%s<<INFRASTORE_COV_ENV\n%s\nINFRASTORE_COV_ENV\n' "$key" "${!key}"
             done >> "$GITHUB_ENV"
 
       - name: Build workspace
@@ -107,7 +107,7 @@ jobs:
         shell: bash
         run: |
           rm -rf target/wheels
-          maturin build --manifest-path crates/castore-py/Cargo.toml --out target/wheels
+          maturin build --manifest-path crates/infrastore-py/Cargo.toml --out target/wheels
           python -m pip install target/wheels/*.whl
 
       - name: Run Python tests
@@ -119,26 +119,26 @@ jobs:
         with:
           version: "1.12"
 
-      # Castore.jl dlopens the cdylib that `cargo build --workspace` already
-      # produced, located via CASTORE_LIB.
+      # InfraStore.jl dlopens the cdylib that `cargo build --workspace` already
+      # produced, located via INFRASTORE_LIB.
       - name: Run Julia tests
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            Linux) root=$PWD; lib=libcastore_ffi.so ;;
-            macOS) root=$PWD; lib=libcastore_ffi.dylib ;;
+            Linux) root=$PWD; lib=libinfrastore_ffi.so ;;
+            macOS) root=$PWD; lib=libinfrastore_ffi.dylib ;;
             # `pwd -W` yields a native D:/... path. Bash's own /d/... form is
             # not something the Windows loader can dlopen.
-            Windows) root=$(pwd -W); lib=castore_ffi.dll ;;
+            Windows) root=$(pwd -W); lib=infrastore_ffi.dll ;;
             *) echo "unsupported runner: $RUNNER_OS" >&2; exit 1 ;;
           esac
-          export CASTORE_LIB="$root/target/debug/$lib"
-          test -f "$CASTORE_LIB" || { echo "missing cdylib: $CASTORE_LIB" >&2; exit 1; }
-          julia --project=julia/Castore.jl -e 'using Pkg; Pkg.instantiate()'
-          julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl
+          export INFRASTORE_LIB="$root/target/debug/$lib"
+          test -f "$INFRASTORE_LIB" || { echo "missing cdylib: $INFRASTORE_LIB" >&2; exit 1; }
+          julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+          julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 
       # Render both reports from the profiles all three suites just wrote.
-      # `--ignore-filename-regex` drops the protobuf code castore-proto's build
+      # `--ignore-filename-regex` drops the protobuf code infrastore-proto's build
       # script generates into target/; build scripts are themselves excluded
       # unless --include-build-script is passed, so the vendored netcdf-c/HDF5
       # build stays out of the numbers.

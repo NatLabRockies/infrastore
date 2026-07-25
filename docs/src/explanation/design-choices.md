@@ -1,11 +1,12 @@
 # Design Choices
 
-castore is a foundation library. End users rarely call it directly — they reach it through a parent
-package such as [InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl)
-(IS.jl) or [infrasys](https://github.com/natlabrockies/infrasys), which embed castore to persist the
+infrastore is a foundation library. End users rarely call it directly — they reach it through a
+parent package such as
+[InfrastructureSystems.jl](https://github.com/NREL-Sienna/InfrastructureSystems.jl) (IS.jl) or
+[infrasys](https://github.com/natlabrockies/infrasys), which embed infrastore to persist the
 time-series data behind their component models. This page records the decisions that shape the API
 and the on-disk format, and the reasoning behind them, so that developers of those parent packages
-understand what castore optimizes for — and, just as importantly, what it deliberately does not.
+understand what infrastore optimizes for — and, just as importantly, what it deliberately does not.
 
 ## Data Orientation: Optimize for Reading Every Component at One Timestamp
 
@@ -30,8 +31,8 @@ the hot one, and it is the one parent packages hand to their users.
   [`add_time_series_bulk` and `bulk_add`](./storage-model.md#keeping-the-two-files-consistent).
 - Do not build a user-facing feature whose common path is "read this one component's entire array"
   and expect it to be cheap. It works, but it is the slow direction. If a downstream workload
-  genuinely needs that orientation, that is a signal to raise with castore, not to work around with
-  many single-series reads.
+  genuinely needs that orientation, that is a signal to raise with infrastore, not to work around
+  with many single-series reads.
 - The orientation is a property of the _packed_ NetCDF layout only. `NonSequentialTimeSeries` and
   the dense forecast types are stored as standalone per-array variables and do not participate in
   it.
@@ -89,9 +90,9 @@ profile without duplicating storage, and it is why deletes are reference-counted
 
 ## Keep the Multi-Language Surface Consistent
 
-`castore-core` is the single source of truth; the Rust, Python (PyO3), Julia (C ABI), CLI, and gRPC
-interfaces are thin wrappers over the same `Store`. A capability is not considered done until it
-behaves the same across the bindings that support it, and unsupported operations return an explicit
-error rather than silently changing semantics. This keeps a parent package free to move between
-bindings — for example, Julia via the C ABI and Python via the wheel — without the data model
-shifting underneath it. See [Language Bindings](./bindings.md).
+`infrastore-core` is the single source of truth; the Rust, Python (PyO3), Julia (C ABI), CLI, and
+gRPC interfaces are thin wrappers over the same `Store`. A capability is not considered done until
+it behaves the same across the bindings that support it, and unsupported operations return an
+explicit error rather than silently changing semantics. This keeps a parent package free to move
+between bindings — for example, Julia via the C ABI and Python via the wheel — without the data
+model shifting underneath it. See [Language Bindings](./bindings.md).

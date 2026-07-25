@@ -5,7 +5,7 @@
 #   julia --project=julia/formatter julia/formatter/format.jl --check  # exit 1 if unformatted
 using JuliaFormatter
 
-const PACKAGE_DIR = normpath(joinpath(@__DIR__, "..", "Castore.jl"))
+const PACKAGE_DIR = normpath(joinpath(@__DIR__, "..", "InfraStore.jl"))
 const check_only = "--check" in ARGS
 
 formatted = format(PACKAGE_DIR; overwrite=!check_only)

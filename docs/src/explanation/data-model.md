@@ -28,7 +28,7 @@ The data model defines six time-series types, all present in the `TimeSeriesType
 metadata schema. Both static series types are implemented across every interface. The four forecast
 types support reading values across the Rust core, the C ABI, Python, Julia, and gRPC. Dense
 forecasts are written through the generic `add_time_series` across the Rust core, Python, and Julia
-(the C ABI keeps the per-type `castore_store_add_forecast` / `castore_store_add_probabilistic`
+(the C ABI keeps the per-type `infrastore_store_add_forecast` / `infrastore_store_add_probabilistic`
 transport functions), and `DeterministicSingleTimeSeries` is derived from stored `SingleTimeSeries`
 via `transform_single_time_series` (gRPC stays read-only):
 
@@ -42,10 +42,10 @@ via `transform_single_time_series` (gRPC stays read-only):
 | `Scenarios`                     | `add_time_series`                         | Forecast with discrete scenarios                    |
 
 All six types can be **read** from every interface: the Rust core, the C ABI, Python, Julia, the
-`cas` CLI, and the gRPC server. The **write** paths in the table are available in the Rust core, the
-C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no interface
-adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by transforming a
-stored `SingleTimeSeries`.
+`infrastore` CLI, and the gRPC server. The **write** paths in the table are available in the Rust
+core, the C ABI, Python, Julia, and the CLI — never over gRPC, whose service is read-only. And no
+interface adds a `DeterministicSingleTimeSeries` directly: it only ever comes into existence by
+transforming a stored `SingleTimeSeries`.
 
 **`DeterministicSingleTimeSeries` is a storage-level view, and reads always return a
 `Deterministic`.** This is by design in every binding: `TimeSeriesData` has no
@@ -58,7 +58,7 @@ readers can match either concrete type without caring which is stored).
 Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
 `Scenarios` object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
-`castore_store_add_forecast` / `castore_store_add_probabilistic` transport; a
+`infrastore_store_add_forecast` / `infrastore_store_add_probabilistic` transport; a
 `DeterministicSingleTimeSeries` is produced by `transform_single_time_series`. The read-only gRPC
 server serves forecast reads but does not accept writes. See [Forecasts](#forecasts) below.
 
@@ -256,6 +256,6 @@ type into its subtypes stays in the calling language, where the type hierarchy l
 > are unrelated to the entity-to-entity tables described in this section.
 
 Both are available in the Rust core, the C ABI, Julia, and Python; neither is exposed over gRPC or
-the `cas` CLI. The supplemental-attribute surface is the wider of the two (it carries counts and a
-grouped summary) because each of its operations is driven by an existing consumer; the parent/child
-surface is deliberately narrower for now.
+the `infrastore` CLI. The supplemental-attribute surface is the wider of the two (it carries counts
+and a grouped summary) because each of its operations is driven by an existing consumer; the
+parent/child surface is deliberately narrower for now.

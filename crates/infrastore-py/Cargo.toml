@@ -1,0 +1,32 @@
+[package]
+name = "infrastore-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for infrastore"
+
+# The lib target is deliberately NOT named `infrastore`: the CLI's bin target
+# already is, and on MSVC both would emit `target/debug/deps/infrastore.pdb`,
+# which fails the parallel `cargo build --workspace` with LNK1201. The Python
+# module is still `infrastore` -- it comes from `#[pymodule] fn infrastore`
+# (the `PyInit_infrastore` symbol) and `module-name` in `pyproject.toml`, not
+# from this name.
+[lib]
+name = "infrastore_py"
+crate-type = ["cdylib"]
+
+# Statically link netcdf-c/HDF5 so a built wheel needs no system libraries; see
+# `infrastore-core`'s manifest for the full tradeoff.
+[features]
+default = ["vendored"]
+vendored = ["infrastore-core/vendored"]
+
+[dependencies]
+chrono = { workspace = true }
+ndarray = { workspace = true }
+numpy = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py310", "chrono"] }
+infrastore-core = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -14,7 +14,7 @@ changes listed in Phase 0 — nothing else changes.
   `// FINDING:` comment referencing the log entry, and move on. The only authorized non-test code
   changes are in Phase 0 and the explicitly flagged dev-dependency additions.
 - **Never** change: `DATA_FORMAT_VERSION`, the proto surface, public API signatures, on-disk layout,
-  error variants, or FFI exports. Never hand-edit `crates/castore-ffi/include/castore.h`.
+  error variants, or FFI exports. Never hand-edit `crates/infrastore-ffi/include/infrastore.h`.
 - **Quality gates after every phase** (all must pass before the phase's commit):
 
   ```bash
@@ -25,10 +25,10 @@ changes listed in Phase 0 — nothing else changes.
   cargo deny check --config deny.toml
   ```
 
-  Python phases additionally: `maturin develop --manifest-path crates/castore-py/Cargo.toml` then
-  `pytest python/tests`. Julia phases: `cargo build -p castore-ffi --release`, export
-  `CASTORE_LIB=$PWD/target/release/libcastore_ffi.dylib` (`.so` on Linux), then
-  `julia --project=julia/Castore.jl julia/Castore.jl/test/runtests.jl`.
+  Python phases additionally: `maturin develop --manifest-path crates/infrastore-py/Cargo.toml` then
+  `pytest python/tests`. Julia phases: `cargo build -p infrastore-ffi --release`, export
+  `INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib` (`.so` on Linux), then
+  `julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl`.
 - One commit per phase, message prefixed `test:` (Phase 0: `refactor:`). Do not bypass a failing
   pre-commit hook.
 - **Cross-platform**: CI runs Linux/macOS/Windows. Gate permission-bit tests with `#[cfg(unix)]`
@@ -36,28 +36,28 @@ changes listed in Phase 0 — nothing else changes.
   separators.
 - **Julia style**: never vertically align `::`/`=` into columns (Blue style, plain `field::Type`).
 - **Python style**: optional arguments are keyword-only; if any test file touches the public surface
-  list, `python/tests/test_stubs.py` must stay green (it diffs `castore.pyi` member sets).
+  list, `python/tests/test_stubs.py` must stay green (it diffs `infrastore.pyi` member sets).
 
 ## 2. Phase 0 — harness fixes (authorized code changes)
 
-- **0.1 De-duplicate the `slice_count_axis` test.** `crates/castore-core/tests/forecasts.rs` lines
-  ~25–60 contain a private `mod slice_axis` that _re-implements_ `store.rs`'s
+- **0.1 De-duplicate the `slice_count_axis` test.** `crates/infrastore-core/tests/forecasts.rs`
+  lines ~25–60 contain a private `mod slice_axis` that _re-implements_ `store.rs`'s
   `pub(crate)
   slice_count_axis` so the five `slice_count_axis_*` tests can call it — they test a
   copy, not the shipping code. Move those five tests into the existing `#[cfg(test)]` module in
-  `crates/castore-core/src/store.rs` (precedent: `resolve_windows_tests` there), delete
+  `crates/infrastore-core/src/store.rs` (precedent: `resolve_windows_tests` there), delete
   `mod slice_axis` and the test-file copies. No public export.
 - **0.2 Shared backend harness.** `fn for_each_backend` is duplicated verbatim in
   `tests/indexing.rs:24` and `tests/forecasts.rs:66` (runs a populate/verify pair against both the
-  in-memory and NetCDF backends). Extract to `crates/castore-core/tests/common/mod.rs` and include
-  with `mod common;` from each integration-test file that uses it. Phase 1 threads more tests
-  through it.
-- **0.3 Dev-dependencies** (authorized, needed by later phases): add `rusqlite` to `castore-core`
+  in-memory and NetCDF backends). Extract to `crates/infrastore-core/tests/common/mod.rs` and
+  include with `mod common;` from each integration-test file that uses it. Phase 1 threads more
+  tests through it.
+- **0.3 Dev-dependencies** (authorized, needed by later phases): add `rusqlite` to `infrastore-core`
   dev-deps if not already visible to tests (used to corrupt catalogs in 1.7 — precedent:
-  `tests/associations.rs` already opens the sqlite file raw to drop tables), and to `castore-cli`
+  `tests/associations.rs` already opens the sqlite file raw to drop tables), and to `infrastore-cli`
   dev-deps (used in 3.6 to build a corrupt store for the `verify` failing-exit test).
 
-## 3. Phase 1 — core corner cases (`castore-core`)
+## 3. Phase 1 — core corner cases (`infrastore-core`)
 
 New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items extend the named files.
 
@@ -140,7 +140,7 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
     asserted; Julia tests `(4,2,3)`).
   - NaN/Inf round trip via numpy; forecast persisted-and-reopened (today only statics persist in
     Python tests).
-  - Untested `Store` methods, all present in `castore.pyi` — cover each at least once:
+  - Untested `Store` methods, all present in `infrastore.pyi` — cover each at least once:
     `has_time_series`, `remove_time_series_bulk`, `counts_by_type`, `list_owner_ids`,
     `static_summary`, `forecast_summary`, `check_static_consistency` (including the divergent-grid
     error → this is how to finally _raise_ `IntegrityError`), `resolve_forecast_key`,
@@ -152,7 +152,7 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
     `"0.9.0"` by reopening the file with raw bytes? Not feasible from Python without a netcdf
     library — instead do it via a tiny Rust-side fixture? **Skip**; pin it in Rust (1.7) and log a
     Finding that Python cannot construct this case natively.
-- **2.2 Julia** (`julia/Castore.jl/test/runtests.jl`):
+- **2.2 Julia** (`julia/InfraStore.jl/test/runtests.jl`):
   - Stored round trips for `UInt64` and `Int32` (today only constructor-inference covers Int32); a
     `Float32` forecast.
   - Error paths: operate on a store after `close!` (pin — Python tests this, Julia does not);
@@ -164,30 +164,30 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
     mirror the "both-or-neither" argument validation).
   - NaN round trip; embedded-NUL name: Julia's `Cstring` conversion throws `ArgumentError` before
     reaching the FFI — pin that at the wrapper level.
-- **2.3 FFI direct tests** (`crates/castore-ffi`, extend the existing `#[cfg(test)]` module — today
-  3 tests touch 21 of 122 exports, and no test asserts an error **code by value**):
-  - Store lifecycle **through the ABI**: `castore_store_create` on a temp path → add via
-    `castore_store_add_*` → `castore_store_persist`/`flush` → `castore_store_free` → reopen via
-    `castore_store_open` read-only. (Existing tests construct `CastoreStoreHandle` directly and
+- **2.3 FFI direct tests** (`crates/infrastore-ffi`, extend the existing `#[cfg(test)]` module —
+  today 3 tests touch 21 of 122 exports, and no test asserts an error **code by value**):
+  - Store lifecycle **through the ABI**: `infrastore_store_create` on a temp path → add via
+    `infrastore_store_add_*` → `infrastore_store_persist`/`flush` → `infrastore_store_free` → reopen
+    via `infrastore_store_open` read-only. (Existing tests construct `InfraStoreHandle` directly and
     never call these.)
   - Null-pointer sweep: for a representative export of each family (store op, reader op, key op,
-    buffer op) pass a null handle and a null out-param; assert `CASTORE_ERR_NULL_POINTER` (1)
+    buffer op) pass a null handle and a null out-param; assert `INFRASTORE_ERR_NULL_POINTER` (1)
     exactly.
-  - Invalid UTF-8 name (e.g. `b"wind\xff\x00"`): assert `CASTORE_ERR_INVALID_UTF8` (2), and that
-    `castore_last_error_message` returns a non-empty message (that function has never been called in
-    a test).
-  - Error codes by value: `CASTORE_ERR_NOT_FOUND`, `CASTORE_ERR_DUPLICATE`, `CASTORE_ERR_READ_ONLY`
-    via natural triggers.
+  - Invalid UTF-8 name (e.g. `b"wind\xff\x00"`): assert `INFRASTORE_ERR_INVALID_UTF8` (2), and that
+    `infrastore_last_error_message` returns a non-empty message (that function has never been called
+    in a test).
+  - Error codes by value: `INFRASTORE_ERR_NOT_FOUND`, `INFRASTORE_ERR_DUPLICATE`,
+    `INFRASTORE_ERR_READ_ONLY` via natural triggers.
   - Buffer-probe edges: `cap` non-zero but smaller than needed; index past
     `num_groups`/`num_entries`.
-  - Dtype codes `F32(1)`, `I32(3)`, `U64(4)`, `Bool(5)` asserted through `castore_store_get_single`
-    (only 0 and 2 are asserted today).
+  - Dtype codes `F32(1)`, `I32(3)`, `U64(4)`, `Bool(5)` asserted through
+    `infrastore_store_get_single` (only 0 and 2 are asserted today).
   - Do **not** test double-free or use-after-free — those are documented UB, not defined behavior to
     pin.
 
 ## 5. Phase 3 — proto, server, CLI
 
-- **3.1 Proto conversion unit tests** (`crates/castore-proto/src/convert.rs`): dtype matrix — add
+- **3.1 Proto conversion unit tests** (`crates/infrastore-proto/src/convert.rs`): dtype matrix — add
   F32/I32/U64/Bool (only F64/I64 today); `FeatureValue` `Float`/`Bool`/`Str` both directions plus
   the `value == None` → `MissingField` arm (only `Int` is ever exercised); **`Period::Months`
   through the wire types** — `P1M` resolution/horizon/interval in metadata, keys (including the
@@ -199,25 +199,25 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
   `ext` through. Do not change behavior: add a test pinning the blanking, and record it in Findings
   (§9) for the user to rule on. **Ruled on** — see F1; the test is
   `ext_is_always_empty_in_get_resp`.
-- **3.3 Server integration** (`crates/castore-server/tests/`): request-validation matrix — missing
-  key, `start` without `end`, malformed RFC3339, unparseable ISO period, unknown
+- **3.3 Server integration** (`crates/infrastore-server/tests/`): request-validation matrix —
+  missing key, `start` without `end`, malformed RFC3339, unparseable ISO period, unknown
   `owner_category`/`time_series_type` enum ints → each asserts `Code::InvalidArgument`; empty-result
   matrix — `ListTimeSeries`/`ListKeys` zero rows, keys for an unknown owner, `HasTimeSeries`
   **false**, `ListOwnerIds` empty, counts on an empty store; BulkRead edges — empty key list, one
   missing key among N, duplicate keys, a `time_range` applied to bulk; one end-to-end **Months**
   series (add `P1M` resolution to the backing store, list + get over the wire, assert the ISO string
   survives).
-- **3.4 Server binary** (never executed by any test; bin name `castore-server`, so
-  `env!("CARGO_BIN_EXE_castore-server")`): nonexistent store file in `[data].files` → nonzero exit
-  with a useful stderr; `auth = "none"` end-to-end (the integration tests attach the interceptor
-  manually and never run the binary's dispatch branch); `api_key` through the binary. Bind
-  `127.0.0.1:0` if the config accepts port 0 and the binary logs the bound address; otherwise pick a
-  high random port with a bounded retry loop.
+- **3.4 Server binary** (never executed by any test; bin name `infrastore-server`, so
+  `env!("CARGO_BIN_EXE_infrastore-server")`): nonexistent store file in `[data].files` → nonzero
+  exit with a useful stderr; `auth = "none"` end-to-end (the integration tests attach the
+  interceptor manually and never run the binary's dispatch branch); `api_key` through the binary.
+  Bind `127.0.0.1:0` if the config accepts port 0 and the binary logs the bound address; otherwise
+  pick a high random port with a bounded retry loop.
 - **3.5 Client `map_status`.** Unit-test the client's status→error table directly if visible;
   otherwise drive it through the server tests (`NotFound`, `InvalidArgument`, and the documented
   lossy collapse of `Internal`/`Unavailable` into `ConnectionError` — the collapse is intentional;
   pin it, don't "fix" it).
-- **3.6 CLI** (`crates/castore-cli/tests/cli_round_trip.rs`; `run_err` should start asserting the
+- **3.6 CLI** (`crates/infrastore-cli/tests/cli_round_trip.rs`; `run_err` should start asserting the
   `Error:` stderr prefix):
   - Bad CSV matrix: ragged row, non-numeric cell in an f64 column, `"abc"` in an i64 column,
     negative into `u64`, value-count/shape mismatch (the likeliest real user error), missing
@@ -227,8 +227,9 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
   - Descriptor matrix: unknown field (`deny_unknown_fields`), missing per-type required fields (each
     "requires 'X'" message), empty root array, root scalar, malformed JSON, zero `element_shape`
     dimension, non-divisible value count, scenario-count inference failure,
-    `DeterministicSingleTimeSeries` in a descriptor → "run `cas transform`" error, a `features` map
-    in a descriptor (never populated in any test), `owner_category: supplemental_attribute`.
+    `DeterministicSingleTimeSeries` in a descriptor → "run `infrastore transform`" error, a
+    `features` map in a descriptor (never populated in any test),
+    `owner_category: supplemental_attribute`.
   - Untested subcommands: `transform` (derive DST from an added STS, then `list` shows the DST tag),
     `copy` (real + `--dry-run`), `persist`, `compact`, `params`, `template`; real `clear` and
     `replace-owner`; single-series `remove --force` (non-`--all` path).
@@ -236,7 +237,7 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
     byte-compare via `get -f csv`. Include one non-f64 dtype and one forecast.
   - `get --time-range` (currently never invoked at all), `--limit`/`--full` truncation message,
     selector zero-match and multi-match messages, glob edges (`?`, `[ab]`, no-match, `*`).
-  - `CASTORE_STORE` env fallback (set via `Command::env`), flag-beats-env precedence, missing
+  - `INFRASTORE_STORE` env fallback (set via `Command::env`), flag-beats-env precedence, missing
     `--store` error.
   - `verify` failing case: corrupt a store's sqlite with the 1.7 recipe (rusqlite dev-dep), assert
     exit code 1 specifically.
@@ -267,15 +268,15 @@ full §1 gate before each. Total new-test estimate: ~120–150 test functions.
 - All performance work (`TEST_COVERAGE_ASSESSMENT.md` §3 short-term items and P-list): indexes are
   done; projections, bulk_read batching, hashing, WAL, compact, chunk geometry are separate changes.
 - `name_glob` in FFI/Julia (API addition), gRPC surface changes (streaming, message limits,
-  `RemoteClient` auth — tracked in `GRPC_BACKLOG.md`), `cas-bench` CI wiring, ASAN/valgrind CI job
-  (worthwhile follow-up; needs its own workflow change), the known multi-file `[data].files`
+  `RemoteClient` auth — tracked in `GRPC_BACKLOG.md`), `infrastore-bench` CI wiring, ASAN/valgrind
+  CI job (worthwhile follow-up; needs its own workflow change), the known multi-file `[data].files`
   truncation defect (documented in `GRPC_BACKLOG.md`; do not "fix" it in a test).
 
 ## 9. Findings log
 
 Append entries here as `F<n>: <file:line> — <what the test pinned and why it looks wrong>`. Seeded:
 
-- F1: `castore-proto/src/convert.rs:358–422` — `GetResp.ext` is always the empty string while the
+- F1: `infrastore-proto/src/convert.rs:358–422` — `GetResp.ext` is always the empty string while the
   metadata path carries `ext` through. **RESOLVED as documented behavior** (user decision,
   2026-07-24): `GetResp.ext` stays empty and is documented as unused. On investigation this is not a
   value being dropped — three findings changed the picture:
@@ -292,20 +293,20 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
      `GetResp` items — to serve a value the typed Rust client still could not surface without a core
      API change; and `reserved 10`, though idiomatic for this file (precedent: `reserved 5`), is a
      proto surface change that the plan froze and is better ridden along with other proto work.
-     Documented on field 10 in `proto/castore/v1/store.proto` and on `time_series_data_to_get_resp`;
-     pinned by `ext_is_always_empty_in_get_resp`.
+     Documented on field 10 in `proto/infrastore/v1/store.proto` and on
+     `time_series_data_to_get_resp`; pinned by `ext_is_always_empty_in_get_resp`.
 - F2: Python cannot natively construct an `IncompatibleFormatError` fixture (no NetCDF attribute
   access from the test suite); the case is pinned in Rust only (1.7).
-- F3: `castore-core/src/store.rs:1979` — `Store::verify_integrity` delegates straight to the NetCDF
-  backend, which walks only its own hash index. A `data_hash` corrupted in the SQLite catalog is
-  therefore **not** reported even though every read of that key then fails. Pinned by
+- F3: `infrastore-core/src/store.rs:1979` — `Store::verify_integrity` delegates straight to the
+  NetCDF backend, which walks only its own hash index. A `data_hash` corrupted in the SQLite catalog
+  is therefore **not** reported even though every read of that key then fails. Pinned by
   `verify_integrity_does_not_inspect_the_sqlite_catalog` (1.7). **RESOLVED as documented scope**
   (user decision, 2026-07-24): the behavior stays as it is and the check's scope is now stated
   wherever it is surfaced — `Store::verify_integrity` and `IntegrityReport` rustdoc,
-  `cas verify --help` (and its success line, now "Array integrity OK"), the PyO3 docstring, the
-  Julia docstring, the `castore_store_verify` header comment, and a "What it does not cover" section
-  in `docs/src/explanation/content-addressing.md` that the API references link to. Rationale for not
-  implementing: `verify_integrity` is public across four bindings plus the CLI and gRPC, so
+  `infrastore verify --help` (and its success line, now "Array integrity OK"), the PyO3 docstring,
+  the Julia docstring, the `infrastore_store_verify` header comment, and a "What it does not cover"
+  section in `docs/src/explanation/content-addressing.md` that the API references link to. Rationale
+  for not implementing: `verify_integrity` is public across four bindings plus the CLI and gRPC, so
   tightening it can turn a passing pipeline into a nonzero exit on a store that was working. The
   catalog already has purpose-built checks — `check_static_consistency` and `compact` — and SQLite
   enforces the `NOT NULL`/`CHECK`/unique-index invariants itself. If it is ever revisited, the
@@ -314,52 +315,52 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
   in-memory `HashMap` lookup (`netcdf.rs:1382`). That alone catches a truncated catalog, a corrupted
   one, and a catalog paired with the wrong `.nc`. Note that `PRAGMA integrity_check` would **not**
   catch this finding's case: a flipped `data_hash` is structurally valid SQLite.
-- F4: `castore-core/src/store.rs:247` — a torn artifact (NetCDF present, `.sqlite` deleted) opened
-  **read-write** silently recreates an empty catalog: the store reports zero time series while the
-  arrays are still on disk as unreachable garbage. Read-only opens fail loudly instead. Pinned by
-  `opening_a_store_whose_sqlite_half_is_missing_creates_an_empty_catalog` (1.7).
-- F5: `castore-core/src/store.rs:248` — `Store::open` opens the SQLite catalog _before_ the NetCDF
-  format-version check, so when both halves are wrong the caller sees `Sqlite(CannotOpen)` rather
-  than the more informative `IncompatibleFormat`. Pinned by
+- F4: `infrastore-core/src/store.rs:247` — a torn artifact (NetCDF present, `.sqlite` deleted)
+  opened **read-write** silently recreates an empty catalog: the store reports zero time series
+  while the arrays are still on disk as unreachable garbage. Read-only opens fail loudly instead.
+  Pinned by `opening_a_store_whose_sqlite_half_is_missing_creates_an_empty_catalog` (1.7).
+- F5: `infrastore-core/src/store.rs:248` — `Store::open` opens the SQLite catalog _before_ the
+  NetCDF format-version check, so when both halves are wrong the caller sees `Sqlite(CannotOpen)`
+  rather than the more informative `IncompatibleFormat`. Pinned by
   `the_catalog_half_is_opened_before_the_format_check` (1.7).
 - F7: a closed store reports differently in the two bindings. Python raises
   `TimeSeriesError("store is closed")` from its own guard; Julia nulls the handle so the call
   reaches the ABI's null-handle path and `_check` maps code 1 to `InvalidParameterError`. Both are
   pinned (`test_api_additions.py`, `operations on a closed store raise`), but a caller porting code
   between the bindings cannot catch the same type. Needs a user decision on whether to unify.
-- F8: `castore-core/src/metadata.rs` summary rows return `initial_timestamp` as an RFC3339
+- F8: `infrastore-core/src/metadata.rs` summary rows return `initial_timestamp` as an RFC3339
   **string** in Python (`static_summary`, `forecast_summary`, `check_static_consistency`), while
   `SingleTimeSeries.initial_timestamp` is a `datetime`. Pinned by `test_parity.py`; inconsistent but
   a behavior change to fix.
-- F6: `castore-core/src/store.rs:69` (`ListFilter::name_glob`) — there is no escaping API, so a name
-  containing `*`, `?`, or `[...]` is not addressable by passing its own text as a `name_glob`
+- F6: `infrastore-core/src/store.rs:69` (`ListFilter::name_glob`) — there is no escaping API, so a
+  name containing `*`, `?`, or `[...]` is not addressable by passing its own text as a `name_glob`
   pattern; `wind[1]` used as a pattern matches nothing. Callers needing literal matching must use
   `ListFilter::name`. Pinned by `name_glob_follows_sqlite_glob_semantics` (1.4). Documentation gap
   rather than a defect, but worth stating in the user-facing docs.
-- F9: `castore-server/src/client.rs` — `BulkReadResp` items carry no name, so
+- F9: `infrastore-server/src/client.rs` — `BulkReadResp` items carry no name, so
   `RemoteClient::bulk_read` fills in the empty string while `get_time_series` (which knows the name
   from the key it was handed) keeps it. Pinned by `a_time_range_applies_to_every_key_in_a_bulk_read`
   (3.3). The caller holds the keys positionally so nothing is lost, but the asymmetry is a trap.
-- F10: `cas export` emits a **timestamped** CSV (`timestamp,value`), while a `single` descriptor's
-  CSV holds values only — so `export` output is not directly re-addable as the same type, despite
-  `export` being documented as the read-direction inverse of `add`. A caller must strip the
-  timestamp column or re-add as `non_sequential`. Both routes are pinned by
+- F10: `infrastore export` emits a **timestamped** CSV (`timestamp,value`), while a `single`
+  descriptor's CSV holds values only — so `export` output is not directly re-addable as the same
+  type, despite `export` being documented as the read-direction inverse of `add`. A caller must
+  strip the timestamp column or re-add as `non_sequential`. Both routes are pinned by
   `export_then_add_reproduces_the_values` (3.6).
-- F11: `castore-cli/src/descriptor.rs:292` — the "element_shape must not contain a zero dimension"
-  guard is unreachable, because `per_step` is computed as `product().max(1)`, so a zero dimension
-  becomes 1. `element_shape: [0]` instead surfaces later as a value-count mismatch against the
-  degenerate shape (`expected 0 values for shape [3, 0]`). Still actionable, but not the intended
-  message. Pinned by `a_zero_element_shape_dimension_is_rejected` (3.6).
-- F12: `cas verify` writes its failing report to **stdout** and then exits 1, so unlike every other
-  failing command it produces no `Error:` stderr diagnostic. A shell caller checking stderr for a
-  problem sees nothing. Pinned by `verify_exits_one_on_a_corrupt_store` (3.6).
+- F11: `infrastore-cli/src/descriptor.rs:292` — the "element_shape must not contain a zero
+  dimension" guard is unreachable, because `per_step` is computed as `product().max(1)`, so a zero
+  dimension becomes 1. `element_shape: [0]` instead surfaces later as a value-count mismatch against
+  the degenerate shape (`expected 0 values for shape [3, 0]`). Still actionable, but not the
+  intended message. Pinned by `a_zero_element_shape_dimension_is_rejected` (3.6).
+- F12: `infrastore verify` writes its failing report to **stdout** and then exits 1, so unlike every
+  other failing command it produces no `Error:` stderr diagnostic. A shell caller checking stderr
+  for a problem sees nothing. Pinned by `verify_exits_one_on_a_corrupt_store` (3.6).
 - F13: **precision mismatch between timestamps and periods.** A timestamp is stored as an RFC3339
   string and keeps nanoseconds; a `Period` is an integer count of milliseconds. The **smallest
   supported period is one millisecond** (`Period::Fixed`) or one month (`Period::Months`), enforced
   in three independent places: `is_positive` tests `num_milliseconds() > 0`, `to_iso8601` emits at
   most three fractional digits, and `from_iso8601` _rejects_ more than three — so a finer period
   cannot be written to or read from disk or the wire. That floor is now stated in the `period.rs`
-  module docs. Three consequences, all covered in `castore-core/tests/cross_cutting.rs` (4.1):
+  module docs. Three consequences, all covered in `infrastore-core/tests/cross_cutting.rs` (4.1):
   1. **Documented, not fixed.** A sub-millisecond resolution is not rejected at construction —
      `SingleTimeSeries::new` does not validate — and reads back as `PT0S`. Forecast constructors do
      reject it. Same from Python (`test_a_microsecond_resolution_is_silently_truncated_to_zero`) and

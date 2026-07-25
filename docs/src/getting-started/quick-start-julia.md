@@ -1,13 +1,13 @@
 # Quick Start (Julia)
 
 This walkthrough creates an in-memory store, adds a `SingleTimeSeries`, and reads it back — the
-shortest path to a working round-trip. It assumes `Castore.jl` can find the native library; if the
-first store call errors, see [Integrate with Julia](../how-to/integrate-julia.md).
+shortest path to a working round-trip. It assumes `InfraStore.jl` can find the native library; if
+the first store call errors, see [Integrate with Julia](../how-to/integrate-julia.md).
 
 ## A Minimal Round-Trip
 
 ```julia
-using Dates, Castore
+using Dates, InfraStore
 
 # `in_memory=true` means no filesystem I/O. Pass `path=` with `in_memory=false`
 # to write a NetCDF file plus its SQLite catalog.

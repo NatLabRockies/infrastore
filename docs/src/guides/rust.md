@@ -1,13 +1,13 @@
 # Rust Developer Guide
 
-This guide covers using `castore-core` from Rust. For exact signatures see the
+This guide covers using `infrastore-core` from Rust. For exact signatures see the
 [Rust API reference](../reference/rust-api.md).
 
 For a runnable end-to-end round-trip, `examples/basic_rust.rs` creates an in-memory store, adds a
 `SingleTimeSeries`, and reads it back:
 
 ```sh
-cargo run --manifest-path crates/castore-core/Cargo.toml --example basic
+cargo run --manifest-path crates/infrastore-core/Cargo.toml --example basic
 ```
 
 ## Add the Dependency
@@ -16,7 +16,7 @@ The crate is part of this workspace. From another crate in the workspace:
 
 ```toml
 [dependencies]
-castore-core = { path = "../castore-core" }
+infrastore-core = { path = "../infrastore-core" }
 chrono = "0.4"
 ```
 
@@ -28,7 +28,7 @@ the API speaks.
 
 ```rust
 use std::path::Path;
-use castore_core::{create_store, open_store};
+use infrastore_core::{create_store, open_store};
 
 // In-memory (tests, scratch work): no filesystem I/O.
 let mut store = create_store(None, true)?;
@@ -44,7 +44,7 @@ let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
 
 ```rust
 use chrono::{Duration, TimeZone, Utc};
-use castore_core::{
+use infrastore_core::{
     Features, FeatureValue, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
 };
 
@@ -77,7 +77,7 @@ For many series at once, `add_time_series_bulk` takes a `Vec<AddRequest>` and co
 batch atomically — any error rolls back every array and association in the call:
 
 ```rust
-use castore_core::AddRequest;
+use infrastore_core::AddRequest;
 
 let keys = store.add_time_series_bulk(vec![
     AddRequest {
@@ -156,7 +156,7 @@ let series = store.bulk_read(&ids)?;
 is ANDed, and the `features` clause is a subset match:
 
 ```rust
-use castore_core::{ListFilter, OwnerCategory, TimeSeriesType};
+use infrastore_core::{ListFilter, OwnerCategory, TimeSeriesType};
 
 let metas = store.list_time_series(
     ListFilter::new()
@@ -183,7 +183,7 @@ to, so you can group series that share stored data:
 
 ```rust
 for (key, hash) in store.list_keys_with_hash(ListFilter::new().owner_id(42))? {
-    println!("{} -> {}", key.identity().name, castore_core::hash::hash_hex(&hash));
+    println!("{} -> {}", key.identity().name, infrastore_core::hash::hash_hex(&hash));
 }
 ```
 
@@ -205,7 +205,7 @@ Dense forecasts are written through the generic `add_time_series` by wrapping a 
 conventional shapes per type); the store content-addresses it and records the windowing parameters:
 
 ```rust
-use castore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
+use infrastore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
 
 // A Deterministic forecast: a [H, count, *E] array (here scalar steps, so [H, count]).
 let (horizon_count, count) = (24, 7);
@@ -281,7 +281,7 @@ request is ambiguous. `RequestedType::AbstractDeterministic` matches a stored `D
 `DeterministicSingleTimeSeries`, so callers need not know which one is stored:
 
 ```rust
-use castore_core::RequestedType;
+use infrastore_core::RequestedType;
 
 let key = store.resolve_forecast_key(
     42,
@@ -340,7 +340,7 @@ filtering and are not part of identity, so re-attaching the same pair under diff
 a duplicate and fails with `DuplicateAssociation`:
 
 ```rust
-use castore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+use infrastore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
 
 store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
     component_id: 42,
@@ -394,7 +394,7 @@ Parent/child edges work the same way, except that identity is the **ordered** pa
 an edge is a different edge — and both endpoints are always components, so there is no category:
 
 ```rust
-use castore_core::{ParentChildAssociation, ParentChildFilter};
+use infrastore_core::{ParentChildAssociation, ParentChildFilter};
 
 store.add_parent_child_association(ParentChildAssociation {
     parent_id: 42,
@@ -412,7 +412,7 @@ let updated = store.replace_parent_child_component_id(42, 99)?;
 assert_eq!(updated, 1);
 ```
 
-Neither table is reachable over gRPC or the `cas` CLI.
+Neither table is reachable over gRPC or the `infrastore` CLI.
 
 ## Persist to Disk
 
@@ -440,7 +440,7 @@ Always keep the `.nc` and `.nc.sqlite` files together — neither is usable alon
 Every fallible method returns `Result<T, TimeSeriesError>`. Match on the variant to react:
 
 ```rust
-use castore_core::TimeSeriesError;
+use infrastore_core::TimeSeriesError;
 
 match store.get_time_series(key.identity(), None) {
     Ok(data) => { /* ... */ }

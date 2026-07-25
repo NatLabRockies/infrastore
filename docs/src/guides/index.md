@@ -1,13 +1,13 @@
 # Developer Guides
 
-These guides are written for developers building on castore from a specific language. Each walks
+These guides are written for developers building on infrastore from a specific language. Each walks
 through the full workflow — create or open a store, add series, query, read, and persist — with the
 idioms of that language, then points at the matching [reference](../reference/index.md) for exact
 signatures.
 
-- [Rust](./rust.md) — Embed `castore-core` directly.
-- [Python](./python.md) — Use the `castore` PyO3 wheel.
-- [Julia](./julia.md) — Use the `Castore.jl` package over the C ABI.
+- [Rust](./rust.md) — Embed `infrastore-core` directly.
+- [Python](./python.md) — Use the `infrastore` PyO3 wheel.
+- [Julia](./julia.md) — Use the `InfraStore.jl` package over the C ABI.
 - [gRPC Server & Client](./server.md) — Serve a store for remote readers.
 - [Benchmarks](./benchmarks.md) — Measure bulk-add and simulation-loop read performance.
 
