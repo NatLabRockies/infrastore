@@ -26,14 +26,14 @@ Exported names (types first, then functions):
 `count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
-`get_forecast_metadata`, `get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`,
-`get_probabilistic_metadata`, `get_resolutions`, `get_time_series`, `get_time_series_keys`,
-`has_for_owner`, `has_parent_child_association`, `has_supplemental_attribute_association`,
-`has_time_series`, `has_typed`, `init_logging`, `key_info`, `list_array_groups`, `list_children`,
-`list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`,
-`list_parent_child_associations`, `list_parents`, `list_supplemental_attribute_associations`,
-`list_supplemental_attribute_ids`, `list_time_series`, `num_distinct_arrays`, `open_store`,
-`persist!`, `read_only`, `remove_by_filter!`, `remove_parent_child_associations!`,
+`get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
+`get_time_series`, `get_time_series_keys`, `has_for_owner`, `has_parent_child_association`,
+`has_supplemental_attribute_association`, `has_time_series`, `has_typed`, `init_logging`,
+`key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`,
+`list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
+`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
+`list_time_series`, `num_distinct_arrays`, `open_store`, `persist!`, `read_only`,
+`remove_by_filter!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `remove_typed!`,
 `rename_time_series!`, `replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `resolve_forecast_key`, `static_grid`,
@@ -304,8 +304,10 @@ and may be reused. `length(batch)` returns the number of pending requests.
 
 ```julia
 get_metadata(store, key::TimeSeriesKey) -> TimeSeriesMetadata
+get_metadata(T::Type, store, owner_id, owner_category::OwnerCategory, name;
+             resolution=nothing, interval=nothing, features=Dict()) -> TimeSeriesMetadata
 get_metadata(store, owner_id, owner_category::OwnerCategory, name;
-             resolution=nothing, features=Dict()) -> TimeSeriesMetadata
+             resolution=nothing, features=Dict()) -> TimeSeriesMetadata   # T = SingleTimeSeries
 has_time_series(store, owner_id, owner_category::OwnerCategory, name;
                 resolution=nothing, features=Dict()) -> Bool
 remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
@@ -314,15 +316,24 @@ remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
 
 `owner_category` (`Component` / `SupplementalAttribute`) is required: the owner identity is the pair
 `(owner_id, owner_category)`, so a component and a supplemental attribute may share a numeric
-`owner_id` and remain distinct. `get_metadata` returns the whole
-[`TimeSeriesMetadata`](#result-types) record and throws `NotFoundError` if absent. The attribute
-form addresses a `SingleTimeSeries`; to address a forecast use
-`get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval,
-features)`
-— or `get_probabilistic_metadata`, the same call pinned to `Probabilistic` — and for anything you
-already hold a key for, the key form. All of them return the same struct, so `ext`, `dtype`,
-`owner_type`, and `percentiles` are available whichever way the record was reached (for a forecast,
-`element_shape` is the stored array's trailing dims after its first axis).
+`owner_id` and remain distinct.
+
+`get_metadata` returns the whole [`TimeSeriesMetadata`](#result-types) record — every stored type
+through the one function — and throws `NotFoundError` if absent. The attribute form takes the type
+as its first argument exactly like `get_time_series`: `SingleTimeSeries`, `NonSequentialTimeSeries`,
+`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, or
+`AbstractDeterministic` to resolve whichever of the `Deterministic` /
+`DeterministicSingleTimeSeries` pair is stored. `interval` is only needed to disambiguate forecasts
+that differ solely by interval. Omitting the type reads a `SingleTimeSeries`, the same shorthand
+`has_time_series` and `remove_time_series!` use. Since every form returns the same struct, `ext`,
+`dtype`, `owner_type`, and `percentiles` are available whichever type was asked for and whichever
+way the record was reached (for a forecast, `element_shape` is the stored array's trailing dims
+after its first axis).
+
+```julia
+get_metadata(store, 42, Component, "load"; resolution = Hour(1))
+get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+```
 
 ```julia
 get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -> Vector{T}

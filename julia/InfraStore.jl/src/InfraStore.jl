@@ -83,8 +83,6 @@ export Store,
     verify_integrity,
     compact!,
     get_metadata,
-    get_forecast_metadata,
-    get_probabilistic_metadata,
     get_array_by_hash,
     count_array_references,
     list_time_series,
@@ -1257,13 +1255,29 @@ end
 
 """
     get_metadata(store, key) -> TimeSeriesMetadata
+    get_metadata(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesMetadata
     get_metadata(store, owner_id, owner_category, name; resolution, features=Dict()) -> TimeSeriesMetadata
 
 The complete [`TimeSeriesMetadata`](@ref) of one stored association, addressed
-either by a `TimeSeriesKey` or, in the attribute form, by the identity of a
-`SingleTimeSeries` (`owner_category` is the owner's `OwnerCategory`). Use
-[`get_forecast_metadata`](@ref) to address a forecast by attributes. Throws
-`NotFoundError` if absent.
+either by a `TimeSeriesKey` or by attributes.
+
+The attribute form takes the time series type as its first argument, exactly like
+[`get_time_series`](@ref): `SingleTimeSeries`, `NonSequentialTimeSeries`,
+`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`,
+or `AbstractDeterministic` to resolve whichever of the `Deterministic` /
+`DeterministicSingleTimeSeries` pair is stored. `owner_category` is the owner's
+`OwnerCategory` (`Component` or `SupplementalAttribute`); `interval` is only
+needed to disambiguate forecasts that differ solely by interval.
+
+Omitting the type reads a `SingleTimeSeries`, matching the same shorthand on
+[`has_time_series`](@ref) and [`remove_time_series!`](@ref).
+
+Throws `NotFoundError` if absent.
+
+```julia
+get_metadata(store, 42, Component, "load"; resolution=Hour(1))
+get_metadata(Scenarios, store, 42, Component, "wind"; resolution=Hour(1))
+```
 """
 function get_metadata(store::Store, key::TimeSeriesKey)
     json = _filter_probe(
@@ -1283,61 +1297,7 @@ function get_metadata(store::Store, key::TimeSeriesKey)
 end
 
 function get_metadata(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-)
-    key = _make_key(
-        owner_id,
-        owner_category,
-        name,
-        INFRASTORE_TYPE_SINGLE;
-        resolution=resolution,
-        features=features,
-    )
-    return get_metadata(store, key)
-end
-
-"""
-    get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval, features=Dict()) -> TimeSeriesMetadata
-
-The [`TimeSeriesMetadata`](@ref) of a stored forecast of integer `ts_type` (see
-the `INFRASTORE_TYPE_*` constants). `owner_category` is the owner's
-`OwnerCategory` (`Component` or `SupplementalAttribute`). The optional `interval`
-keyword (a `Period`) restricts the lookup to a forecast with that interval.
-"""
-function get_forecast_metadata(
-    store::Store,
-    owner_id::Integer,
-    owner_category::OwnerCategory,
-    name::AbstractString,
-    ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-)
-    key = _make_key(
-        owner_id,
-        owner_category,
-        name,
-        ts_type;
-        resolution=resolution,
-        interval=interval,
-        features=features,
-    )
-    return get_metadata(store, key)
-end
-
-"""
-    get_probabilistic_metadata(store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesMetadata
-
-[`get_forecast_metadata`](@ref) pinned to `Probabilistic`, whose metadata carries
-the stored `percentiles` — reachable here without a full data fetch.
-"""
-function get_probabilistic_metadata(
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
@@ -1345,15 +1305,50 @@ function get_probabilistic_metadata(
     resolution::Union{Nothing,Period}=nothing,
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
+) where {T}
+    code = _type_code(T)
+    # The family sentinel is not a stored type, so the core resolves it to the
+    # concrete key first; every other type addresses its key directly.
+    key = if code == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
+        resolve_forecast_key(
+            store,
+            owner_id,
+            owner_category,
+            name,
+            code;
+            resolution=resolution,
+            interval=interval,
+            features=features,
+        )
+    else
+        _make_key(
+            owner_id,
+            owner_category,
+            name,
+            code;
+            resolution=resolution,
+            interval=interval,
+            features=features,
+        )
+    end
+    return get_metadata(store, key)
+end
+
+function get_metadata(
+    store::Store,
+    owner_id::Integer,
+    owner_category::OwnerCategory,
+    name::AbstractString;
+    resolution::Union{Nothing,Period}=nothing,
+    features::AbstractDict=Dict{String,Any}(),
 )
-    return get_forecast_metadata(
+    return get_metadata(
+        SingleTimeSeries,
         store,
         owner_id,
         owner_category,
-        name,
-        INFRASTORE_TYPE_PROBABILISTIC;
+        name;
         resolution=resolution,
-        interval=interval,
         features=features,
     )
 end
@@ -2225,6 +2220,20 @@ function _type_for_code(code::Integer)
     else
         throw(InvalidParameterError("unknown time series type code $code"))
     end
+end
+
+# The integer type code for a Julia time series type — the inverse of
+# `_type_for_code`, plus the request-only `AbstractDeterministic` family
+# sentinel, which is a valid thing to ask for but never a stored type.
+_type_code(::Type{SingleTimeSeries}) = INFRASTORE_TYPE_SINGLE
+_type_code(::Type{NonSequentialTimeSeries}) = INFRASTORE_TYPE_NON_SEQUENTIAL
+_type_code(::Type{Deterministic}) = INFRASTORE_TYPE_DETERMINISTIC
+_type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTIC_SINGLE
+_type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
+_type_code(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
+_type_code(::Type{AbstractDeterministic}) = INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
+function _type_code(::Type{T}) where {T}
+    return throw(InvalidParameterError("$T is not a time series type"))
 end
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).

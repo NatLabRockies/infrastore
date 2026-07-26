@@ -1529,7 +1529,7 @@ end
     @test rows[1].ext == "Profile"
     @test rows[1].dtype == Float64
 
-    # get_probabilistic_metadata exposes percentiles + units without a data fetch.
+    # Probabilistic metadata exposes percentiles + units without a data fetch.
     prob = Probabilistic(
         t0,
         res,
@@ -1541,7 +1541,7 @@ end
         "pf",
     )
     add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
-    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    pmd = get_metadata(Probabilistic, store, 3, Component, "pf")
     @test pmd.percentiles == [0.1, 0.5, 0.9]
     @test pmd.units == "MWp"
 
@@ -1598,9 +1598,7 @@ end
         t0, res, Hour(2), Hour(1), 3, reshape(collect(1.0:12.0), 2, 3, 2), "fc"
     )
     add_time_series!(store, 2, "Bus", Component, det; features=feats)
-    fmd = get_forecast_metadata(
-        store, 2, Component, "fc", InfraStore.INFRASTORE_TYPE_DETERMINISTIC; features=feats
-    )
+    fmd = get_metadata(Deterministic, store, 2, Component, "fc"; features=feats)
     @test fmd.element_shape == (3, 2)
     @test fmd.features == Dict("scenario" => "high", "model_year" => 2030)
 
@@ -1616,7 +1614,7 @@ end
         "pf",
     )
     add_time_series!(store, 3, "Generator", Component, prob)
-    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    pmd = get_metadata(Probabilistic, store, 3, Component, "pf")
     @test pmd.element_shape == (2, 3)
     @test isempty(pmd.features)
     @test pmd.percentiles == [0.1, 0.9]
@@ -2656,16 +2654,16 @@ end
     @test occursin("TimeSeriesMetadata(owner_id=", repr(md))
     @test occursin(bytes2hex(md.data_hash), repr(md))
 
-    fmd = get_forecast_metadata(
-        store, 1, Component, "fc", InfraStore.INFRASTORE_TYPE_DETERMINISTIC
-    )
+    fmd = get_metadata(Deterministic, store, 1, Component, "fc")
     @test fmd isa TimeSeriesMetadata
     @test fmd.horizon == Millisecond(Hour(2))
     @test fmd.count == 2
-    # The forecast getters carry `dtype` and `owner_type` too — one export, one
-    # struct, so no field is dropped by the addressing path taken.
+    # A forecast record carries `dtype` and `owner_type` too — one export, one
+    # struct, so no field is dropped by the type or addressing path taken.
     @test fmd.dtype == Float64
     @test fmd.owner_type == "Generator"
+    # The family sentinel resolves to whichever concrete type is stored.
+    @test get_metadata(AbstractDeterministic, store, 1, Component, "fc") == fmd
 
     # The same record, addressed by key rather than by attributes.
     fkey = resolve_forecast_key(
@@ -2764,10 +2762,10 @@ end
             ext="percentile-ext",
         ),
     )
-    pmd = get_probabilistic_metadata(store, 1, Component, "pf")
+    pmd = get_metadata(Probabilistic, store, 1, Component, "pf")
     @test pmd isa TimeSeriesMetadata
     @test pmd.percentiles == [0.1, 0.9]
-    @test pmd == get_probabilistic_metadata(store, 1, Component, "pf")
+    @test pmd == get_metadata(Probabilistic, store, 1, Component, "pf")
     # `ext` reaches a Probabilistic: the metadata surface no longer drops fields
     # depending on which getter was called.
     @test pmd.ext == "percentile-ext"
@@ -2777,4 +2775,83 @@ end
     row = only(list_time_series(store))
     @test row.percentiles == [0.1, 0.9]
     @test row.time_series_type == Probabilistic
+end
+
+@testset "get_metadata covers every stored time series type" begin
+    # One getter, dispatched on the Julia type exactly like `get_time_series`.
+    # Nothing is special-cased per type: a NonSequentialTimeSeries and a
+    # Scenarios are as reachable as a SingleTimeSeries.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        NonSequentialTimeSeries([t0, t0 + Hour(2), t0 + Hour(5)], Float64[1, 2, 3], "b"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Deterministic(t0, res, Hour(2), Hour(1), 2, reshape(1.0:4.0, 2, 2), "c"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Probabilistic(
+            t0, res, Hour(2), Hour(1), 2, [0.1, 0.9], reshape(1.0:8.0, 2, 2, 2), "d"
+        ),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Scenarios(t0, res, Hour(2), Hour(1), 2, reshape(1.0:12.0, 3, 2, 2), "e"),
+    )
+
+    for (T, name) in (
+        (SingleTimeSeries, "a"),
+        (NonSequentialTimeSeries, "b"),
+        (Deterministic, "c"),
+        (Probabilistic, "d"),
+        (Scenarios, "e"),
+    )
+        md = get_metadata(T, store, 1, Component, name)
+        @test md isa TimeSeriesMetadata
+        @test md.time_series_type == T
+        @test md.name == name
+        @test md.owner_type == "Generator"
+        @test md.dtype == Float64
+    end
+
+    # A transform-derived DST is addressable by its own type, and through the
+    # family sentinel alongside it.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    dst = get_metadata(DeterministicSingleTimeSeries, store, 1, Component, "a")
+    @test dst.time_series_type == DeterministicSingleTimeSeries
+    @test get_metadata(AbstractDeterministic, store, 1, Component, "a") == dst
+    @test get_metadata(AbstractDeterministic, store, 1, Component, "c").time_series_type ==
+        Deterministic
+
+    # The type-less shorthand is the SingleTimeSeries one, as on has_time_series.
+    @test get_metadata(store, 1, Component, "a") ==
+        get_metadata(SingleTimeSeries, store, 1, Component, "a")
+
+    # A type that is not a stored time series type is rejected up front.
+    @test_throws InfraStore.InvalidParameterError get_metadata(
+        Store, store, 1, Component, "a"
+    )
 end

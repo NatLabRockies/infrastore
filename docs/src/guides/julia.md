@@ -101,6 +101,10 @@ meta = get_metadata(
 #          name, time_series_type, data_hash, initial_timestamp, resolution, length,
 #          horizon/interval/count, percentiles, dtype, element_shape, features, units, ext
 
+# Any other stored type: pass it first, exactly as get_time_series does. Omitting
+# the type reads a SingleTimeSeries.
+scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
 # get_time_series itself resolves by attributes too (pass the type as the first argument):
