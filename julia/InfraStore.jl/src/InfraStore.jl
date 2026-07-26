@@ -97,8 +97,6 @@ export Store,
     clear!,
     replace_owner!,
     transform_single_time_series!,
-    has_typed,
-    remove_typed!,
     copy_time_series!,
     close!,
     persist!,
@@ -1311,11 +1309,11 @@ function get_metadata(
     # concrete key first; every other type addresses its key directly.
     key = if code == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
         resolve_forecast_key(
+            T,
             store,
             owner_id,
             owner_category,
-            name,
-            code;
+            name;
             resolution=resolution,
             interval=interval,
             features=features,
@@ -1375,23 +1373,25 @@ function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::Abstrac
 end
 
 """
-    resolve_forecast_key(store, owner_id, owner_category, name, requested_type; resolution, interval, features=Dict()) -> TimeSeriesKey
+    resolve_forecast_key(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesKey
 
-Resolve a forecast addressed by attributes plus a `requested_type` (a `INFRASTORE_TYPE_*`
-forecast code, or `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` for the Deterministic /
-DeterministicSingleTimeSeries family) to its concrete key. Throws on an ambiguous
-match or a miss.
+Resolve the forecast addressed by attributes plus the requested type `T` to its
+concrete key. `T` is a forecast type (`Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) or
+`AbstractDeterministic` for the Deterministic / DeterministicSingleTimeSeries
+family, in which case the returned key names whichever concrete type is stored.
+Throws on an ambiguous match or a miss.
 """
 function resolve_forecast_key(
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
-    name::AbstractString,
-    requested_type::Integer;
+    name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
-)
+) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -1417,7 +1417,7 @@ function resolve_forecast_key(
         resolution_iso,
         interval_iso,
         features_json,
-        Int32(requested_type),
+        Int32(_type_code(T)),
         out_key,
     )
     _check(code)
@@ -1540,7 +1540,7 @@ end
     has_for_owner(store, owner_id, owner_category; time_series_type=nothing) -> Bool
 
 True if `(owner_id, owner_category)` has any time series, optionally restricted to
-a single `time_series_type` code (the name-less existence query).
+a single `time_series_type` (the Julia type) — the name-less existence query.
 `owner_category` is the owner's `OwnerCategory` (`Component` or
 `SupplementalAttribute`).
 """
@@ -1548,7 +1548,7 @@ function has_for_owner(
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory;
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
 )
     out = Ref{Bool}(false)
     use_type = time_series_type !== nothing
@@ -1559,7 +1559,7 @@ function has_for_owner(
         store.handle,
         Int64(owner_id),
         _category_int(owner_category),
-        Int32(use_type ? time_series_type : 0),
+        use_type ? _filter_type_code(time_series_type) : Int32(0),
         use_type,
         out,
     )
@@ -2236,6 +2236,19 @@ function _type_code(::Type{T}) where {T}
     return throw(InvalidParameterError("$T is not a time series type"))
 end
 
+# The type code a catalog *filter* takes. A filter selects stored rows, so the
+# request-only `AbstractDeterministic` family sentinel is not a valid value: it
+# names no stored type. Ask for one of its two concrete members instead.
+function _filter_type_code(::Type{T}) where {T}
+    T === AbstractDeterministic && throw(
+        InvalidParameterError(
+            "AbstractDeterministic is a request-only family and matches no stored rows; " *
+            "filter on Deterministic or DeterministicSingleTimeSeries",
+        ),
+    )
+    return Int32(_type_code(T))
+end
+
 # The Julia time series type for a metadata row's type name (the `as_str` form).
 function _type_for_name(name::AbstractString)
     if name == "SingleTimeSeries"
@@ -2339,7 +2352,7 @@ List the key of every stored time series matching the (all-optional, independent
 filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 
 - `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
-- `time_series_type` — a `INFRASTORE_TYPE_*` integer code.
+- `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, ...).
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `features` — match keys whose features include all the given entries (subset).
@@ -2348,7 +2361,7 @@ function list_keys(
     store::Store;
     owner_id::Union{Nothing,Integer}=nothing,
     owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -2358,7 +2371,7 @@ function list_keys(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     has_type = time_series_type !== nothing
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -2459,7 +2472,7 @@ function list_time_series(
     store::Store;
     owner_id::Union{Nothing,Integer}=nothing,
     owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -2469,7 +2482,7 @@ function list_time_series(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     has_type = time_series_type !== nothing;
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -2521,7 +2534,7 @@ function list_names(
     store::Store;
     owner_id::Union{Nothing,Integer}=nothing,
     owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -2531,7 +2544,7 @@ function list_names(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     has_type = time_series_type !== nothing;
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -2583,7 +2596,7 @@ function list_owner_types(
     store::Store;
     owner_id::Union{Nothing,Integer}=nothing,
     owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -2593,7 +2606,7 @@ function list_owner_types(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     has_type = time_series_type !== nothing;
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -2645,7 +2658,7 @@ function remove_by_filter!(
     store::Store;
     owner_id::Union{Nothing,Integer}=nothing,
     owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -2655,7 +2668,7 @@ function remove_by_filter!(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     has_type = time_series_type !== nothing;
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -2712,7 +2725,7 @@ function list_array_groups(
     store::Store;
     owner_id::Union{Nothing,Integer}=nothing,
     owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
@@ -2722,7 +2735,7 @@ function list_array_groups(
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     has_type = time_series_type !== nothing
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
@@ -3116,17 +3129,17 @@ end
     list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
 
 Distinct owner ids of `owner_category` (an `OwnerCategory`) that have a time
-series, optionally restricted by `time_series_type` (a `INFRASTORE_TYPE_*` integer code)
+series, optionally restricted by `time_series_type` (the Julia type)
 and/or `resolution` (a `Period`).
 """
 function list_owner_ids(
     store::Store,
     owner_category::OwnerCategory;
-    time_series_type::Union{Nothing,Integer}=nothing,
+    time_series_type::Union{Nothing,Type}=nothing,
     resolution::Union{Nothing,Period}=nothing,
 )
     has_type = time_series_type !== nothing
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     resolution_iso = _period_to_cstr(resolution)
     cat = _category_int(owner_category)
     out_len = Ref{UInt64}(0)
@@ -4156,13 +4169,13 @@ end
     get_resolutions(store; time_series_type=nothing) -> Vector{Period}
 
 Return the distinct resolutions stored, in the core's stored (lexical-by-ISO)
-order. When `time_series_type` (a
-`INFRASTORE_TYPE_*` integer code) is given the result is restricted to that type. This is
-a single catalog query in the core rather than a scan of every association.
+order. When `time_series_type` (the Julia type) is given the result is
+restricted to that type. This is a single catalog query in the core rather than
+a scan of every association.
 """
-function get_resolutions(store::Store; time_series_type::Union{Nothing,Integer}=nothing)
+function get_resolutions(store::Store; time_series_type::Union{Nothing,Type}=nothing)
     has_type = time_series_type !== nothing
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     out_len = Ref{UInt64}(0)
     code = ccall(
         (:infrastore_store_get_resolutions, lib_path()),
@@ -4197,13 +4210,13 @@ end
     get_intervals(store; time_series_type=nothing) -> Vector{Period}
 
 Return the distinct forecast intervals stored (lexical-by-ISO order), the
-interval analog of [`get_resolutions`](@ref). When `time_series_type` (a
-`INFRASTORE_TYPE_*` code) is given the result is restricted to that type; non-forecast
-types return an empty vector.
+interval analog of [`get_resolutions`](@ref). When `time_series_type` (the Julia
+type) is given the result is restricted to that type; non-forecast types return
+an empty vector.
 """
-function get_intervals(store::Store; time_series_type::Union{Nothing,Integer}=nothing)
+function get_intervals(store::Store; time_series_type::Union{Nothing,Type}=nothing)
     has_type = time_series_type !== nothing
-    type_arg = has_type ? Int32(time_series_type) : Int32(0)
+    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     out_len = Ref{UInt64}(0)
     code = ccall(
         (:infrastore_store_get_intervals, lib_path()),
@@ -4442,7 +4455,10 @@ end
 
 # ---- Forecasts -------------------------------------------------------------
 #
-# TimeSeriesType integer codes (must match the Rust `TimeSeriesType` enum):
+# TimeSeriesType integer codes (must match the Rust `TimeSeriesType` enum).
+# These are the C ABI's wire encoding, not part of the Julia API: every public
+# function names a time series type with the Julia type itself, and `_type_code`
+# does the conversion at the boundary.
 const INFRASTORE_TYPE_SINGLE = 0
 const INFRASTORE_TYPE_NON_SEQUENTIAL = 1
 const INFRASTORE_TYPE_DETERMINISTIC = 2
@@ -4636,19 +4652,24 @@ function transform_single_time_series!(
     return Int(out_count[])
 end
 
-"""True iff a time series of `ts_type` with the given attributes exists.
+"""
+    has_time_series(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> Bool
+
+True iff a time series of type `T` with the given attributes exists. `T` is any
+stored time series type; the type-less form is the `SingleTimeSeries` shorthand.
 `owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`)."""
-function has_typed(
+`SupplementalAttribute`).
+"""
+function has_time_series(
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
-    name::AbstractString,
-    ts_type::Integer;
+    name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
-)
+) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
@@ -4661,7 +4682,7 @@ function has_typed(
         Int64(owner_id),
         _category_int(owner_category),
         name,
-        Int32(ts_type),
+        Int32(_type_code(T)),
         resolution_iso,
         interval_iso,
         features_json,
@@ -4671,18 +4692,24 @@ function has_typed(
     return out[]
 end
 
-"""Remove a time series of `ts_type` by attributes. `owner_category` is the
-owner's `OwnerCategory` (`Component` or `SupplementalAttribute`)."""
-function remove_typed!(
+"""
+    remove_time_series!(T, store, owner_id, owner_category, name; resolution, interval, features=Dict())
+
+Remove the time series of type `T` with the given attributes. `T` is any stored
+time series type; the type-less form is the `SingleTimeSeries` shorthand.
+`owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
+"""
+function remove_time_series!(
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
-    name::AbstractString,
-    ts_type::Integer;
+    name::AbstractString;
     resolution::Union{Nothing,Period}=nothing,
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
-)
+) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
@@ -4694,7 +4721,7 @@ function remove_typed!(
         Int64(owner_id),
         _category_int(owner_category),
         name,
-        Int32(ts_type),
+        Int32(_type_code(T)),
         resolution_iso,
         interval_iso,
         features_json,
@@ -4704,12 +4731,12 @@ function remove_typed!(
 end
 
 """
-    copy_time_series!(store, owner_id, owner_category, name, ts_type,
+    copy_time_series!(T, store, owner_id, owner_category, name,
                       dst_owner_id, dst_owner_type; new_name=nothing,
-                      resolution=nothing, features=Dict())
+                      resolution=nothing, interval=nothing, features=Dict())
 
-Copy the time series identified by the source attributes onto `dst_owner_id`,
-optionally renaming it to `new_name`.
+Copy the time series of type `T` identified by the source attributes onto
+`dst_owner_id`, optionally renaming it to `new_name`.
 
 Arrays are content-addressed, so this writes only a new association row against
 the same underlying array: no data is duplicated, and the stored time series type
@@ -4721,18 +4748,18 @@ The copy keeps the source's `owner_category`. Throws if the destination already
 holds a matching series.
 """
 function copy_time_series!(
+    ::Type{T},
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString,
-    ts_type::Integer,
     dst_owner_id::Integer,
     dst_owner_type::AbstractString;
     new_name::Union{Nothing,AbstractString}=nothing,
     resolution::Union{Nothing,Period}=nothing,
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
-)
+) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
@@ -4757,7 +4784,7 @@ function copy_time_series!(
         Int64(owner_id),
         _category_int(owner_category),
         name,
-        Int32(ts_type),
+        Int32(_type_code(T)),
         resolution_iso,
         interval_iso,
         features_json,
@@ -5920,12 +5947,15 @@ end
 # returned arrays are copies in canonical column-major layout, so they stay
 # valid across subsequent reads.
 
-_int_for_type(::Type{Deterministic}) = INFRASTORE_TYPE_DETERMINISTIC
-_int_for_type(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTIC_SINGLE
-_int_for_type(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
-_int_for_type(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
+# A forecast reader covers one forecast type, so it takes a narrower set than
+# `_type_code`: static types and the family sentinel are rejected here.
+const _FORECAST_TYPES = (
+    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios
+)
+
 function _int_for_type(::Type{T}) where {T}
-    return throw(InvalidParameterError("$T is not a forecast type"))
+    T in _FORECAST_TYPES || throw(InvalidParameterError("$T is not a forecast type"))
+    return _type_code(T)
 end
 
 # Copy `byte_len` bytes at `ptr` into a fresh `T` array and reshape from the

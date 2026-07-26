@@ -28,18 +28,17 @@ Exported names (types first, then functions):
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
 `get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
 `get_time_series`, `get_time_series_keys`, `has_for_owner`, `has_parent_child_association`,
-`has_supplemental_attribute_association`, `has_time_series`, `has_typed`, `init_logging`,
-`key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`,
-`list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
-`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
-`list_time_series`, `num_distinct_arrays`, `open_store`, `persist!`, `read_only`,
-`remove_by_filter!`, `remove_parent_child_associations!`,
-`remove_supplemental_attribute_associations!`, `remove_time_series!`, `remove_typed!`,
-`rename_time_series!`, `replace_owner!`, `replace_parent_child_component_id!`,
-`replace_supplemental_attribute_component_id!`, `resolve_forecast_key`, `static_grid`,
-`static_groups`, `static_read!`, `static_summary`, `static_values`,
-`supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
-`transform_single_time_series!`, `verify_integrity`.
+`has_supplemental_attribute_association`, `has_time_series`, `init_logging`, `key_info`,
+`list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`, `list_names`,
+`list_owner_ids`, `list_owner_types`, `list_parent_child_associations`, `list_parents`,
+`list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
+`num_distinct_arrays`, `open_store`, `persist!`, `read_only`, `remove_by_filter!`,
+`remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
+`remove_time_series!`, `rename_time_series!`, `replace_owner!`,
+`replace_parent_child_component_id!`, `replace_supplemental_attribute_component_id!`,
+`resolve_forecast_key`, `static_grid`, `static_groups`, `static_read!`, `static_summary`,
+`static_values`, `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`,
+`time_series_counts`, `transform_single_time_series!`, `verify_integrity`.
 
 ## Constructors
 
@@ -429,15 +428,15 @@ transform_single_time_series!(store, horizon::Period, interval::Period;
 category (both are transformed when it is `nothing`); `resolution` restricts it to the
 `SingleTimeSeries` at that resolution.
 
-`has_typed`, `remove_typed!`, and `copy_time_series!` address a series by its `ts_type` integer code
-(`0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
-`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`):
+`has_time_series` and `remove_time_series!` take the time series type as their first argument to
+address a type other than `SingleTimeSeries`, the same shape `get_metadata` and `get_time_series`
+use:
 
 ```julia
-has_typed(store, owner_id, owner_category, name, ts_type::Integer;
-          resolution=nothing, interval=nothing, features=Dict()) -> Bool
-remove_typed!(store, owner_id, owner_category, name, ts_type::Integer;
-              resolution=nothing, interval=nothing, features=Dict())
+has_time_series(T::Type, store, owner_id, owner_category, name;
+                resolution=nothing, interval=nothing, features=Dict()) -> Bool
+remove_time_series!(T::Type, store, owner_id, owner_category, name;
+                    resolution=nothing, interval=nothing, features=Dict())
 ```
 
 `interval` (a `Period`) pins the forecast interval — the only way to disambiguate two forecasts of
@@ -447,7 +446,7 @@ lookup is ambiguous and errors.
 ### Copying an association
 
 ```julia
-copy_time_series!(store, owner_id, owner_category, name, ts_type::Integer,
+copy_time_series!(T::Type, store, owner_id, owner_category, name,
                   dst_owner_id, dst_owner_type::AbstractString;
                   new_name=nothing, resolution=nothing, interval=nothing,
                   features=Dict()) -> Nothing
@@ -462,7 +461,7 @@ dense `Deterministic`. The copy keeps the source's `owner_category`. Throws if t
 already holds a matching series.
 
 ```julia
-copy_time_series!(store, 42, Component, "load", 0, 43, "Generator")   # SingleTimeSeries → owner 43
+copy_time_series!(SingleTimeSeries, store, 42, Component, "load", 43, "Generator")   # → owner 43
 ```
 
 ### Reading forecast values
@@ -684,9 +683,9 @@ descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `i
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
-- `time_series_type` — a `INFRASTORE_TYPE_*` **integer code** (`0 = SingleTimeSeries` …
-  `5 = Scenarios`), not a Julia type. (The `time_series_type` field on a returned row _is_ the Julia
-  type.)
+- `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, …), the same value the
+  `time_series_type` field of a returned row carries. A filter selects stored rows, so
+  `AbstractDeterministic` is rejected: filter on `Deterministic` or `DeterministicSingleTimeSeries`.
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `features` — match keys whose features include all the given entries (subset match).

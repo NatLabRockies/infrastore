@@ -583,7 +583,7 @@ end
     @test length(list_keys(store; owner_id=1)) == 3
     @test length(list_keys(store; owner_category=SupplementalAttribute)) == 1
     @test length(list_keys(store; name="load")) == 3
-    @test length(list_keys(store; time_series_type=InfraStore.INFRASTORE_TYPE_SINGLE)) == 4
+    @test length(list_keys(store; time_series_type=SingleTimeSeries)) == 4
     @test length(list_keys(store; resolution=Minute(5))) == 1
     # Feature filter is a subset match.
     fkeys = list_keys(store; owner_id=1, name="load", features=Dict("scenario" => "high"))
@@ -597,11 +597,9 @@ end
     # get_resolutions: distinct resolutions (order is lexical-by-ISO, so compare
     # as a set — periods of different kinds have no numeric total order).
     @test Set(get_resolutions(store)) == Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
-    @test Set(get_resolutions(store; time_series_type=InfraStore.INFRASTORE_TYPE_SINGLE)) ==
+    @test Set(get_resolutions(store; time_series_type=SingleTimeSeries)) ==
         Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
-    @test isempty(
-        get_resolutions(store; time_series_type=InfraStore.INFRASTORE_TYPE_DETERMINISTIC)
-    )
+    @test isempty(get_resolutions(store; time_series_type=Deterministic))
 
     # counts_by_type: all four are SingleTimeSeries here.
     cbt = counts_by_type(store)
@@ -699,9 +697,7 @@ end
 
     @test sort!(list_owner_ids(store, Component)) == [1, 2]
     @test list_owner_ids(store, SupplementalAttribute) == [9]
-    @test list_owner_ids(
-        store, Component; time_series_type=InfraStore.INFRASTORE_TYPE_DETERMINISTIC
-    ) == [1]
+    @test list_owner_ids(store, Component; time_series_type=Deterministic) == [1]
     @test sort!(list_owner_ids(store, Component; resolution=Hour(1))) == [1, 2]
     @test isempty(list_owner_ids(store, Component; resolution=Minute(5)))
 end
@@ -1517,7 +1513,7 @@ end
     kf = add_time_series!(store, 2, "Bus", Component, det)
 
     @test get_intervals(store) == [Hour(1)]
-    @test isempty(get_intervals(store; time_series_type=InfraStore.INFRASTORE_TYPE_SINGLE))
+    @test isempty(get_intervals(store; time_series_type=SingleTimeSeries))
     @test sort(list_names(store)) == ["fc", "load"]
     @test list_names(store; owner_id=1) == ["load"]
     @test sort(list_owner_types(store)) == ["Bus", "Generator"]
@@ -1553,9 +1549,7 @@ end
     @test mixed[2].data == det.data
 
     # resolve_forecast_key resolves the abstract-deterministic family.
-    rk = resolve_forecast_key(
-        store, 2, Component, "fc", InfraStore.INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
-    )
+    rk = resolve_forecast_key(AbstractDeterministic, store, 2, Component, "fc")
     @test get_time_series(Deterministic, store, rk).data == det.data
 
     # rename_time_series! moves the association.
@@ -2666,9 +2660,7 @@ end
     @test get_metadata(AbstractDeterministic, store, 1, Component, "fc") == fmd
 
     # The same record, addressed by key rather than by attributes.
-    fkey = resolve_forecast_key(
-        store, 1, Component, "fc", InfraStore.INFRASTORE_TYPE_DETERMINISTIC
-    )
+    fkey = resolve_forecast_key(Deterministic, store, 1, Component, "fc")
     @test get_metadata(store, fkey) == fmd
 
     # Key rows: owner_category is the enum, time_series_type the Julia type.
@@ -2854,4 +2846,105 @@ end
     @test_throws InfraStore.InvalidParameterError get_metadata(
         Store, store, 1, Component, "a"
     )
+end
+
+@testset "typed lookups and filters name the Julia type" begin
+    # has/remove/copy and every `time_series_type` filter take the Julia type,
+    # not a wire code. The type-less has/remove forms stay the SingleTimeSeries
+    # shorthand.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Scenarios(t0, res, Hour(2), Hour(1), 2, reshape(1.0:12.0, 3, 2, 2), "b"),
+    )
+
+    # A type-addressed existence check does not match a different stored type.
+    @test has_time_series(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+    @test !has_time_series(Scenarios, store, 1, Component, "a"; resolution=res)
+    @test has_time_series(Scenarios, store, 1, Component, "b"; resolution=res)
+    # …and agrees with the type-less SingleTimeSeries shorthand.
+    @test has_time_series(store, 1, Component, "a"; resolution=res) ==
+        has_time_series(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+
+    # copy_time_series! preserves the stored type onto the new owner.
+    copy_time_series!(Scenarios, store, 1, Component, "b", 2, "Generator"; resolution=res)
+    @test has_time_series(Scenarios, store, 2, Component, "b"; resolution=res)
+    @test only(list_keys(store; owner_id=2)).time_series_type == Scenarios
+    # Arrays are content-addressed, so the copy adds an association, not data.
+    @test num_distinct_arrays(store) == 2
+
+    copy_time_series!(
+        SingleTimeSeries,
+        store,
+        1,
+        Component,
+        "a",
+        3,
+        "Bus";
+        new_name="renamed",
+        resolution=res,
+    )
+    @test only(list_keys(store; owner_id=3)).name == "renamed"
+
+    # A transform-derived DST stays a DST through a copy (a read-then-write
+    # round trip would flatten it into a dense Deterministic). Both stored
+    # SingleTimeSeries — "a" and the copy renamed onto the Bus — transform.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 2
+    copy_time_series!(
+        DeterministicSingleTimeSeries,
+        store,
+        1,
+        Component,
+        "a",
+        4,
+        "Generator";
+        resolution=res,
+    )
+    @test only(list_keys(store; owner_id=4)).time_series_type ==
+        DeterministicSingleTimeSeries
+
+    # Every filter keyword takes the type too.
+    @test length(list_keys(store; time_series_type=Scenarios)) == 2
+    @test list_names(store; time_series_type=SingleTimeSeries) == ["a", "renamed"]
+    @test list_owner_types(store; time_series_type=SingleTimeSeries) == ["Bus", "Generator"]
+    @test list_owner_ids(store, Component; time_series_type=Scenarios) == [1, 2]
+    @test has_for_owner(store, 1, Component; time_series_type=Scenarios)
+    @test !has_for_owner(store, 3, Component; time_series_type=Scenarios)
+    @test get_resolutions(store; time_series_type=Scenarios) == [Millisecond(res)]
+    @test get_intervals(store; time_series_type=Scenarios) == [Millisecond(Hour(1))]
+    @test isempty(get_intervals(store; time_series_type=SingleTimeSeries))
+    @test only(list_time_series(store; time_series_type=Scenarios, owner_id=2)).name == "b"
+    @test only(list_array_groups(store; time_series_type=Scenarios, owner_id=1)).name == "b"
+
+    # Typed removal, then the filter form.
+    remove_time_series!(Scenarios, store, 2, Component, "b"; resolution=res)
+    @test !has_time_series(Scenarios, store, 2, Component, "b"; resolution=res)
+    @test remove_by_filter!(store; time_series_type=Scenarios) == 1
+    @test isempty(list_keys(store; time_series_type=Scenarios))
+
+    # A filter selects stored rows, so the request-only family sentinel is
+    # rejected rather than silently matching nothing.
+    @test_throws InfraStore.InvalidParameterError list_keys(
+        store; time_series_type=AbstractDeterministic
+    )
+    @test_throws InfraStore.InvalidParameterError get_resolutions(
+        store; time_series_type=AbstractDeterministic
+    )
+    # A type that is not a time series type at all is rejected everywhere.
+    @test_throws InfraStore.InvalidParameterError has_time_series(
+        Store, store, 1, Component, "a"
+    )
+    @test_throws InfraStore.InvalidParameterError list_keys(store; time_series_type=Store)
 end

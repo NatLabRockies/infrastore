@@ -195,13 +195,22 @@ for k in get_time_series_keys(store, 42, Component)
 end
 ```
 
-`has_typed`, `remove_typed!`, and `copy_time_series!` address a series by its `ts_type` integer code
-(and take the same `resolution` / `interval` / `features` keywords). `copy_time_series!` re-points a
-stored series at another owner without duplicating data — it writes one association row against the
-same content-addressed array, preserving the stored type (a DST stays a DST):
+`has_time_series`, `remove_time_series!`, and `copy_time_series!` take the time series type as their
+first argument to address anything other than a `SingleTimeSeries` (and take the same `resolution` /
+`interval` / `features` keywords). `copy_time_series!` re-points a stored series at another owner
+without duplicating data — it writes one association row against the same content-addressed array,
+preserving the stored type (a DST stays a DST):
 
 ```julia
-copy_time_series!(store, 42, Component, "load", 0, 43, "Generator")   # ts_type 0 = SingleTimeSeries
+has_time_series(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+copy_time_series!(SingleTimeSeries, store, 42, Component, "load", 43, "Generator")
+```
+
+Every `time_series_type` filter keyword takes the Julia type as well:
+
+```julia
+list_keys(store; time_series_type = Deterministic)
+get_resolutions(store; time_series_type = SingleTimeSeries)
 ```
 
 The low-level `get_metadata` + `get_array_by_hash` path is still available for raw access. See the
