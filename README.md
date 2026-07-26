@@ -12,7 +12,9 @@ tool, and a read-only gRPC server with a Rust client.
 or the
 [Architecture](https://natlabrockies.github.io/infrastore/latest/explanation/architecture.html).
 
-**Status:** under development, unstable API, integrating with parent packages
+## Status
+
+Under development, unstable API, integrating with parent packages
 
 ## Features
 
