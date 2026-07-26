@@ -64,8 +64,8 @@ identifiers:
 ```julia
 got = get_time_series(SingleTimeSeries, store, 42, Component, "load"; resolution = Hour(1))
 
-for m in list_time_series(store; owner_id = 42)
-    println(m["name"], " ", m["resolution"], " ", m["units"])
+for m in list_time_series(store; owner_id = 42)   # Vector{TimeSeriesMetadata}
+    println(m.name, " ", m.resolution, " ", m.units)
 end
 # load PT1H MW
 ```

@@ -8,7 +8,7 @@ use crate::hash::array_hash;
 use crate::metadata::{
     AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, ParentChildAssociation,
     ParentChildFilter, SeriesFamily, SupplementalAttributeAssociation, SupplementalAttributeFilter,
-    SupplementalAttributeSummaryRow, references_to_in_tx,
+    SupplementalAttributeSummaryRow, references_to_in_tx, typed_references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
@@ -483,6 +483,10 @@ impl Store {
         if removed_hashes.is_empty() {
             return Err(TimeSeriesError::NotFound);
         }
+        if key.time_series_type == TimeSeriesType::SingleTimeSeries {
+            // Dropping the tx rolls the deletion back on error.
+            Self::check_no_orphaned_dst(&tx, removed_hashes.iter().copied())?;
+        }
         // For each removed association, drop the underlying array iff no other
         // association still references it.
         let mut to_drop = Vec::new();
@@ -494,6 +498,38 @@ impl Store {
         tx.commit()?;
         for h in to_drop {
             self.backend.remove_array(&h)?;
+        }
+        Ok(())
+    }
+
+    /// A `DeterministicSingleTimeSeries` is a view over a stored
+    /// `SingleTimeSeries` array, so a removal must not leave a DST whose array
+    /// no `SingleTimeSeries` association backs any more. Called inside the
+    /// removal transaction (after the deletes) with the arrays the removed
+    /// `SingleTimeSeries` rows resolved to; errors roll the transaction back.
+    /// The check is on the post-removal state, so a batch that removes the DST
+    /// together with its backing series passes regardless of order.
+    /// Owner-scoped `clear_time_series` is deliberately exempt: it drops every
+    /// association of the owner at once.
+    fn check_no_orphaned_dst(
+        tx: &rusqlite::Transaction<'_>,
+        removed_sts_hashes: impl IntoIterator<Item = [u8; 32]>,
+    ) -> Result<()> {
+        let mut seen = HashSet::new();
+        for h in removed_sts_hashes {
+            if !seen.insert(h) {
+                continue;
+            }
+            let dst =
+                typed_references_to_in_tx(tx, &h, TimeSeriesType::DeterministicSingleTimeSeries)?;
+            if dst > 0 && typed_references_to_in_tx(tx, &h, TimeSeriesType::SingleTimeSeries)? == 0
+            {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "cannot remove a SingleTimeSeries that backs a DeterministicSingleTimeSeries; \
+                     remove the derived forecast first"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -538,6 +574,7 @@ impl Store {
         }
         let tx = self.metadata.transaction()?;
         let mut removed_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut removed_sts_hashes: Vec<[u8; 32]> = Vec::new();
         let mut count = 0usize;
         for key in keys {
             let removed = MetadataStore::delete_by_key(&tx, key)?;
@@ -546,8 +583,14 @@ impl Store {
                 return Err(TimeSeriesError::NotFound);
             }
             count += removed.len();
+            if key.time_series_type == TimeSeriesType::SingleTimeSeries {
+                removed_sts_hashes.extend(removed.iter().copied());
+            }
             removed_hashes.extend(removed);
         }
+        // Checked after all deletes, so a batch removing a DST together with
+        // its backing series passes regardless of order.
+        Self::check_no_orphaned_dst(&tx, removed_sts_hashes)?;
         // Decide array drops after *all* deletes so a hash referenced only by
         // other rows removed in this same batch is reclaimed too. Dedup so a
         // hash removed via several keys is checked (and dropped) once.

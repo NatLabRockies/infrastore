@@ -87,8 +87,10 @@ The conventions that shape the Julia API:
 The model was shaped to drop into InfrastructureSystems.jl: owners are identified by integer
 component identifiers (`i64`), owner categories map to `Component` / `SupplementalAttribute`, and
 features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
-unchanged. The FFI exposes attribute-based metadata accessors (`infrastore_store_get_metadata`,
-`infrastore_store_has_by_attrs`, `infrastore_store_remove_by_attrs`) and a hash-based array fetch
+unchanged. The FFI exposes attribute-based accessors (`infrastore_store_has_by_attrs`,
+`infrastore_store_remove_by_attrs`), a whole-record metadata read
+(`infrastore_store_get_metadata_by_key`, reachable from attributes through
+`infrastore_make_key_from_attrs`), and a hash-based array fetch
 (`infrastore_store_get_array_by_hash`) so an InfrastructureSystems.jl-side store can keep its own
 key objects and reach the array layer directly.
 

@@ -2,8 +2,10 @@
 /target/
 **/*.rs.bk
 
-# Coverage (cargo llvm-cov)
+# Coverage (cargo llvm-cov, Coverage.jl)
 /lcov.info
+/julia-lcov.info
+*.cov
 
 # Python
 __pycache__/

@@ -121,6 +121,11 @@ jobs:
 
       # InfraStore.jl dlopens the cdylib that `cargo build --workspace` already
       # produced, located via INFRASTORE_LIB.
+      #
+      # On Linux the run also emits Julia's own line counts. That is a separate
+      # measurement from the llvm-cov instrumentation above: llvm-cov sees the
+      # Rust code this suite drives through the C ABI, `--code-coverage` sees the
+      # Julia wrapper itself. Both are uploaded, under different Codecov flags.
       - name: Run Julia tests
         shell: bash
         run: |
@@ -134,8 +139,20 @@ jobs:
           esac
           export INFRASTORE_LIB="$root/target/debug/$lib"
           test -f "$INFRASTORE_LIB" || { echo "missing cdylib: $INFRASTORE_LIB" >&2; exit 1; }
+          # An `if` rather than `[ ... ] && covflags=(...)`: GitHub runs this
+          # shell with `-e`, and a trailing AND-list that evaluates false is
+          # itself a failing command, which would abort the step on non-Linux.
+          # `user` rather than the narrower `--code-coverage=@<path>`: the path
+          # form silently produces nothing if the prefix does not match how
+          # Julia records the file, whereas `user` cannot miss. Scoping happens
+          # in the report step, which reads only the package's src tree.
+          covflags=()
+          if [ "$RUNNER_OS" = Linux ]; then
+            covflags=(--code-coverage=user)
+          fi
           julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
-          julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+          julia --project=julia/InfraStore.jl "${covflags[@]}" \
+            julia/InfraStore.jl/test/runtests.jl
 
       # Render both reports from the profiles all three suites just wrote.
       # `--ignore-filename-regex` drops the protobuf code infrastore-proto's build
@@ -145,17 +162,25 @@ jobs:
       #
       # `--remap-path-prefix` is deliberately absent: it only takes effect at
       # compile time, and the builds above are plain cargo invocations, so it
-      # would be silently inert here. The job summary is shortened with sed
-      # instead; lcov.info keeps absolute paths.
-      - name: Report coverage
+      # would be silently inert here. The absolute paths llvm-cov emits are
+      # rewritten afterwards with sed instead -- Codecov matches report paths
+      # against the repo tree, and an absolute SF: line matches nothing, which
+      # surfaces as an upload that succeeds and a report covering no files.
+      - name: Report Rust coverage
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           ignore='(^|/)target/'
           cargo llvm-cov report --lcov --output-path lcov.info \
             --ignore-filename-regex "$ignore"
+          sed -i "s|^SF:$PWD/|SF:|" lcov.info
+          if grep -q '^SF:/' lcov.info; then
+            echo "lcov.info still holds absolute paths; Codecov will not map them" >&2
+            grep '^SF:/' lcov.info | head >&2
+            exit 1
+          fi
           {
-            echo '### Coverage (cargo llvm-cov)'
+            echo '### Rust coverage (cargo llvm-cov)'
             echo ''
             echo 'Rust, Python, and Julia suites combined.'
             echo '```'
@@ -163,9 +188,70 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Coverage.jl is run from a temp project rather than through
+      # julia-actions/julia-processcoverage, which writes to a fixed lcov.info
+      # at the repo root and would clobber the Rust report above. Handing
+      # process_folder a relative path keeps the emitted paths relative too,
+      # which is what Codecov needs.
+      - name: Report Julia coverage
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          julia -e '
+            using Pkg
+            Pkg.activate(; temp=true)
+            Pkg.add("Coverage")
+            using Coverage
+            cov = process_folder("julia/InfraStore.jl/src")
+            LCOV.writefile("julia-lcov.info", cov)
+            covered, total = get_summary(cov)
+            pct = total == 0 ? 0.0 : 100 * covered / total
+            open(ENV["GITHUB_STEP_SUMMARY"], "a") do io
+                println(io, "### Julia coverage (Coverage.jl)\n")
+                println(io, "julia/InfraStore.jl/src only; the Rust code this ",
+                            "suite drives is counted in the llvm-cov report above.\n")
+                println(io, "```")
+                for f in sort(cov; by = x -> x.filename)
+                    c, t = get_summary(f)
+                    p = t == 0 ? 0.0 : 100 * c / t
+                    println(io, rpad(f.filename, 56), lpad(string(c, "/", t), 12),
+                                lpad(string(round(p; digits = 2), "%"), 10))
+                end
+                println(io, "-"^78)
+                println(io, rpad("TOTAL", 56), lpad(string(covered, "/", total), 12),
+                            lpad(string(round(pct; digits = 2), "%"), 10))
+                println(io, "```")
+            end
+          '
+          # Coverage.jl scatters <source>.<pid>.cov files through the tree; drop
+          # them so nothing downstream mistakes them for tracked files.
+          find julia -name '*.cov' -delete
+
+      - name: Upload Rust coverage to Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: rust
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+      - name: Upload Julia coverage to Codecov
+        if: matrix.os == 'ubuntu-latest'
+        uses: codecov/codecov-action@v5
+        with:
+          files: julia-lcov.info
+          flags: julia
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+      # Kept alongside the Codecov upload so the raw reports stay reachable
+      # when Codecov is unavailable.
       - name: Upload coverage report
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-lcov
-          path: lcov.info
+          path: |
+            lcov.info
+            julia-lcov.info

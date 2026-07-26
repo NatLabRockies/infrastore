@@ -1,5 +1,8 @@
 # infrastore
 
+[![Test](https://github.com/NatLabRockies/infrastore/actions/workflows/test.yml/badge.svg)](https://github.com/NatLabRockies/infrastore/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/NatLabRockies/infrastore/branch/main/graph/badge.svg)](https://codecov.io/gh/NatLabRockies/infrastore)
+
 Rust library for managing time-series data in power-systems and energy simulations. Numerical arrays
 are persisted in NetCDF4, and the metadata associating each array with its owning component lives in
 SQLite. Identical arrays are stored once and shared through content addressing.
@@ -12,7 +15,9 @@ tool, and a read-only gRPC server with a Rust client.
 or the
 [Architecture](https://natlabrockies.github.io/infrastore/latest/explanation/architecture.html).
 
-**Status:** under development, unstable API, integrating with parent packages
+## Status
+
+Under development, unstable API, integrating with parent packages
 
 ## Features
 

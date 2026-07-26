@@ -2025,6 +2025,22 @@ pub fn references_to_in_tx(tx: &Transaction<'_>, data_hash: &[u8; 32]) -> Result
     Ok(count)
 }
 
+/// Count the associations of one `time_series_type` referencing `data_hash`,
+/// inside an in-flight transaction.
+pub fn typed_references_to_in_tx(
+    tx: &Transaction<'_>,
+    data_hash: &[u8; 32],
+    ts_type: TimeSeriesType,
+) -> Result<i64> {
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM time_series_associations
+         WHERE data_hash = ?1 AND time_series_type = ?2",
+        params![data_hash.as_slice(), ts_type.as_str()],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
 /// Does an association of `conflicting_type` already exist sharing the
 /// abstract-deterministic family identity `(owner_id, owner_category, name,
 /// resolution, features)`, *ignoring* interval and the requesting type?

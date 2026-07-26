@@ -106,7 +106,7 @@ end
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
     @test got.data == data
-    @test got.data isa Array{Float64,2}
+    @test got.data isa Array{Float64, 2}
     @test got.ext == "LinearFunctionData"
     @test got.name == "curves"
 
@@ -549,7 +549,7 @@ end
     # hash is physical storage detail, read via the metadata descriptor — it is not
     # carried on a key, so list_keys does not expose it.
     hash = get_metadata(store, 400, Component, "dst").data_hash
-    @test count_array_references(store, hash) == (sts=1, dst=1)
+    @test count_array_references(store, hash) == ArrayReferenceCounts(1, 1)
 end
 
 @testset "list_keys filters (owner, type, name, resolution, features)" begin
@@ -583,7 +583,7 @@ end
     @test length(list_keys(store; owner_id=1)) == 3
     @test length(list_keys(store; owner_category=SupplementalAttribute)) == 1
     @test length(list_keys(store; name="load")) == 3
-    @test length(list_keys(store; time_series_type=InfraStore.INFRASTORE_TYPE_SINGLE)) == 4
+    @test length(list_keys(store; time_series_type=SingleTimeSeries)) == 4
     @test length(list_keys(store; resolution=Minute(5))) == 1
     # Feature filter is a subset match.
     fkeys = list_keys(store; owner_id=1, name="load", features=Dict("scenario" => "high"))
@@ -597,11 +597,9 @@ end
     # get_resolutions: distinct resolutions (order is lexical-by-ISO, so compare
     # as a set — periods of different kinds have no numeric total order).
     @test Set(get_resolutions(store)) == Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
-    @test Set(get_resolutions(store; time_series_type=InfraStore.INFRASTORE_TYPE_SINGLE)) ==
+    @test Set(get_resolutions(store; time_series_type=SingleTimeSeries)) ==
         Set([Millisecond(Minute(5)), Millisecond(Hour(1))])
-    @test isempty(
-        get_resolutions(store; time_series_type=InfraStore.INFRASTORE_TYPE_DETERMINISTIC)
-    )
+    @test isempty(get_resolutions(store; time_series_type=Deterministic))
 
     # counts_by_type: all four are SingleTimeSeries here.
     cbt = counts_by_type(store)
@@ -645,11 +643,12 @@ end
 
     rows = list_array_groups(store)
     @test length(rows) == 3
-    # Rows carry every list_keys field plus a 64-char hex data_hash.
-    @test all(r -> r.data_hash isa String && length(r.data_hash) == 64, rows)
+    # Rows carry every list_keys field plus the 32-byte content hash.
+    @test all(r -> r.data_hash isa Vector{UInt8} && length(r.data_hash) == 32, rows)
     @test all(r -> r.name == "load", rows)
 
-    groups = Dict{String,Vector{Int}}()
+    # A Vector{UInt8} hashes by content, so it groups directly as a Dict key.
+    groups = Dict{Vector{UInt8}, Vector{Int}}()
     for r in rows
         push!(get!(groups, r.data_hash, Int[]), Int(r.owner_id))
     end
@@ -698,9 +697,7 @@ end
 
     @test sort!(list_owner_ids(store, Component)) == [1, 2]
     @test list_owner_ids(store, SupplementalAttribute) == [9]
-    @test list_owner_ids(
-        store, Component; time_series_type=InfraStore.INFRASTORE_TYPE_DETERMINISTIC
-    ) == [1]
+    @test list_owner_ids(store, Component; time_series_type=Deterministic) == [1]
     @test sort!(list_owner_ids(store, Component; resolution=Hour(1))) == [1, 2]
     @test isempty(list_owner_ids(store, Component; resolution=Minute(5)))
 end
@@ -1409,7 +1406,7 @@ end
     si = get_time_series(store, k_i)
     @test eltype(si.data) == Int64
     @test si.data == Int64[10, 20, 30]
-    @test typeof(si) == SingleTimeSeries{Int64,1}
+    @test typeof(si) == SingleTimeSeries{Int64, 1}
 
     k_f = add_time_series!(
         store, 2, "Gen", Component, SingleTimeSeries(t0, res, Float32[1.5, 2.5, 3.5], "f")
@@ -1417,7 +1414,7 @@ end
     sf = get_time_series(store, k_f)
     @test eltype(sf.data) == Float32
     @test sf.data == Float32[1.5, 2.5, 3.5]
-    @test typeof(sf) == SingleTimeSeries{Float32,1}
+    @test typeof(sf) == SingleTimeSeries{Float32, 1}
 
     k_b = add_time_series!(
         store,
@@ -1429,7 +1426,7 @@ end
     sb = get_time_series(store, k_b)
     @test eltype(sb.data) == Bool
     @test sb.data == Bool[true, false, true, false]
-    @test typeof(sb) == SingleTimeSeries{Bool,1}
+    @test typeof(sb) == SingleTimeSeries{Bool, 1}
 
     # Multi-dimensional element shape is reshaped (previously flattened).
     A = Float64[t * 100 + a * 10 + b for t in 1:4, a in 1:2, b in 1:3]  # (4, 2, 3)
@@ -1437,7 +1434,7 @@ end
     sm = get_time_series(store, k_m)
     @test size(sm.data) == (4, 2, 3)
     @test sm.data == A
-    @test typeof(sm) == SingleTimeSeries{Float64,3}
+    @test typeof(sm) == SingleTimeSeries{Float64, 3}
 
     # Int64 multi-dim: both dtype and shape preserved together.
     B = Int64[t * 10 + e for t in 1:3, e in 1:2]  # (3, 2)
@@ -1446,7 +1443,7 @@ end
     @test eltype(sim.data) == Int64
     @test size(sim.data) == (3, 2)
     @test sim.data == B
-    @test typeof(sim) == SingleTimeSeries{Int64,2}
+    @test typeof(sim) == SingleTimeSeries{Int64, 2}
 end
 
 @testset "parametric constructors infer {T,N} and normalize views" begin
@@ -1455,27 +1452,27 @@ end
 
     # Inference from the value array's eltype/ndims.
     @test typeof(SingleTimeSeries(t0, res, Float64[1, 2, 3], "f")) ==
-        SingleTimeSeries{Float64,1}
+        SingleTimeSeries{Float64, 1}
     @test typeof(SingleTimeSeries(t0, res, Int32[1 2; 3 4], "i")) ==
-        SingleTimeSeries{Int32,2}
+        SingleTimeSeries{Int32, 2}
     @test typeof(NonSequentialTimeSeries([t0, t0 + res], Float32[1, 2], "n")) ==
-        NonSequentialTimeSeries{Float32,1}
+        NonSequentialTimeSeries{Float32, 1}
     @test typeof(NonSequentialTimeSeries([t0, t0 + res], Int32[1 2; 3 4], "n2")) ==
-        NonSequentialTimeSeries{Int32,2}
+        NonSequentialTimeSeries{Int32, 2}
 
     # Views/ranges/reshapes normalize to a concrete Array{T,N}.
     base = Float64[1, 2, 3, 4, 5, 6]
     sts_view = SingleTimeSeries(t0, res, view(base, 1:3), "v")
-    @test sts_view.data isa Array{Float64,1}
+    @test sts_view.data isa Array{Float64, 1}
     @test sts_view.data == Float64[1, 2, 3]
     sts_reshaped = SingleTimeSeries(t0, res, reshape(base, 2, 3), "r")
-    @test sts_reshaped.data isa Array{Float64,2}
+    @test sts_reshaped.data isa Array{Float64, 2}
 
     # Forecast structs infer {T,N} too.
     det = Deterministic(
         t0, res, Hour(2), Hour(1), 5, Float64[i + s for s in 0:1, i in 1:5], "d"
     )
-    @test typeof(det) == Deterministic{Float64,2}
+    @test typeof(det) == Deterministic{Float64, 2}
     scen = Scenarios(
         t0,
         res,
@@ -1485,7 +1482,7 @@ end
         Float32[v for v in 1:(3 * 2 * 5)] |> a -> reshape(a, 3, 2, 5),
         "s",
     )
-    @test typeof(scen) == Scenarios{Float32,3}
+    @test typeof(scen) == Scenarios{Float32, 3}
 end
 
 @testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
@@ -1516,7 +1513,7 @@ end
     kf = add_time_series!(store, 2, "Bus", Component, det)
 
     @test get_intervals(store) == [Hour(1)]
-    @test isempty(get_intervals(store; time_series_type=InfraStore.INFRASTORE_TYPE_SINGLE))
+    @test isempty(get_intervals(store; time_series_type=SingleTimeSeries))
     @test sort(list_names(store)) == ["fc", "load"]
     @test list_names(store; owner_id=1) == ["load"]
     @test sort(list_owner_types(store)) == ["Bus", "Generator"]
@@ -1524,11 +1521,11 @@ end
     # Full metadata rows include units + ext.
     rows = list_time_series(store; owner_id=1)
     @test length(rows) == 1
-    @test rows[1]["units"] == "MW"
-    @test rows[1]["ext"] == "Profile"
-    @test rows[1]["dtype"] == "f64"
+    @test rows[1].units == "MW"
+    @test rows[1].ext == "Profile"
+    @test rows[1].dtype == Float64
 
-    # get_probabilistic_metadata exposes percentiles + units without a data fetch.
+    # Probabilistic metadata exposes percentiles + units without a data fetch.
     prob = Probabilistic(
         t0,
         res,
@@ -1540,7 +1537,7 @@ end
         "pf",
     )
     add_time_series!(store, 3, "Generator", Component, prob; units="MWp")
-    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    pmd = get_metadata(Probabilistic, store, 3, Component, "pf")
     @test pmd.percentiles == [0.1, 0.5, 0.9]
     @test pmd.units == "MWp"
 
@@ -1551,10 +1548,8 @@ end
     @test mixed[2] isa Deterministic
     @test mixed[2].data == det.data
 
-    # resolve_forecast_key resolves the abstract-deterministic family.
-    rk = resolve_forecast_key(
-        store, 2, Component, "fc", InfraStore.INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
-    )
+    # get_time_series_key resolves the abstract-deterministic family.
+    rk = get_time_series_key(AbstractDeterministic, store, 2, Component, "fc")
     @test get_time_series(Deterministic, store, rk).data == det.data
 
     # rename_time_series! moves the association.
@@ -1597,9 +1592,7 @@ end
         t0, res, Hour(2), Hour(1), 3, reshape(collect(1.0:12.0), 2, 3, 2), "fc"
     )
     add_time_series!(store, 2, "Bus", Component, det; features=feats)
-    fmd = get_forecast_metadata(
-        store, 2, Component, "fc", InfraStore.INFRASTORE_TYPE_DETERMINISTIC; features=feats
-    )
+    fmd = get_metadata(Deterministic, store, 2, Component, "fc"; features=feats)
     @test fmd.element_shape == (3, 2)
     @test fmd.features == Dict("scenario" => "high", "model_year" => 2030)
 
@@ -1615,7 +1608,7 @@ end
         "pf",
     )
     add_time_series!(store, 3, "Generator", Component, prob)
-    pmd = get_probabilistic_metadata(store, 3, Component, "pf")
+    pmd = get_metadata(Probabilistic, store, 3, Component, "pf")
     @test pmd.element_shape == (2, 3)
     @test isempty(pmd.features)
     @test pmd.percentiles == [0.1, 0.9]
@@ -1779,10 +1772,12 @@ end
     @test count_supplemental_attributes(store) == 2
     @test count_components_with_attributes(store) == 2
 
-    @test supplemental_attribute_counts_by_type(store) ==
-        [(type="GeographicInfo", count=2), (type="Outage", count=1)]
+    @test supplemental_attribute_counts_by_type(store) == [
+        SupplementalAttributeTypeCount("GeographicInfo", 2),
+        SupplementalAttributeTypeCount("Outage", 1),
+    ]
     summary = supplemental_attribute_summary(store)
-    @test (component_type="Generator", attribute_type="GeographicInfo", count=2) in summary
+    @test SupplementalAttributeSummaryRow("Generator", "GeographicInfo", 2) in summary
     @test sum(r.count for r in summary) == 3
 
     # Component rewrite, and the collision it can hit.
@@ -2521,7 +2516,7 @@ end
     static_read!(reader, t0)
     @test sort(vec(static_values(reader, 1))) == Float64[1, 100]
 
-    # `list_keys` returns metadata NamedTuples, so remove by attributes.
+    # `list_keys` returns metadata rows, not keys, so remove by attributes.
     remove_time_series!(store, 1, Component, "a"; resolution=Hour(1))
     @test num_distinct_arrays(store) == 1
 
@@ -2596,4 +2591,426 @@ end
     rebuilt = build_static_reader(store; resolution=Hour(1))
     static_read!(rebuilt, t0)
     @test length(vec(static_values(rebuilt, 1))) == 2
+end
+
+# ---- Result structs --------------------------------------------------------
+#
+# The catalog / metadata queries return structs (not NamedTuples or Dicts):
+# typed fields, value equality, hashability, and a field-labelled `show`.
+
+@testset "query results are structs with typed fields" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "load"; ext="Profile");
+        units="MW",
+        features=Dict("scenario" => "high"),
+    )
+    add_time_series!(
+        store,
+        9,
+        "GeographicInfo",
+        SupplementalAttribute,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "load"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(1.0:4.0, 2, 2), "fc"),
+    )
+
+    # Metadata getters return the per-type metadata structs.
+    feats = Dict{String, Any}("scenario" => "high")
+    read_md() =
+        get_metadata(store, 1, Component, "load"; resolution=Hour(1), features=feats)
+    md = read_md()
+    @test md isa TimeSeriesMetadata
+    @test md.owner_type == "Generator"
+    @test md.owner_category == Component
+    @test md.time_series_type == SingleTimeSeries
+    # Fields that do not apply to a static series are `nothing`, not zero.
+    @test md.horizon === nothing && md.count === nothing && md.percentiles === nothing
+    @test md.dtype == Float64
+    @test md.element_shape == ()
+    @test md.ext == "Profile"
+    @test md.units == "MW"
+    @test md.features == feats
+    # Value equality (a NamedTuple had it; a plain struct with a Vector and a
+    # Dict field would fall back to identity without the generated `==`).
+    @test md == read_md()
+    @test length(Set([md, read_md()])) == 1
+    @test occursin("TimeSeriesMetadata(owner_id=", repr(md))
+    @test occursin(bytes2hex(md.data_hash), repr(md))
+
+    fmd = get_metadata(Deterministic, store, 1, Component, "fc")
+    @test fmd isa TimeSeriesMetadata
+    @test fmd.horizon == Millisecond(Hour(2))
+    @test fmd.count == 2
+    # A forecast record carries `dtype` and `owner_type` too — one export, one
+    # struct, so no field is dropped by the type or addressing path taken.
+    @test fmd.dtype == Float64
+    @test fmd.owner_type == "Generator"
+    # The family sentinel resolves to whichever concrete type is stored.
+    @test get_metadata(AbstractDeterministic, store, 1, Component, "fc") == fmd
+
+    # The same record, addressed by key rather than by attributes.
+    fkey = get_time_series_key(Deterministic, store, 1, Component, "fc")
+    @test get_metadata(store, fkey) == fmd
+
+    # Key rows: owner_category is the enum, time_series_type the Julia type.
+    row = only(list_keys(store; owner_id=9))
+    @test row isa KeyRow
+    @test row.owner_category == SupplementalAttribute
+    @test row.time_series_type == SingleTimeSeries
+    @test row.horizon === nothing
+    @test only(list_keys(store; owner_id=1, name="fc")).owner_category == Component
+
+    info = key_info(only(get_time_series_keys(store, 9, SupplementalAttribute)))
+    @test info isa KeyInfo
+    @test info.owner_category == SupplementalAttribute
+
+    # Array-group rows are key rows plus the hex hash.
+    group = only(list_array_groups(store; owner_id=9))
+    @test group isa ArrayGroupRow
+    @test group.owner_category == SupplementalAttribute
+    @test group.data_hash isa Vector{UInt8}
+    @test length(group.data_hash) == 32
+
+    # Full metadata rows carry the storage detail a key row omits.
+    mrow = only(list_time_series(store; owner_id=1, name="load"))
+    @test mrow isa TimeSeriesMetadata
+    @test mrow.owner_type == "Generator"
+    @test mrow.owner_category == Component
+    @test mrow.dtype == Float64
+    @test mrow.element_shape == ()
+    @test mrow.percentiles === nothing
+    @test mrow.units == "MW"
+    @test mrow.ext == "Profile"
+    @test mrow.data_hash == md.data_hash
+    # list_time_series and get_metadata are two paths to the same record.
+    @test mrow == md
+
+    # Counts and summaries.
+    @test get_counts(store) isa TimeSeriesCounts
+    @test time_series_counts(store) isa TimeSeriesCountsDetailed
+    @test time_series_counts(store).supplemental_attributes_with_time_series == 1
+    @test counts_by_type(store) ==
+        [TimeSeriesTypeCount(Deterministic, 1), TimeSeriesTypeCount(SingleTimeSeries, 2)]
+    @test only(filter(r -> r.owner_type == "GeographicInfo", static_summary(store))) ==
+        StaticSummaryRow(
+        "GeographicInfo",
+        SupplementalAttribute,
+        SingleTimeSeries,
+        "load",
+        t0,
+        Millisecond(Hour(1)),
+        4,
+        1,
+    )
+    @test only(forecast_summary(store)).owner_category == Component
+
+    # One StaticGrid type for both the consistency check and a reader's grid.
+    grid = only(check_static_consistency(store))
+    @test grid == StaticGrid(t0, Millisecond(Hour(1)), 4)
+    @test static_grid(build_static_reader(store; resolution=Hour(1))) == grid
+
+    @test forecast_timeline(
+        build_forecast_reader(store, Deterministic; resolution=Hour(1))
+    ) == ForecastTimeline(t0, Millisecond(Hour(1)), Millisecond(Hour(1)), 2)
+
+    @test get_forecast_parameters(store) == ForecastParameters(
+        Millisecond(Hour(2)), Millisecond(Hour(1)), 2, Millisecond(Hour(1)), t0
+    )
+    @test get_forecast_parameters(store; resolution=Minute(5)) ==
+        ForecastParameters(nothing, nothing, nothing, nothing, nothing)
+
+    @test get_compression(store) == CompressionSettings(:none, 0, false)
+    @test count_array_references(store, md.data_hash) == ArrayReferenceCounts(1, 0)
+end
+
+@testset "Probabilistic metadata struct" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Probabilistic(
+            t0,
+            Hour(1),
+            Hour(2),
+            Hour(1),
+            2,
+            [0.1, 0.9],
+            reshape(1.0:8.0, 2, 2, 2),
+            "pf";
+            ext="percentile-ext",
+        ),
+    )
+    pmd = get_metadata(Probabilistic, store, 1, Component, "pf")
+    @test pmd isa TimeSeriesMetadata
+    @test pmd.percentiles == [0.1, 0.9]
+    @test pmd == get_metadata(Probabilistic, store, 1, Component, "pf")
+    # `ext` reaches a Probabilistic: the metadata surface no longer drops fields
+    # depending on which getter was called.
+    @test pmd.ext == "percentile-ext"
+    @test pmd.dtype == Float64
+    @test pmd == only(list_time_series(store))
+
+    row = only(list_time_series(store))
+    @test row.percentiles == [0.1, 0.9]
+    @test row.time_series_type == Probabilistic
+end
+
+@testset "get_metadata covers every stored time series type" begin
+    # One getter, dispatched on the Julia type exactly like `get_time_series`.
+    # Nothing is special-cased per type: a NonSequentialTimeSeries and a
+    # Scenarios are as reachable as a SingleTimeSeries.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        NonSequentialTimeSeries([t0, t0 + Hour(2), t0 + Hour(5)], Float64[1, 2, 3], "b"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Deterministic(t0, res, Hour(2), Hour(1), 2, reshape(1.0:4.0, 2, 2), "c"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Probabilistic(
+            t0, res, Hour(2), Hour(1), 2, [0.1, 0.9], reshape(1.0:8.0, 2, 2, 2), "d"
+        ),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Scenarios(t0, res, Hour(2), Hour(1), 2, reshape(1.0:12.0, 3, 2, 2), "e"),
+    )
+
+    for (T, name) in (
+        (SingleTimeSeries, "a"),
+        (NonSequentialTimeSeries, "b"),
+        (Deterministic, "c"),
+        (Probabilistic, "d"),
+        (Scenarios, "e"),
+    )
+        md = get_metadata(T, store, 1, Component, name)
+        @test md isa TimeSeriesMetadata
+        @test md.time_series_type == T
+        @test md.name == name
+        @test md.owner_type == "Generator"
+        @test md.dtype == Float64
+    end
+
+    # A transform-derived DST is addressable by its own type, and through the
+    # family sentinel alongside it.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    dst = get_metadata(DeterministicSingleTimeSeries, store, 1, Component, "a")
+    @test dst.time_series_type == DeterministicSingleTimeSeries
+    @test get_metadata(AbstractDeterministic, store, 1, Component, "a") == dst
+    @test get_metadata(AbstractDeterministic, store, 1, Component, "c").time_series_type ==
+        Deterministic
+
+    # The type-less shorthand is the SingleTimeSeries one, as on has_time_series.
+    @test get_metadata(store, 1, Component, "a") ==
+        get_metadata(SingleTimeSeries, store, 1, Component, "a")
+
+    # A type that is not a stored time series type is rejected up front.
+    @test_throws InfraStore.InvalidParameterError get_metadata(
+        Store, store, 1, Component, "a"
+    )
+end
+
+@testset "typed lookups and filters name the Julia type" begin
+    # has/remove/copy and every `time_series_type` filter take the Julia type,
+    # not a wire code. The type-less has/remove forms stay the SingleTimeSeries
+    # shorthand.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Scenarios(t0, res, Hour(2), Hour(1), 2, reshape(1.0:12.0, 3, 2, 2), "b"),
+    )
+
+    # A type-addressed existence check does not match a different stored type.
+    @test has_time_series(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+    @test !has_time_series(Scenarios, store, 1, Component, "a"; resolution=res)
+    @test has_time_series(Scenarios, store, 1, Component, "b"; resolution=res)
+    # …and agrees with the type-less SingleTimeSeries shorthand.
+    @test has_time_series(store, 1, Component, "a"; resolution=res) ==
+        has_time_series(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+
+    # copy_time_series! preserves the stored type onto the new owner.
+    copy_time_series!(Scenarios, store, 1, Component, "b", 2, "Generator"; resolution=res)
+    @test has_time_series(Scenarios, store, 2, Component, "b"; resolution=res)
+    @test only(list_keys(store; owner_id=2)).time_series_type == Scenarios
+    # Arrays are content-addressed, so the copy adds an association, not data.
+    @test num_distinct_arrays(store) == 2
+
+    copy_time_series!(
+        SingleTimeSeries,
+        store,
+        1,
+        Component,
+        "a",
+        3,
+        "Bus";
+        new_name="renamed",
+        resolution=res,
+    )
+    @test only(list_keys(store; owner_id=3)).name == "renamed"
+
+    # A transform-derived DST stays a DST through a copy (a read-then-write
+    # round trip would flatten it into a dense Deterministic). Both stored
+    # SingleTimeSeries — "a" and the copy renamed onto the Bus — transform.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 2
+    copy_time_series!(
+        DeterministicSingleTimeSeries,
+        store,
+        1,
+        Component,
+        "a",
+        4,
+        "Generator";
+        resolution=res,
+    )
+    @test only(list_keys(store; owner_id=4)).time_series_type ==
+        DeterministicSingleTimeSeries
+
+    # Every filter keyword takes the type too.
+    @test length(list_keys(store; time_series_type=Scenarios)) == 2
+    @test list_names(store; time_series_type=SingleTimeSeries) == ["a", "renamed"]
+    @test list_owner_types(store; time_series_type=SingleTimeSeries) == ["Bus", "Generator"]
+    @test list_owner_ids(store, Component; time_series_type=Scenarios) == [1, 2]
+    @test has_for_owner(store, 1, Component; time_series_type=Scenarios)
+    @test !has_for_owner(store, 3, Component; time_series_type=Scenarios)
+    @test get_resolutions(store; time_series_type=Scenarios) == [Millisecond(res)]
+    @test get_intervals(store; time_series_type=Scenarios) == [Millisecond(Hour(1))]
+    @test isempty(get_intervals(store; time_series_type=SingleTimeSeries))
+    @test only(list_time_series(store; time_series_type=Scenarios, owner_id=2)).name == "b"
+    @test only(list_array_groups(store; time_series_type=Scenarios, owner_id=1)).name == "b"
+
+    # Typed removal, then the filter form.
+    remove_time_series!(Scenarios, store, 2, Component, "b"; resolution=res)
+    @test !has_time_series(Scenarios, store, 2, Component, "b"; resolution=res)
+    @test remove_by_filter!(store; time_series_type=Scenarios) == 1
+    @test isempty(list_keys(store; time_series_type=Scenarios))
+
+    # A filter selects stored rows, so the request-only family sentinel is
+    # rejected rather than silently matching nothing.
+    @test_throws InfraStore.InvalidParameterError list_keys(
+        store; time_series_type=AbstractDeterministic
+    )
+    @test_throws InfraStore.InvalidParameterError get_resolutions(
+        store; time_series_type=AbstractDeterministic
+    )
+    # A type that is not a time series type at all is rejected everywhere.
+    @test_throws InfraStore.InvalidParameterError has_time_series(
+        Store, store, 1, Component, "a"
+    )
+    @test_throws InfraStore.InvalidParameterError list_keys(store; time_series_type=Store)
+end
+
+@testset "get_time_series_key addresses any type and validates" begin
+    # The attribute-addressed counterpart of get_time_series_keys: it works for
+    # static types too, not just forecasts, and the handle it returns always
+    # names something stored.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        NonSequentialTimeSeries([t0, t0 + Hour(2)], Float64[9, 8], "b"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Scenarios(t0, res, Hour(2), Hour(1), 2, reshape(1.0:12.0, 3, 2, 2), "c"),
+    )
+
+    # A static key round-trips through the key-based readers.
+    sk = get_time_series_key(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+    @test key_info(sk).time_series_type == SingleTimeSeries
+    @test get_time_series(store, sk).data == Float64[1, 2, 3, 4]
+    @test get_metadata(store, sk).name == "a"
+    @test has_time_series(store, sk)
+
+    nk = get_time_series_key(NonSequentialTimeSeries, store, 1, Component, "b")
+    @test key_info(nk).time_series_type == NonSequentialTimeSeries
+    @test get_time_series(NonSequentialTimeSeries, store, nk).data == Float64[9, 8]
+
+    ck = get_time_series_key(Scenarios, store, 1, Component, "c"; resolution=res)
+    @test key_info(ck).time_series_type == Scenarios
+
+    # Keys from attributes feed a bulk read directly.
+    @test length(bulk_read(store, [sk, nk, ck])) == 3
+
+    # Resolution is against the catalog, so a miss and an ambiguous request are
+    # both reported rather than handing back a key that names nothing.
+    @test_throws InfraStore.NotFoundError get_time_series_key(
+        SingleTimeSeries, store, 1, Component, "missing"
+    )
+    @test_throws InfraStore.NotFoundError get_time_series_key(
+        Probabilistic, store, 1, Component, "a"
+    )
+
+    # The family sentinel picks whichever concrete type is stored.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    @test key_info(
+        get_time_series_key(AbstractDeterministic, store, 1, Component, "a"; resolution=res)
+    ).time_series_type == DeterministicSingleTimeSeries
+
+    @test_throws InfraStore.InvalidParameterError get_time_series_key(
+        Store, store, 1, Component, "a"
+    )
 end

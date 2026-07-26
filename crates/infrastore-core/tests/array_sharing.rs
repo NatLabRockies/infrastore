@@ -70,7 +70,7 @@ fn count_array_references_multiple_sts_then_decrements() {
 }
 
 #[test]
-fn count_array_references_dst_without_sts() {
+fn removing_the_last_sts_backing_a_dst_is_refused() {
     let mut store = create_store(None, true).unwrap();
     let sts_key = add_sts(&mut store, 5);
 
@@ -83,24 +83,60 @@ fn count_array_references_dst_without_sts() {
     let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
     assert_eq!(store.count_array_references(&hash).unwrap(), (1, 1));
 
-    // Remove the STS: the DST still references the array, so it survives and the
-    // count becomes the (0, 1) case — a DST holding an array with no STS.
-    store.remove_time_series(sts_key.identity()).unwrap();
-    assert_eq!(store.count_array_references(&hash).unwrap(), (0, 1));
-    assert_eq!(store.num_distinct_arrays().unwrap(), 1);
+    // A DST is a view over the STS's array: removing its last backing
+    // SingleTimeSeries would orphan it, so the remove is refused and rolled
+    // back.
+    let err = store.remove_time_series(sts_key.identity()).unwrap_err();
+    assert!(matches!(
+        err,
+        infrastore_core::TimeSeriesError::InvalidParameter(_)
+    ));
+    assert_eq!(store.count_array_references(&hash).unwrap(), (1, 1));
 
-    // The DST view still reads its (Deterministic-shaped) data from the array.
+    // Removing the derived DST first unblocks the STS removal.
     let dst_key = store
         .list_keys(infrastore_core::ListFilter::new())
         .unwrap()
         .into_iter()
         .find(|k| k.time_series_type() == TimeSeriesType::DeterministicSingleTimeSeries)
-        .expect("a DST key must remain after removing the STS");
-    let got = store.get_time_series(dst_key.identity(), None).unwrap();
-    assert!(got.as_deterministic().is_some());
-
-    // Removing the DST clears the final reference and reclaims the array.
+        .expect("the derived DST key must be listed");
     store.remove_time_series(dst_key.identity()).unwrap();
+    store.remove_time_series(sts_key.identity()).unwrap();
+    assert_eq!(store.count_array_references(&hash).unwrap(), (0, 0));
+    assert_eq!(store.num_distinct_arrays().unwrap(), 0);
+}
+
+#[test]
+fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
+    let mut store = create_store(None, true).unwrap();
+    let sts_key = add_sts(&mut store, 5);
+    store
+        .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+        .unwrap();
+    let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
+    let dst_key = store
+        .list_keys(infrastore_core::ListFilter::new())
+        .unwrap()
+        .into_iter()
+        .find(|k| k.time_series_type() == TimeSeriesType::DeterministicSingleTimeSeries)
+        .expect("the derived DST key must be listed");
+
+    // An STS-only bulk remove would orphan the DST and is refused atomically.
+    let err = store
+        .remove_time_series_bulk(&[sts_key.identity()])
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        infrastore_core::TimeSeriesError::InvalidParameter(_)
+    ));
+    assert_eq!(store.count_array_references(&hash).unwrap(), (1, 1));
+
+    // Removing both in one batch passes: the orphan check runs on the
+    // post-removal state, so the STS-before-DST order does not matter.
+    let removed = store
+        .remove_time_series_bulk(&[sts_key.identity(), dst_key.identity()])
+        .unwrap();
+    assert_eq!(removed, 2);
     assert_eq!(store.count_array_references(&hash).unwrap(), (0, 0));
     assert_eq!(store.num_distinct_arrays().unwrap(), 0);
 }

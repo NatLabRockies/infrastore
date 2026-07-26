@@ -41,8 +41,10 @@ and `parent_child_associations` (directed component ↔ component edges, e.g. a 
 a bus, deliberately narrower until a consumer needs more). Both are independent of time series in
 both directions, and of each other. Metadata getters surface `element_shape` and `features` in every
 binding. Python ships type stubs (`infrastore.pyi` + a pytest drift guard), a full exception
-hierarchy, and keyword-only optional arguments; Julia overloads `Base`
-(`==`/`hash`/`show`/`length`/`iterate`) and offers do-block `Store`/`open_store` forms. A stored
+hierarchy, and keyword-only optional arguments; Julia returns its catalog/metadata/summary query
+results as structs (`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
+`docs/src/reference/julia-api.md#result-types`), overloads `Base`
+(`==`/`hash`/`show`/`length`/`iterate`), and offers do-block `Store`/`open_store` forms. A stored
 `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
 design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI
 additionally has `export` (bulk read-direction inverse of `add`, timestamped forecast CSV),

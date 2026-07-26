@@ -90,7 +90,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             char **out_resolution,            /* ISO-8601; infrastore_string_free */
                             int32_t *out_dtype,
                             int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
-                            uint8_t **out_data, uint64_t *out_data_byte_len);  /* infrastore_buffer_free_u8 */
+                            uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
+                            char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
 /* All-or-nothing batched remove: on any error (including one missing key)
@@ -143,25 +144,6 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
 Resolve a series by its attributes instead of a key handle. A `NULL`/empty `resolution` means unset.
 
 ```c
-int32_t infrastore_store_get_metadata(const struct InfraStore *handle,
-                              int64_t owner_id,
-                              int32_t owner_category,         /* 0=Component, 1=SupplementalAttribute */
-                              const char *name,
-                              const char *resolution,         /* ISO-8601; NULL = unset */
-                              const char *features_json,
-                              int64_t *out_initial_ts_unix_ms,
-                              char **out_resolution,          /* ISO-8601; infrastore_string_free */
-                              uint64_t *out_length, uint8_t *out_data_hash, /* 32-byte buffer */
-                              int32_t *out_dtype,
-                              char *out_ext, uint64_t ext_cap,
-                              uint64_t *out_ext_len,
-                              char *out_units, uint64_t units_cap,
-                              uint64_t *out_units_len,        /* empty => unset */
-                              uint64_t *out_element_shape, uint64_t element_shape_cap,
-                              uint64_t *out_element_shape_len, /* 0 => scalar elements */
-                              char *out_features_json, uint64_t features_json_cap,
-                              uint64_t *out_features_json_len); /* "{}" => none */
-
 int32_t infrastore_store_has_by_attrs(const struct InfraStore *handle,
                               int64_t owner_id, int32_t owner_category, const char *name,
                               const char *resolution, const char *features_json, bool *out_present);
@@ -218,18 +200,41 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
                           char *name_buf, uint64_t name_cap, uint64_t *out_name_len,
                           char *features_buf, uint64_t features_cap, uint64_t *out_features_len);
 
-/* Read an association's name by key, resolved through the stored metadata (the
-   per-association name is not carried on the key itself). name_buf uses the
-   probe-then-fetch convention (like infrastore_key_attributes): call with name_buf = NULL,
-   name_cap = 0 to learn *out_name_len, then again with a name_len+1-byte buffer. */
-int32_t infrastore_store_get_association(const struct InfraStore *handle, const struct InfraStoreKey *key,
-                                 char *name_buf, uint64_t name_cap, uint64_t *out_name_len);
+/* The whole metadata record for a key, as a JSON object with the shape of one
+   infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
+   time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
+   horizon, interval, count, length, percentiles, dtype, element_shape, features,
+   units, ext — fields that do not apply to the key's type are null. One export
+   covers every time series type, static and forecast alike. Probe-then-fetch:
+   call with buf = NULL, cap = 0 to learn *out_len, then again with an
+   out_len+1-byte buffer. INFRASTORE_ERR_NOT_FOUND if the key names nothing stored. */
+int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
+                                     const struct InfraStoreKey *key,
+                                     char *buf, uint64_t cap, uint64_t *out_len);
+
+/* Resolve attributes plus a requested type to the key of the one matching stored
+   series. requested_type is any stored type code (0..5) or
+   INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100), which matches a stored Deterministic or
+   DeterministicSingleTimeSeries and yields the concrete one. Unlike
+   infrastore_make_key_from_attrs, which builds an identity without consulting the
+   catalog, this validates: INFRASTORE_ERR_NOT_FOUND on a miss and
+   INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
+   type, resolution, and/or interval). The name is historical — it is not
+   forecast-specific. Free the key with infrastore_key_free. */
+int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
+                                      int64_t owner_id, int32_t owner_category,
+                                      const char *name,
+                                      const char *resolution, const char *interval,
+                                      const char *features_json,
+                                      int32_t requested_type,
+                                      struct InfraStoreKey **out_key);
 ```
 
-`infrastore_store_get_metadata` + `infrastore_store_get_array_by_hash` is the read path used by
-bindings that maintain their own key objects (such as an InfrastructureSystems.jl-side store).
+`infrastore_store_get_metadata_by_key` + `infrastore_store_get_array_by_hash` is the read path used
+by bindings that maintain their own key objects (such as an InfrastructureSystems.jl-side store).
 `infrastore_make_key_from_attrs` bridges the two addressing styles: it materializes a
-`InfraStoreKey` from attributes that the key-based read functions accept directly.
+`InfraStoreKey` from attributes that the key-based read functions accept directly, which is how a
+binding reaches the metadata of an attribute-addressed series.
 `infrastore_store_get_time_series_keys` enumerates an owner's keys (the only way to obtain a key for
 a transform-derived `DeterministicSingleTimeSeries`), and `infrastore_key_attributes` reads back an
 opaque key's type, name, features, and addressing so the caller can pick the matching key-based
@@ -337,7 +342,8 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               int32_t *out_dtype,
                               uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                               double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
-                              int32_t *out_matched_type);  /* concrete matched TimeSeriesType */
+                              int32_t *out_matched_type,  /* concrete matched TimeSeriesType */
+                              char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
 ```
 
 `infrastore_store_get_forecast_by_key` is the key-based counterpart: it takes a `InfraStoreKey`
@@ -360,50 +366,17 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, co
                                      int32_t *out_dtype,
                                      uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                                      double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
-                                     int32_t *out_matched_type);
+                                     int32_t *out_matched_type,
+                                     char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
 ```
 
-The metadata-only accessors read the windowing parameters and content hash without decoding the
-array. `infrastore_store_get_probabilistic_metadata` additionally returns the percentile vector
-(free it with `infrastore_buffer_free_f64`):
+Forecast metadata is read with the same `infrastore_store_get_metadata_by_key` as everything else —
+build the key with `infrastore_make_key_from_attrs`, passing the forecast `ts_type` and, when a name
+carries several forecasts differing only by interval, the `interval`. The returned row carries the
+windowing parameters (`horizon`, `interval`, `count`), the content hash, and the `percentiles` of a
+`Probabilistic`, without decoding the array.
 
 ```c
-int32_t infrastore_store_get_forecast_metadata(const struct InfraStore *handle,
-                                       int64_t owner_id, int32_t owner_category,
-                                       const char *name, int32_t ts_type,
-                                       const char *resolution, const char *interval,  /* ISO-8601 filters */
-                                       const char *features_json,
-                                       int64_t *out_initial_ts_unix_ms,
-                                       char **out_resolution, char **out_horizon, char **out_interval,  /* ISO-8601; infrastore_string_free */
-                                       uint64_t *out_count, uint64_t *out_length,
-                                       uint8_t *out_data_hash,
-                                       char *ext_buf, uint64_t ext_cap,
-                                       uint64_t *out_ext_len,
-                                       char *out_units, uint64_t units_cap,
-                                       uint64_t *out_units_len,
-                                       uint64_t *out_element_shape, uint64_t element_shape_cap,
-                                       uint64_t *out_element_shape_len,
-                                       char *out_features_json, uint64_t features_json_cap,
-                                       uint64_t *out_features_json_len);
-
-int32_t infrastore_store_get_probabilistic_metadata(const struct InfraStore *handle,
-                                            int64_t owner_id, int32_t owner_category,
-                                            const char *name,
-                                            const char *resolution, const char *interval,  /* ISO-8601 filters */
-                                            const char *features_json,
-                                            int64_t *out_initial_ts_unix_ms,
-                                            char **out_resolution, char **out_horizon,
-                                            char **out_interval,  /* ISO-8601; infrastore_string_free */
-                                            uint64_t *out_count,
-                                            uint64_t *out_length, uint8_t *out_data_hash,
-                                            double **out_percentiles, uint64_t *out_percentiles_len,
-                                            char *out_units, uint64_t units_cap,
-                                            uint64_t *out_units_len,
-                                            uint64_t *out_element_shape, uint64_t element_shape_cap,
-                                            uint64_t *out_element_shape_len,
-                                            char *out_features_json, uint64_t features_json_cap,
-                                            uint64_t *out_features_json_len);
-
 int32_t infrastore_store_has_typed(const struct InfraStore *handle,
                            int64_t owner_id, int32_t owner_category, const char *name,
                            int32_t ts_type,
@@ -656,14 +629,16 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
                                int64_t old_owner_id, int64_t new_owner_id,
                                int32_t owner_category, uint64_t *out_updated);
 /* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
-   storage detail). has_owner / has_owner_category are independent filters; with
-   neither set the whole store is listed. Probe-then-fetch: call with buf=NULL,
-   cap=0 to learn the length via out_len, then again with len+1 bytes. */
+   storage detail). The filters are independent; with none set the whole store is
+   listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
+   rows carry no interval. Probe-then-fetch: call with buf=NULL, cap=0 to learn
+   the length via out_len, then again with len+1 bytes. */
 int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            bool has_owner, int64_t owner_id,
                            bool has_owner_category, int32_t owner_category,
                            bool has_time_series_type, int32_t time_series_type,
-                           const char *name, const char *resolution, const char *features_json,
+                           const char *name, const char *resolution, const char *interval,
+                           const char *features_json,
                            char *buf, uint64_t cap, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
    the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
@@ -674,7 +649,8 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                    bool has_owner, int64_t owner_id,
                                    bool has_owner_category, int32_t owner_category,
                                    bool has_time_series_type, int32_t time_series_type,
-                                   const char *name, const char *resolution, const char *features_json,
+                                   const char *name, const char *resolution, const char *interval,
+                                   const char *features_json,
                                    char *buf, uint64_t cap, uint64_t *out_len);
 ```
 
