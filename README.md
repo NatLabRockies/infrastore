@@ -53,11 +53,10 @@ authoritative.
 | Julia    | `Pkg.add("InfraStore")`        |
 | CLI      | `cargo install infrastore-cli` |
 
-The Rust crates and the Python wheel statically link NetCDF, HDF5, and zlib, so there are no system
-libraries to install. Building the crates from source needs `cmake` and a C compiler; the wheels are
-prebuilt. The Julia package links the ecosystem's `NetCDF_jll` / `HDF5_jll` instead, so a Julia
-process has exactly one `libhdf5` — see [Releasing](docs/src/releasing.md) for why the two channels
-differ.
+Every channel statically links NetCDF, HDF5, and zlib, so there are no system libraries to install.
+Building the crates from source needs `cmake` and a C compiler; the Python wheels and the Julia
+binary (`InfraStore_jll`) are prebuilt — see [Releasing](docs/src/releasing.md) for why the Julia
+package vendors its own HDF5 rather than linking `NetCDF_jll` / `HDF5_jll`.
 
 To work against a checkout instead:
 

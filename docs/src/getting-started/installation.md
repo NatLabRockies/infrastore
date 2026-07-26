@@ -9,10 +9,11 @@ Most users install a published package and need no build tools at all:
 | Julia    | `Pkg.add("InfraStore")`        |
 | CLI      | `cargo install infrastore-cli` |
 
-The Python wheels are prebuilt and self-contained. The Rust crates build NetCDF, HDF5, and zlib from
-vendored sources and link them statically, so they need `cmake` and a C compiler but **no system
-NetCDF or HDF5**. The Julia package links the ecosystem's `NetCDF_jll` / `HDF5_jll` instead, so a
-Julia process has exactly one `libhdf5`.
+The Python wheels and the Julia binary (`InfraStore_jll`) are prebuilt and self-contained. The Rust
+crates build NetCDF, HDF5, and zlib from vendored sources and link them statically, so they need
+`cmake` and a C compiler but **no system NetCDF or HDF5**. The same vendored, statically linked
+stack backs every channel, so the HDF5 version behind the on-disk format is pinned by infrastore
+rather than by the target environment.
 
 The rest of this page covers building the workspace from a checkout.
 

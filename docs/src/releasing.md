@@ -28,19 +28,27 @@ The `crates-release` workflow refuses to publish if the tag does not match the w
 
 ## NetCDF linkage
 
-The two distribution channels link NetCDF differently, and the choice is **not** interchangeable:
+Every distribution channel — the Rust crates, the Python wheel, and `InfraStore_jll` — ships with
+the `vendored` feature: netcdf-c, HDF5, and zlib are compiled from source and linked statically.
+`pip install infrastore` and `cargo add infrastore-core` need no system libraries, only `cmake` and
+a C compiler at build time, and every channel is backed by the exact HDF5 version infrastore was
+tested against rather than whatever the target environment resolves.
 
-| Channel                   | Linkage                                  | How                                                                  |
-| ------------------------- | ---------------------------------------- | -------------------------------------------------------------------- |
-| Rust crates, Python wheel | vendored netcdf-c + HDF5 + zlib, static  | the `vendored` feature, enabled by default in every crate            |
-| `InfraStore_jll` (Julia)  | dynamic, against `NetCDF_jll`/`HDF5_jll` | `cargo build --no-default-features` in `yggdrasil/build_tarballs.jl` |
+For the JLL this is a deliberate departure from Julia-ecosystem convention (linking
+`NetCDF_jll`/`HDF5_jll`), made for two reasons:
 
-Vendoring is what lets a downstream consumer get NetCDF for free — `pip install infrastore` and
-`cargo add infrastore-core` need no system libraries, only `cmake` and a C compiler at build time.
+- **Format control.** The store is a data artifact with a compatibility contract
+  (`DATA_FORMAT_VERSION`); pinning the HDF5 that backs it removes an entire class of
+  environment-dependent behavior. An `HDF5_jll` upgrade in a user's environment must not change how
+  infrastore files are read or written.
+- **No MPI dependency.** `NetCDF_jll`/`HDF5_jll` are MPI-augmented and publish no serial variant, so
+  linking them forces an MPI runtime dependency and a 17-triplet build matrix onto a library that
+  never calls MPI — and propagates that dependency to `InfraStore.jl` and InfrastructureSystems.jl.
 
-The JLL is the exception. Julia's ecosystem already ships HDF5, and a statically vendored copy
-inside `libinfrastore_ffi` would put **two libhdf5 instances in one process** alongside any other
-JLL that links it. The recipe therefore passes `--no-default-features`; that flag is load-bearing.
+Two libhdf5 copies in one Julia process (ours plus HDF5.jl's) is safe here: the cdylib exports only
+its own `infrastore_*` symbols — the statically linked HDF5/netcdf symbols stay local, so nothing
+can cross-resolve. The one scenario that is genuinely hazardous, opening a live store's `.nc` file
+directly with HDF5.jl/NCDatasets.jl while a `Store` handle is open, is explicitly unsupported.
 
 > **Never set `HDF5_DIR` or `NETCDF_DIR` in CI.** The vendored netcdf-c build forwards them to cmake
 > as `HDF5_ROOT` while still requesting static libraries; against a shared-only install such as
@@ -125,38 +133,28 @@ Two registrations, in order. The JLL must exist before `InfraStore.jl` can depen
    (`git rev-parse v0.1.0^{commit}`) and `version` to match. Yggdrasil requires a full commit SHA; a
    tag name is not accepted. Only changes under `crates/`, `Cargo.toml`, or `Cargo.lock` need a new
    SHA — edits to the recipe itself do not, since Yggdrasil builds from its own copy of it.
-2. Test from inside a Yggdrasil checkout — **not** from this repository. The recipe's
-   `YGGDRASIL_DIR` include of `platforms/mpi.jl` resolves relative to the Yggdrasil tree:
+2. Test the recipe locally. It has no cross-recipe includes, so it runs from this repository
+   directly (BinaryBuilder needs Docker on macOS):
    ```sh
-   git clone https://github.com/JuliaPackaging/Yggdrasil
-   mkdir -p Yggdrasil/I/InfraStore
-   cp yggdrasil/build_tarballs.jl Yggdrasil/I/InfraStore/
-   cd Yggdrasil/I/InfraStore
-   julia build_tarballs.jl --verbose --debug \
-       x86_64-linux-gnu-libgfortran5-cxx11-mpi+mpich
+   cd yggdrasil
+   julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
    ```
-   **Pass the full tagged triplet.** A platform argument does not filter the recipe's `platforms`
-   list, it replaces it, so a bare `x86_64-linux-gnu` builds for an untagged platform that no
-   `HDF5_jll` artifact matches. Nothing is then installed into `${prefix}` and the build dies far
-   away, inside cargo, with `hdf5-metno-sys` reporting an `Invalid HDF5 headers directory` — while
-   the recipe's own platform list is never consulted. Omit the argument to build all 17.
+   A platform argument replaces the recipe's `platforms` list rather than filtering it, but the
+   listed platforms carry no extra tags, so bare triplets are exactly right. Omit the argument to
+   build all five.
 3. Copy the recipe into a [Yggdrasil](https://github.com/JuliaPackaging/Yggdrasil) fork under
    `I/InfraStore/` and open a PR. Their CI builds every platform in the list and all must pass.
    Merging is done by Yggdrasil maintainers, so allow for review time.
 
-`NetCDF_jll` and `HDF5_jll` are both MPI-augmented and publish only tagged artifacts, so the recipe
-mirrors that: it runs its platforms through `MPI.augment_platforms` and pins
-`libgfortran_version`/`cxxstring_abi` to the single combination `HDF5_jll` ships. Those tags are not
-a claim about this crate's ABI — it is a pure C ABI cdylib — they are the coordinates BinaryBuilder
-selects a dependency's artifact by. Re-check them against `HDF5_jll`'s release assets whenever its
-compat bound moves.
+The recipe builds with the default `vendored` feature — see [NetCDF linkage](#netcdf-linkage) for
+why the JLL statically links its own netcdf-c/HDF5/zlib instead of depending on
+`NetCDF_jll`/`HDF5_jll`. Expect Yggdrasil reviewers to ask about that; the rationale is written out
+in the recipe's header comment. `HDF5_DIR` must remain unset during the build: `hdf5-metno-sys` only
+takes its build-from-source path when the `static` feature is enabled and `HDF5_DIR` is absent.
 
-The recipe patches two things in the source tree, both deliberate:
-
-- it neutralizes `hdf5-metno-sys`'s runtime version probe, which `dlopen`s libhdf5 and therefore
-  cannot work when cross-compiling — the header version from `HDF5_jll` is authoritative;
-- it drops sha2's `asm` feature, because BinaryBuilder forbids forcing an arch via `-march` and the
-  ARMv8 crypto kernels cannot be assembled there (x86-64 still detects SHA-NI at runtime).
+The recipe patches one thing in the source tree: it drops sha2's `asm` feature, because
+BinaryBuilder forbids forcing an arch via `-march` and the ARMv8 crypto kernels cannot be assembled
+there (x86-64 still detects SHA-NI at runtime).
 
 **4b. `InfraStore.jl`** — the `ccall` wrapper and high-level API.
 

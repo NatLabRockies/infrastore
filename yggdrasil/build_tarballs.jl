@@ -1,57 +1,44 @@
 # Yggdrasil build recipe for InfraStore_jll.
 #
 # This produces the `libinfrastore_ffi` binary that `InfraStore.jl` (and,
-# through it, InfrastructureSystems.jl) loads. It is built against the
-# ecosystem's NetCDF_jll + HDF5_jll so there is a single libhdf5 in any Julia
-# process (no Homebrew dependency, no version drift).
+# through it, InfrastructureSystems.jl) loads.
+#
+# HDF5/NetCDF policy: the build keeps the crate's default `vendored` feature,
+# which compiles netcdf-c, HDF5, and zlib from source and links them
+# statically. That pins the exact HDF5 version backing the on-disk format to
+# the one infrastore was tested against, instead of whatever HDF5_jll the
+# user's environment resolves -- the store is a data artifact with a format
+# contract (DATA_FORMAT_VERSION), not a general HDF5 surface.
+#
+# The alternative -- linking NetCDF_jll/HDF5_jll -- was built and works (see
+# this file's history), but was rejected deliberately:
+#
+#   * Those JLLs are MPI-augmented and publish no serial variant, so linking
+#     them forces an MPI runtime dependency and a 17-triplet build matrix onto
+#     a library that never calls MPI, and propagates that dependency to every
+#     downstream user.
+#   * The usual one-libhdf5-per-process argument does not apply here. The
+#     cdylib exports only its own `infrastore_*` C API -- the statically
+#     linked HDF5/netcdf symbols stay local (verified with nm; Julia
+#     additionally dlopens with RTLD_LOCAL|RTLD_DEEPBIND) -- so it cannot
+#     collide with HDF5.jl's copy in the same process.
+#   * The remaining hazard, two HDF5 instances opening the same file, requires
+#     a user to open a live store's .nc with HDF5.jl/NCDatasets.jl directly.
+#     That is explicitly unsupported; the store must be accessed through
+#     InfraStore.jl.
 #
 # ---------------------------------------------------------------------------
-# THIS RECIPE ONLY RUNS FROM INSIDE A YGGDRASIL CHECKOUT.
+# Building locally (no Yggdrasil checkout required -- the recipe has no
+# cross-recipe includes):
 #
-# `YGGDRASIL_DIR` below resolves `platforms/mpi.jl` relative to the Yggdrasil
-# tree, so `julia build_tarballs.jl` from this repository will fail on the
-# include. To work on it:
+#   julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
 #
-#   git clone https://github.com/JuliaPackaging/Yggdrasil   # or your fork
-#   mkdir -p Yggdrasil/I/InfraStore
-#   cp build_tarballs.jl Yggdrasil/I/InfraStore/
-#   cd Yggdrasil/I/InfraStore
-#   julia build_tarballs.jl --verbose --debug \
-#       x86_64-linux-gnu-libgfortran5-cxx11-mpi+mpich
-#
-# Yggdrasil groups recipes by first letter, hence `I/InfraStore/`.
-#
-# PASS THE FULL TAGGED TRIPLET, not a bare `x86_64-linux-gnu`. A platform
-# argument does not filter the `platforms` list below -- `build_tarballs`
-# *replaces* it outright:
-#
-#     # If the user passed in a platform (or a few, comma-separated) on the
-#     # command-line, use that instead of our default platforms
-#     if length(ARGS) > 0
-#         platforms = BinaryBuilderBase.parse_platform.(split(ARGS[1], ","))
-#     end
-#
-# A bare triplet therefore builds for an *untagged* platform that this recipe
-# never lists, no HDF5_jll artifact matches it, nothing is installed into
-# ${prefix}, and the build fails deep inside cargo with hdf5-metno-sys
-# reporting an "Invalid HDF5 headers directory" -- with the recipe's own
-# platform list never consulted. Omit the argument entirely to build the full
-# list. `julia build_tarballs.jl --help` prints the valid triplets.
+# Note that a platform argument REPLACES the `platforms` list below rather
+# than filtering it, but since the platforms carry no extra tags, bare
+# triplets are exactly right. Omit the argument to build the full list.
 # ---------------------------------------------------------------------------
-#
-# Why the MPI machinery below, for a library that never calls MPI:
-# NetCDF_jll and HDF5_jll are both MPI-augmented -- they ship one artifact per
-# MPI ABI (mpiabi/mpich/openmpi/mpitrampoline, microsoftmpi on Windows; there is
-# no serial `none` variant) and select between them with an `mpi` platform tag. A dependent that requests plain, untagged platforms has
-# no artifact to resolve against, so nothing is installed into ${prefix} and
-# the build fails later and confusingly (hdf5-metno-sys panicking on a missing
-# H5pubconf.h). Any consumer of those JLLs has to mirror the augmentation.
 
 using BinaryBuilder, Pkg
-using Base.BinaryPlatforms
-
-const YGGDRASIL_DIR = "../.."
-include(joinpath(YGGDRASIL_DIR, "platforms", "mpi.jl"))
 
 name = "InfraStore"
 version = v"0.1.0"
@@ -72,29 +59,43 @@ sources = [
     ),
 ]
 
-# Build the FFI cdylib, linking the jll-provided NetCDF/HDF5.
+# Build the FFI cdylib with the default `vendored` feature: netcdf-c, HDF5, and
+# zlib are compiled from the sources vendored by netcdf-src/hdf5-metno-src and
+# linked statically, so the artifact is self-contained.
 script = raw"""
 cd ${WORKSPACE}/srcdir/infrastore
 
-# Point the netcdf-sys / hdf5-metno-sys build scripts at the jll libraries.
-export HDF5_DIR=${prefix}
-export NETCDF_DIR=${prefix}
-export PKG_CONFIG_PATH=${prefix}/lib/pkgconfig:${prefix}/share/pkgconfig
-export RUSTFLAGS="-C link-arg=-L${libdir}"
+# The vendored HDF5 needs cmake >= 3.26 and the build rootfs ships 3.21, so
+# CMake_jll is pulled in as a host dependency below. Its bin dir sits on PATH
+# behind the rootfs tools; deleting the rootfs cmake lets it win.
+apk del cmake
 
-# Fetch deps so their build scripts can be patched before compiling.
-cargo fetch --target ${rust_target}
-
-# hdf5-metno-sys (via netcdf-sys) probes the HDF5 runtime version by dlopen()ing
-# libhdf5 — impossible when cross-compiling. The header version from HDF5_jll is
-# authoritative, so neutralize the runtime probe.
+# The vendored netcdf-c/HDF5/zlib builds run through the Rust `cmake` crate,
+# which honors CMAKE_TOOLCHAIN_FILE from the environment; point it at
+# BinaryBuilder's target toolchain so those builds cross-compile.
+# hdf5-metno-src pre-seeds the try-run cache variables HDF5's cmake needs when
+# cross-compiling.
 #
-# This is a brittle match against upstream source: if it stops matching, the sed
-# silently does nothing and the build fails at the probe instead. Verify against
-# the hdf5-metno-sys version in Cargo.lock when bumping dependencies.
-for f in $(find "${CARGO_HOME:-$HOME/.cargo}" /opt -type f -path '*hdf5-metno-sys*/build.rs' 2>/dev/null | sort -u); do
-    sed -i 's/[[:space:]]*validate_runtime_version(&config);/ \/\/ skipped: no cross-compile runtime probe/' "$f"
-done
+# One line must be stripped: BinaryBuilder's toolchain hardcodes
+# `set(CMAKE_INSTALL_PREFIX $ENV{prefix})`, which overrides the install prefix
+# the cmake crate passes on the command line, so the intermediate HDF5/netcdf
+# installs land in ${prefix} instead of the crate OUT_DIRs and the dependent
+# build scripts cannot find them (hdf5-metno-sys: "H5pubconf header not found").
+sed '/set(CMAKE_INSTALL_PREFIX/d' "${CMAKE_TARGET_TOOLCHAIN}" > /tmp/target_toolchain.cmake
+export CMAKE_TOOLCHAIN_FILE=/tmp/target_toolchain.cmake
+
+# HDF5's H5system.c calls StrStrIA (shlwapi). Its cmake links shlwapi only for
+# MSVC, so the mingw link of the cdylib must add it explicitly or the final
+# link fails with: undefined reference to `__imp_StrStrIA`.
+if [[ "${target}" == *-mingw* ]]; then
+    export RUSTFLAGS="-C link-arg=-lshlwapi"
+fi
+
+# HDF5_DIR must remain UNSET in this environment: hdf5-metno-sys only takes
+# its build-from-source path when the `static` feature is enabled AND HDF5_DIR
+# is absent. Setting it would flip the build to external-library discovery,
+# including a dlopen() runtime-version probe that cannot work when
+# cross-compiling.
 
 # BinaryBuilder forbids forcing an arch via -march, so sha2's ARMv8-crypto `asm`
 # kernels cannot be assembled here; use the portable SHA-256 (x86_64 still detects
@@ -102,12 +103,7 @@ done
 sed -i 's/sha2 = { workspace = true, features = \["asm"\] }/sha2 = { workspace = true }/' \
     crates/infrastore-core/Cargo.toml
 
-# `--no-default-features` turns OFF infrastore's `vendored` feature, which is on by
-# default and would build netcdf-c + HDF5 from source and link them statically.
-# That is right for standalone Rust/Python consumers but wrong here: this binary
-# must link the NetCDF_jll/HDF5_jll libraries declared below so a Julia process
-# has exactly one libhdf5. Do not drop this flag.
-cargo build --release --no-default-features --target ${rust_target} -p infrastore-ffi
+cargo build --release --target ${rust_target} -p infrastore-ffi
 
 # Rust does not prefix cdylibs with `lib` on Windows: the artifact there is
 # `infrastore_ffi.dll` (next to a `libinfrastore_ffi.dll.a` import library),
@@ -123,71 +119,36 @@ install -Dvm644 "crates/infrastore-ffi/include/infrastore.h" \
     "${includedir}/infrastore.h"
 """
 
-# Teaches the generated JLL how to tag the running system with an MPI ABI, so it
-# selects the same variant its NetCDF/HDF5 dependencies resolved to.
-augment_platform_block = """
-    using Base.BinaryPlatforms
-    $(MPI.augment)
-    augment_platform!(platform::Platform) = augment_mpi!(platform)
-"""
-
 # The tier-1 targets that cover essentially every InfrastructureSystems.jl user,
 # deliberately narrower than `supported_platforms()`. Every platform listed must
-# build for the Yggdrasil PR to merge, and MPI augmentation multiplies this list
-# by the number of MPI ABIs -- so start small and widen once these are green.
-#
-# The `libgfortran_version` / `cxxstring_abi` tags are NOT about this crate's own
-# ABI -- it is a pure C ABI cdylib with no Fortran or C++ in its link closure.
-# They are the coordinates BinaryBuilder uses to *select a dependency's*
-# artifact, and HDF5_jll publishes only tagged builds:
-#
-#     x86_64-linux-gnu-libgfortran5-cxx11-mpi+mpich
-#     x86_64-apple-darwin-libgfortran5-mpi+mpich        (macOS carries no cxx tag)
-#
-# A platform missing those tags matches none of them, nothing gets installed into
-# ${prefix}, and the build dies much later with hdf5-metno-sys reporting an
-# "Invalid HDF5 headers directory". NetCDF_jll, by contrast, ships artifacts
-# tagged with `mpi` alone; tags an artifact does not declare are ignored when
-# matching, so these fuller platforms select both correctly.
-#
-# Rather than `expand_cxxstring_abis` / `expand_gfortran_versions`, which would
-# multiply the matrix by combinations HDF5_jll does not publish, these are pinned
-# to the single combination it does. After MPI augmentation this yields exactly
-# the 17 triplets HDF5_jll ships. Re-check against its release assets when
-# bumping the HDF5_jll compat bound.
+# build for the Yggdrasil PR to merge, so start small and widen once these are
+# green. With no JLL binary dependencies there are no artifact-matching tags to
+# mirror -- plain triplets are sufficient.
 platforms = [
-    Platform("x86_64", "linux"; libc = "glibc", libgfortran_version = v"5", cxxstring_abi = "cxx11"),
-    Platform("aarch64", "linux"; libc = "glibc", libgfortran_version = v"5", cxxstring_abi = "cxx11"),
-    Platform("x86_64", "macos"; libgfortran_version = v"5"),
-    Platform("aarch64", "macos"; libgfortran_version = v"5"),
-    Platform("x86_64", "windows"; libgfortran_version = v"5", cxxstring_abi = "cxx11"),
+    Platform("x86_64", "linux"; libc = "glibc"),
+    Platform("aarch64", "linux"; libc = "glibc"),
+    Platform("x86_64", "macos"),
+    Platform("aarch64", "macos"),
+    Platform("x86_64", "windows"),
 ]
-
-platforms, platform_dependencies = MPI.augment_platforms(platforms)
 
 products = [
     LibraryProduct("libinfrastore_ffi", :libinfrastore_ffi),
 ]
 
-# HDF5_jll is pinned to the same compat bound NetCDF_jll declares. That
-# agreement is the whole point of this recipe: if the two resolved to different
-# HDF5_jll versions we would be back to two libhdf5 in one process, which is
-# exactly what vendoring was avoided for.
+# Self-contained by design: NetCDF, HDF5, and zlib are statically linked, so
+# there are no runtime binary dependencies. See the header comment before
+# adding any. CMake_jll is host-only: the vendored HDF5 requires CMake >= 3.26
+# and the build rootfs ships 3.21, so pull a current cmake onto the PATH (the
+# Rust `cmake` crate invokes whatever `cmake` PATH resolves to).
 dependencies = [
-    Dependency("NetCDF_jll"; compat="401.1000.100"),
-    Dependency("HDF5_jll"; compat="2.1.2"),
+    HostBuildDependency(PackageSpec(name = "CMake_jll", uuid = "3f4e10e2-61f2-5801-8945-23b9d642d0e6")),
 ]
-append!(dependencies, platform_dependencies)
-
-# Don't look for `mpiwrapper.so` when BinaryBuilder examines and `dlopen`s the
-# shared libraries. (MPItrampoline will skip its automatic initialization.)
-ENV["MPITRAMPOLINE_DELAY_INIT"] = "1"
 
 build_tarballs(
     ARGS, name, version, sources, script, platforms, products, dependencies;
     compilers = [:c, :rust],
     julia_compat = "1.10",
-    augment_platform_block,
     # Must be >= the workspace's `rust-version`, and the workspace is on edition
     # 2024 (Rust >= 1.85). BinaryBuilder otherwise defaults to whatever its
     # newest Rust shard happens to be, which makes the toolchain drift silently.
