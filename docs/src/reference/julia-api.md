@@ -29,11 +29,12 @@ Exported names (types first, then functions):
 `get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
 `get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_for_owner`,
 `has_parent_child_association`, `has_supplemental_attribute_association`, `has_time_series`,
-`init_logging`, `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`,
-`list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
-`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
-`list_time_series`, `num_distinct_arrays`, `open_store`, `persist!`, `read_only`,
-`remove_by_filter!`, `remove_parent_child_associations!`,
+`in_transaction`, `init_logging`, `key_info`, `list_array_groups`, `list_children`,
+`list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`,
+`list_parent_child_associations`, `list_parents`, `list_supplemental_attribute_associations`,
+`list_supplemental_attribute_ids`, `list_time_series`, `num_distinct_arrays`, `open_store`,
+`persist!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
+`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
@@ -676,6 +677,14 @@ get_compression(store) -> CompressionSettings  # compression=:deflate|:none, lev
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
 flush!(store) -> Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
+
+transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
+                                  # Spans any number of operations; removals are reversible only
+                                  # inside one. Nests. Holds the SQLite write lock until it ends.
+begin_transaction!(store) -> Nothing
+commit_transaction!(store) -> Nothing    # errors if no transaction is open
+rollback_transaction!(store) -> Nothing  # errors if no transaction is open
+in_transaction(store) -> Bool
 clear!(store; owner_id=nothing, owner_category=nothing) -> Nothing
                                   # both `nothing`: remove every series in the store.
                                   # Scope to one owner by passing BOTH keywords — they identify the

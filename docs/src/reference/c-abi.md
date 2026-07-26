@@ -616,6 +616,15 @@ int32_t infrastore_store_get_compression(const struct InfraStore *handle, uint8_
 int32_t infrastore_store_verify(const struct InfraStore *handle, uint64_t *out_error_count);
 int32_t infrastore_store_compact(struct InfraStore *handle);
 int32_t infrastore_store_flush(struct InfraStore *handle);
+/* Cross-operation transactions. Adds, removals, and transforms between a begin and
+   its matching commit either all take effect or none do; removals are reversible
+   only inside one. Calls nest -- only the outermost commit is durable. This is
+   store state, not a borrowed guard, so nothing has to survive the ABI boundary.
+   Holds the SQLite write lock until the outermost commit/rollback. */
+int32_t infrastore_store_begin_transaction(struct InfraStore *handle);
+int32_t infrastore_store_commit_transaction(struct InfraStore *handle);
+int32_t infrastore_store_rollback_transaction(struct InfraStore *handle);
+int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
 /* Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);

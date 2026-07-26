@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Savepoint, params};
 use serde::{Deserialize, Serialize};
 
 use crate::types::period::Period;
@@ -535,16 +535,40 @@ impl MetadataStore {
         Ok(())
     }
 
-    pub fn transaction(&mut self) -> Result<Transaction<'_>> {
+    /// Begin a scoped unit of work, rolled back if the guard is dropped without
+    /// [`Savepoint::commit`].
+    ///
+    /// This is a SQLite *savepoint* rather than a transaction so that it nests:
+    /// outside any enclosing unit of work it behaves exactly like `BEGIN` /
+    /// `COMMIT` (SQLite starts a transaction implicitly and releasing the
+    /// outermost savepoint commits it), while inside one — see
+    /// [`Store::begin_transaction`](crate::Store::begin_transaction) — it scopes
+    /// just its own statements and leaves the enclosing transaction open.
+    /// Every mutating entry point takes one, so each is atomic on its own and
+    /// composes into a caller's larger transaction without changing behavior.
+    pub fn savepoint(&mut self) -> Result<Savepoint<'_>> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        Ok(self.conn.transaction()?)
+        Ok(self.conn.savepoint()?)
+    }
+
+    /// Run `sql` directly on the connection, for the raw
+    /// `SAVEPOINT`/`RELEASE`/`ROLLBACK TO` statements that drive a cross-operation
+    /// transaction. Those cannot use [`Self::savepoint`]: the guard would have to
+    /// outlive the call that opened it, which is precisely the borrow that does
+    /// not survive a C ABI boundary.
+    pub(crate) fn execute_txn_stmt(&self, sql: &str) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        self.conn.execute_batch(sql)?;
+        Ok(())
     }
 
     /// Insert a metadata record + its features inside the supplied transaction.
     /// Returns the association id. Caller is responsible for committing.
-    pub fn insert(tx: &Transaction<'_>, meta: &TimeSeriesMetadata) -> Result<i64> {
+    pub fn insert(tx: &Connection, meta: &TimeSeriesMetadata) -> Result<i64> {
         Self::insert_batched(tx, meta, &mut FeatureSetCache::default())
     }
 
@@ -558,7 +582,7 @@ impl MetadataStore {
     /// which is what stops a bulk add, and a transform, from scaling with the
     /// number of features per series.
     pub fn insert_batched(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         meta: &TimeSeriesMetadata,
         cache: &mut FeatureSetCache,
     ) -> Result<i64> {
@@ -642,11 +666,7 @@ impl MetadataStore {
     /// Equal hash implies equal set (SHA-256 of the canonical encoding), so an
     /// ignored conflict cannot silently keep a *different* set under the same
     /// hash.
-    fn insert_feature_set(
-        tx: &Transaction<'_>,
-        f_hash: &[u8; 32],
-        features: &Features,
-    ) -> Result<()> {
+    fn insert_feature_set(tx: &Connection, f_hash: &[u8; 32], features: &Features) -> Result<()> {
         if features.is_empty() {
             return Ok(());
         }
@@ -677,7 +697,7 @@ impl MetadataStore {
     /// many rows went. Deleting an association leaves its set behind (sets are
     /// shared, so deletion cannot cascade); this reclaims the ones that are now
     /// unreachable. Called from [`crate::Store::compact`].
-    pub fn sweep_orphan_feature_sets(tx: &Transaction<'_>) -> Result<usize> {
+    pub fn sweep_orphan_feature_sets(tx: &Connection) -> Result<usize> {
         let n = tx.execute(
             "DELETE FROM feature_sets
              WHERE features_hash NOT IN
@@ -699,7 +719,7 @@ impl MetadataStore {
     /// `resolution`, and `features_hash` still pin the row down; to target a
     /// single interval among otherwise-identical rows, remove by full key
     /// identity (which carries the exact interval).
-    pub fn delete_by_key(tx: &Transaction<'_>, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
+    pub fn delete_by_key(tx: &Connection, key: &KeyIdentity) -> Result<Vec<[u8; 32]>> {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
         let interval_iso = key.interval.map(period_to_iso);
@@ -743,7 +763,7 @@ impl MetadataStore {
     /// Delete all associations for the owner `(owner_id, owner_category)`.
     /// Returns the data_hashes of removed rows.
     pub fn delete_by_owner(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         owner_id: i64,
         owner_category: OwnerCategory,
     ) -> Result<Vec<[u8; 32]>> {
@@ -769,7 +789,7 @@ impl MetadataStore {
     /// underlying arrays are untouched (arrays are content-addressed). Returns
     /// the rows updated.
     pub fn replace_owner(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         old_owner: i64,
         new_owner: i64,
         owner_category: OwnerCategory,
@@ -789,7 +809,7 @@ impl MetadataStore {
     /// and hash untouched. Returns the number of rows updated (0 if `key` matches
     /// nothing). A collision with an existing series of the new identity maps to
     /// [`TimeSeriesError::DuplicateTimeSeries`].
-    pub fn rename(tx: &Transaction<'_>, key: &KeyIdentity, new_name: &str) -> Result<usize> {
+    pub fn rename(tx: &Connection, key: &KeyIdentity, new_name: &str) -> Result<usize> {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
         let interval_iso = key.interval.map(period_to_iso);
@@ -814,7 +834,7 @@ impl MetadataStore {
     }
 
     /// Delete every association in the store. Returns the removed data_hashes.
-    pub fn delete_all(tx: &Transaction<'_>) -> Result<Vec<[u8; 32]>> {
+    pub fn delete_all(tx: &Connection) -> Result<Vec<[u8; 32]>> {
         let bytes_list: Vec<Vec<u8>> = collect_data_hashes(
             tx,
             "SELECT data_hash FROM time_series_associations",
@@ -1415,7 +1435,7 @@ impl MetadataStore {
     }
 
     fn assoc_insert(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         table: AssocTable,
         left_id: i64,
         left_type: &str,
@@ -1433,11 +1453,7 @@ impl MetadataStore {
         Ok(tx.last_insert_rowid())
     }
 
-    fn assoc_delete(
-        tx: &Transaction<'_>,
-        table: AssocTable,
-        filter: &EndpointFilter,
-    ) -> Result<usize> {
+    fn assoc_delete(tx: &Connection, table: AssocTable, filter: &EndpointFilter) -> Result<usize> {
         let (where_clause, params) = filter.to_sql(table);
         let param_refs = to_param_refs(&params);
         let sql = format!("DELETE FROM {} {where_clause}", table.name);
@@ -1447,7 +1463,7 @@ impl MetadataStore {
     // ---- Supplemental-attribute associations ------------------------------
 
     pub fn insert_supplemental_attribute_association(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         assoc: &SupplementalAttributeAssociation,
     ) -> Result<i64> {
         Self::assoc_insert(
@@ -1465,7 +1481,7 @@ impl MetadataStore {
     }
 
     pub fn delete_supplemental_attribute_associations(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         filter: &SupplementalAttributeFilter,
     ) -> Result<usize> {
         Self::assoc_delete(tx, SUPPLEMENTAL_ATTRIBUTE_TABLE, &filter.endpoints())
@@ -1474,7 +1490,7 @@ impl MetadataStore {
     /// Rewrite `old_id` to `new_id` wherever it names a component, e.g. after a
     /// component is replaced by one that inherits its attachments.
     pub fn replace_supplemental_attribute_component_id(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         old_id: i64,
         new_id: i64,
     ) -> Result<usize> {
@@ -1610,7 +1626,7 @@ impl MetadataStore {
     // ---- Parent/child associations ----------------------------------------
 
     pub fn insert_parent_child_association(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         assoc: &ParentChildAssociation,
     ) -> Result<i64> {
         Self::assoc_insert(
@@ -1628,7 +1644,7 @@ impl MetadataStore {
     }
 
     pub fn delete_parent_child_associations(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         filter: &ParentChildFilter,
     ) -> Result<usize> {
         Self::assoc_delete(tx, PARENT_CHILD_TABLE, &filter.endpoints())
@@ -1638,7 +1654,7 @@ impl MetadataStore {
     /// of an edge. Done in one statement rather than one per column so a
     /// self-edge (`parent_id = child_id = old_id`) is counted once, not twice.
     pub fn replace_parent_child_component_id(
-        tx: &Transaction<'_>,
+        tx: &Connection,
         old_id: i64,
         new_id: i64,
     ) -> Result<usize> {
@@ -1804,7 +1820,7 @@ fn bytes_to_hash32(bytes: &[u8]) -> Option<[u8; 32]> {
 /// Helper to run a `SELECT data_hash` query and collect raw bytes, isolating
 /// the prepared statement's lifetime so the caller's tx isn't borrowed.
 fn collect_data_hashes(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     sql: &str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<Vec<u8>>> {
@@ -2016,7 +2032,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
 // Allow Connection-level lookups through a transaction for reads (used by the
 // `Store` layer where a tx is already in-flight for atomicity). Implemented as
 // helper free fns so we don't have two parallel Send/Sync wrappers.
-pub fn references_to_in_tx(tx: &Transaction<'_>, data_hash: &[u8; 32]) -> Result<i64> {
+pub fn references_to_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<i64> {
     let count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1",
         params![data_hash.as_slice()],
@@ -2028,7 +2044,7 @@ pub fn references_to_in_tx(tx: &Transaction<'_>, data_hash: &[u8; 32]) -> Result
 /// Count the associations of one `time_series_type` referencing `data_hash`,
 /// inside an in-flight transaction.
 pub fn typed_references_to_in_tx(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     data_hash: &[u8; 32],
     ts_type: TimeSeriesType,
 ) -> Result<i64> {
@@ -2053,7 +2069,7 @@ pub fn typed_references_to_in_tx(
 /// `features_hash` (a SHA-256 collision is the only false positive), which is
 /// sufficient for a guard.
 pub fn forecast_family_conflict(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     owner_id: i64,
     owner_category: OwnerCategory,
     name: &str,

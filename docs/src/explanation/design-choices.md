@@ -96,3 +96,41 @@ it behaves the same across the bindings that support it, and unsupported operati
 explicit error rather than silently changing semantics. This keeps a parent package free to move
 between bindings — for example, Julia via the C ABI and Python via the wheel — without the data
 model shifting underneath it. See [Language Bindings](./bindings.md).
+
+## Make Transactions Span Operations, Without Enlisting NetCDF
+
+Every mutating entry point is atomic on its own, and a [bulk add](./storage-model.md) commits a
+whole batch in one catalog transaction. Neither helps when several _operations_ have to succeed or
+fail together — add a series and remove the one it replaces, or write a batch and derive a forecast
+from it. `Store::begin_transaction` opens a unit of work spanning any number of operations, and only
+its outermost commit makes anything durable.
+
+The obstacle is that a store is two artifacts and only one of them has transactions. SQLite rolls
+back its own statements; NetCDF has nothing to enlist. Rather than trying to give NetCDF a
+transaction, the array store is made **append-only for the transaction's duration**, which content
+addressing makes cheap:
+
+- **Writes** are recorded as they happen and removed on rollback. An array is recorded only if it
+  was _physically written_ — a write of content that already exists is a no-op on hash, so there is
+  nothing to undo.
+- **Frees are deferred** to the outermost commit. While the transaction is open, an array whose last
+  association was removed must keep its bytes, because a rollback restores the rows that point at
+  it. At commit the reference count is rechecked against the state the commit is about to make
+  permanent, so a hash removed and re-added inside the same transaction is never freed.
+
+That deferral is what makes **removals reversible inside a transaction**, which they are not outside
+one. It is the capability a caller cannot build for itself: a client-side undo log can re-insert a
+catalog row, but it cannot bring back array bytes the store already reclaimed.
+
+Two consequences fall out of the mechanism rather than being designed in. Reads inside a transaction
+see its uncommitted writes, because they go through the same connection — so a binding needs no
+staging overlay to give a caller read-your-own-writes. And nesting is free: each level is a SQLite
+savepoint, so an inner failure unwinds only its own work and leaves the enclosing transaction
+usable.
+
+The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
+until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
+timeout. And a transaction is not a substitute for batching: block-sized NetCDF writes and
+feature-set dedup come from `bulk_add`, and a loop of single adds gets neither just because it is
+wrapped in a transaction. The two compose — batch each operation, and use a transaction when several
+of them must be atomic together.

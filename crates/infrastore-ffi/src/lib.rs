@@ -1740,6 +1740,95 @@ pub unsafe extern "C" fn infrastore_store_compact(handle: *mut InfraStoreHandle)
     }
 }
 
+/// Begin a transaction spanning subsequent operations on `handle`, so that adds,
+/// removals, and transforms either all take effect or none do. Calls nest; only
+/// the outermost commit makes anything durable.
+///
+/// Unlike a batch, this is store state rather than a borrowed guard — nothing has
+/// to survive across the ABI boundary. Pair every call with exactly one
+/// `infrastore_store_commit_transaction` or
+/// `infrastore_store_rollback_transaction`.
+///
+/// Holds the SQLite write lock until the outermost commit or rollback; another
+/// writer on the same artifact will block, then fail on its busy timeout.
+///
+/// Returns `INFRASTORE_OK`, or an error code if the store is read-only.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
+/// of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_begin_transaction(handle: *mut InfraStoreHandle) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    match store.inner.begin_transaction() {
+        Ok(()) => INFRASTORE_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Commit the innermost open transaction on `handle`.
+///
+/// Returns `INFRASTORE_OK`, or an error code if no transaction is open.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
+/// of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_commit_transaction(handle: *mut InfraStoreHandle) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    match store.inner.commit_transaction() {
+        Ok(()) => INFRASTORE_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Roll back the innermost open transaction on `handle`, undoing every operation
+/// it covered — including removals, which are reversible only inside a
+/// transaction.
+///
+/// Returns `INFRASTORE_OK`, or an error code if no transaction is open.
+///
+/// # Safety
+///
+/// `handle` must be a live mutable store handle and must not be used concurrently for the duration
+/// of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_rollback_transaction(
+    handle: *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    match store.inner.rollback_transaction() {
+        Ok(()) => INFRASTORE_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Whether a transaction is currently open on `handle`. Writes `true`/`false`
+/// through `out`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle; `out` must be a valid, writable `bool` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_in_transaction(
+    handle: *mut InfraStoreHandle,
+    out: *mut bool,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let store = deref_handle!(ref handle);
+    unsafe { *out = store.inner.in_transaction() };
+    INFRASTORE_OK
+}
+
 /// Flush pending store writes.
 ///
 /// # Safety
