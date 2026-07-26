@@ -549,7 +549,7 @@ end
     # hash is physical storage detail, read via the metadata descriptor — it is not
     # carried on a key, so list_keys does not expose it.
     hash = get_metadata(store, 400, Component, "dst").data_hash
-    @test count_array_references(store, hash) == (sts=1, dst=1)
+    @test count_array_references(store, hash) == ArrayReferenceCounts(1, 1)
 end
 
 @testset "list_keys filters (owner, type, name, resolution, features)" begin
@@ -645,11 +645,12 @@ end
 
     rows = list_array_groups(store)
     @test length(rows) == 3
-    # Rows carry every list_keys field plus a 64-char hex data_hash.
-    @test all(r -> r.data_hash isa String && length(r.data_hash) == 64, rows)
+    # Rows carry every list_keys field plus the 32-byte content hash.
+    @test all(r -> r.data_hash isa Vector{UInt8} && length(r.data_hash) == 32, rows)
     @test all(r -> r.name == "load", rows)
 
-    groups = Dict{String,Vector{Int}}()
+    # A Vector{UInt8} hashes by content, so it groups directly as a Dict key.
+    groups = Dict{Vector{UInt8},Vector{Int}}()
     for r in rows
         push!(get!(groups, r.data_hash, Int[]), Int(r.owner_id))
     end
@@ -1524,9 +1525,9 @@ end
     # Full metadata rows include units + ext.
     rows = list_time_series(store; owner_id=1)
     @test length(rows) == 1
-    @test rows[1]["units"] == "MW"
-    @test rows[1]["ext"] == "Profile"
-    @test rows[1]["dtype"] == "f64"
+    @test rows[1].units == "MW"
+    @test rows[1].ext == "Profile"
+    @test rows[1].dtype == Float64
 
     # get_probabilistic_metadata exposes percentiles + units without a data fetch.
     prob = Probabilistic(
@@ -1779,10 +1780,12 @@ end
     @test count_supplemental_attributes(store) == 2
     @test count_components_with_attributes(store) == 2
 
-    @test supplemental_attribute_counts_by_type(store) ==
-        [(type="GeographicInfo", count=2), (type="Outage", count=1)]
+    @test supplemental_attribute_counts_by_type(store) == [
+        SupplementalAttributeTypeCount("GeographicInfo", 2),
+        SupplementalAttributeTypeCount("Outage", 1),
+    ]
     summary = supplemental_attribute_summary(store)
-    @test (component_type="Generator", attribute_type="GeographicInfo", count=2) in summary
+    @test SupplementalAttributeSummaryRow("Generator", "GeographicInfo", 2) in summary
     @test sum(r.count for r in summary) == 3
 
     # Component rewrite, and the collision it can hit.
@@ -2521,7 +2524,7 @@ end
     static_read!(reader, t0)
     @test sort(vec(static_values(reader, 1))) == Float64[1, 100]
 
-    # `list_keys` returns metadata NamedTuples, so remove by attributes.
+    # `list_keys` returns metadata rows, not keys, so remove by attributes.
     remove_time_series!(store, 1, Component, "a"; resolution=Hour(1))
     @test num_distinct_arrays(store) == 1
 
@@ -2596,4 +2599,182 @@ end
     rebuilt = build_static_reader(store; resolution=Hour(1))
     static_read!(rebuilt, t0)
     @test length(vec(static_values(rebuilt, 1))) == 2
+end
+
+# ---- Result structs --------------------------------------------------------
+#
+# The catalog / metadata queries return structs (not NamedTuples or Dicts):
+# typed fields, value equality, hashability, and a field-labelled `show`.
+
+@testset "query results are structs with typed fields" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "load"; ext="Profile");
+        units="MW",
+        features=Dict("scenario" => "high"),
+    )
+    add_time_series!(
+        store,
+        9,
+        "GeographicInfo",
+        SupplementalAttribute,
+        SingleTimeSeries(t0, Hour(1), Float64[5, 6, 7, 8], "load"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Deterministic(t0, Hour(1), Hour(2), Hour(1), 2, reshape(1.0:4.0, 2, 2), "fc"),
+    )
+
+    # Metadata getters return the per-type metadata structs.
+    feats = Dict{String,Any}("scenario" => "high")
+    read_md() =
+        get_metadata(store, 1, Component, "load"; resolution=Hour(1), features=feats)
+    md = read_md()
+    @test md isa TimeSeriesMetadata
+    @test md.owner_type == "Generator"
+    @test md.owner_category == Component
+    @test md.time_series_type == SingleTimeSeries
+    # Fields that do not apply to a static series are `nothing`, not zero.
+    @test md.horizon === nothing && md.count === nothing && md.percentiles === nothing
+    @test md.dtype == Float64
+    @test md.element_shape == ()
+    @test md.ext == "Profile"
+    @test md.units == "MW"
+    @test md.features == feats
+    # Value equality (a NamedTuple had it; a plain struct with a Vector and a
+    # Dict field would fall back to identity without the generated `==`).
+    @test md == read_md()
+    @test length(Set([md, read_md()])) == 1
+    @test occursin("TimeSeriesMetadata(owner_id=", repr(md))
+    @test occursin(bytes2hex(md.data_hash), repr(md))
+
+    fmd = get_forecast_metadata(
+        store, 1, Component, "fc", InfraStore.INFRASTORE_TYPE_DETERMINISTIC
+    )
+    @test fmd isa TimeSeriesMetadata
+    @test fmd.horizon == Millisecond(Hour(2))
+    @test fmd.count == 2
+    # The forecast getters carry `dtype` and `owner_type` too — one export, one
+    # struct, so no field is dropped by the addressing path taken.
+    @test fmd.dtype == Float64
+    @test fmd.owner_type == "Generator"
+
+    # The same record, addressed by key rather than by attributes.
+    fkey = resolve_forecast_key(
+        store, 1, Component, "fc", InfraStore.INFRASTORE_TYPE_DETERMINISTIC
+    )
+    @test get_metadata(store, fkey) == fmd
+
+    # Key rows: owner_category is the enum, time_series_type the Julia type.
+    row = only(list_keys(store; owner_id=9))
+    @test row isa KeyRow
+    @test row.owner_category == SupplementalAttribute
+    @test row.time_series_type == SingleTimeSeries
+    @test row.horizon === nothing
+    @test only(list_keys(store; owner_id=1, name="fc")).owner_category == Component
+
+    info = key_info(only(get_time_series_keys(store, 9, SupplementalAttribute)))
+    @test info isa KeyInfo
+    @test info.owner_category == SupplementalAttribute
+
+    # Array-group rows are key rows plus the hex hash.
+    group = only(list_array_groups(store; owner_id=9))
+    @test group isa ArrayGroupRow
+    @test group.owner_category == SupplementalAttribute
+    @test group.data_hash isa Vector{UInt8}
+    @test length(group.data_hash) == 32
+
+    # Full metadata rows carry the storage detail a key row omits.
+    mrow = only(list_time_series(store; owner_id=1, name="load"))
+    @test mrow isa TimeSeriesMetadata
+    @test mrow.owner_type == "Generator"
+    @test mrow.owner_category == Component
+    @test mrow.dtype == Float64
+    @test mrow.element_shape == ()
+    @test mrow.percentiles === nothing
+    @test mrow.units == "MW"
+    @test mrow.ext == "Profile"
+    @test mrow.data_hash == md.data_hash
+    # list_time_series and get_metadata are two paths to the same record.
+    @test mrow == md
+
+    # Counts and summaries.
+    @test get_counts(store) isa TimeSeriesCounts
+    @test time_series_counts(store) isa TimeSeriesCountsDetailed
+    @test time_series_counts(store).supplemental_attributes_with_time_series == 1
+    @test counts_by_type(store) ==
+        [TimeSeriesTypeCount(Deterministic, 1), TimeSeriesTypeCount(SingleTimeSeries, 2)]
+    @test only(filter(r -> r.owner_type == "GeographicInfo", static_summary(store))) ==
+        StaticSummaryRow(
+        "GeographicInfo",
+        SupplementalAttribute,
+        SingleTimeSeries,
+        "load",
+        t0,
+        Millisecond(Hour(1)),
+        4,
+        1,
+    )
+    @test only(forecast_summary(store)).owner_category == Component
+
+    # One StaticGrid type for both the consistency check and a reader's grid.
+    grid = only(check_static_consistency(store))
+    @test grid == StaticGrid(t0, Millisecond(Hour(1)), 4)
+    @test static_grid(build_static_reader(store; resolution=Hour(1))) == grid
+
+    @test forecast_timeline(
+        build_forecast_reader(store, Deterministic; resolution=Hour(1))
+    ) == ForecastTimeline(t0, Millisecond(Hour(1)), Millisecond(Hour(1)), 2)
+
+    @test get_forecast_parameters(store) == ForecastParameters(
+        Millisecond(Hour(2)), Millisecond(Hour(1)), 2, Millisecond(Hour(1)), t0
+    )
+    @test get_forecast_parameters(store; resolution=Minute(5)) ==
+        ForecastParameters(nothing, nothing, nothing, nothing, nothing)
+
+    @test get_compression(store) == CompressionSettings(:none, 0, false)
+    @test count_array_references(store, md.data_hash) == ArrayReferenceCounts(1, 0)
+end
+
+@testset "Probabilistic metadata struct" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Probabilistic(
+            t0,
+            Hour(1),
+            Hour(2),
+            Hour(1),
+            2,
+            [0.1, 0.9],
+            reshape(1.0:8.0, 2, 2, 2),
+            "pf";
+            ext="percentile-ext",
+        ),
+    )
+    pmd = get_probabilistic_metadata(store, 1, Component, "pf")
+    @test pmd isa TimeSeriesMetadata
+    @test pmd.percentiles == [0.1, 0.9]
+    @test pmd == get_probabilistic_metadata(store, 1, Component, "pf")
+    # `ext` reaches a Probabilistic: the metadata surface no longer drops fields
+    # depending on which getter was called.
+    @test pmd.ext == "percentile-ext"
+    @test pmd.dtype == Float64
+    @test pmd == only(list_time_series(store))
+
+    row = only(list_time_series(store))
+    @test row.percentiles == [0.1, 0.9]
+    @test row.time_series_type == Probabilistic
 end

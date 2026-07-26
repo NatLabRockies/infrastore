@@ -131,12 +131,13 @@ the same stored array — without reading any array bytes. Two cases land in the
 that were deduplicated because their content was identical, and a `SingleTimeSeries` together with
 any `DeterministicSingleTimeSeries` derived from it (the DST shares the backing array).
 
-In the Julia binding, `list_array_groups` returns the `list_keys` rows plus a `data_hash` field (a
-64-character hex string); group by it to find the shared sets. `count_array_references` reports, for
-one hash, how many `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations point at it.
+In the Julia binding, `list_array_groups` returns `ArrayGroupRow`s — the `list_keys` fields plus a
+`data_hash` field (the 32 raw bytes, which hash and compare by content and so work directly as a
+`Dict` key); group by it to find the shared sets. `count_array_references` reports, for one hash,
+how many `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations point at it.
 
 ```julia
-groups = Dict{String, Vector{NamedTuple}}()
+groups = Dict{Vector{UInt8}, Vector{ArrayGroupRow}}()
 for row in list_array_groups(store)
     push!(get!(groups, row.data_hash, eltype(values(groups))[]), row)
 end

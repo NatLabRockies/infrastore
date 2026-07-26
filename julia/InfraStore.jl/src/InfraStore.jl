@@ -15,6 +15,22 @@ export Store,
     OwnerCategory,
     Component,
     SupplementalAttribute,
+    TimeSeriesMetadata,
+    KeyInfo,
+    KeyRow,
+    ArrayGroupRow,
+    TimeSeriesCounts,
+    TimeSeriesCountsDetailed,
+    TimeSeriesTypeCount,
+    ArrayReferenceCounts,
+    StaticSummaryRow,
+    ForecastSummaryRow,
+    SupplementalAttributeTypeCount,
+    SupplementalAttributeSummaryRow,
+    ForecastParameters,
+    StaticGrid,
+    ForecastTimeline,
+    CompressionSettings,
     add_time_series!,
     AddBatch,
     add_time_series_bulk!,
@@ -89,12 +105,14 @@ export Store,
     close!,
     persist!,
     StaticReader,
+    StaticGroup,
     build_static_reader,
     static_grid,
     static_groups,
     static_read!,
     static_values,
     ForecastReader,
+    ForecastEntry,
     build_forecast_reader,
     forecast_timeline,
     forecast_entries,
@@ -281,6 +299,22 @@ end
 
 const _DTYPE_JULIA = (Float64, Float32, Int64, Int32, UInt64, Bool)
 _julia_dtype(code::Integer) = _DTYPE_JULIA[Int(code) + 1]
+
+# The Julia element type for a catalog row's dtype name (the Rust `as_str` form).
+const _DTYPE_BY_NAME = Dict{String,Type}(
+    "f64" => Float64,
+    "f32" => Float32,
+    "i64" => Int64,
+    "i32" => Int32,
+    "u64" => UInt64,
+    "bool" => Bool,
+)
+
+function _dtype_for_name(name::AbstractString)
+    dtype = get(_DTYPE_BY_NAME, String(name), nothing)
+    dtype === nothing && throw(InvalidParameterError("unknown dtype $name"))
+    return dtype
+end
 
 # Row-major little-endian bytes for a (possibly multi-dimensional) array. Julia
 # is column-major, so transpose the axis order before flattening. A 1-D `Vector`
@@ -509,6 +543,345 @@ a [`Deterministic`]. It surfaces as the `time_series_type` of keys returned by
 `get_time_series_keys` / `key_info`.
 """
 abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
+
+# ---- Result types ---------------------------------------------------------
+#
+# The catalog / summary / metadata queries below return these structs. They are
+# plain immutable value types: read fields with `x.field`, compare with `==`,
+# use them as `Dict` keys. Fields that do not apply to a row's time series type
+# are `nothing` (e.g. `horizon` on a `SingleTimeSeries` row).
+#
+# `time_series_type` fields hold the Julia type (`SingleTimeSeries`,
+# `Deterministic`, ...), so they can be passed straight to `get_time_series`;
+# `dtype` fields hold the Julia element type (`Float64`, `Bool`, ...).
+
+"""
+    TimeSeriesMetadata
+
+The complete stored description of one time series association — the Julia
+mirror of the Rust core's `TimeSeriesMetadata`, and the single metadata type of
+this package. It is returned both by [`list_time_series`](@ref) (one per matching
+association) and by the [`get_metadata`](@ref) family (one, addressed by key or
+by attributes).
+
+Every time series type shares the struct; the fields a type does not use are
+`nothing` (`horizon` / `interval` / `count` on a static series, `length` on a
+forecast whose array is described by its window geometry, `percentiles` on
+anything but a `Probabilistic`).
+
+- `owner_id`, `owner_category`, `owner_type`, `name`, `time_series_type` — the
+  association's identity and its owner.
+- `data_hash` — the 32-byte content hash, ready for [`get_array_by_hash`](@ref)
+  and [`count_array_references`](@ref); `bytes2hex` it for the display form.
+- `initial_timestamp`, `resolution`, `length` — the static time grid.
+- `horizon`, `interval`, `count` — the forecast window geometry.
+- `percentiles` — the stored percentile vector of a `Probabilistic`.
+- `dtype`, `element_shape` — the Julia element type and per-timestep shape (an
+  empty tuple for scalar elements; for a forecast, the stored array's trailing
+  dims after its first axis).
+- `features` — the feature dictionary (empty when none).
+- `units`, `ext` — `nothing` when unset.
+"""
+struct TimeSeriesMetadata
+    owner_id::Int64
+    owner_type::String
+    owner_category::OwnerCategory
+    time_series_type::Type
+    name::String
+    data_hash::Vector{UInt8}
+    initial_timestamp::Union{Nothing,DateTime}
+    resolution::Union{Nothing,Period}
+    horizon::Union{Nothing,Period}
+    interval::Union{Nothing,Period}
+    count::Union{Nothing,Int}
+    length::Union{Nothing,Int}
+    percentiles::Union{Nothing,Vector{Float64}}
+    dtype::Type
+    element_shape::Tuple{Vararg{Int}}
+    features::Dict{String,Any}
+    units::Union{Nothing,String}
+    ext::Union{Nothing,String}
+end
+
+"""
+    KeyInfo
+
+The attributes an opaque [`TimeSeriesKey`] carries, as returned by
+[`key_info`](@ref): the identity a series is addressed by. `resolution` is
+`nothing` for types that have none (a `NonSequentialTimeSeries`).
+"""
+struct KeyInfo
+    owner_id::Int64
+    owner_category::OwnerCategory
+    name::String
+    time_series_type::Type
+    resolution::Union{Nothing,Period}
+    features::Dict{String,Any}
+end
+
+"""
+    KeyRow
+
+One row of [`list_keys`](@ref): a key's identity plus the descriptive snapshot
+recorded for it. `length` applies to static series, `horizon` / `interval` /
+`count` to forecasts; the fields that do not apply to a row's
+`time_series_type` are `nothing`.
+
+Physical storage detail (`data_hash`, `dtype`, `ext`, `percentiles`) is not part
+of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
+or the `get_*_metadata` functions.
+"""
+struct KeyRow
+    owner_id::Int64
+    owner_category::OwnerCategory
+    time_series_type::Type
+    name::String
+    initial_timestamp::Union{Nothing,DateTime}
+    resolution::Union{Nothing,Period}
+    length::Union{Nothing,Int}
+    horizon::Union{Nothing,Period}
+    interval::Union{Nothing,Period}
+    count::Union{Nothing,Int}
+    features::Dict{String,Any}
+end
+
+"""
+    ArrayGroupRow
+
+One row of [`list_array_groups`](@ref): every [`KeyRow`] field plus `data_hash`,
+the 32-byte content hash of the array the row resolves to. Rows that share a
+stored array share their `data_hash`, so grouping by it (a `Vector{UInt8}` hashes
+and compares by content, so it works directly as a `Dict` key) finds the series
+that share their underlying data.
+"""
+struct ArrayGroupRow
+    owner_id::Int64
+    owner_category::OwnerCategory
+    time_series_type::Type
+    name::String
+    initial_timestamp::Union{Nothing,DateTime}
+    resolution::Union{Nothing,Period}
+    length::Union{Nothing,Int}
+    horizon::Union{Nothing,Period}
+    interval::Union{Nothing,Period}
+    count::Union{Nothing,Int}
+    features::Dict{String,Any}
+    data_hash::Vector{UInt8}
+end
+
+"""
+    TimeSeriesCounts
+
+Association counts from [`get_counts`](@ref).
+"""
+struct TimeSeriesCounts
+    components_with_time_series::Int
+    static_time_series::Int
+    forecasts::Int
+end
+
+"""
+    TimeSeriesCountsDetailed
+
+Distinct owners per category and distinct stored arrays per kind, from
+[`time_series_counts`](@ref). Arrays shared by content count once.
+"""
+struct TimeSeriesCountsDetailed
+    components_with_time_series::Int
+    supplemental_attributes_with_time_series::Int
+    static_time_series_count::Int
+    forecast_count::Int
+end
+
+"""
+    TimeSeriesTypeCount
+
+One row of [`counts_by_type`](@ref): the number of associations stored under
+`time_series_type` (the Julia type).
+"""
+struct TimeSeriesTypeCount
+    time_series_type::Type
+    count::Int
+end
+
+"""
+    ArrayReferenceCounts
+
+The result of [`count_array_references`](@ref): how many `SingleTimeSeries`
+(`sts`) and `DeterministicSingleTimeSeries` (`dst`) associations reference one
+stored array.
+"""
+struct ArrayReferenceCounts
+    sts::Int
+    dst::Int
+end
+
+"""
+    StaticSummaryRow
+
+One grouped static-series row from [`static_summary`](@ref): the distinct
+`(owner_type, owner_category, time_series_type, name, initial_timestamp,
+resolution, time_step_count)` group, with `count` associations in it.
+"""
+struct StaticSummaryRow
+    owner_type::String
+    owner_category::OwnerCategory
+    time_series_type::Type
+    name::String
+    initial_timestamp::Union{Nothing,DateTime}
+    resolution::Union{Nothing,Period}
+    time_step_count::Union{Nothing,Int}
+    count::Int
+end
+
+"""
+    ForecastSummaryRow
+
+One grouped forecast row from [`forecast_summary`](@ref): the distinct
+`(owner_type, owner_category, time_series_type, name, initial_timestamp,
+resolution, horizon, interval, window_count)` group, with `count` associations
+in it.
+"""
+struct ForecastSummaryRow
+    owner_type::String
+    owner_category::OwnerCategory
+    time_series_type::Type
+    name::String
+    initial_timestamp::Union{Nothing,DateTime}
+    resolution::Union{Nothing,Period}
+    horizon::Union{Nothing,Period}
+    interval::Union{Nothing,Period}
+    window_count::Union{Nothing,Int}
+    count::Int
+end
+
+"""
+    SupplementalAttributeTypeCount
+
+One row of [`supplemental_attribute_counts_by_type`](@ref): the number of
+attachments carrying attributes of `attribute_type`.
+"""
+struct SupplementalAttributeTypeCount
+    attribute_type::String
+    count::Int
+end
+
+"""
+    SupplementalAttributeSummaryRow
+
+One row of [`supplemental_attribute_summary`](@ref): the number of attachments
+between components of `component_type` and attributes of `attribute_type`.
+"""
+struct SupplementalAttributeSummaryRow
+    component_type::String
+    attribute_type::String
+    count::Int
+end
+
+"""
+    ForecastParameters
+
+The store's forecast configuration, from [`get_forecast_parameters`](@ref).
+Every field is `nothing` when no forecast matches the query.
+"""
+struct ForecastParameters
+    horizon::Union{Nothing,Period}
+    interval::Union{Nothing,Period}
+    count::Union{Nothing,Int}
+    resolution::Union{Nothing,Period}
+    initial_timestamp::Union{Nothing,DateTime}
+end
+
+"""
+    StaticGrid
+
+A shared static time grid: the valid timestamps are `initial_timestamp +
+k·resolution` for `k in 0:length-1`. Returned by [`static_grid`](@ref) for a
+[`StaticReader`], and by [`check_static_consistency`](@ref) once per resolution
+present in the store.
+"""
+struct StaticGrid
+    initial_timestamp::DateTime
+    resolution::Period
+    length::Int
+end
+
+"""
+    ForecastTimeline
+
+A [`ForecastReader`]'s window timeline, from [`forecast_timeline`](@ref): the
+valid timestamps are `initial_timestamp + k·interval` for `k in 0:count-1`.
+"""
+struct ForecastTimeline
+    initial_timestamp::DateTime
+    resolution::Period
+    interval::Period
+    count::Int
+end
+
+"""
+    CompressionSettings
+
+A store's on-disk compression policy, from [`get_compression`](@ref).
+`compression` is `:deflate` or `:none`; `level` (0-9) and `shuffle` apply to
+DEFLATE.
+"""
+struct CompressionSettings
+    compression::Symbol
+    level::Int
+    shuffle::Bool
+end
+
+# The result types are compared and hashed by value. Julia's default `==` for an
+# immutable struct is `===`-based, which would compare the `Vector` / `Dict`
+# fields above by identity, so `==`, a matching `hash`, and a field-labelled
+# `show` are generated for each of them here.
+const _RESULT_TYPES = (
+    :TimeSeriesMetadata,
+    :KeyInfo,
+    :KeyRow,
+    :ArrayGroupRow,
+    :TimeSeriesCounts,
+    :TimeSeriesCountsDetailed,
+    :TimeSeriesTypeCount,
+    :ArrayReferenceCounts,
+    :StaticSummaryRow,
+    :ForecastSummaryRow,
+    :SupplementalAttributeTypeCount,
+    :SupplementalAttributeSummaryRow,
+    :ForecastParameters,
+    :StaticGrid,
+    :ForecastTimeline,
+    :CompressionSettings,
+)
+
+# 32-byte content hashes read as hex; everything else uses its own `repr`.
+_field_repr(v) = repr(v)
+_field_repr(v::Vector{UInt8}) = bytes2hex(v)
+
+function _show_result(io::IO, x)
+    print(io, nameof(typeof(x)), "(")
+    for (i, field) in enumerate(fieldnames(typeof(x)))
+        i > 1 && print(io, ", ")
+        print(io, field, "=", _field_repr(getfield(x, field)))
+    end
+    return print(io, ")")
+end
+
+for T in _RESULT_TYPES
+    @eval begin
+        function Base.:(==)(a::$T, b::$T)
+            return all(getfield(a, f) == getfield(b, f) for f in fieldnames($T))
+        end
+        function Base.hash(x::$T, h::UInt)
+            for f in fieldnames($T)
+                h = hash(getfield(x, f), h)
+            end
+            return hash($(QuoteNode(T)), h)
+        end
+        Base.show(io::IO, x::$T) = _show_result(io, x)
+    end
+end
 
 # ---- Keys -----------------------------------------------------------------
 
@@ -750,27 +1123,6 @@ function _take_buffer_string(buf::Vector{UInt8}, len::Integer)
     return n == 0 ? nothing : String(buf[1:n])
 end
 
-# Element-shape out-buffer: `len` is the full dimension count reported by the
-# FFI; anything beyond the buffer capacity is pathological, so fail loudly
-# rather than silently truncating a shape.
-function _take_element_shape(buf::Vector{UInt64}, len::Integer)
-    Int(len) <= length(buf) || error(
-        "element shape has $(Int(len)) dimensions, exceeding the $(length(buf))-slot buffer",
-    )
-    return Tuple(Int(d) for d in buf[1:Int(len)])
-end
-
-# Features out-buffer: the FFI reports the full JSON byte length; a truncated
-# JSON document must never be parsed, so fail loudly if it did not fit.
-function _take_features_json(buf::Vector{UInt8}, len::Integer)
-    Int(len) < length(buf) || error(
-        "features JSON is $(Int(len)) bytes, exceeding the $(length(buf))-byte buffer"
-    )
-    n = Int(len)
-    n == 0 && return Dict{String,Any}()
-    return JSON.parse(String(buf[1:n]))
-end
-
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
                      features=Dict(), units=nothing)
@@ -904,18 +1256,32 @@ function add_time_series!(
 end
 
 """
-    get_metadata(store, owner_id, owner_category, name; resolution, features=Dict())
+    get_metadata(store, key) -> TimeSeriesMetadata
+    get_metadata(store, owner_id, owner_category, name; resolution, features=Dict()) -> TimeSeriesMetadata
 
-Look up a SingleTimeSeries by attributes and return a named tuple of
-`(initial_timestamp, resolution, length, data_hash, dtype, ext, units,
-element_shape, features)`. `owner_category` is the
-owner's `OwnerCategory` (`Component` or `SupplementalAttribute`). `data_hash` is
-the 32-byte content hash as a `Vector{UInt8}`. `ext` and `units` are
-`nothing` when unset. `element_shape` is the per-timestep shape tuple (empty for
-scalar elements; for forecasts across all metadata getters it is the stored
-array's trailing dims after its first axis) and `features` the feature
-dictionary (empty when none). Throws `NotFoundError` if absent.
+The complete [`TimeSeriesMetadata`](@ref) of one stored association, addressed
+either by a `TimeSeriesKey` or, in the attribute form, by the identity of a
+`SingleTimeSeries` (`owner_category` is the owner's `OwnerCategory`). Use
+[`get_forecast_metadata`](@ref) to address a forecast by attributes. Throws
+`NotFoundError` if absent.
 """
+function get_metadata(store::Store, key::TimeSeriesKey)
+    json = _filter_probe(
+        store,
+        (buf, cap, out_len) -> ccall(
+            (:infrastore_store_get_metadata_by_key, lib_path()),
+            Int32,
+            (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
+            store.handle,
+            key.handle,
+            buf,
+            cap,
+            out_len,
+        ),
+    )
+    return _decode_metadata(JSON.parse(json))
+end
+
 function get_metadata(
     store::Store,
     owner_id::Integer,
@@ -924,100 +1290,24 @@ function get_metadata(
     resolution::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_iso = _period_to_cstr(resolution)
-    features_json = isempty(features) ? C_NULL : JSON.json(features)
-    out_initial = Ref{Int64}(0)
-    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_length = Ref{UInt64}(0)
-    out_hash = Vector{UInt8}(undef, 32)
-    out_dtype = Ref{Int32}(0)
-    lt_buf = Vector{UInt8}(undef, 256)
-    out_lt_len = Ref{UInt64}(0)
-    units_buf = Vector{UInt8}(undef, 256)
-    out_units_len = Ref{UInt64}(0)
-    shape_buf = Vector{UInt64}(undef, 8)
-    out_shape_len = Ref{UInt64}(0)
-    fj_buf = Vector{UInt8}(undef, 4096)
-    out_fj_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_metadata, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Ref{Int64},
-            Ref{Ptr{Cchar}},
-            Ref{UInt64},
-            Ptr{UInt8},
-            Ref{Int32},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt64},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-        ),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
+    key = _make_key(
+        owner_id,
+        owner_category,
         name,
-        resolution_iso,
-        features_json,
-        out_initial,
-        out_resolution,
-        out_length,
-        out_hash,
-        out_dtype,
-        lt_buf,
-        UInt64(length(lt_buf)),
-        out_lt_len,
-        units_buf,
-        UInt64(length(units_buf)),
-        out_units_len,
-        shape_buf,
-        UInt64(length(shape_buf)),
-        out_shape_len,
-        fj_buf,
-        UInt64(length(fj_buf)),
-        out_fj_len,
-    )
-    _check(code)
-    resolution = _take_period(out_resolution[])
-    ext = _take_buffer_string(lt_buf, out_lt_len[])
-    units = _take_buffer_string(units_buf, out_units_len[])
-    return (
-        initial_timestamp=_from_unix_ms(out_initial[]),
+        INFRASTORE_TYPE_SINGLE;
         resolution=resolution,
-        length=Int(out_length[]),
-        data_hash=out_hash,
-        dtype=_julia_dtype(out_dtype[]),
-        ext=ext,
-        units=units,
-        element_shape=_take_element_shape(shape_buf, out_shape_len[]),
-        features=_take_features_json(fj_buf, out_fj_len[]),
+        features=features,
     )
+    return get_metadata(store, key)
 end
 
 """
-    get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval, features=Dict())
+    get_forecast_metadata(store, owner_id, owner_category, name, ts_type; resolution, interval, features=Dict()) -> TimeSeriesMetadata
 
-Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, ext,
-units, element_shape, features)`
-for a stored forecast of integer `ts_type` (see the `INFRASTORE_TYPE_*` constants).
-`owner_category` is the owner's `OwnerCategory` (`Component` or
-`SupplementalAttribute`). The optional `interval` keyword (a `Period`) restricts
-the lookup to a forecast with that interval. `ext` and `units` are
-`nothing` when unset.
+The [`TimeSeriesMetadata`](@ref) of a stored forecast of integer `ts_type` (see
+the `INFRASTORE_TYPE_*` constants). `owner_category` is the owner's
+`OwnerCategory` (`Component` or `SupplementalAttribute`). The optional `interval`
+keyword (a `Period`) restricts the lookup to a forecast with that interval.
 """
 function get_forecast_metadata(
     store::Store,
@@ -1029,110 +1319,23 @@ function get_forecast_metadata(
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = isempty(features) ? C_NULL : JSON.json(features)
-    out_initial = Ref{Int64}(0);
-    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL);
-    out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0);
-    out_length = Ref{UInt64}(0)
-    out_hash = Vector{UInt8}(undef, 32)
-    lt_buf = Vector{UInt8}(undef, 256);
-    out_lt_len = Ref{UInt64}(0)
-    units_buf = Vector{UInt8}(undef, 256);
-    out_units_len = Ref{UInt64}(0)
-    shape_buf = Vector{UInt64}(undef, 8);
-    out_shape_len = Ref{UInt64}(0)
-    fj_buf = Vector{UInt8}(undef, 4096);
-    out_fj_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_forecast_metadata, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Int32,
-            Cstring,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Ref{Int64},
-            Ref{Ptr{Cchar}},
-            Ref{Ptr{Cchar}},
-            Ref{Ptr{Cchar}},
-            Ref{UInt64},
-            Ref{UInt64},
-            Ptr{UInt8},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt64},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-        ),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
+    key = _make_key(
+        owner_id,
+        owner_category,
         name,
-        Int32(ts_type),
-        resolution_iso,
-        interval_iso,
-        features_json,
-        out_initial,
-        out_resolution,
-        out_horizon,
-        out_interval,
-        out_count,
-        out_length,
-        out_hash,
-        lt_buf,
-        UInt64(length(lt_buf)),
-        out_lt_len,
-        units_buf,
-        UInt64(length(units_buf)),
-        out_units_len,
-        shape_buf,
-        UInt64(length(shape_buf)),
-        out_shape_len,
-        fj_buf,
-        UInt64(length(fj_buf)),
-        out_fj_len,
+        ts_type;
+        resolution=resolution,
+        interval=interval,
+        features=features,
     )
-    _check(code)
-    ext = _take_buffer_string(lt_buf, out_lt_len[])
-    units = _take_buffer_string(units_buf, out_units_len[])
-    return (
-        initial_timestamp=_from_unix_ms(out_initial[]),
-        resolution=_take_period(out_resolution[]),
-        horizon=_take_period(out_horizon[]),
-        interval=_take_period(out_interval[]),
-        count=Int(out_count[]),
-        length=Int(out_length[]),
-        data_hash=out_hash,
-        ext=ext,
-        units=units,
-        element_shape=_take_element_shape(shape_buf, out_shape_len[]),
-        features=_take_features_json(fj_buf, out_fj_len[]),
-    )
+    return get_metadata(store, key)
 end
 
 """
-    get_probabilistic_metadata(store, owner_id, owner_category, name; resolution, interval, features=Dict())
+    get_probabilistic_metadata(store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesMetadata
 
-Return `(initial_timestamp, resolution, horizon, interval, count, length, data_hash, percentiles,
-units, element_shape, features)`
-for a stored `Probabilistic` forecast. `percentiles` is the stored percentile
-vector; `units` is `nothing` when unset. Previously the percentiles were only
-reachable through a full data fetch.
+[`get_forecast_metadata`](@ref) pinned to `Probabilistic`, whose metadata carries
+the stored `percentiles` — reachable here without a full data fetch.
 """
 function get_probabilistic_metadata(
     store::Store,
@@ -1143,101 +1346,15 @@ function get_probabilistic_metadata(
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    resolution_iso = _period_to_cstr(resolution)
-    interval_iso = _period_to_cstr(interval)
-    features_json = isempty(features) ? C_NULL : JSON.json(features)
-    out_initial = Ref{Int64}(0);
-    out_resolution = Ref{Ptr{Cchar}}(C_NULL)
-    out_horizon = Ref{Ptr{Cchar}}(C_NULL);
-    out_interval = Ref{Ptr{Cchar}}(C_NULL)
-    out_count = Ref{UInt64}(0);
-    out_length = Ref{UInt64}(0)
-    out_hash = Vector{UInt8}(undef, 32)
-    out_pct = Ref{Ptr{Float64}}(C_NULL);
-    out_pct_len = Ref{UInt64}(0)
-    units_buf = Vector{UInt8}(undef, 256);
-    out_units_len = Ref{UInt64}(0)
-    shape_buf = Vector{UInt64}(undef, 8);
-    out_shape_len = Ref{UInt64}(0)
-    fj_buf = Vector{UInt8}(undef, 4096);
-    out_fj_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_probabilistic_metadata, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Cstring,
-            Ref{Int64},
-            Ref{Ptr{Cchar}},
-            Ref{Ptr{Cchar}},
-            Ref{Ptr{Cchar}},
-            Ref{UInt64},
-            Ref{UInt64},
-            Ptr{UInt8},
-            Ref{Ptr{Float64}},
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt64},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-        ),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
+    return get_forecast_metadata(
+        store,
+        owner_id,
+        owner_category,
         name,
-        resolution_iso,
-        interval_iso,
-        features_json,
-        out_initial,
-        out_resolution,
-        out_horizon,
-        out_interval,
-        out_count,
-        out_length,
-        out_hash,
-        out_pct,
-        out_pct_len,
-        units_buf,
-        UInt64(length(units_buf)),
-        out_units_len,
-        shape_buf,
-        UInt64(length(shape_buf)),
-        out_shape_len,
-        fj_buf,
-        UInt64(length(fj_buf)),
-        out_fj_len,
-    )
-    _check(code)
-    percentiles = copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_f64, lib_path()),
-        Cvoid,
-        (Ptr{Float64}, UInt64),
-        out_pct[],
-        out_pct_len[],
-    )
-    return (
-        initial_timestamp=_from_unix_ms(out_initial[]),
-        resolution=_take_period(out_resolution[]),
-        horizon=_take_period(out_horizon[]),
-        interval=_take_period(out_interval[]),
-        count=Int(out_count[]),
-        length=Int(out_length[]),
-        data_hash=out_hash,
-        percentiles=percentiles,
-        units=_take_buffer_string(units_buf, out_units_len[]),
-        element_shape=_take_element_shape(shape_buf, out_shape_len[]),
-        features=_take_features_json(fj_buf, out_fj_len[]),
+        INFRASTORE_TYPE_PROBABILISTIC;
+        resolution=resolution,
+        interval=interval,
+        features=features,
     )
 end
 
@@ -1351,7 +1468,7 @@ function get_array_by_hash(
 end
 
 """
-    count_array_references(store, data_hash) -> (; sts, dst)
+    count_array_references(store, data_hash) -> ArrayReferenceCounts
 
 Count the `SingleTimeSeries` and `DeterministicSingleTimeSeries` associations
 referencing the 32-byte content hash `data_hash`, across all owners. A
@@ -1374,7 +1491,7 @@ function count_array_references(store::Store, data_hash::Vector{UInt8})
         out_dst,
     )
     _check(code)
-    return (sts=Int(out_sts[]), dst=Int(out_dst[]))
+    return ArrayReferenceCounts(Int(out_sts[]), Int(out_dst[]))
 end
 
 """
@@ -1561,8 +1678,8 @@ function get_time_series(
 
     initial = _from_unix_ms(out_initial[])
     resolution = _take_period(out_resolution[])
-    assoc = _get_association(store, key)
-    return SingleTimeSeries(initial, resolution, data, assoc.name)
+    name = _association_name(store, key)
+    return SingleTimeSeries(initial, resolution, data, name)
 end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot.
@@ -1837,7 +1954,7 @@ function bulk_read(
                     out_type,
                 ),
             )
-            name = _get_association(store, keys[i]).name
+            name = _association_name(store, keys[i])
             t = Int(out_type[])
             out[i] = if t == INFRASTORE_TYPE_SINGLE
                 _bulk_single(result, i - 1, name)
@@ -1945,8 +2062,8 @@ function get_time_series(
     end
     n = min(Int(out_lt_len[]), length(lt_buf))
     ext = n == 0 ? nothing : String(lt_buf[1:n])
-    assoc = _get_association(store, key)
-    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), data, assoc.name; ext=ext)
+    name = _association_name(store, key)
+    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), data, name; ext=ext)
 end
 
 # ---- Attribute-addressed static reads --------------------------------------
@@ -1991,7 +2108,7 @@ end
 
 # Fetch the per-association `name` for a key (the attribute the read FFIs don't
 # return), to populate the struct on read.
-function _get_association(store::Store, key::TimeSeriesKey)
+function _association_name(store::Store, key::TimeSeriesKey)
     name_len = Ref{UInt64}(0)
     code = ccall(
         (:infrastore_store_get_association, lib_path()),
@@ -2016,13 +2133,12 @@ function _get_association(store::Store, key::TimeSeriesKey)
         name_len,
     )
     _check(code)
-    name = String(name_buf[1:Int(name_len[])])
-    return (name=name,)
+    return String(name_buf[1:Int(name_len[])])
 end
 
-# Association attributes for an attribute-addressed read: build the matching key,
-# then look up `name`.
-function _assoc_attrs(
+# Association name for an attribute-addressed read: build the matching key, then
+# look up `name`.
+function _assoc_name(
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory,
@@ -2032,7 +2148,7 @@ function _assoc_attrs(
     interval::Union{Nothing,Period}=nothing,
     features::AbstractDict=Dict{String,Any}(),
 )
-    return _get_association(
+    return _association_name(
         store,
         _make_key(
             owner_id,
@@ -2130,45 +2246,94 @@ function _type_for_name(name::AbstractString)
     end
 end
 
-_row_ms(x) = x === nothing ? nothing : Millisecond(Int64(x))
 _row_period(x) = x === nothing ? nothing : _iso_to_period(String(x))
 _row_int(x) = x === nothing ? nothing : Int(x)
+_row_timestamp(x) = x === nothing ? nothing : _from_unix_ms(Int64(x))
+
+# The owner category of a catalog row, which the core writes as its name.
+function _category_for_name(s::AbstractString)
+    if s == "Component"
+        Component
+    elseif s == "SupplementalAttribute"
+        SupplementalAttribute
+    else
+        throw(InvalidParameterError("unknown owner category $s"))
+    end
+end
 
 function _decode_key_row(r::AbstractDict)
-    its = r["initial_timestamp_ms"]
-    return (
-        owner_id=Int64(r["owner_id"]),
-        owner_category=String(r["owner_category"]),
-        time_series_type=_type_for_name(r["time_series_type"]),
-        name=String(r["name"]),
-        initial_timestamp=its === nothing ? nothing : _from_unix_ms(Int64(its)),
-        resolution=_row_period(r["resolution"]),
-        length=_row_int(r["length"]),
-        horizon=_row_period(r["horizon"]),
-        interval=_row_period(r["interval"]),
-        count=_row_int(r["count"]),
-        features=Dict{String,Any}(r["features"]),
+    return KeyRow(
+        Int64(r["owner_id"]),
+        _category_for_name(r["owner_category"]),
+        _type_for_name(r["time_series_type"]),
+        String(r["name"]),
+        _row_timestamp(r["initial_timestamp_ms"]),
+        _row_period(r["resolution"]),
+        _row_int(r["length"]),
+        _row_period(r["horizon"]),
+        _row_period(r["interval"]),
+        _row_int(r["count"]),
+        Dict{String,Any}(r["features"]),
+    )
+end
+
+# An array-group row is a key row plus the content hash of the array it resolves
+# to. The core writes the hash as hex; the binding hands back the 32 bytes every
+# other hash-taking function expects.
+function _decode_array_group_row(r::AbstractDict)
+    k = _decode_key_row(r)
+    return ArrayGroupRow(
+        k.owner_id,
+        k.owner_category,
+        k.time_series_type,
+        k.name,
+        k.initial_timestamp,
+        k.resolution,
+        k.length,
+        k.horizon,
+        k.interval,
+        k.count,
+        k.features,
+        hex2bytes(String(r["data_hash"])),
+    )
+end
+
+function _decode_metadata(r::AbstractDict)
+    percentiles = r["percentiles"]
+    return TimeSeriesMetadata(
+        Int64(r["owner_id"]),
+        String(r["owner_type"]),
+        _category_for_name(r["owner_category"]),
+        _type_for_name(r["time_series_type"]),
+        String(r["name"]),
+        hex2bytes(String(r["data_hash"])),
+        _row_timestamp(r["initial_timestamp_ms"]),
+        _row_period(r["resolution"]),
+        _row_period(r["horizon"]),
+        _row_period(r["interval"]),
+        _row_int(r["count"]),
+        _row_int(r["length"]),
+        percentiles === nothing ? nothing : Vector{Float64}(percentiles),
+        _dtype_for_name(r["dtype"]),
+        Tuple(Int(d) for d in r["element_shape"]),
+        Dict{String,Any}(r["features"]),
+        r["units"] === nothing ? nothing : String(r["units"]),
+        r["ext"] === nothing ? nothing : String(r["ext"]),
     )
 end
 
 """
     list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-              name=nothing, resolution=nothing, features=Dict()) -> Vector{NamedTuple}
+              name=nothing, resolution=nothing, features=Dict()) -> Vector{KeyRow}
 
 List the key of every stored time series matching the (all-optional, independent)
-filters. With no filter set the whole store is listed.
+filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 
 - `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
 - `time_series_type` — a `INFRASTORE_TYPE_*` integer code.
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `features` — match keys whose features include all the given entries (subset).
-
-Each key is a `NamedTuple` with `owner_id`, `owner_category`, `time_series_type`
-(the Julia type), `name`, `initial_timestamp`, `resolution`, `length`, `horizon`,
-`interval`, `count`, and `features`; fields that do not apply to a key's type are
-`nothing`. Physical storage detail (`data_hash`, `ext`, `percentiles`) is
-not on the key — read it via [`get_metadata`](@ref) / [`get_forecast_metadata`](@ref).
 """
 function list_keys(
     store::Store;
@@ -2260,9 +2425,10 @@ function list_keys(
     return [_decode_key_row(r) for r in rows]
 end
 
-# Shared two-call probe-then-fetch for a filter-based JSON-returning FFI export.
-# `f` performs one ccall with the given (buf, cap, out_len); returns the decoded
-# JSON payload string.
+# Shared two-call probe-then-fetch for any JSON-returning FFI export (the filter
+# listings and the single-record metadata read alike). `ccall_once` performs one
+# ccall with the given (buf, cap, out_len); returns the decoded JSON payload
+# string.
 function _filter_probe(store::Store, ccall_once)
     out_len = Ref{UInt64}(0)
     _check(ccall_once(C_NULL, UInt64(0), out_len))
@@ -2274,11 +2440,11 @@ end
 """
     list_time_series(store; owner_id=nothing, owner_category=nothing,
                      time_series_type=nothing, name=nothing, resolution=nothing,
-                     features=Dict()) -> Vector{Dict}
+                     features=Dict()) -> Vector{TimeSeriesMetadata}
 
-Full metadata rows matching the filter (same filters as [`list_keys`](@ref)). Each
-row is a `Dict` with the key fields plus `data_hash` (hex), `dtype`,
-`element_shape`, `percentiles`, `units`, and `ext`.
+The full [`TimeSeriesMetadata`](@ref) of every association matching the filter
+(the same filters as [`list_keys`](@ref)) — the listing counterpart of
+[`get_metadata`](@ref), which returns one.
 """
 function list_time_series(
     store::Store;
@@ -2333,7 +2499,7 @@ function list_time_series(
             out_len,
         ),
     )
-    return JSON.parse(json)
+    return TimeSeriesMetadata[_decode_metadata(r) for r in JSON.parse(json)]
 end
 
 """
@@ -2520,11 +2686,12 @@ end
 """
     list_array_groups(store; owner_id=nothing, owner_category=nothing,
                       time_series_type=nothing, name=nothing, resolution=nothing,
-                      features=Dict()) -> Vector{NamedTuple}
+                      features=Dict()) -> Vector{ArrayGroupRow}
 
-Like [`list_keys`](@ref) (same filters, same row fields), but each row additionally
-carries `data_hash`: the 64-character lowercase hex content hash of the array the
-row resolves to. Rows that share a stored array share their `data_hash` — both
+Like [`list_keys`](@ref) (same filters, same row fields), but each
+[`ArrayGroupRow`](@ref) additionally carries `data_hash`: the 64-character
+lowercase hex content hash of the array the row resolves to. Rows that share a
+stored array share their `data_hash` — both
 deduplicated identical arrays and a `SingleTimeSeries` together with any
 `DeterministicSingleTimeSeries` derived from it. Group the returned rows by
 `data_hash` to find which time series share their underlying data.
@@ -2619,20 +2786,17 @@ function list_array_groups(
     )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [(; _decode_key_row(r)..., data_hash=String(r["data_hash"])) for r in rows]
+    return ArrayGroupRow[_decode_array_group_row(r) for r in rows]
 end
 
 """
-    key_info(key) -> NamedTuple
+    key_info(key) -> KeyInfo
 
-Inspect an opaque `TimeSeriesKey` (e.g. one returned by `get_time_series_keys`):
-returns `(owner_id, owner_category, name, time_series_type, resolution, features)`.
-`owner_category` is an `OwnerCategory` (`Component` or `SupplementalAttribute`).
-`time_series_type` is the Julia type (one of `SingleTimeSeries`,
-`NonSequentialTimeSeries`, `Deterministic`, `DeterministicSingleTimeSeries`,
-`Probabilistic`, `Scenarios`) — pass it straight to
-`get_time_series(time_series_type, store, key)`. `features` is a `Dict` (empty
-when none).
+Inspect an opaque `TimeSeriesKey` (e.g. one returned by `get_time_series_keys`),
+returning its [`KeyInfo`](@ref). `time_series_type` is the Julia type (one of
+`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) — pass it straight
+to `get_time_series(time_series_type, store, key)`.
 """
 function key_info(key::TimeSeriesKey)
     out_type = Ref{Int32}(0)
@@ -2709,13 +2873,13 @@ function key_info(key::TimeSeriesKey)
     name = String(name_buf[1:Int(name_len[])])
     features = JSON.parse(String(feat_buf[1:Int(feat_len[])]))
     resolution = _take_period(out_res[])
-    return (
-        owner_id=out_owner[],
-        owner_category=OwnerCategory(Int(out_category[])),
-        name=name,
-        time_series_type=_type_for_code(out_type[]),
-        resolution=resolution,
-        features=features,
+    return KeyInfo(
+        out_owner[],
+        OwnerCategory(Int(out_category[])),
+        name,
+        _type_for_code(out_type[]),
+        resolution,
+        features,
     )
 end
 
@@ -2836,6 +3000,11 @@ function has_time_series(store::Store, key::TimeSeriesKey)
     return out[]
 end
 
+"""
+    get_counts(store) -> TimeSeriesCounts
+
+Association counts: components with time series, static series, and forecasts.
+"""
 function get_counts(store::Store)
     a = Ref{Int64}(0);
     b = Ref{Int64}(0);
@@ -2850,14 +3019,15 @@ function get_counts(store::Store)
         c,
     )
     _check(code)
-    return (components_with_time_series=a[], static_time_series=b[], forecasts=c[])
+    return TimeSeriesCounts(Int(a[]), Int(b[]), Int(c[]))
 end
 
 """
-    counts_by_type(store) -> Vector{NamedTuple}
+    counts_by_type(store) -> Vector{TimeSeriesTypeCount}
 
-Association count grouped by time series type, as `(time_series_type, count)`
-NamedTuples (`time_series_type` is the Julia type). One catalog query in the core.
+Association count grouped by time series type, as
+[`TimeSeriesTypeCount`](@ref)s (`time_series_type` is the Julia type). One
+catalog query in the core.
 """
 function counts_by_type(store::Store)
     out_len = Ref{UInt64}(0)
@@ -2883,8 +3053,8 @@ function counts_by_type(store::Store)
     )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [
-        (time_series_type=_type_for_name(r["time_series_type"]), count=Int(r["count"])) for
+    return TimeSeriesTypeCount[
+        TimeSeriesTypeCount(_type_for_name(r["time_series_type"]), Int(r["count"])) for
         r in rows
     ]
 end
@@ -2909,11 +3079,10 @@ function num_distinct_arrays(store::Store)
 end
 
 """
-    time_series_counts(store) -> NamedTuple
+    time_series_counts(store) -> TimeSeriesCountsDetailed
 
-Distinct owners per category and distinct stored arrays per kind:
-`(components_with_time_series, supplemental_attributes_with_time_series,
-static_time_series_count, forecast_count)`. Arrays shared by content count once.
+Distinct owners per category and distinct stored arrays per kind. Arrays shared
+by content count once.
 """
 function time_series_counts(store::Store)
     a = Ref{Int64}(0);
@@ -2931,12 +3100,7 @@ function time_series_counts(store::Store)
         d,
     )
     _check(code)
-    return (
-        components_with_time_series=a[],
-        supplemental_attributes_with_time_series=b[],
-        static_time_series_count=c[],
-        forecast_count=d[],
-    )
+    return TimeSeriesCountsDetailed(Int(a[]), Int(b[]), Int(c[]), Int(d[]))
 end
 
 """
@@ -2991,37 +3155,35 @@ function list_owner_ids(
 end
 
 function _decode_static_summary_row(r::AbstractDict)
-    its = r["initial_timestamp_ms"]
-    return (
-        owner_type=String(r["owner_type"]),
-        owner_category=String(r["owner_category"]),
-        time_series_type=_type_for_name(r["time_series_type"]),
-        name=String(r["name"]),
-        initial_timestamp=its === nothing ? nothing : _from_unix_ms(Int64(its)),
-        resolution=_row_period(r["resolution"]),
-        time_step_count=_row_int(r["time_step_count"]),
-        count=Int(r["count"]),
+    return StaticSummaryRow(
+        String(r["owner_type"]),
+        _category_for_name(r["owner_category"]),
+        _type_for_name(r["time_series_type"]),
+        String(r["name"]),
+        _row_timestamp(r["initial_timestamp_ms"]),
+        _row_period(r["resolution"]),
+        _row_int(r["time_step_count"]),
+        Int(r["count"]),
     )
 end
 
 function _decode_forecast_summary_row(r::AbstractDict)
-    its = r["initial_timestamp_ms"]
-    return (
-        owner_type=String(r["owner_type"]),
-        owner_category=String(r["owner_category"]),
-        time_series_type=_type_for_name(r["time_series_type"]),
-        name=String(r["name"]),
-        initial_timestamp=its === nothing ? nothing : _from_unix_ms(Int64(its)),
-        resolution=_row_period(r["resolution"]),
-        horizon=_row_period(r["horizon"]),
-        interval=_row_period(r["interval"]),
-        window_count=_row_int(r["window_count"]),
-        count=Int(r["count"]),
+    return ForecastSummaryRow(
+        String(r["owner_type"]),
+        _category_for_name(r["owner_category"]),
+        _type_for_name(r["time_series_type"]),
+        String(r["name"]),
+        _row_timestamp(r["initial_timestamp_ms"]),
+        _row_period(r["resolution"]),
+        _row_period(r["horizon"]),
+        _row_period(r["interval"]),
+        _row_int(r["window_count"]),
+        Int(r["count"]),
     )
 end
 
 """
-    static_summary(store) -> Vector{NamedTuple}
+    static_summary(store) -> Vector{StaticSummaryRow}
 
 Grouped static-series (SingleTimeSeries + NonSequentialTimeSeries) summary: one
 row per distinct `(owner_type, owner_category, time_series_type, name,
@@ -3053,11 +3215,11 @@ function static_summary(store::Store)
     )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [_decode_static_summary_row(r) for r in rows]
+    return StaticSummaryRow[_decode_static_summary_row(r) for r in rows]
 end
 
 """
-    forecast_summary(store) -> Vector{NamedTuple}
+    forecast_summary(store) -> Vector{ForecastSummaryRow}
 
 Grouped forecast summary: one row per distinct `(owner_type, owner_category,
 time_series_type, name, initial_timestamp, resolution, horizon, interval,
@@ -3087,7 +3249,7 @@ function forecast_summary(store::Store)
     )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [_decode_forecast_summary_row(r) for r in rows]
+    return ForecastSummaryRow[_decode_forecast_summary_row(r) for r in rows]
 end
 
 # ---- Association catalogs --------------------------------------------------
@@ -3601,10 +3763,9 @@ function count_components_with_attributes(
 end
 
 """
-    supplemental_attribute_counts_by_type(store) -> Vector{NamedTuple}
+    supplemental_attribute_counts_by_type(store) -> Vector{SupplementalAttributeTypeCount}
 
-Attachment counts grouped by attribute type, ordered by type. Each row is
-`(type, count)`.
+Attachment counts grouped by attribute type, ordered by type.
 """
 function supplemental_attribute_counts_by_type(store::Store)
     json = _filter_probe(
@@ -3619,15 +3780,17 @@ function supplemental_attribute_counts_by_type(store::Store)
             out_len,
         ),
     )
-    return [(type=String(r["type"]), count=Int(r["count"])) for r in JSON.parse(json)]
+    return SupplementalAttributeTypeCount[
+        SupplementalAttributeTypeCount(String(r["type"]), Int(r["count"])) for
+        r in JSON.parse(json)
+    ]
 end
 
 """
-    supplemental_attribute_summary(store) -> Vector{NamedTuple}
+    supplemental_attribute_summary(store) -> Vector{SupplementalAttributeSummaryRow}
 
 Attachment counts grouped by both type names, ordered by attribute type then
-component type. Each row is `(component_type, attribute_type, count)`. The core
-does the GROUP BY; callers build any presentation table.
+component type. The core does the GROUP BY; callers build any presentation table.
 """
 function supplemental_attribute_summary(store::Store)
     json = _filter_probe(
@@ -3642,11 +3805,9 @@ function supplemental_attribute_summary(store::Store)
             out_len,
         ),
     )
-    return [
-        (
-            component_type=String(r["component_type"]),
-            attribute_type=String(r["attribute_type"]),
-            count=Int(r["count"]),
+    return SupplementalAttributeSummaryRow[
+        SupplementalAttributeSummaryRow(
+            String(r["component_type"]), String(r["attribute_type"]), Int(r["count"])
         ) for r in JSON.parse(json)
     ]
 end
@@ -3881,15 +4042,11 @@ function count_parent_child_associations(
 end
 
 """
-    get_forecast_parameters(store; resolution=nothing, interval=nothing)
+    get_forecast_parameters(store; resolution=nothing, interval=nothing) -> ForecastParameters
 
-Return the store's forecast parameters as a NamedTuple
-`(horizon, interval, count, resolution, initial_timestamp)`, optionally restricted
-to forecasts with the given `resolution` and/or `interval` (`Period`s).
-`horizon`, `interval`, and `resolution` are `Period`s (`Millisecond` for fixed
-durations) or `nothing`;
-`count` is an `Int` (or `nothing`); `initial_timestamp` is a `DateTime` (or
-`nothing`). Every field is `nothing` when no forecast matches.
+Return the store's [`ForecastParameters`](@ref), optionally restricted to
+forecasts with the given `resolution` and/or `interval` (`Period`s). Every field
+is `nothing` when no forecast matches.
 """
 function get_forecast_parameters(
     store::Store;
@@ -3929,22 +4086,22 @@ function get_forecast_parameters(
         initial_out,
     )
     _check(code)
-    return (
-        horizon=_take_period(horizon_out[]),
-        interval=_take_period(interval_out[]),
-        count=(count[] < 0 ? nothing : Int(count[])),
-        resolution=_take_period(resolution_out[]),
-        initial_timestamp=(initial_out[] < 0 ? nothing : _from_unix_ms(initial_out[])),
+    return ForecastParameters(
+        _take_period(horizon_out[]),
+        _take_period(interval_out[]),
+        count[] < 0 ? nothing : Int(count[]),
+        _take_period(resolution_out[]),
+        initial_out[] < 0 ? nothing : _from_unix_ms(initial_out[]),
     )
 end
 
 """
-    check_static_consistency(store; resolution=nothing) -> Vector{NamedTuple}
+    check_static_consistency(store; resolution=nothing) -> Vector{StaticGrid}
 
 Verify that, per resolution, every `SingleTimeSeries` shares one
-`(initial_timestamp, length)` grid, and return one
-`(resolution, initial_timestamp, length)` NamedTuple per resolution present
-(empty vector when there are none), ordered by resolution. Series at different
+`(initial_timestamp, length)` grid, and return one [`StaticGrid`](@ref) per
+resolution present (empty vector when there are none), ordered by
+resolution. Series at different
 resolutions legitimately have different grids, so consistency is only required
 within a resolution; pass `resolution` (a `Period`) to scope the check to one
 grid. Throws `IntegrityError` when the `SingleTimeSeries` at a single
@@ -3977,11 +4134,11 @@ function check_static_consistency(store::Store; resolution::Union{Nothing,Period
     )
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return [
-        (
-            resolution=_iso_to_period(String(r["resolution"])),
-            initial_timestamp=_from_unix_ms(Int64(r["initial_timestamp_ms"])),
-            length=Int(r["length"]),
+    return StaticGrid[
+        StaticGrid(
+            _from_unix_ms(Int64(r["initial_timestamp_ms"])),
+            _iso_to_period(String(r["resolution"])),
+            Int(r["length"]),
         ) for r in rows
     ]
 end
@@ -4087,12 +4244,10 @@ function read_only(store::Store)
 end
 
 """
-    get_compression(store)
+    get_compression(store) -> CompressionSettings
 
-Return the store's compression policy as a NamedTuple `(compression, level,
-shuffle)`. `compression` is `:deflate` or `:none`; `level` (0-9) and `shuffle`
-apply to DEFLATE. For a store opened from disk this reflects the policy it was
-created with; in-memory stores report `:none`.
+Return the store's [`CompressionSettings`](@ref). For a store opened from disk
+this reflects the policy it was created with; in-memory stores report `:none`.
 """
 function get_compression(store::Store)
     kind = Ref{UInt8}(0);
@@ -4108,11 +4263,7 @@ function get_compression(store::Store)
         shuffle,
     )
     _check(code)
-    return if kind[] == 0
-        (compression=:none, level=Int(level[]), shuffle=shuffle[])
-    else
-        (compression=:deflate, level=Int(level[]), shuffle=shuffle[])
-    end
+    return CompressionSettings(kind[] == 0 ? :none : :deflate, Int(level[]), shuffle[])
 end
 
 """
@@ -5073,9 +5224,9 @@ end
 
 # ---- Forecast data reads ---------------------------------------------------
 #
-# All three functions call `infrastore_store_get_forecast` and return named tuples
-# with the data array reshaped to the canonical Julia (column-major) layout
-# that is the inverse of `_row_major_bytes`.
+# All three functions call `infrastore_store_get_forecast` and return the
+# matching forecast struct, with the data array reshaped to the canonical Julia
+# (column-major) layout that is the inverse of `_row_major_bytes`.
 #
 # Canonical row-major shapes from FORECAST_READ_SPEC.md:
 #   Deterministic  [H, count, *E]
@@ -5410,7 +5561,7 @@ function get_time_series(
         time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(
+    assoc_name = _assoc_name(
         store,
         owner_id,
         owner_category,
@@ -5421,7 +5572,7 @@ function get_time_series(
         features=features,
     )
     return Deterministic(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, assoc_name
     )
 end
 
@@ -5459,7 +5610,7 @@ function get_time_series(
         time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(
+    assoc_name = _assoc_name(
         store,
         owner_id,
         owner_category,
@@ -5470,7 +5621,7 @@ function get_time_series(
         features=features,
     )
     return Deterministic(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, assoc_name
     )
 end
 
@@ -5505,7 +5656,7 @@ function get_time_series(
         time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(
+    assoc_name = _assoc_name(
         store,
         owner_id,
         owner_category,
@@ -5516,7 +5667,7 @@ function get_time_series(
         features=features,
     )
     return Deterministic(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, assoc_name
     )
 end
 
@@ -5550,7 +5701,7 @@ function get_time_series(
         time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(
+    assoc_name = _assoc_name(
         store,
         owner_id,
         owner_category,
@@ -5568,7 +5719,7 @@ function get_time_series(
         r.count,
         r.percentiles,
         data,
-        a.name,
+        assoc_name,
     )
 end
 
@@ -5602,7 +5753,7 @@ function get_time_series(
         time_range=time_range,
     )
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _assoc_attrs(
+    assoc_name = _assoc_name(
         store,
         owner_id,
         owner_category,
@@ -5614,7 +5765,7 @@ function get_time_series(
     )
     # `scenario_count` is the leading axis of the decoded data.
     return Scenarios(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, assoc_name
     )
 end
 
@@ -5641,9 +5792,9 @@ function get_time_series(
 )
     r = _get_forecast_raw(store, key; time_range=time_range)
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _get_association(store, key)
+    name = _association_name(store, key)
     return Deterministic(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, name
     )
 end
 
@@ -5676,7 +5827,7 @@ function get_time_series(
 )
     r = _get_forecast_raw(store, key; time_range=time_range)
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _get_association(store, key)
+    name = _association_name(store, key)
     return Probabilistic(
         r.initial_timestamp,
         r.resolution,
@@ -5685,7 +5836,7 @@ function get_time_series(
         r.count,
         r.percentiles,
         data,
-        a.name,
+        name,
     )
 end
 
@@ -5702,9 +5853,9 @@ function get_time_series(
 )
     r = _get_forecast_raw(store, key; time_range=time_range)
     data = _decode_forecast_array(r.bytes, r.dtype_code, r.dims)
-    a = _get_association(store, key)
+    name = _association_name(store, key)
     return Scenarios(
-        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, a.name
+        r.initial_timestamp, r.resolution, r.horizon, r.interval, r.count, data, name
     )
 end
 
@@ -5926,11 +6077,10 @@ function build_static_reader(
 end
 
 """
-    static_grid(reader) -> NamedTuple
+    static_grid(reader) -> StaticGrid
 
-The reader's master grid: `(; initial_timestamp::DateTime, resolution::Period,
-length::Int)`. Valid timestamps are `initial_timestamp + k·resolution` for
-`k in 0:length-1`.
+The reader's master grid. Valid timestamps are `initial_timestamp + k·resolution`
+for `k in 0:length-1`.
 """
 function static_grid(reader::StaticReader)
     out_initial = Ref{Int64}(0)
@@ -5947,11 +6097,7 @@ function static_grid(reader::StaticReader)
             out_len,
         ),
     )
-    return (
-        initial_timestamp=_from_unix_ms(out_initial[]),
-        resolution=_take_period(out_res[]),
-        length=Int(out_len[]),
-    )
+    return StaticGrid(_from_unix_ms(out_initial[]), _take_period(out_res[]), Int(out_len[]))
 end
 
 """
@@ -6182,10 +6328,9 @@ function build_forecast_reader(
 end
 
 """
-    forecast_timeline(reader) -> NamedTuple
+    forecast_timeline(reader) -> ForecastTimeline
 
-The reader's window timeline: `(; initial_timestamp::DateTime, resolution::Period,
-interval::Period, count::Int)`. Valid timestamps are `initial_timestamp +
+The reader's window timeline. Valid timestamps are `initial_timestamp +
 k·interval` for `k in 0:count-1`.
 """
 function forecast_timeline(reader::ForecastReader)
@@ -6205,11 +6350,11 @@ function forecast_timeline(reader::ForecastReader)
             out_count,
         ),
     )
-    return (
-        initial_timestamp=_from_unix_ms(out_initial[]),
-        resolution=_take_period(out_res[]),
-        interval=_take_period(out_interval[]),
-        count=Int(out_count[]),
+    return ForecastTimeline(
+        _from_unix_ms(out_initial[]),
+        _take_period(out_res[]),
+        _take_period(out_interval[]),
+        Int(out_count[]),
     )
 end
 

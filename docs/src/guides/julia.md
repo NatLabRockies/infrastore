@@ -97,8 +97,9 @@ meta = get_metadata(
     resolution = Hour(1),
     features = Dict("model_year" => 2030),
 )
-# meta :: (initial_timestamp::DateTime, resolution::Millisecond, length::Int,
-#          data_hash::Vector{UInt8}, dtype, ext)
+# meta :: TimeSeriesMetadata — the whole record: owner_id/owner_type/owner_category,
+#          name, time_series_type, data_hash, initial_timestamp, resolution, length,
+#          horizon/interval/count, percentiles, dtype, element_shape, features, units, ext
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
@@ -215,7 +216,7 @@ forecasts. (Full signatures:
 
 ```julia
 reader = build_static_reader(store; resolution = Hour(1))
-grid = static_grid(reader)                 # (initial_timestamp, resolution, length)
+grid = static_grid(reader)                 # StaticGrid: initial_timestamp, resolution, length
 for k in 0:(grid.length - 1)
     static_read!(reader, grid.initial_timestamp + grid.resolution * k)
     for (gi, g) in enumerate(static_groups(reader))
@@ -232,7 +233,7 @@ whose columns line up with the group's `keys`. All matched series must share one
 
 ```julia
 reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
-tl = forecast_timeline(reader)             # (initial_timestamp, resolution, interval, count)
+tl = forecast_timeline(reader)             # ForecastTimeline: initial_timestamp, resolution, interval, count
 for k in 0:(tl.count - 1)
     forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
     for (i, e) in enumerate(forecast_entries(reader))
@@ -265,7 +266,7 @@ end
 ## Store-Wide Operations
 
 ```julia
-counts = get_counts(store)        # (components_with_time_series, static_time_series, forecasts)
+counts = get_counts(store)        # TimeSeriesCounts: components_with_time_series, static_time_series, forecasts
 nerr   = verify_integrity(store)  # 0 == arrays intact (catalog not checked)
 compact!(store)
 ```
@@ -303,9 +304,9 @@ list_supplemental_attribute_ids(store; component_id=43, attribute_types=["Outage
 count_supplemental_attributes(store)         # 2, distinct attributes
 count_components_with_attributes(store)      # 2, distinct components
 supplemental_attribute_counts_by_type(store)
-# [(type = "GeographicInfo", count = 2), (type = "Outage", count = 1)]
+# [SupplementalAttributeTypeCount("GeographicInfo", 2), SupplementalAttributeTypeCount("Outage", 1)]
 supplemental_attribute_summary(store)
-# [(component_type = "Generator", attribute_type = "GeographicInfo", count = 2), ...]
+# [SupplementalAttributeSummaryRow("Generator", "GeographicInfo", 2), ...]
 ```
 
 Identity is the `(component_id, attribute_id)` pair. The type names ride along for filtering and are

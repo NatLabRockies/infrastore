@@ -625,52 +625,34 @@ int32_t infrastore_store_flush(struct InfraStore *handle);
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
 
 /**
- * Look up a SingleTimeSeries metadata record by attributes. On success the
- * caller's out-params receive the initial timestamp, resolution, length, the
- * 32-byte content hash (written into the `out_data_hash` buffer, which must
- * have room for 32 bytes), the dtype code (`out_dtype`), the extension
- * payload and units string via probe-then-fetch (`out_ext` /
- * `out_ext_len` and `out_units` / `out_units_len`; an empty string
- * means the field is unset), the per-timestep element shape via
- * probe-then-fetch (`out_element_shape` / `out_element_shape_len`; length 0
- * means scalar elements), and the features as a JSON object string via
- * probe-then-fetch (`out_features_json` / `out_features_json_len`; `{}` means
- * no features). Returns `INFRASTORE_ERR_NOT_FOUND` if absent.
+ * Write the full metadata record for `key` as a JSON object string, using the
+ * probe-then-fetch buffer convention (a null or too-small `buf` reports the
+ * required byte length in `out_len` without copying).
+ *
+ * The row shape is identical to one element of the
+ * `infrastore_store_list_time_series` array: `owner_id`, `owner_type`,
+ * `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
+ * `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
+ * `length`, `percentiles`, `dtype`, `element_shape`, `features`, `units`, and
+ * `ext`, with the fields that do not apply to the key's type set to `null`.
+ * That is the whole `TimeSeriesMetadata` the core holds for the association, so
+ * this one export serves every time series type — static and forecast alike.
+ * Returns `INFRASTORE_ERR_NOT_FOUND` when the key names no stored association.
+ *
+ * Build `key` from attributes with `infrastore_make_key_from_attrs`, or take one
+ * from `infrastore_store_add_*` / `infrastore_store_get_time_series_keys`.
  *
  * # Safety
  *
- * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
- * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
- * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must be valid for one
- * value and `out_data_hash` must be valid for 32 bytes. The `out_ext`, `out_units`, and
- * `out_features_json` caller buffers, when non-null, must be valid for `ext_cap`,
- * `units_cap`, and `features_json_cap` bytes respectively; the `out_element_shape` buffer, when
- * non-null, must be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be
- * valid for one `u64`.
+ * `handle` must be a live store handle and `key` a live key handle; neither is
+ * retained past the call. `buf`, when non-null, must be valid for writing `cap`
+ * bytes, and `out_len` must be valid for writing one `u64`.
  */
-int32_t infrastore_store_get_metadata(const struct InfraStore *handle,
-                                      int64_t owner_id,
-                                      int32_t owner_category,
-                                      const char *name,
-                                      const char *resolution,
-                                      const char *features_json,
-                                      int64_t *out_initial_ts_unix_ms,
-                                      char **out_resolution,
-                                      uint64_t *out_length,
-                                      uint8_t *out_data_hash,
-                                      int32_t *out_dtype,
-                                      char *out_ext,
-                                      uint64_t ext_cap,
-                                      uint64_t *out_ext_len,
-                                      char *out_units,
-                                      uint64_t units_cap,
-                                      uint64_t *out_units_len,
-                                      uint64_t *out_element_shape,
-                                      uint64_t element_shape_cap,
-                                      uint64_t *out_element_shape_len,
-                                      char *out_features_json,
-                                      uint64_t features_json_cap,
-                                      uint64_t *out_features_json_len);
+int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
+                                             const struct InfraStoreKey *key,
+                                             char *buf,
+                                             uint64_t cap,
+                                             uint64_t *out_len);
 
 /**
  * True iff a SingleTimeSeries with the given attributes exists.
@@ -1168,106 +1150,6 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                                       int32_t owner_category,
                                                       const char *resolution,
                                                       uint64_t *out_count);
-
-/**
- * Read `Probabilistic` metadata. Like `infrastore_store_get_forecast_metadata` but also
- * returns the percentiles vector in `*out_percentiles` (caller frees with
- * `infrastore_buffer_free_f64`), the units string via probe-then-fetch
- * (`out_units` / `out_units_len`; an empty string means unset), the
- * per-timestep element shape via probe-then-fetch (`out_element_shape` /
- * `out_element_shape_len`; length 0 means scalar elements), and the features
- * as a JSON object string via probe-then-fetch (`out_features_json` /
- * `out_features_json_len`; `{}` means no features).
- *
- * # Safety
- *
- * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
- * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
- * null-terminated UTF-8; `features_json` may be null. Scalar output pointers must each be valid for
- * one value, `out_data_hash` must be valid for 32 bytes, and `out_percentiles` must be valid for
- * writing one pointer. The returned percentile buffer must be released exactly once with
- * `infrastore_buffer_free_f64` using the returned length. The `out_units` and `out_features_json` caller
- * buffers, when non-null, must be valid for `units_cap` and `features_json_cap` bytes; the
- * `out_element_shape` buffer, when non-null, must be valid for `element_shape_cap` `u64` values;
- * every `*_len` out-pointer must be valid for one `u64`.
- */
-int32_t infrastore_store_get_probabilistic_metadata(const struct InfraStore *handle,
-                                                    int64_t owner_id,
-                                                    int32_t owner_category,
-                                                    const char *name,
-                                                    const char *resolution,
-                                                    const char *interval,
-                                                    const char *features_json,
-                                                    int64_t *out_initial_ts_unix_ms,
-                                                    char **out_resolution,
-                                                    char **out_horizon,
-                                                    char **out_interval,
-                                                    uint64_t *out_count,
-                                                    uint64_t *out_length,
-                                                    uint8_t *out_data_hash,
-                                                    double **out_percentiles,
-                                                    uint64_t *out_percentiles_len,
-                                                    char *out_units,
-                                                    uint64_t units_cap,
-                                                    uint64_t *out_units_len,
-                                                    uint64_t *out_element_shape,
-                                                    uint64_t element_shape_cap,
-                                                    uint64_t *out_element_shape_len,
-                                                    char *out_features_json,
-                                                    uint64_t features_json_cap,
-                                                    uint64_t *out_features_json_len);
-
-/**
- * Read forecast metadata by attributes. Out-params receive initial timestamp,
- * resolution, horizon, interval, count, the stored array length, the 32-byte
- * content hash (into `out_data_hash`), the extension payload and units
- * string via probe-then-fetch (`ext_buf` / `out_ext_len` and
- * `out_units` / `out_units_len`; an empty string means the field is unset),
- * the per-timestep element shape via probe-then-fetch (`out_element_shape` /
- * `out_element_shape_len`; length 0 means scalar elements), and the features
- * as a JSON object string via probe-then-fetch (`out_features_json` /
- * `out_features_json_len`; `{}` means no features).
- *
- * # Safety
- *
- * `handle` must be a live store handle. `owner_id` and `owner_category` (`0` =
- * Component, `1` = SupplementalAttribute) identify the owner. Required strings must be
- * null-terminated UTF-8; `features_json` may be null. `interval`, when non-null, is the
- * ISO-8601 forecast interval (part of the identity); pass null to leave it unconstrained.
- * Scalar output pointers must each be valid for
- * one value and `out_data_hash` must be valid for 32 bytes. The `ext_buf`, `out_units`,
- * and `out_features_json` caller buffers, when non-null, must be valid for `ext_cap`,
- * `units_cap`, and `features_json_cap` bytes; the `out_element_shape` buffer, when non-null, must
- * be valid for `element_shape_cap` `u64` values; every `*_len` out-pointer must be valid for one
- * `u64`.
- */
-int32_t infrastore_store_get_forecast_metadata(const struct InfraStore *handle,
-                                               int64_t owner_id,
-                                               int32_t owner_category,
-                                               const char *name,
-                                               int32_t ts_type,
-                                               const char *resolution,
-                                               const char *interval,
-                                               const char *features_json,
-                                               int64_t *out_initial_ts_unix_ms,
-                                               char **out_resolution,
-                                               char **out_horizon,
-                                               char **out_interval,
-                                               uint64_t *out_count,
-                                               uint64_t *out_length,
-                                               uint8_t *out_data_hash,
-                                               char *ext_buf,
-                                               uint64_t ext_cap,
-                                               uint64_t *out_ext_len,
-                                               char *out_units,
-                                               uint64_t units_cap,
-                                               uint64_t *out_units_len,
-                                               uint64_t *out_element_shape,
-                                               uint64_t element_shape_cap,
-                                               uint64_t *out_element_shape_len,
-                                               char *out_features_json,
-                                               uint64_t features_json_cap,
-                                               uint64_t *out_features_json_len);
 
 /**
  * Fetch a forecast by attributes and return the full data array plus metadata.
