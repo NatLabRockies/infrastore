@@ -1,0 +1,61 @@
+# Codecov configuration. See https://docs.codecov.com/docs/codecov-yaml.
+#
+# Two reports are uploaded from .github/workflows/test.yml, both from the Linux
+# leg of the test matrix:
+#
+#   rust  -- cargo llvm-cov over crates/*/src. The Rust, Python, and Julia
+#            suites all run under the same instrumentation, so this measures
+#            Rust exercised through every binding, not just `cargo test`.
+#   julia -- Coverage.jl over julia/InfraStore.jl/src, the wrapper's own code.
+#
+# Rust doctests are excluded: rustdoc does not go through RUSTC_WRAPPER, so they
+# execute uninstrumented.
+
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  precision: 2
+  round: down
+  range: "60...90"
+
+  status:
+    # Both start informational: they post the number and annotate the diff but
+    # never fail the check. Flip `informational` off once a few PRs have shown
+    # what the patch numbers actually look like on this repo.
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: 80%
+        informational: true
+
+# Line-level annotations in the PR's Files changed tab, marking statements the
+# suites never reached. Scoped to the diff, so untested code elsewhere does not
+# bury the review.
+github_checks:
+  annotations: true
+
+comment:
+  layout: "header, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+flags:
+  rust:
+    paths:
+      - crates/
+    carryforward: false
+  julia:
+    paths:
+      - julia/InfraStore.jl/src/
+    carryforward: false
+
+ignore:
+  - "target/"
+  - "**/tests/"
+  - "python/tests/"
+  - "julia/InfraStore.jl/test/"
