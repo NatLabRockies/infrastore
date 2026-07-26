@@ -236,11 +236,17 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * `*out_shape` with `infrastore_buffer_free_i64` and `*out_data` with
  * `infrastore_buffer_free_u8`, each using its returned length.
  *
+ * `out_ext`, when non-null, receives the association's opaque extension payload
+ * from the metadata row: null when the series carries no `ext`, otherwise an
+ * owned C string the caller must free with `infrastore_string_free`. Pass a
+ * null `out_ext` to skip the metadata lookup entirely.
+ *
  * # Safety
  *
- * `handle` and `key` must be live handles created by this library. Every output pointer must be
- * valid for writing its indicated value. The returned shape and data buffers must each be released
- * exactly once with the matching free function and returned length.
+ * `handle` and `key` must be live handles created by this library. Every output pointer except
+ * `out_ext` must be valid for writing its indicated value; `out_ext` may be null. The returned
+ * shape and data buffers must each be released exactly once with the matching free function and
+ * returned length, and a non-null `*out_ext` exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     const struct InfraStoreKey *key,
@@ -253,7 +259,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     int64_t **out_shape,
                                     uint64_t *out_shape_len,
                                     uint8_t **out_data,
-                                    uint64_t *out_data_byte_len);
+                                    uint64_t *out_data_byte_len,
+                                    char **out_ext);
 
 /**
  * Fetch a NonSequentialTimeSeries by key.
@@ -1175,6 +1182,11 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *   non-NULL only for `Probabilistic`; free with
  *   `infrastore_buffer_free_f64(*out_percentiles, *out_percentiles_len)`.
  *
+ * `out_ext`, when non-null, receives the association's opaque `ext` payload
+ * from the metadata row: null when unset, otherwise an owned C string the
+ * caller must free with `infrastore_string_free`. Pass a null `out_ext` to
+ * skip the metadata lookup entirely.
+ *
  * **Optional time-range / window selection:** when `time_range_present` is
  * `true`, only the windows whose start timestamp falls in
  * `[time_range_start_ms, time_range_end_ms)` are returned. Pass
@@ -1202,6 +1214,9 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
  *   to 0, so no free is needed. When non-null it must be freed exactly once
  *   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+ * - `out_ext` may be null (the metadata lookup is skipped); when non-null it
+ *   must be valid for writing one pointer, and a non-null `*out_ext` must be
+ *   freed exactly once with `infrastore_string_free`.
  * - All returned heap buffers are invalidated after their matching free call
  *   and must not be used afterwards.
  */
@@ -1229,7 +1244,8 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                                       uint64_t *out_data_byte_len,
                                       double **out_percentiles,
                                       uint64_t *out_percentiles_len,
-                                      int32_t *out_matched_type);
+                                      int32_t *out_matched_type,
+                                      char **out_ext);
 
 /**
  * Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
@@ -1255,6 +1271,9 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
  *   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
  *   to 0, so no free is needed. When non-null it must be freed exactly once
  *   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+ * - `out_ext` may be null (the metadata lookup is skipped); when non-null it
+ *   must be valid for writing one pointer, and a non-null `*out_ext` must be
+ *   freed exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle,
                                              const struct InfraStoreKey *key,
@@ -1274,7 +1293,8 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle,
                                              uint64_t *out_data_byte_len,
                                              double **out_percentiles,
                                              uint64_t *out_percentiles_len,
-                                             int32_t *out_matched_type);
+                                             int32_t *out_matched_type,
+                                             char **out_ext);
 
 /**
  * Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,
@@ -1337,6 +1357,8 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  * - `time_series_type` (the `INFRASTORE_TYPE_*` code)
  * - `name` (null = no name filter)
  * - `resolution` (empty/null = no resolution filter)
+ * - `interval` (empty/null = no interval filter; forecasts only — static rows
+ *   have no interval and never match an interval filter)
  * - `features_json` (a JSON object; null or empty = no feature filter; matches as
  *   a subset, i.e. a key whose features include all the given ones)
  *
@@ -1361,6 +1383,7 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    int32_t time_series_type,
                                    const char *name,
                                    const char *resolution,
+                                   const char *interval,
                                    const char *features_json,
                                    char *buf,
                                    uint64_t cap,
@@ -1385,6 +1408,7 @@ int32_t infrastore_store_list_time_series(const struct InfraStore *handle,
                                           int32_t time_series_type,
                                           const char *name,
                                           const char *resolution,
+                                          const char *interval,
                                           const char *features_json,
                                           char *buf,
                                           uint64_t cap,
@@ -1408,6 +1432,7 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     int32_t time_series_type,
                                     const char *name,
                                     const char *resolution,
+                                    const char *interval,
                                     const char *features_json,
                                     char *buf,
                                     uint64_t cap,
@@ -1431,6 +1456,7 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           int32_t time_series_type,
                                           const char *name,
                                           const char *resolution,
+                                          const char *interval,
                                           const char *features_json,
                                           char *buf,
                                           uint64_t cap,
@@ -1455,6 +1481,7 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           int32_t time_series_type,
                                           const char *name,
                                           const char *resolution,
+                                          const char *interval,
                                           const char *features_json,
                                           uint64_t *out_removed);
 
@@ -1533,6 +1560,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            int32_t time_series_type,
                                            const char *name,
                                            const char *resolution,
+                                           const char *interval,
                                            const char *features_json,
                                            char *buf,
                                            uint64_t cap,
@@ -1588,26 +1616,6 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
                                   char *features_buf,
                                   uint64_t features_cap,
                                   uint64_t *out_features_len);
-
-/**
- * Read an association's `name` by key, resolved through the stored metadata
- * (`Store::get_metadata`). This surfaces the per-association `name` that is not
- * carried on the key itself — the read path uses it to populate the returned
- * time series object.
- *
- * `name` uses the probe-then-fetch convention (see [`infrastore_key_attributes`]).
- *
- * # Safety
- *
- * `handle` and `key` must be live handles created by this library.
- * `out_name_len` must be valid for writing one `u64`. `name_buf` may be null;
- * when non-null it must be valid for writing `name_cap` bytes.
- */
-int32_t infrastore_store_get_association(const struct InfraStore *handle,
-                                         const struct InfraStoreKey *key,
-                                         char *name_buf,
-                                         uint64_t name_cap,
-                                         uint64_t *out_name_len);
 
 /**
  * Release a `u64` dims buffer returned by `infrastore_store_get_forecast`.

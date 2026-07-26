@@ -716,11 +716,17 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// `*out_shape` with `infrastore_buffer_free_i64` and `*out_data` with
 /// `infrastore_buffer_free_u8`, each using its returned length.
 ///
+/// `out_ext`, when non-null, receives the association's opaque extension payload
+/// from the metadata row: null when the series carries no `ext`, otherwise an
+/// owned C string the caller must free with `infrastore_string_free`. Pass a
+/// null `out_ext` to skip the metadata lookup entirely.
+///
 /// # Safety
 ///
-/// `handle` and `key` must be live handles created by this library. Every output pointer must be
-/// valid for writing its indicated value. The returned shape and data buffers must each be released
-/// exactly once with the matching free function and returned length.
+/// `handle` and `key` must be live handles created by this library. Every output pointer except
+/// `out_ext` must be valid for writing its indicated value; `out_ext` may be null. The returned
+/// shape and data buffers must each be released exactly once with the matching free function and
+/// returned length, and a non-null `*out_ext` exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_single(
@@ -736,6 +742,7 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
+    out_ext: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -793,6 +800,16 @@ pub unsafe extern "C" fn infrastore_store_get_single(
             return INFRASTORE_ERR_INTEGRITY;
         }
     };
+    // The extension payload lives on the metadata row, not on the reconstructed
+    // series; a null `out_ext` skips the lookup.
+    let ext_cstr = if out_ext.is_null() {
+        std::ptr::null_mut()
+    } else {
+        match store.inner.get_metadata(&key.inner) {
+            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
+            Err(error) => return map_core_error(error),
+        }
+    };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
@@ -813,6 +830,9 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_len;
+        if !out_ext.is_null() {
+            *out_ext = ext_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -3481,6 +3501,11 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ///   non-NULL only for `Probabilistic`; free with
 ///   `infrastore_buffer_free_f64(*out_percentiles, *out_percentiles_len)`.
 ///
+/// `out_ext`, when non-null, receives the association's opaque `ext` payload
+/// from the metadata row: null when unset, otherwise an owned C string the
+/// caller must free with `infrastore_string_free`. Pass a null `out_ext` to
+/// skip the metadata lookup entirely.
+///
 /// **Optional time-range / window selection:** when `time_range_present` is
 /// `true`, only the windows whose start timestamp falls in
 /// `[time_range_start_ms, time_range_end_ms)` are returned. Pass
@@ -3508,6 +3533,9 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 ///   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
 ///   to 0, so no free is needed. When non-null it must be freed exactly once
 ///   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+/// - `out_ext` may be null (the metadata lookup is skipped); when non-null it
+///   must be valid for writing one pointer, and a non-null `*out_ext` must be
+///   freed exactly once with `infrastore_string_free`.
 /// - All returned heap buffers are invalidated after their matching free call
 ///   and must not be used afterwards.
 #[unsafe(no_mangle)]
@@ -3544,6 +3572,10 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     // the concrete type that was matched (e.g. an AbstractDeterministic request
     // resolves to 2=Deterministic or 3=DeterministicSingleTimeSeries)
     out_matched_type: *mut i32,
+    // optional: the association's opaque `ext` payload (owned C string, freed
+    // with `infrastore_string_free`; null when unset). Pass null to skip the
+    // metadata lookup.
+    out_ext: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -3629,7 +3661,17 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
-    unsafe {
+    // The association's `ext` payload lives on the metadata row; a null
+    // `out_ext` skips the lookup.
+    let ext_cstr = if out_ext.is_null() {
+        std::ptr::null_mut()
+    } else {
+        match store.inner.get_metadata(key.identity()) {
+            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
+            Err(error) => return map_core_error(error),
+        }
+    };
+    let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
             data,
@@ -3647,7 +3689,16 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
             out_percentiles,
             out_percentiles_len,
         )
+    };
+    if code == INFRASTORE_OK {
+        if !out_ext.is_null() {
+            unsafe { *out_ext = ext_cstr };
+        }
+    } else if !ext_cstr.is_null() {
+        // Don't leak the ext string when the emit fails after the metadata fetch.
+        unsafe { drop(std::ffi::CString::from_raw(ext_cstr)) };
     }
+    code
 }
 
 /// Shared emitter: write a forecast `TimeSeriesData` value into the C out-params
@@ -3827,6 +3878,9 @@ unsafe fn emit_forecast_data(
 ///   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
 ///   to 0, so no free is needed. When non-null it must be freed exactly once
 ///   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
+/// - `out_ext` may be null (the metadata lookup is skipped); when non-null it
+///   must be valid for writing one pointer, and a non-null `*out_ext` must be
+///   freed exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
@@ -3851,6 +3905,10 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     // the concrete type read (taken from the key; provided for symmetry with
     // `infrastore_store_get_forecast`)
     out_matched_type: *mut i32,
+    // optional: the association's opaque `ext` payload (owned C string, freed
+    // with `infrastore_string_free`; null when unset). Pass null to skip the
+    // metadata lookup.
+    out_ext: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -3911,7 +3969,17 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
         Ok(d) => d,
         Err(e) => return map_core_error(e),
     };
-    unsafe {
+    // The association's `ext` payload lives on the metadata row; a null
+    // `out_ext` skips the lookup.
+    let ext_cstr = if out_ext.is_null() {
+        std::ptr::null_mut()
+    } else {
+        match store.inner.get_metadata(&key.inner) {
+            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
+            Err(error) => return map_core_error(error),
+        }
+    };
+    let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
             data,
@@ -3929,7 +3997,16 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
             out_percentiles,
             out_percentiles_len,
         )
+    };
+    if code == INFRASTORE_OK {
+        if !out_ext.is_null() {
+            unsafe { *out_ext = ext_cstr };
+        }
+    } else if !ext_cstr.is_null() {
+        // Don't leak the ext string when the emit fails after the metadata fetch.
+        unsafe { drop(std::ffi::CString::from_raw(ext_cstr)) };
     }
+    code
 }
 
 /// Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,
@@ -4246,6 +4323,8 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// - `time_series_type` (the `INFRASTORE_TYPE_*` code)
 /// - `name` (null = no name filter)
 /// - `resolution` (empty/null = no resolution filter)
+/// - `interval` (empty/null = no interval filter; forecasts only — static rows
+///   have no interval and never match an interval filter)
 /// - `features_json` (a JSON object; null or empty = no feature filter; matches as
 ///   a subset, i.e. a key whose features include all the given ones)
 ///
@@ -4272,6 +4351,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
@@ -4293,6 +4373,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
             time_series_type,
             name,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4328,6 +4409,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
@@ -4349,6 +4431,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
             time_series_type,
             name,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4387,6 +4470,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
@@ -4408,6 +4492,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
             time_series_type,
             name,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4442,6 +4527,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
@@ -4463,6 +4549,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
             time_series_type,
             name,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4498,6 +4585,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     out_removed: *mut u64,
 ) -> i32 {
@@ -4517,6 +4605,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             time_series_type,
             name,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4674,7 +4763,8 @@ pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
 /// # Safety
 ///
 /// `name` and `features_json` must each be null or a null-terminated UTF-8
-/// string; `resolution` must be null or a null-terminated ISO-8601 period.
+/// string; `resolution` and `interval` must each be null or a null-terminated
+/// ISO-8601 period.
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_list_filter(
     has_owner: bool,
@@ -4685,6 +4775,7 @@ unsafe fn build_list_filter(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
 ) -> std::result::Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
@@ -4724,6 +4815,11 @@ unsafe fn build_list_filter(
         Ok(None) => {}
         Err(c) => return Err(c),
     }
+    match unsafe { cstr_to_optional_period(interval) } {
+        Ok(Some(p)) => filter = filter.interval(p),
+        Ok(None) => {}
+        Err(c) => return Err(c),
+    }
     let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
         filter = filter.features(features);
@@ -4758,6 +4854,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
     time_series_type: i32,
     name: *const c_char,
     resolution: *const c_char,
+    interval: *const c_char,
     features_json: *const c_char,
     buf: *mut c_char,
     cap: u64,
@@ -4779,6 +4876,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
             time_series_type,
             name,
             resolution,
+            interval,
             features_json,
         )
     } {
@@ -4903,55 +5001,6 @@ pub unsafe extern "C" fn infrastore_key_attributes(
             features_cap,
             out_features_len,
         );
-    }
-    INFRASTORE_OK
-}
-
-/// Read an association's `name` by key, resolved through the stored metadata
-/// (`Store::get_metadata`). This surfaces the per-association `name` that is not
-/// carried on the key itself — the read path uses it to populate the returned
-/// time series object.
-///
-/// `name` uses the probe-then-fetch convention (see [`infrastore_key_attributes`]).
-///
-/// # Safety
-///
-/// `handle` and `key` must be live handles created by this library.
-/// `out_name_len` must be valid for writing one `u64`. `name_buf` may be null;
-/// when non-null it must be valid for writing `name_cap` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_get_association(
-    handle: *const InfraStoreHandle,
-    key: *const InfraStoreKeyHandle,
-    name_buf: *mut c_char,
-    name_cap: u64,
-    out_name_len: *mut u64,
-) -> i32 {
-    clear_error();
-    let store = match unsafe { handle.as_ref() } {
-        Some(s) => s,
-        None => {
-            set_error("store handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    let key = match unsafe { key.as_ref() } {
-        Some(k) => k,
-        None => {
-            set_error("key handle is null");
-            return INFRASTORE_ERR_NULL_POINTER;
-        }
-    };
-    if out_name_len.is_null() {
-        set_error("an out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let meta = match store.inner.get_metadata(&key.inner) {
-        Ok(m) => m,
-        Err(e) => return map_core_error(e),
-    };
-    unsafe {
-        write_str_out(&meta.name, name_buf, name_cap, out_name_len);
     }
     INFRASTORE_OK
 }
@@ -7299,6 +7348,7 @@ mod reader_ffi_tests {
                     &mut shape_len,
                     &mut data_ptr,
                     &mut data_len,
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -7589,6 +7639,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_OK, "get_single failed: {}", last_error());
@@ -7839,6 +7890,7 @@ mod abi_tests {
                     0,
                     false,
                     0,
+                    ptr::null(),
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
@@ -8125,6 +8177,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_NOT_FOUND);

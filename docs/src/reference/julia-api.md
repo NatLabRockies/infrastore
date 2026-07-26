@@ -228,15 +228,8 @@ per resolution present) — the same concept, so the same type.
 ```julia
 add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::SingleTimeSeries;
+    ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
     features::AbstractDict = Dict(), units = nothing,
-    ext = ts.ext,
-) -> TimeSeriesKey
-
-add_time_series!(
-    store::Store, owner_id, owner_type, owner_category::OwnerCategory,
-    ts::NonSequentialTimeSeries;
-    features = Dict(), units = nothing,
     ext = ts.ext,
 ) -> TimeSeriesKey
 
@@ -253,6 +246,8 @@ get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name;
 ```
 
 `time_range = (start::DateTime, stop::DateTime)` (exclusive end) slices the read on every form.
+Every read populates the returned struct's `ext` field from the stored association, so a binding's
+reconstruction tag comes back with the data — no separate `get_metadata` call is needed.
 
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
@@ -317,6 +312,11 @@ remove_time_series!(store, owner_id, owner_category::OwnerCategory, name;
 `owner_category` (`Component` / `SupplementalAttribute`) is required: the owner identity is the pair
 `(owner_id, owner_category)`, so a component and a supplemental attribute may share a numeric
 `owner_id` and remain distinct.
+
+`remove_time_series!` refuses to remove a `SingleTimeSeries` whose array still backs a
+`DeterministicSingleTimeSeries` when it is the last backing series (the DST is a view of that
+array); it raises `InvalidParameterError` — remove the derived forecast first, or use an
+owner-scoped `clear!`, which is exempt.
 
 `get_metadata` returns the whole [`TimeSeriesMetadata`](#result-types) record — every stored type
 through the one function — and throws `NotFoundError` if absent. The attribute form takes the type
@@ -663,7 +663,8 @@ num_distinct_arrays(store) -> Int   # distinct content hashes; shared arrays cou
 time_series_counts(store) -> TimeSeriesCountsDetailed   # distinct owners per category + distinct arrays per kind
 list_owner_ids(store, owner_category; time_series_type=nothing, resolution=nothing) -> Vector{Int}
 list_array_groups(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                  name=nothing, resolution=nothing, features=Dict()) -> Vector{ArrayGroupRow}
+                  name=nothing, resolution=nothing, interval=nothing,
+                  features=Dict()) -> Vector{ArrayGroupRow}
                                   # list_keys rows + `data_hash`; group by it to find shared arrays
 count_array_references(store, data_hash::Vector{UInt8}) -> ArrayReferenceCounts  # (sts, dst) refs to a 32-byte hash
 static_summary(store) -> Vector{StaticSummaryRow}   # grouped static rows with a `count`; build your own table
@@ -687,12 +688,12 @@ close!(store) -> Nothing
 
 ```julia
 list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, features=Dict()) -> Vector{KeyRow}
+          name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Vector{KeyRow}
 ```
 
 `list_keys` lists the key of every stored series as `KeyRow` structs (identity plus the per-type
 descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
-`features`; fields that do not apply to a key's type are `nothing`). All six filters are optional
+`features`; fields that do not apply to a key's type are `nothing`). All seven filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
@@ -701,12 +702,14 @@ and independent, and combine as a conjunction; with none set the whole store is 
   `AbstractDeterministic` is rejected: filter on `Deterministic` or `DeterministicSingleTimeSeries`.
 - `name` — exact association name.
 - `resolution` — a `Period`.
+- `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval
+  filter).
 - `features` — match keys whose features include all the given entries (subset match).
 
 Physical storage detail (`data_hash`, `dtype`, `ext`, `percentiles`) is not on a key — read it via
 `get_metadata` / `list_time_series`.
 
-`list_array_groups` takes the same six filters and returns the same row fields as `list_keys`, but
+`list_array_groups` takes the same seven filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves
 to (a `Vector{UInt8}` hashes and compares by content, so it groups directly as a `Dict` key). Rows
 that share a stored array share their `data_hash`: both deduplicated identical arrays and a
