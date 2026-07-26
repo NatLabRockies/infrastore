@@ -43,18 +43,18 @@ struct TimeSeriesMetadata
     time_series_type::Type
     name::String
     data_hash::Vector{UInt8}
-    initial_timestamp::Union{Nothing,DateTime}
-    resolution::Union{Nothing,Period}
-    horizon::Union{Nothing,Period}
-    interval::Union{Nothing,Period}
-    count::Union{Nothing,Int}
-    length::Union{Nothing,Int}
-    percentiles::Union{Nothing,Vector{Float64}}
+    initial_timestamp::Union{Nothing, DateTime}
+    resolution::Union{Nothing, Period}
+    horizon::Union{Nothing, Period}
+    interval::Union{Nothing, Period}
+    count::Union{Nothing, Int}
+    length::Union{Nothing, Int}
+    percentiles::Union{Nothing, Vector{Float64}}
     dtype::Type
     element_shape::Tuple{Vararg{Int}}
-    features::Dict{String,Any}
-    units::Union{Nothing,String}
-    ext::Union{Nothing,String}
+    features::Dict{String, Any}
+    units::Union{Nothing, String}
+    ext::Union{Nothing, String}
 end
 
 """
@@ -69,8 +69,8 @@ struct KeyInfo
     owner_category::OwnerCategory
     name::String
     time_series_type::Type
-    resolution::Union{Nothing,Period}
-    features::Dict{String,Any}
+    resolution::Union{Nothing, Period}
+    features::Dict{String, Any}
 end
 
 """
@@ -90,13 +90,13 @@ struct KeyRow
     owner_category::OwnerCategory
     time_series_type::Type
     name::String
-    initial_timestamp::Union{Nothing,DateTime}
-    resolution::Union{Nothing,Period}
-    length::Union{Nothing,Int}
-    horizon::Union{Nothing,Period}
-    interval::Union{Nothing,Period}
-    count::Union{Nothing,Int}
-    features::Dict{String,Any}
+    initial_timestamp::Union{Nothing, DateTime}
+    resolution::Union{Nothing, Period}
+    length::Union{Nothing, Int}
+    horizon::Union{Nothing, Period}
+    interval::Union{Nothing, Period}
+    count::Union{Nothing, Int}
+    features::Dict{String, Any}
 end
 
 """
@@ -113,13 +113,13 @@ struct ArrayGroupRow
     owner_category::OwnerCategory
     time_series_type::Type
     name::String
-    initial_timestamp::Union{Nothing,DateTime}
-    resolution::Union{Nothing,Period}
-    length::Union{Nothing,Int}
-    horizon::Union{Nothing,Period}
-    interval::Union{Nothing,Period}
-    count::Union{Nothing,Int}
-    features::Dict{String,Any}
+    initial_timestamp::Union{Nothing, DateTime}
+    resolution::Union{Nothing, Period}
+    length::Union{Nothing, Int}
+    horizon::Union{Nothing, Period}
+    interval::Union{Nothing, Period}
+    count::Union{Nothing, Int}
+    features::Dict{String, Any}
     data_hash::Vector{UInt8}
 end
 
@@ -182,9 +182,9 @@ struct StaticSummaryRow
     owner_category::OwnerCategory
     time_series_type::Type
     name::String
-    initial_timestamp::Union{Nothing,DateTime}
-    resolution::Union{Nothing,Period}
-    time_step_count::Union{Nothing,Int}
+    initial_timestamp::Union{Nothing, DateTime}
+    resolution::Union{Nothing, Period}
+    time_step_count::Union{Nothing, Int}
     count::Int
 end
 
@@ -201,11 +201,11 @@ struct ForecastSummaryRow
     owner_category::OwnerCategory
     time_series_type::Type
     name::String
-    initial_timestamp::Union{Nothing,DateTime}
-    resolution::Union{Nothing,Period}
-    horizon::Union{Nothing,Period}
-    interval::Union{Nothing,Period}
-    window_count::Union{Nothing,Int}
+    initial_timestamp::Union{Nothing, DateTime}
+    resolution::Union{Nothing, Period}
+    horizon::Union{Nothing, Period}
+    interval::Union{Nothing, Period}
+    window_count::Union{Nothing, Int}
     count::Int
 end
 
@@ -239,11 +239,11 @@ The store's forecast configuration, from [`get_forecast_parameters`](@ref).
 Every field is `nothing` when no forecast matches the query.
 """
 struct ForecastParameters
-    horizon::Union{Nothing,Period}
-    interval::Union{Nothing,Period}
-    count::Union{Nothing,Int}
-    resolution::Union{Nothing,Period}
-    initial_timestamp::Union{Nothing,DateTime}
+    horizon::Union{Nothing, Period}
+    interval::Union{Nothing, Period}
+    count::Union{Nothing, Int}
+    resolution::Union{Nothing, Period}
+    initial_timestamp::Union{Nothing, DateTime}
 end
 
 """

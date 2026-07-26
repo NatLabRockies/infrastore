@@ -17,7 +17,7 @@ mutable struct AddBatch
     handle::Ptr{Cvoid}
     count::Int
     function AddBatch()
-        handle = ccall((:infrastore_batch_new, lib_path()), Ptr{Cvoid}, ())
+        handle = @ccall lib_path().infrastore_batch_new()::Ptr{Cvoid}
         batch = new(handle, 0)
         finalizer(_finalize_batch, batch)
         return batch
@@ -26,7 +26,7 @@ end
 
 function _finalize_batch(b::AddBatch)
     if b.handle != C_NULL
-        ccall((:infrastore_batch_free, lib_path()), Cvoid, (Ptr{Cvoid},), b.handle)
+        @ccall lib_path().infrastore_batch_free(b.handle::Ptr{Cvoid})::Cvoid
         b.handle = C_NULL
     end
     return nothing
@@ -42,49 +42,30 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::SingleTimeSeries;
-    features::AbstractDict=Dict{String,Any}(),
-    units::Union{Nothing,AbstractString}=nothing,
-    ext::Union{Nothing,AbstractString}=ts.ext,
+    features::AbstractDict=Dict{String, Any}(),
+    units::Union{Nothing, AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=ts.ext,
 )
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
-    code = ccall(
-        (:infrastore_batch_add_single, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Cstring,
-            Int32,
-            Cstring,
-            Int64,
-            Cstring,
-            Int32,
-            UInt64,
-            Ptr{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Cstring,
-            Cstring,
-            Cstring,
-        ),
-        batch.handle,
-        Int64(owner_id),
-        owner_type,
-        _category_int(owner_category),
-        ts.name,
-        _to_unix_ms(ts.initial_timestamp),
-        _period_to_iso(ts.resolution),
-        dtype,
-        UInt64(length(dims)),
-        dims,
-        bytes,
-        UInt64(length(bytes)),
-        _opt_string_arg(ext),
-        _features_arg(features),
-        _opt_string_arg(units),
-    )
+    code = @ccall lib_path().infrastore_batch_add_single(
+        batch.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        owner_type::Cstring,
+        _category_int(owner_category)::Int32,
+        ts.name::Cstring,
+        _to_unix_ms(ts.initial_timestamp)::Int64,
+        _period_to_iso(ts.resolution)::Cstring,
+        dtype::Int32,
+        UInt64(length(dims))::UInt64,
+        dims::Ptr{UInt64},
+        bytes::Ptr{UInt8},
+        UInt64(length(bytes))::UInt64,
+        _opt_string_arg(ext)::Cstring,
+        _features_arg(features)::Cstring,
+        _opt_string_arg(units)::Cstring,
+    )::Int32
     _check(code)
     batch.count += 1
     return batch
@@ -96,50 +77,31 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
-    features::AbstractDict=Dict{String,Any}(),
-    units::Union{Nothing,AbstractString}=nothing,
-    ext::Union{Nothing,AbstractString}=ts.ext,
+    features::AbstractDict=Dict{String, Any}(),
+    units::Union{Nothing, AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=ts.ext,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
-    code = ccall(
-        (:infrastore_batch_add_non_sequential, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Cstring,
-            Int32,
-            Cstring,
-            Ptr{Int64},
-            UInt64,
-            Int32,
-            UInt64,
-            Ptr{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Cstring,
-            Cstring,
-            Cstring,
-        ),
-        batch.handle,
-        Int64(owner_id),
-        owner_type,
-        _category_int(owner_category),
-        ts.name,
-        timestamps,
-        UInt64(length(timestamps)),
-        dtype,
-        UInt64(length(dims)),
-        dims,
-        bytes,
-        UInt64(length(bytes)),
-        _opt_string_arg(ext),
-        _features_arg(features),
-        _opt_string_arg(units),
-    )
+    code = @ccall lib_path().infrastore_batch_add_non_sequential(
+        batch.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        owner_type::Cstring,
+        _category_int(owner_category)::Int32,
+        ts.name::Cstring,
+        timestamps::Ptr{Int64},
+        UInt64(length(timestamps))::UInt64,
+        dtype::Int32,
+        UInt64(length(dims))::UInt64,
+        dims::Ptr{UInt64},
+        bytes::Ptr{UInt8},
+        UInt64(length(bytes))::UInt64,
+        _opt_string_arg(ext)::Cstring,
+        _features_arg(features)::Cstring,
+        _opt_string_arg(units)::Cstring,
+    )::Int32
     _check(code)
     batch.count += 1
     return batch
@@ -151,9 +113,9 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::Deterministic;
-    features::AbstractDict=Dict{String,Any}(),
-    units::Union{Nothing,AbstractString}=nothing,
-    ext::Union{Nothing,AbstractString}=ts.ext,
+    features::AbstractDict=Dict{String, Any}(),
+    units::Union{Nothing, AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=ts.ext,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -180,9 +142,9 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::Scenarios;
-    features::AbstractDict=Dict{String,Any}(),
-    units::Union{Nothing,AbstractString}=nothing,
-    ext::Union{Nothing,AbstractString}=ts.ext,
+    features::AbstractDict=Dict{String, Any}(),
+    units::Union{Nothing, AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=ts.ext,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -216,57 +178,34 @@ function _batch_add_dense_forecast!(
     interval::Period,
     count::Integer,
     data::AbstractArray;
-    features::AbstractDict=Dict{String,Any}(),
-    units::Union{Nothing,AbstractString}=nothing,
-    ext::Union{Nothing,AbstractString}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
+    units::Union{Nothing, AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=nothing,
 )
     dtype = _dtype_code(eltype(data))
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
-    code = ccall(
-        (:infrastore_batch_add_forecast, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Cstring,
-            Int32,
-            Cstring,
-            Int32,
-            Int64,
-            Cstring,
-            Cstring,
-            Cstring,
-            UInt64,
-            Int32,
-            UInt64,
-            Ptr{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Cstring,
-            Cstring,
-            Cstring,
-        ),
-        batch.handle,
-        Int64(owner_id),
-        owner_type,
-        _category_int(owner_category),
-        name,
-        Int32(ts_type),
-        _to_unix_ms(initial_timestamp),
-        _period_to_iso(resolution),
-        _period_to_iso(horizon),
-        _period_to_iso(interval),
-        UInt64(count),
-        dtype,
-        UInt64(length(dims)),
-        dims,
-        bytes,
-        UInt64(length(bytes)),
-        _opt_string_arg(ext),
-        _features_arg(features),
-        _opt_string_arg(units),
-    )
+    code = @ccall lib_path().infrastore_batch_add_forecast(
+        batch.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        owner_type::Cstring,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        Int32(ts_type)::Int32,
+        _to_unix_ms(initial_timestamp)::Int64,
+        _period_to_iso(resolution)::Cstring,
+        _period_to_iso(horizon)::Cstring,
+        _period_to_iso(interval)::Cstring,
+        UInt64(count)::UInt64,
+        dtype::Int32,
+        UInt64(length(dims))::UInt64,
+        dims::Ptr{UInt64},
+        bytes::Ptr{UInt8},
+        UInt64(length(bytes))::UInt64,
+        _opt_string_arg(ext)::Cstring,
+        _features_arg(features)::Cstring,
+        _opt_string_arg(units)::Cstring,
+    )::Int32
     _check(code)
     batch.count += 1
     return batch
@@ -278,59 +217,35 @@ function add_time_series!(
     owner_type::AbstractString,
     owner_category::OwnerCategory,
     ts::Probabilistic;
-    features::AbstractDict=Dict{String,Any}(),
-    units::Union{Nothing,AbstractString}=nothing,
-    ext::Union{Nothing,AbstractString}=ts.ext,
+    features::AbstractDict=Dict{String, Any}(),
+    units::Union{Nothing, AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=ts.ext,
 )
     dtype = _dtype_code(eltype(ts.data))
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
-    code = ccall(
-        (:infrastore_batch_add_probabilistic, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Cstring,
-            Int32,
-            Cstring,
-            Int64,
-            Cstring,
-            Cstring,
-            Cstring,
-            UInt64,
-            Ptr{Float64},
-            UInt64,
-            Int32,
-            UInt64,
-            Ptr{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Cstring,
-            Cstring,
-            Cstring,
-        ),
-        batch.handle,
-        Int64(owner_id),
-        owner_type,
-        _category_int(owner_category),
-        ts.name,
-        _to_unix_ms(ts.initial_timestamp),
-        _period_to_iso(ts.resolution),
-        _period_to_iso(ts.horizon),
-        _period_to_iso(ts.interval),
-        UInt64(ts.count),
-        ts.percentiles,
-        UInt64(length(ts.percentiles)),
-        dtype,
-        UInt64(length(dims)),
-        dims,
-        bytes,
-        UInt64(length(bytes)),
-        _opt_string_arg(ext),
-        _features_arg(features),
-        _opt_string_arg(units),
-    )
+    code = @ccall lib_path().infrastore_batch_add_probabilistic(
+        batch.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        owner_type::Cstring,
+        _category_int(owner_category)::Int32,
+        ts.name::Cstring,
+        _to_unix_ms(ts.initial_timestamp)::Int64,
+        _period_to_iso(ts.resolution)::Cstring,
+        _period_to_iso(ts.horizon)::Cstring,
+        _period_to_iso(ts.interval)::Cstring,
+        UInt64(ts.count)::UInt64,
+        ts.percentiles::Ptr{Float64},
+        UInt64(length(ts.percentiles))::UInt64,
+        dtype::Int32,
+        UInt64(length(dims))::UInt64,
+        dims::Ptr{UInt64},
+        bytes::Ptr{UInt8},
+        UInt64(length(bytes))::UInt64,
+        _opt_string_arg(ext)::Cstring,
+        _features_arg(features)::Cstring,
+        _opt_string_arg(units)::Cstring,
+    )::Int32
     _check(code)
     batch.count += 1
     return batch
@@ -346,15 +261,12 @@ nothing was committed and the batch is left empty.
 function add_time_series_bulk!(store::Store, batch::AddBatch)
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_add_batch, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
-        store.handle,
-        batch.handle,
-        out_keys,
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_add_batch(
+        store.handle::Ptr{Cvoid},
+        batch.handle::Ptr{Cvoid},
+        out_keys::Ref{Ptr{Ptr{Cvoid}}},
+        out_len::Ref{UInt64},
+    )::Int32
     batch.count = 0
     _check(code)
     n = Int(out_len[])
@@ -366,13 +278,9 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
         for i in 1:n
             keys[i] = TimeSeriesKey(raw[i])
         end
-        ccall(
-            (:infrastore_keys_buffer_free, lib_path()),
-            Cvoid,
-            (Ptr{Ptr{Cvoid}}, UInt64),
-            out_keys[],
-            out_len[],
-        )
+        @ccall lib_path().infrastore_keys_buffer_free(
+            out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
+        )::Cvoid
     end
     return keys
 end

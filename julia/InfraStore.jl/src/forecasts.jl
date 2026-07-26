@@ -35,23 +35,20 @@ function transform_single_time_series!(
     store::Store,
     horizon::Period,
     interval::Period;
-    owner_category::Union{Nothing,OwnerCategory}=nothing,
-    resolution::Union{Nothing,Period}=nothing,
+    owner_category::Union{Nothing, OwnerCategory}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
 )
     cat = owner_category === nothing ? Int32(-1) : Int32(Int(owner_category))
     res_iso = _period_to_cstr(resolution)
     out_count = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_transform_single_time_series, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Cstring, Cstring, Int32, Cstring, Ref{UInt64}),
-        store.handle,
-        _period_to_iso(horizon),
-        _period_to_iso(interval),
-        cat,
-        res_iso,
-        out_count,
-    )
+    code = @ccall lib_path().infrastore_store_transform_single_time_series(
+        store.handle::Ptr{Cvoid},
+        _period_to_iso(horizon)::Cstring,
+        _period_to_iso(interval)::Cstring,
+        cat::Int32,
+        res_iso::Cstring,
+        out_count::Ref{UInt64},
+    )::Int32
     _check(code)
     return Int(out_count[])
 end
@@ -70,28 +67,25 @@ function has_time_series(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
-    code = ccall(
-        (:infrastore_store_has_typed, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Bool}),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        Int32(_type_code(T)),
-        resolution_iso,
-        interval_iso,
-        features_json,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_has_typed(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        Int32(_type_code(T))::Int32,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        out::Ref{Bool},
+    )::Int32
     _check(code)
     return out[]
 end
@@ -110,26 +104,23 @@ function remove_time_series!(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
-    code = ccall(
-        (:infrastore_store_remove_typed, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        Int32(_type_code(T)),
-        resolution_iso,
-        interval_iso,
-        features_json,
-    )
+    code = @ccall lib_path().infrastore_store_remove_typed(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        Int32(_type_code(T))::Int32,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+    )::Int32
     _check(code)
     return nothing
 end
@@ -159,43 +150,28 @@ function copy_time_series!(
     name::AbstractString,
     dst_owner_id::Integer,
     dst_owner_type::AbstractString;
-    new_name::Union{Nothing,AbstractString}=nothing,
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    new_name::Union{Nothing, AbstractString}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     renamed = new_name === nothing ? C_NULL : new_name
-    code = ccall(
-        (:infrastore_store_copy_time_series, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Int32,
-            Cstring,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Int64,
-            Cstring,
-            Cstring,
-        ),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        Int32(_type_code(T)),
-        resolution_iso,
-        interval_iso,
-        features_json,
-        Int64(dst_owner_id),
-        dst_owner_type,
-        renamed,
-    )
+    code = @ccall lib_path().infrastore_store_copy_time_series(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        Int32(_type_code(T))::Int32,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        Int64(dst_owner_id)::Int64,
+        dst_owner_type::Cstring,
+        renamed::Cstring,
+    )::Int32
     _check(code)
     return nothing
 end
@@ -222,10 +198,10 @@ function _get_forecast_raw(
     owner_category::OwnerCategory,
     name::AbstractString,
     ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
@@ -251,65 +227,36 @@ function _get_forecast_raw(
     out_matched = Ref{Int32}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
 
-    code = ccall(
-        (:infrastore_store_get_forecast, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},   # handle
-            Int64,        # owner_id
-            Int32,        # owner_category
-            Cstring,      # name
-            Int32,        # ts_type
-            Cstring,      # resolution (ISO-8601)
-            Cstring,      # interval (ISO-8601)
-            Cstring,      # features_json
-            Bool,         # time_range_present
-            Int64,        # time_range_start_ms
-            Int64,        # time_range_end_ms
-            Ref{Int64},   # out_initial_ts_unix_ms
-            Ref{Ptr{Cchar}},   # out_resolution
-            Ref{Ptr{Cchar}},   # out_horizon
-            Ref{Ptr{Cchar}},   # out_interval
-            Ref{UInt64},  # out_count
-            Ref{UInt64},  # out_scenario_count
-            Ref{UInt64},  # out_ndims
-            Ref{Ptr{UInt64}},  # out_dims
-            Ref{Int32},   # out_dtype
-            Ref{Ptr{UInt8}},   # out_data
-            Ref{UInt64},  # out_data_byte_len
-            Ref{Ptr{Float64}}, # out_percentiles
-            Ref{UInt64},  # out_percentiles_len
-            Ref{Int32},   # out_matched_type
-            Ref{Ptr{Cchar}},  # out_ext
-        ),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        Int32(ts_type),
-        resolution_iso,
-        interval_iso,
-        features_json,
-        time_range_present,
-        range_start_ms,
-        range_end_ms,
-        out_initial,
-        out_res,
-        out_horizon,
-        out_interval,
-        out_count,
-        out_scen,
-        out_ndims,
-        out_dims,
-        out_dtype,
-        out_data,
-        out_byte_len,
-        out_pct,
-        out_pct_len,
-        out_matched,
-        out_ext,
+    _check(
+        @ccall lib_path().infrastore_store_get_forecast(
+            store.handle::Ptr{Cvoid},
+            Int64(owner_id)::Int64,
+            _category_int(owner_category)::Int32,
+            name::Cstring,
+            Int32(ts_type)::Int32,
+            resolution_iso::Cstring,
+            interval_iso::Cstring,
+            features_json::Cstring,
+            time_range_present::Bool,
+            range_start_ms::Int64,
+            range_end_ms::Int64,
+            out_initial::Ref{Int64},
+            out_res::Ref{Ptr{Cchar}},
+            out_horizon::Ref{Ptr{Cchar}},
+            out_interval::Ref{Ptr{Cchar}},
+            out_count::Ref{UInt64},
+            out_scen::Ref{UInt64},
+            out_ndims::Ref{UInt64},
+            out_dims::Ref{Ptr{UInt64}},
+            out_dtype::Ref{Int32},
+            out_data::Ref{Ptr{UInt8}},
+            out_byte_len::Ref{UInt64},
+            out_pct::Ref{Ptr{Float64}},
+            out_pct_len::Ref{UInt64},
+            out_matched::Ref{Int32},
+            out_ext::Ref{Ptr{Cchar}},
+        )::Int32
     )
-    _check(code)
 
     return _decode_forecast_outputs(
         out_initial,
@@ -354,37 +301,25 @@ function _decode_forecast_outputs(
     nd = Int(out_ndims[])
     dims_raw = unsafe_wrap(Array, out_dims[], nd; own=false)
     dims = Int.(copy(dims_raw))
-    ccall(
-        (:infrastore_buffer_free_u64, lib_path()),
-        Cvoid,
-        (Ptr{UInt64}, UInt64),
-        out_dims[],
-        out_ndims[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u64(
+        out_dims[]::Ptr{UInt64}, out_ndims[]::UInt64
+    )::Cvoid
 
     # Copy data bytes and free FFI buffer.
     n_bytes = Int(out_byte_len[])
     bytes_raw = unsafe_wrap(Array, out_data[], n_bytes; own=false)
     bytes = copy(bytes_raw)
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_byte_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_byte_len[]::UInt64
+    )::Cvoid
 
     # Percentiles (Probabilistic only; null for others).
     np = Int(out_pct_len[])
     percentiles = if np > 0 && out_pct[] != C_NULL
         p = copy(unsafe_wrap(Array, out_pct[], np; own=false))
-        ccall(
-            (:infrastore_buffer_free_f64, lib_path()),
-            Cvoid,
-            (Ptr{Float64}, UInt64),
-            out_pct[],
-            out_pct_len[],
-        )
+        @ccall lib_path().infrastore_buffer_free_f64(
+            out_pct[]::Ptr{Float64}, out_pct_len[]::UInt64
+        )::Cvoid
         p
     else
         Float64[]
@@ -411,7 +346,7 @@ end
 function _get_forecast_raw(
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     time_range_present = time_range !== nothing
     range_start_ms = time_range_present ? _to_unix_ms(time_range[1]) : Int64(0)
@@ -433,53 +368,30 @@ function _get_forecast_raw(
     out_matched = Ref{Int32}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
 
-    code = ccall(
-        (:infrastore_store_get_forecast_by_key, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},   # handle
-            Ptr{Cvoid},   # key
-            Bool,         # time_range_present
-            Int64,        # time_range_start_ms
-            Int64,        # time_range_end_ms
-            Ref{Int64},   # out_initial_ts_unix_ms
-            Ref{Ptr{Cchar}},   # out_resolution
-            Ref{Ptr{Cchar}},   # out_horizon
-            Ref{Ptr{Cchar}},   # out_interval
-            Ref{UInt64},  # out_count
-            Ref{UInt64},  # out_scenario_count
-            Ref{UInt64},  # out_ndims
-            Ref{Ptr{UInt64}},  # out_dims
-            Ref{Int32},   # out_dtype
-            Ref{Ptr{UInt8}},   # out_data
-            Ref{UInt64},  # out_data_byte_len
-            Ref{Ptr{Float64}}, # out_percentiles
-            Ref{UInt64},  # out_percentiles_len
-            Ref{Int32},   # out_matched_type
-            Ref{Ptr{Cchar}},  # out_ext
-        ),
-        store.handle,
-        key.handle,
-        time_range_present,
-        range_start_ms,
-        range_end_ms,
-        out_initial,
-        out_res,
-        out_horizon,
-        out_interval,
-        out_count,
-        out_scen,
-        out_ndims,
-        out_dims,
-        out_dtype,
-        out_data,
-        out_byte_len,
-        out_pct,
-        out_pct_len,
-        out_matched,
-        out_ext,
+    _check(
+        @ccall lib_path().infrastore_store_get_forecast_by_key(
+            store.handle::Ptr{Cvoid},
+            key.handle::Ptr{Cvoid},
+            time_range_present::Bool,
+            range_start_ms::Int64,
+            range_end_ms::Int64,
+            out_initial::Ref{Int64},
+            out_res::Ref{Ptr{Cchar}},
+            out_horizon::Ref{Ptr{Cchar}},
+            out_interval::Ref{Ptr{Cchar}},
+            out_count::Ref{UInt64},
+            out_scen::Ref{UInt64},
+            out_ndims::Ref{UInt64},
+            out_dims::Ref{Ptr{UInt64}},
+            out_dtype::Ref{Int32},
+            out_data::Ref{Ptr{UInt8}},
+            out_byte_len::Ref{UInt64},
+            out_pct::Ref{Ptr{Float64}},
+            out_pct_len::Ref{UInt64},
+            out_matched::Ref{Int32},
+            out_ext::Ref{Ptr{Cchar}},
+        )::Int32
     )
-    _check(code)
 
     return _decode_forecast_outputs(
         out_initial,
@@ -590,11 +502,11 @@ function get_time_series(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
-) where {T<:Union{AbstractDeterministic,Probabilistic,Scenarios}}
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+) where {T <: Union{AbstractDeterministic, Probabilistic, Scenarios}}
     r = _get_forecast_raw(
         store,
         owner_id,
@@ -621,8 +533,8 @@ function get_time_series(
     ::Type{T},
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
-) where {T<:Union{AbstractDeterministic,Probabilistic,Scenarios}}
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
+) where {T <: Union{AbstractDeterministic, Probabilistic, Scenarios}}
     r = _get_forecast_raw(store, key; time_range=time_range)
     return _forecast_from_raw(_forecast_result_type(T), r, _key_name(key))
 end

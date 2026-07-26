@@ -13,27 +13,24 @@ function _make_key(
     owner_category::OwnerCategory,
     name::AbstractString,
     ts_type::Integer;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall(
-        (:infrastore_make_key_from_attrs, lib_path()),
-        Int32,
-        (Int64, Int32, Cstring, Int32, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        Int32(ts_type),
-        resolution_iso,
-        interval_iso,
-        features_json,
-        out_key,
-    )
+    code = @ccall lib_path().infrastore_make_key_from_attrs(
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        Int32(ts_type)::Int32,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        out_key::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     return TimeSeriesKey(out_key[])
 end
@@ -57,16 +54,13 @@ function get_time_series_keys(
 )
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_time_series_keys, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int32, Ref{Ptr{Ptr{Cvoid}}}, Ref{UInt64}),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        out_keys,
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_get_time_series_keys(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        out_keys::Ref{Ptr{Ptr{Cvoid}}},
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     n = Int(out_len[])
     keys = Vector{TimeSeriesKey}(undef, n)
@@ -77,13 +71,9 @@ function get_time_series_keys(
         for i in 1:n
             keys[i] = TimeSeriesKey(raw[i])
         end
-        ccall(
-            (:infrastore_keys_buffer_free, lib_path()),
-            Cvoid,
-            (Ptr{Ptr{Cvoid}}, UInt64),
-            out_keys[],
-            out_len[],
-        )
+        @ccall lib_path().infrastore_keys_buffer_free(
+            out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
+        )::Cvoid
     end
     return keys
 end
@@ -180,7 +170,7 @@ function _decode_key_row(r::AbstractDict)
         _row_period(r["horizon"]),
         _row_period(r["interval"]),
         _row_int(r["count"]),
-        Dict{String,Any}(r["features"]),
+        Dict{String, Any}(r["features"]),
     )
 end
 
@@ -223,22 +213,10 @@ function _decode_metadata(r::AbstractDict)
         percentiles === nothing ? nothing : Vector{Float64}(percentiles),
         _dtype_for_name(r["dtype"]),
         Tuple(Int(d) for d in r["element_shape"]),
-        Dict{String,Any}(r["features"]),
+        Dict{String, Any}(r["features"]),
         r["units"] === nothing ? nothing : String(r["units"]),
         r["ext"] === nothing ? nothing : String(r["ext"]),
     )
-end
-
-# Shared two-call probe-then-fetch for any JSON-returning FFI export (the filter
-# listings and the single-record metadata read alike). `ccall_once` performs one
-# ccall with the given (buf, cap, out_len); returns the decoded JSON payload
-# string.
-function _filter_probe(store::Store, ccall_once)
-    out_len = Ref{UInt64}(0)
-    _check(ccall_once(C_NULL, UInt64(0), out_len))
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    _check(ccall_once(buf, UInt64(length(buf)), out_len))
-    return String(buf[1:Int(out_len[])])
 end
 
 # Marshal the shared catalog-filter arguments every `infrastore_store_list_*` /
@@ -275,48 +253,29 @@ function _filter_list_json(
     name=nothing,
     resolution=nothing,
     interval=nothing,
-    features=Dict{String,Any}(),
+    features=Dict{String, Any}(),
 )
     fptr = dlsym(dlopen(lib_path()), fname)
     (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features
     )
-    return _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            fptr,
-            Int32,
-            (
-                Ptr{Cvoid},
-                Bool,
-                Int64,
-                Bool,
-                Int32,
-                Bool,
-                Int32,
-                Cstring,
-                Cstring,
-                Cstring,
-                Cstring,
-                Ptr{UInt8},
-                UInt64,
-                Ref{UInt64},
-            ),
-            store.handle,
-            has_owner,
-            owner_arg,
-            has_category,
-            category_arg,
-            has_type,
-            type_arg,
-            name_arg,
-            resolution_iso,
-            interval_iso,
-            features_json,
-            buf,
-            cap,
-            out_len,
-        ),
+    return _probe(
+        (buf, cap, out_len) -> @ccall $fptr(
+            store.handle::Ptr{Cvoid},
+            has_owner::Bool,
+            owner_arg::Int64,
+            has_category::Bool,
+            category_arg::Int32,
+            has_type::Bool,
+            type_arg::Int32,
+            name_arg::Cstring,
+            resolution_iso::Cstring,
+            interval_iso::Cstring,
+            features_json::Cstring,
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
     )
 end
 
@@ -384,48 +343,32 @@ one all-or-nothing transaction; returns the number removed (0 if none match).
 """
 function remove_by_filter!(
     store::Store;
-    owner_id::Union{Nothing,Integer}=nothing,
-    owner_category::Union{Nothing,OwnerCategory}=nothing,
-    time_series_type::Union{Nothing,Type}=nothing,
-    name::Union{Nothing,AbstractString}=nothing,
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    owner_id::Union{Nothing, Integer}=nothing,
+    owner_category::Union{Nothing, OwnerCategory}=nothing,
+    time_series_type::Union{Nothing, Type}=nothing,
+    name::Union{Nothing, AbstractString}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features
     )
     out_removed = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_remove_by_filter, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Bool,
-            Int64,
-            Bool,
-            Int32,
-            Bool,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Cstring,
-            Ref{UInt64},
-        ),
-        store.handle,
-        has_owner,
-        owner_arg,
-        has_category,
-        category_arg,
-        has_type,
-        type_arg,
-        name_arg,
-        resolution_iso,
-        interval_iso,
-        features_json,
-        out_removed,
-    )
+    code = @ccall lib_path().infrastore_store_remove_by_filter(
+        store.handle::Ptr{Cvoid},
+        has_owner::Bool,
+        owner_arg::Int64,
+        has_category::Bool,
+        category_arg::Int32,
+        has_type::Bool,
+        type_arg::Int32,
+        name_arg::Cstring,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        out_removed::Ref{UInt64},
+    )::Int32
     _check(code)
     return Int(out_removed[])
 end
@@ -469,68 +412,38 @@ function key_info(key::TimeSeriesKey)
     feat_len = Ref{UInt64}(0)
     # Probe the string lengths (type, resolution, owner id, and owner category are
     # filled on this call too).
-    code = ccall(
-        (:infrastore_key_attributes, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Ref{Int32},
-            Ref{Ptr{Cchar}},
-            Ref{Int64},
-            Ref{Int32},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-        ),
-        key.handle,
-        out_type,
-        out_res,
-        out_owner,
-        out_category,
-        C_NULL,
-        UInt64(0),
-        name_len,
-        C_NULL,
-        UInt64(0),
-        feat_len,
-    )
+    code = @ccall lib_path().infrastore_key_attributes(
+        key.handle::Ptr{Cvoid},
+        out_type::Ref{Int32},
+        out_res::Ref{Ptr{Cchar}},
+        out_owner::Ref{Int64},
+        out_category::Ref{Int32},
+        C_NULL::Ptr{UInt8},
+        UInt64(0)::UInt64,
+        name_len::Ref{UInt64},
+        C_NULL::Ptr{UInt8},
+        UInt64(0)::UInt64,
+        feat_len::Ref{UInt64},
+    )::Int32
     _check(code)
     # The probe call also allocates the resolution string; free it and re-read on
     # the fetch call below.
     _take_cstr(out_res[])
     name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
     feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
-    code = ccall(
-        (:infrastore_key_attributes, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Ref{Int32},
-            Ref{Ptr{Cchar}},
-            Ref{Int64},
-            Ref{Int32},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-        ),
-        key.handle,
-        out_type,
-        out_res,
-        out_owner,
-        out_category,
-        name_buf,
-        UInt64(length(name_buf)),
-        name_len,
-        feat_buf,
-        UInt64(length(feat_buf)),
-        feat_len,
-    )
+    code = @ccall lib_path().infrastore_key_attributes(
+        key.handle::Ptr{Cvoid},
+        out_type::Ref{Int32},
+        out_res::Ref{Ptr{Cchar}},
+        out_owner::Ref{Int64},
+        out_category::Ref{Int32},
+        name_buf::Ptr{UInt8},
+        UInt64(length(name_buf))::UInt64,
+        name_len::Ref{UInt64},
+        feat_buf::Ptr{UInt8},
+        UInt64(length(feat_buf))::UInt64,
+        feat_len::Ref{UInt64},
+    )::Int32
     _check(code)
     name = String(name_buf[1:Int(name_len[])])
     features = JSON.parse(String(feat_buf[1:Int(feat_len[])]))
@@ -551,7 +464,7 @@ function get_time_series(
     ::Type{SingleTimeSeries},
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     return get_time_series(store, key; time_range=time_range)
 end
@@ -569,9 +482,9 @@ function get_time_series(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     key = _make_key(
         owner_id,
@@ -598,9 +511,9 @@ function get_time_series(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     key = _make_key(
         owner_id,
@@ -614,13 +527,9 @@ function get_time_series(
 end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)
-    code = ccall(
-        (:infrastore_store_remove, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}),
-        store.handle,
-        key.handle,
-    )
+    code = @ccall lib_path().infrastore_store_remove(
+        store.handle::Ptr{Cvoid}, key.handle::Ptr{Cvoid}
+    )::Int32
     _check(code)
     return nothing
 end
@@ -635,29 +544,21 @@ removed.
 function remove_time_series!(store::Store, keys::Vector{TimeSeriesKey})
     handles = Ptr{Cvoid}[k.handle for k in keys]
     out_removed = Ref{UInt64}(0)
-    code = GC.@preserve keys ccall(
-        (:infrastore_store_remove_bulk, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Ref{UInt64}),
-        store.handle,
-        handles,
-        UInt64(length(handles)),
-        out_removed,
-    )
+    code = GC.@preserve keys @ccall lib_path().infrastore_store_remove_bulk(
+        store.handle::Ptr{Cvoid},
+        handles::Ptr{Ptr{Cvoid}},
+        UInt64(length(handles))::UInt64,
+        out_removed::Ref{UInt64},
+    )::Int32
     _check(code)
     return Int(out_removed[])
 end
 
 function has_time_series(store::Store, key::TimeSeriesKey)
     out = Ref{Bool}(false)
-    code = ccall(
-        (:infrastore_store_has, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}),
-        store.handle,
-        key.handle,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_has(
+        store.handle::Ptr{Cvoid}, key.handle::Ptr{Cvoid}, out::Ref{Bool}
+    )::Int32
     _check(code)
     return out[]
 end
@@ -671,15 +572,9 @@ function get_counts(store::Store)
     a = Ref{Int64}(0);
     b = Ref{Int64}(0);
     c = Ref{Int64}(0)
-    code = ccall(
-        (:infrastore_store_counts, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-        store.handle,
-        a,
-        b,
-        c,
-    )
+    code = @ccall lib_path().infrastore_store_counts(
+        store.handle::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}
+    )::Int32
     _check(code)
     return TimeSeriesCounts(Int(a[]), Int(b[]), Int(c[]))
 end
@@ -693,26 +588,20 @@ catalog query in the core.
 """
 function counts_by_type(store::Store)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_counts_by_type, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        C_NULL,
-        UInt64(0),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_counts_by_type(
+        store.handle::Ptr{Cvoid},
+        C_NULL::Ptr{UInt8},
+        UInt64(0)::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_counts_by_type, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_counts_by_type(
+        store.handle::Ptr{Cvoid},
+        buf::Ptr{UInt8},
+        UInt64(length(buf))::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return TimeSeriesTypeCount[
@@ -729,13 +618,9 @@ Number of distinct stored arrays (content hashes); series that share an array
 """
 function num_distinct_arrays(store::Store)
     out = Ref{Int64}(0)
-    code = ccall(
-        (:infrastore_store_num_distinct_arrays, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{Int64}),
-        store.handle,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_num_distinct_arrays(
+        store.handle::Ptr{Cvoid}, out::Ref{Int64}
+    )::Int32
     _check(code)
     return Int(out[])
 end
@@ -751,16 +636,9 @@ function time_series_counts(store::Store)
     b = Ref{Int64}(0);
     c = Ref{Int64}(0);
     d = Ref{Int64}(0)
-    code = ccall(
-        (:infrastore_store_counts_detailed, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{Int64}, Ref{Int64}, Ref{Int64}, Ref{Int64}),
-        store.handle,
-        a,
-        b,
-        c,
-        d,
-    )
+    code = @ccall lib_path().infrastore_store_counts_detailed(
+        store.handle::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}, d::Ref{Int64}
+    )::Int32
     _check(code)
     return TimeSeriesCountsDetailed(Int(a[]), Int(b[]), Int(c[]), Int(d[]))
 end
@@ -775,42 +653,36 @@ and/or `resolution` (a `Period`).
 function list_owner_ids(
     store::Store,
     owner_category::OwnerCategory;
-    time_series_type::Union{Nothing,Type}=nothing,
-    resolution::Union{Nothing,Period}=nothing,
+    time_series_type::Union{Nothing, Type}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
 )
     has_type = time_series_type !== nothing
     type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     resolution_iso = _period_to_cstr(resolution)
     cat = _category_int(owner_category)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_list_owner_ids, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int32, Bool, Int32, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        cat,
-        has_type,
-        type_arg,
-        resolution_iso,
-        C_NULL,
-        UInt64(0),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_list_owner_ids(
+        store.handle::Ptr{Cvoid},
+        cat::Int32,
+        has_type::Bool,
+        type_arg::Int32,
+        resolution_iso::Cstring,
+        C_NULL::Ptr{UInt8},
+        UInt64(0)::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_list_owner_ids, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int32, Bool, Int32, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        cat,
-        has_type,
-        type_arg,
-        resolution_iso,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_list_owner_ids(
+        store.handle::Ptr{Cvoid},
+        cat::Int32,
+        has_type::Bool,
+        type_arg::Int32,
+        resolution_iso::Cstring,
+        buf::Ptr{UInt8},
+        UInt64(length(buf))::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     ids = JSON.parse(String(buf[1:Int(out_len[])]))
     return Int[Int(i) for i in ids]
@@ -855,26 +727,20 @@ presentation table (e.g. a DataFrame).
 """
 function static_summary(store::Store)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_static_summary, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        C_NULL,
-        UInt64(0),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_static_summary(
+        store.handle::Ptr{Cvoid},
+        C_NULL::Ptr{UInt8},
+        UInt64(0)::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_static_summary, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_static_summary(
+        store.handle::Ptr{Cvoid},
+        buf::Ptr{UInt8},
+        UInt64(length(buf))::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return StaticSummaryRow[_decode_static_summary_row(r) for r in rows]
@@ -889,26 +755,20 @@ window_count)` with `count` = the number of associations in the group.
 """
 function forecast_summary(store::Store)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_forecast_summary, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        C_NULL,
-        UInt64(0),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_forecast_summary(
+        store.handle::Ptr{Cvoid},
+        C_NULL::Ptr{UInt8},
+        UInt64(0)::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_forecast_summary, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_forecast_summary(
+        store.handle::Ptr{Cvoid},
+        buf::Ptr{UInt8},
+        UInt64(length(buf))::UInt64,
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return ForecastSummaryRow[_decode_forecast_summary_row(r) for r in rows]

@@ -113,25 +113,15 @@ end
 
 function _last_error_message()
     needed = Ref{UInt64}(0)
-    ccall(
-        (:infrastore_last_error_message, lib_path()),
-        Int32,
-        (Ptr{UInt8}, UInt64, Ptr{UInt64}),
-        C_NULL,
-        UInt64(0),
-        needed,
-    )
+    @ccall lib_path().infrastore_last_error_message(
+        C_NULL::Ptr{UInt8}, UInt64(0)::UInt64, needed::Ptr{UInt64}
+    )::Int32
     n = Int(needed[])
     n == 0 && return ""
     buf = Vector{UInt8}(undef, n + 1)
-    ccall(
-        (:infrastore_last_error_message, lib_path()),
-        Int32,
-        (Ptr{UInt8}, UInt64, Ptr{UInt64}),
-        buf,
-        UInt64(n + 1),
-        C_NULL,
-    )
+    @ccall lib_path().infrastore_last_error_message(
+        buf::Ptr{UInt8}, UInt64(n + 1)::UInt64, C_NULL::Ptr{UInt64}
+    )::Int32
     return String(buf[1:n])
 end
 
@@ -161,6 +151,21 @@ function _check(code::Int32)
     end
 end
 
+# ---- Probe-then-fetch ------------------------------------------------------
+
+# Every JSON-returning export uses the same two-call protocol: a null buffer
+# reports the required length, then a buffer of that size receives the body.
+# `ccall_once(buf, capacity, out_len)` performs one call; Julia requires a
+# `ccall` symbol to be a literal, so each call site passes a closure naming its
+# own export. The `+ 1` leaves room for the trailing NUL the Rust side appends.
+function _probe(ccall_once)
+    out_len = Ref{UInt64}(0)
+    _check(ccall_once(C_NULL, UInt64(0), out_len))
+    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
+    _check(ccall_once(buf, UInt64(length(buf)), out_len))
+    return String(buf[1:Int(out_len[])])
+end
+
 # ---- Tracing ---------------------------------------------------------------
 
 """
@@ -184,7 +189,7 @@ an invalid directive string).
 """
 function init_logging(level::AbstractString="")
     filter_ptr = isempty(level) ? C_NULL : level
-    ret = ccall((:infrastore_store_init_logging, lib_path()), Int32, (Cstring,), filter_ptr)
+    ret = @ccall lib_path().infrastore_store_init_logging(filter_ptr::Cstring)::Int32
     if ret != 0
         @warn "InfraStore.init_logging: infrastore_store_init_logging returned error code $ret"
     end

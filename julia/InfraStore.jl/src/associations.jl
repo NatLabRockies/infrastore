@@ -10,6 +10,10 @@
 # because two of the four fields are string lists. Expanding an abstract type
 # into its concrete subtypes stays here on the Julia side; the Rust core only
 # ever sees concrete type names.
+#
+# The two families expose the same shapes over different column names, so the
+# wrappers are generated from the tables below rather than written twice. Every
+# FFI export is still spelled out literally in a table, so each stays greppable.
 
 """
     SupplementalAttributeAssociation(component_id, component_type, attribute_id, attribute_type)
@@ -43,63 +47,43 @@ struct ParentChildAssociation
     child_type::String
 end
 
-function Base.:(==)(
-    a::SupplementalAttributeAssociation, b::SupplementalAttributeAssociation
-)
-    return a.component_id == b.component_id &&
-           a.component_type == b.component_type &&
-           a.attribute_id == b.attribute_id &&
-           a.attribute_type == b.attribute_type
+# Both rows are (id, type, id, type) quadruples, so identity, hashing, display,
+# and JSON marshalling are one implementation over the field layout.
+const _AssocRow = Union{SupplementalAttributeAssociation, ParentChildAssociation}
+
+function Base.:(==)(a::T, b::T) where {T <: _AssocRow}
+    return all(getfield(a, i) == getfield(b, i) for i in 1:fieldcount(T))
 end
 
-function Base.hash(a::SupplementalAttributeAssociation, h::UInt)
-    h = hash(a.component_id, h)
-    h = hash(a.component_type, h)
-    h = hash(a.attribute_id, h)
-    return hash(a.attribute_type, h)
+function Base.hash(a::_AssocRow, h::UInt)
+    for i in 1:fieldcount(typeof(a))
+        h = hash(getfield(a, i), h)
+    end
+    return h
 end
 
-function Base.show(io::IO, a::SupplementalAttributeAssociation)
+# An attachment reads component <- attribute; an edge reads parent -> child.
+_assoc_arrow(::Type{SupplementalAttributeAssociation}) = " <- "
+_assoc_arrow(::Type{ParentChildAssociation}) = " -> "
+
+function Base.show(io::IO, a::T) where {T <: _AssocRow}
     return print(
         io,
-        "SupplementalAttributeAssociation(",
-        a.component_type,
-        " ",
-        a.component_id,
-        " <- ",
-        a.attribute_type,
-        " ",
-        a.attribute_id,
-        ")",
+        "$(nameof(T))($(getfield(a, 2)) $(getfield(a, 1))" *
+        "$(_assoc_arrow(T))$(getfield(a, 4)) $(getfield(a, 3)))",
     )
 end
 
-function Base.:(==)(a::ParentChildAssociation, b::ParentChildAssociation)
-    return a.parent_id == b.parent_id &&
-           a.parent_type == b.parent_type &&
-           a.child_id == b.child_id &&
-           a.child_type == b.child_type
+function _assoc_json(a::T) where {T <: _AssocRow}
+    return Dict{String, Any}(String(f) => getfield(a, f) for f in fieldnames(T))
 end
 
-function Base.hash(a::ParentChildAssociation, h::UInt)
-    h = hash(a.parent_id, h)
-    h = hash(a.parent_type, h)
-    h = hash(a.child_id, h)
-    return hash(a.child_type, h)
-end
-
-function Base.show(io::IO, a::ParentChildAssociation)
-    return print(
-        io,
-        "ParentChildAssociation(",
-        a.parent_type,
-        " ",
-        a.parent_id,
-        " -> ",
-        a.child_type,
-        " ",
-        a.child_id,
-        ")",
+function _decode_assoc(::Type{T}, r::AbstractDict) where {T <: _AssocRow}
+    return T(
+        (
+            ft <: Integer ? ft(r[String(f)]) : String(r[String(f)]) for
+            (f, ft) in zip(fieldnames(T), fieldtypes(T))
+        )...,
     )
 end
 
@@ -107,7 +91,7 @@ end
 # the common "everything" query skips JSON entirely. An empty `Vector{String}`
 # is a deliberate "none of these types" and is forwarded as such.
 function _assoc_filter_json(pairs...)
-    filter = Dict{String,Any}()
+    filter = Dict{String, Any}()
     for (key, value) in pairs
         value === nothing && continue
         filter[key] = value isa Integer ? Int64(value) : String[String(v) for v in value]
@@ -115,398 +99,380 @@ function _assoc_filter_json(pairs...)
     return isempty(filter) ? C_NULL : JSON.json(filter)
 end
 
-function _supplemental_filter_json(
-    component_id, component_types, attribute_id, attribute_types
+# ---- Wrapper generation ----------------------------------------------------
+#
+# A row type supplies its family's filter keywords: the id columns as-is, the
+# type columns pluralized, because `component_type` filters on
+# `component_types`, a list of concrete type names.
+
+function _filter_fields(::Type{T}) where {T}
+    return map(f -> endswith(String(f), "_id") ? f : Symbol(f, "s"), fieldnames(T))
+end
+
+_is_id_field(f::Symbol) = endswith(String(f), "_id")
+
+function _assoc_filter_kwargs(::Type{T}) where {T}
+    return [
+        Expr(
+            :kw,
+            :($f::Union{Nothing, $(_is_id_field(f) ? :Integer : :AbstractVector)}),
+            :nothing,
+        ) for f in _filter_fields(T)
+    ]
+end
+
+function _assoc_filter_call(::Type{T}) where {T}
+    return Expr(
+        :call, :_assoc_filter_json, (:($(String(f)) => $f) for f in _filter_fields(T))...
+    )
+end
+
+# One table per family: public name, FFI export, body shape, and the shape's
+# selector argument where it takes one. The row type is supplied by the loop and
+# fixes the filter keywords.
+const _SUPPLEMENTAL_FILTER_API = (
+    (:has_supplemental_attribute_association,
+        :infrastore_store_has_supplemental_attribute_association, :bool, nothing),
+    (:list_supplemental_attribute_associations,
+        :infrastore_store_list_supplemental_attribute_associations, :rows, nothing),
+    (:list_supplemental_attribute_ids,
+        :infrastore_store_list_supplemental_attribute_ids, :ids, nothing),
+    (:list_components_with_attributes,
+        :infrastore_store_list_components_with_attributes, :ids, nothing),
+    (:remove_supplemental_attribute_associations!,
+        :infrastore_store_remove_supplemental_attribute_associations, :count_u64, nothing),
+    # One count export, selecting what to count: 0 = matching rows,
+    # 1 = distinct attributes, 2 = distinct components.
+    (:count_supplemental_attribute_associations,
+        :infrastore_store_count_supplemental_attribute_associations, :count_kind, 0),
+    (:count_supplemental_attributes,
+        :infrastore_store_count_supplemental_attribute_associations, :count_kind, 1),
+    (:count_components_with_attributes,
+        :infrastore_store_count_supplemental_attribute_associations, :count_kind, 2),
 )
-    return _assoc_filter_json(
-        "component_id" => component_id,
-        "component_types" => component_types,
-        "attribute_id" => attribute_id,
-        "attribute_types" => attribute_types,
-    )
+
+const _PARENT_CHILD_FILTER_API = (
+    (:has_parent_child_association,
+        :infrastore_store_has_parent_child_association, :bool, nothing),
+    (:list_parent_child_associations,
+        :infrastore_store_list_parent_child_associations, :rows, nothing),
+    # One id export, selecting the endpoint: 0 = parents, 1 = children.
+    (:list_parents, :infrastore_store_list_parent_child_ids, :endpoint_ids, 0),
+    (:list_children, :infrastore_store_list_parent_child_ids, :endpoint_ids, 1),
+    (:remove_parent_child_associations!,
+        :infrastore_store_remove_parent_child_associations, :count_u64, nothing),
+    (:count_parent_child_associations,
+        :infrastore_store_count_parent_child_associations, :count_i64, nothing),
+)
+
+for (T, api) in (
+        (SupplementalAttributeAssociation, _SUPPLEMENTAL_FILTER_API),
+        (ParentChildAssociation, _PARENT_CHILD_FILTER_API),
+    ),
+    (fname, sym, shape, selector) in api
+
+    body = if shape === :bool
+        quote
+            out = Ref{Bool}(false)
+            _check(
+                @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid}, filter_json::Cstring, out::Ref{Bool}
+                )::Int32
+            )
+            return out[]
+        end
+    elseif shape === :rows
+        quote
+            json = _probe(
+                (buf, cap, len) -> @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid},
+                    filter_json::Cstring,
+                    buf::Ptr{UInt8},
+                    cap::UInt64,
+                    len::Ref{UInt64},
+                )::Int32
+            )
+            return $T[_decode_assoc($T, r) for r in JSON.parse(json)]
+        end
+    elseif shape === :ids
+        quote
+            json = _probe(
+                (buf, cap, len) -> @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid},
+                    filter_json::Cstring,
+                    buf::Ptr{UInt8},
+                    cap::UInt64,
+                    len::Ref{UInt64},
+                )::Int32
+            )
+            return Int[Int(i) for i in JSON.parse(json)]
+        end
+    elseif shape === :endpoint_ids
+        quote
+            json = _probe(
+                (buf, cap, len) -> @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid},
+                    filter_json::Cstring,
+                    Int32($selector)::Int32,
+                    buf::Ptr{UInt8},
+                    cap::UInt64,
+                    len::Ref{UInt64},
+                )::Int32
+            )
+            return Int[Int(i) for i in JSON.parse(json)]
+        end
+    elseif shape === :count_u64
+        quote
+            out = Ref{UInt64}(0)
+            _check(
+                @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid}, filter_json::Cstring, out::Ref{UInt64}
+                )::Int32
+            )
+            return Int(out[])
+        end
+    elseif shape === :count_i64
+        quote
+            out = Ref{Int64}(0)
+            _check(
+                @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid}, filter_json::Cstring, out::Ref{Int64}
+                )::Int32
+            )
+            return Int(out[])
+        end
+    elseif shape === :count_kind
+        quote
+            out = Ref{Int64}(0)
+            _check(
+                @ccall lib_path().$sym(
+                    store.handle::Ptr{Cvoid},
+                    filter_json::Cstring,
+                    Int32($selector)::Int32,
+                    out::Ref{Int64},
+                )::Int32
+            )
+            return Int(out[])
+        end
+    else
+        error("unknown association wrapper shape $shape")
+    end
+    @eval function $fname(store::Store; $(_assoc_filter_kwargs(T)...))
+        filter_json = $(_assoc_filter_call(T))
+        $body
+    end
 end
 
-function _parent_child_filter_json(parent_id, parent_types, child_id, child_types)
-    return _assoc_filter_json(
-        "parent_id" => parent_id,
-        "parent_types" => parent_types,
-        "child_id" => child_id,
-        "child_types" => child_types,
-    )
+for (fname, T, sym) in (
+    (:add_supplemental_attribute_association!, SupplementalAttributeAssociation,
+        :infrastore_store_add_supplemental_attribute_association),
+    (:add_parent_child_association!, ParentChildAssociation,
+        :infrastore_store_add_parent_child_association),
+)
+    id1, type1, id2, type2 = fieldnames(T)
+    @eval function $fname(store::Store, association::$T)
+        _check(
+            @ccall lib_path().$sym(
+                store.handle::Ptr{Cvoid},
+                association.$id1::Int64,
+                association.$type1::Cstring,
+                association.$id2::Int64,
+                association.$type2::Cstring,
+            )::Int32
+        )
+        return nothing
+    end
 end
 
-function _supplemental_json(a::SupplementalAttributeAssociation)
-    return Dict(
-        "component_id" => a.component_id,
-        "component_type" => a.component_type,
-        "attribute_id" => a.attribute_id,
-        "attribute_type" => a.attribute_type,
-    )
+for (fname, T, sym) in (
+    (:add_supplemental_attribute_associations!, SupplementalAttributeAssociation,
+        :infrastore_store_add_supplemental_attribute_associations),
+    (:add_parent_child_associations!, ParentChildAssociation,
+        :infrastore_store_add_parent_child_associations),
+)
+    @eval function $fname(store::Store, associations::AbstractVector{$T})
+        payload = JSON.json([_assoc_json(a) for a in associations])
+        out = Ref{UInt64}(0)
+        _check(
+            @ccall lib_path().$sym(
+                store.handle::Ptr{Cvoid}, payload::Cstring, out::Ref{UInt64}
+            )::Int32
+        )
+        return Int(out[])
+    end
 end
 
-function _parent_child_json(a::ParentChildAssociation)
-    return Dict(
-        "parent_id" => a.parent_id,
-        "parent_type" => a.parent_type,
-        "child_id" => a.child_id,
-        "child_type" => a.child_type,
-    )
+for (fname, sym) in (
+    (:replace_supplemental_attribute_component_id!,
+        :infrastore_store_replace_supplemental_attribute_component_id),
+    (:replace_parent_child_component_id!,
+        :infrastore_store_replace_parent_child_component_id),
+)
+    @eval function $fname(store::Store, old_id::Integer, new_id::Integer)
+        out = Ref{UInt64}(0)
+        _check(
+            @ccall lib_path().$sym(
+                store.handle::Ptr{Cvoid},
+                Int64(old_id)::Int64,
+                Int64(new_id)::Int64,
+                out::Ref{UInt64},
+            )::Int32
+        )
+        return Int(out[])
+    end
 end
 
-function _decode_supplemental(r::AbstractDict)
-    return SupplementalAttributeAssociation(
-        Int64(r["component_id"]),
-        String(r["component_type"]),
-        Int64(r["attribute_id"]),
-        String(r["attribute_type"]),
-    )
-end
+# ---- Documentation for the generated wrappers ------------------------------
+#
+# The parent/child family mirrors the supplemental family shape for shape, so
+# its entries point at the supplemental docs rather than restating them.
 
-function _decode_parent_child(r::AbstractDict)
-    return ParentChildAssociation(
-        Int64(r["parent_id"]),
-        String(r["parent_type"]),
-        Int64(r["child_id"]),
-        String(r["child_type"]),
-    )
-end
-
-# Shared result handling for the two families. Julia requires a `ccall` symbol
-# to be a literal, so each call site names its own export and passes a closure
-# that performs the call with the out pointer supplied here — the same shape as
-# `_filter_probe` above.
-
-# For exports returning a row/entity count through a `u64` out pointer.
-function _assoc_count_out(ccall_once)
-    out = Ref{UInt64}(0)
-    _check(ccall_once(out))
-    return Int(out[])
-end
-
-# For exports returning a `bool` out pointer.
-function _assoc_bool_out(ccall_once)
-    out = Ref{Bool}(false)
-    _check(ccall_once(out))
-    return out[]
-end
-
-# For exports returning an `i64` count out pointer.
-function _assoc_i64_out(ccall_once)
-    out = Ref{Int64}(0)
-    _check(ccall_once(out))
-    return Int(out[])
-end
-
-"""
+@doc """
     add_supplemental_attribute_association!(store, association)
 
 Attach a supplemental attribute to a component. Throws
 `DuplicateAssociationError` if that component already carries that attribute,
 whatever type names are supplied.
-"""
-function add_supplemental_attribute_association!(
-    store::Store, association::SupplementalAttributeAssociation
-)
-    _check(
-        ccall(
-            (:infrastore_store_add_supplemental_attribute_association, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Int64, Cstring, Int64, Cstring),
-            store.handle,
-            association.component_id,
-            association.component_type,
-            association.attribute_id,
-            association.attribute_type,
-        ),
-    )
-    return nothing
-end
+""" add_supplemental_attribute_association!
 
-"""
+@doc """
     add_supplemental_attribute_associations!(store, associations) -> Int
 
 Attach many in one all-or-nothing transaction, returning the number inserted. A
 duplicate anywhere in the batch rolls the whole batch back. This is the import
 half of the round trip whose export is
 [`list_supplemental_attribute_associations`](@ref) with no filter.
-"""
-function add_supplemental_attribute_associations!(
-    store::Store, associations::AbstractVector{SupplementalAttributeAssociation}
-)
-    payload = JSON.json([_supplemental_json(a) for a in associations])
-    return _assoc_count_out(
-        out -> ccall(
-            (:infrastore_store_add_supplemental_attribute_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{UInt64}),
-            store.handle,
-            payload,
-            out,
-        ),
-    )
-end
+""" add_supplemental_attribute_associations!
 
-"""
+@doc """
     has_supplemental_attribute_association(store; filters...) -> Bool
 
 Whether any attachment matches the filter. Filter keywords, all optional and
 ANDed: `component_id`, `component_types` (a `Vector{String}` of concrete type
 names), `attribute_id`, `attribute_types`. With no filter, this is "does the
 store hold any attachment at all".
-"""
-function has_supplemental_attribute_association(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _supplemental_filter_json(
-        component_id, component_types, attribute_id, attribute_types
-    )
-    return _assoc_bool_out(
-        out -> ccall(
-            (:infrastore_store_has_supplemental_attribute_association, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{Bool}),
-            store.handle,
-            filter_json,
-            out,
-        ),
-    )
-end
+""" has_supplemental_attribute_association
 
-"""
+@doc """
     list_supplemental_attribute_associations(store; filters...) -> Vector{SupplementalAttributeAssociation}
 
 Full attachment rows matching the filter (same keywords as
 [`has_supplemental_attribute_association`](@ref)), in insertion order. With no
 filter this exports the whole table, which is what a JSON serialization round
 trip needs.
-"""
-function list_supplemental_attribute_associations(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _supplemental_filter_json(
-        component_id, component_types, attribute_id, attribute_types
-    )
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_list_supplemental_attribute_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            buf,
-            cap,
-            out_len,
-        ),
-    )
-    return SupplementalAttributeAssociation[
-        _decode_supplemental(r) for r in JSON.parse(json)
-    ]
-end
+""" list_supplemental_attribute_associations
 
-"""
+@doc """
     list_supplemental_attribute_ids(store; filters...) -> Vector{Int}
 
 Distinct attribute ids matching the filter, ascending — the attributes attached
 to a component when `component_id` is set.
-"""
-function list_supplemental_attribute_ids(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _supplemental_filter_json(
-        component_id, component_types, attribute_id, attribute_types
-    )
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_list_supplemental_attribute_ids, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            buf,
-            cap,
-            out_len,
-        ),
-    )
-    return Int[Int(i) for i in JSON.parse(json)]
-end
+""" list_supplemental_attribute_ids
 
-"""
+@doc """
     list_components_with_attributes(store; filters...) -> Vector{Int}
 
 Distinct component ids matching the filter, ascending — the components carrying
 an attribute when `attribute_id` is set.
-"""
-function list_components_with_attributes(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _supplemental_filter_json(
-        component_id, component_types, attribute_id, attribute_types
-    )
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_list_components_with_attributes, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            buf,
-            cap,
-            out_len,
-        ),
-    )
-    return Int[Int(i) for i in JSON.parse(json)]
-end
+""" list_components_with_attributes
 
-"""
+@doc """
     remove_supplemental_attribute_associations!(store; filters...) -> Int
 
 Remove every attachment matching the filter, returning the number removed.
 Removing nothing is not an error: callers that expect a specific count assert on
 the return value.
-"""
-function remove_supplemental_attribute_associations!(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _supplemental_filter_json(
-        component_id, component_types, attribute_id, attribute_types
-    )
-    return _assoc_count_out(
-        out -> ccall(
-            (:infrastore_store_remove_supplemental_attribute_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            out,
-        ),
-    )
-end
+""" remove_supplemental_attribute_associations!
 
-"""
+@doc """
     replace_supplemental_attribute_component_id!(store, old_id, new_id) -> Int
 
 Move every attachment from component `old_id` to `new_id`, returning the rows
 updated. Throws `DuplicateAssociationError` if `new_id` already carries one of
 the attributes being moved.
-"""
-function replace_supplemental_attribute_component_id!(
-    store::Store, old_id::Integer, new_id::Integer
-)
-    return _assoc_count_out(
-        out -> ccall(
-            (:infrastore_store_replace_supplemental_attribute_component_id, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Int64, Int64, Ref{UInt64}),
-            store.handle,
-            Int64(old_id),
-            Int64(new_id),
-            out,
-        ),
-    )
-end
+""" replace_supplemental_attribute_component_id!
 
-# `kind`: 0 = matching rows, 1 = distinct attributes, 2 = distinct components.
-function _supplemental_count(store::Store, filter_json, kind::Integer)
-    out = Ref{Int64}(0)
-    _check(
-        ccall(
-            (:infrastore_store_count_supplemental_attribute_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Int32, Ref{Int64}),
-            store.handle,
-            filter_json,
-            Int32(kind),
-            out,
-        ),
-    )
-    return Int(out[])
-end
-
-"""
+@doc """
     count_supplemental_attribute_associations(store; filters...) -> Int
 
 Number of attachments matching the filter.
-"""
-function count_supplemental_attribute_associations(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    return _supplemental_count(
-        store,
-        _supplemental_filter_json(
-            component_id, component_types, attribute_id, attribute_types
-        ),
-        0,
-    )
-end
+""" count_supplemental_attribute_associations
 
-"""
+@doc """
     count_supplemental_attributes(store; filters...) -> Int
 
 Number of *distinct* attributes among the attachments matching the filter.
-"""
-function count_supplemental_attributes(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    return _supplemental_count(
-        store,
-        _supplemental_filter_json(
-            component_id, component_types, attribute_id, attribute_types
-        ),
-        1,
-    )
-end
+""" count_supplemental_attributes
 
-"""
+@doc """
     count_components_with_attributes(store; filters...) -> Int
 
 Number of *distinct* components among the attachments matching the filter.
-"""
-function count_components_with_attributes(
-    store::Store;
-    component_id::Union{Nothing,Integer}=nothing,
-    component_types::Union{Nothing,AbstractVector}=nothing,
-    attribute_id::Union{Nothing,Integer}=nothing,
-    attribute_types::Union{Nothing,AbstractVector}=nothing,
-)
-    return _supplemental_count(
-        store,
-        _supplemental_filter_json(
-            component_id, component_types, attribute_id, attribute_types
-        ),
-        2,
-    )
-end
+""" count_components_with_attributes
+
+@doc """
+    add_parent_child_association!(store, association)
+
+Record a directed edge between two components. Throws
+`DuplicateAssociationError` if that ordered pair is already related; the
+reversed pair is a different edge.
+""" add_parent_child_association!
+
+@doc """
+    add_parent_child_associations!(store, associations) -> Int
+
+Record many edges in one all-or-nothing transaction, returning the number
+inserted.
+""" add_parent_child_associations!
+
+@doc """
+    has_parent_child_association(store; filters...) -> Bool
+
+Whether any edge matches the filter. Filter keywords, all optional and ANDed:
+`parent_id`, `parent_types`, `child_id`, `child_types`.
+""" has_parent_child_association
+
+@doc """
+    list_parent_child_associations(store; filters...) -> Vector{ParentChildAssociation}
+
+Full edge rows matching the filter (same keywords as
+[`has_parent_child_association`](@ref)), in insertion order.
+""" list_parent_child_associations
+
+@doc """
+    list_children(store; filters...) -> Vector{Int}
+
+Distinct child ids matching the filter, ascending — the children of a component
+when `parent_id` is set.
+""" list_children
+
+@doc """
+    list_parents(store; filters...) -> Vector{Int}
+
+Distinct parent ids matching the filter, ascending — the parents of a component
+when `child_id` is set.
+""" list_parents
+
+@doc """
+    remove_parent_child_associations!(store; filters...) -> Int
+
+Remove every edge matching the filter, returning the number removed. Removing
+nothing is not an error.
+""" remove_parent_child_associations!
+
+@doc """
+    replace_parent_child_component_id!(store, old_id, new_id) -> Int
+
+Rewrite component `old_id` to `new_id` on both ends of every edge, returning the
+rows updated. Throws `DuplicateAssociationError` if the rewrite would duplicate
+an edge `new_id` already has.
+""" replace_parent_child_component_id!
+
+@doc """
+    count_parent_child_associations(store; filters...) -> Int
+
+Number of edges matching the filter.
+""" count_parent_child_associations
 
 """
     supplemental_attribute_counts_by_type(store) -> Vector{SupplementalAttributeTypeCount}
@@ -514,17 +480,11 @@ end
 Attachment counts grouped by attribute type, ordered by type.
 """
 function supplemental_attribute_counts_by_type(store::Store)
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_supplemental_attribute_counts_by_type, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            buf,
-            cap,
-            out_len,
-        ),
+    json = _probe(
+        (buf, cap, len) ->
+            @ccall lib_path().infrastore_store_supplemental_attribute_counts_by_type(
+                store.handle::Ptr{Cvoid}, buf::Ptr{UInt8}, cap::UInt64, len::Ref{UInt64}
+            )::Int32
     )
     return SupplementalAttributeTypeCount[
         SupplementalAttributeTypeCount(String(r["type"]), Int(r["count"])) for
@@ -539,17 +499,11 @@ Attachment counts grouped by both type names, ordered by attribute type then
 component type. The core does the GROUP BY; callers build any presentation table.
 """
 function supplemental_attribute_summary(store::Store)
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_supplemental_attribute_summary, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            buf,
-            cap,
-            out_len,
-        ),
+    json = _probe(
+        (buf, cap, len) ->
+            @ccall lib_path().infrastore_store_supplemental_attribute_summary(
+                store.handle::Ptr{Cvoid}, buf::Ptr{UInt8}, cap::UInt64, len::Ref{UInt64}
+            )::Int32
     )
     return SupplementalAttributeSummaryRow[
         SupplementalAttributeSummaryRow(
@@ -558,234 +512,7 @@ function supplemental_attribute_summary(store::Store)
     ]
 end
 
-"""
-    add_parent_child_association!(store, association)
-
-Record a directed edge between two components. Throws
-`DuplicateAssociationError` if that ordered pair is already related; the
-reversed pair is a different edge.
-"""
-function add_parent_child_association!(store::Store, association::ParentChildAssociation)
-    _check(
-        ccall(
-            (:infrastore_store_add_parent_child_association, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Int64, Cstring, Int64, Cstring),
-            store.handle,
-            association.parent_id,
-            association.parent_type,
-            association.child_id,
-            association.child_type,
-        ),
-    )
-    return nothing
-end
-
-"""
-    add_parent_child_associations!(store, associations) -> Int
-
-Record many edges in one all-or-nothing transaction, returning the number
-inserted.
-"""
-function add_parent_child_associations!(
-    store::Store, associations::AbstractVector{ParentChildAssociation}
-)
-    payload = JSON.json([_parent_child_json(a) for a in associations])
-    return _assoc_count_out(
-        out -> ccall(
-            (:infrastore_store_add_parent_child_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{UInt64}),
-            store.handle,
-            payload,
-            out,
-        ),
-    )
-end
-
-"""
-    has_parent_child_association(store; filters...) -> Bool
-
-Whether any edge matches the filter. Filter keywords, all optional and ANDed:
-`parent_id`, `parent_types`, `child_id`, `child_types`.
-"""
-function has_parent_child_association(
-    store::Store;
-    parent_id::Union{Nothing,Integer}=nothing,
-    parent_types::Union{Nothing,AbstractVector}=nothing,
-    child_id::Union{Nothing,Integer}=nothing,
-    child_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _parent_child_filter_json(parent_id, parent_types, child_id, child_types)
-    return _assoc_bool_out(
-        out -> ccall(
-            (:infrastore_store_has_parent_child_association, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{Bool}),
-            store.handle,
-            filter_json,
-            out,
-        ),
-    )
-end
-
-"""
-    list_parent_child_associations(store; filters...) -> Vector{ParentChildAssociation}
-
-Full edge rows matching the filter (same keywords as
-[`has_parent_child_association`](@ref)), in insertion order.
-"""
-function list_parent_child_associations(
-    store::Store;
-    parent_id::Union{Nothing,Integer}=nothing,
-    parent_types::Union{Nothing,AbstractVector}=nothing,
-    child_id::Union{Nothing,Integer}=nothing,
-    child_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _parent_child_filter_json(parent_id, parent_types, child_id, child_types)
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_list_parent_child_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            buf,
-            cap,
-            out_len,
-        ),
-    )
-    return ParentChildAssociation[_decode_parent_child(r) for r in JSON.parse(json)]
-end
-
-# `endpoint`: 0 = parents, 1 = children.
-function _parent_child_ids(store::Store, filter_json, endpoint::Integer)
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_list_parent_child_ids, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            Int32(endpoint),
-            buf,
-            cap,
-            out_len,
-        ),
-    )
-    return Int[Int(i) for i in JSON.parse(json)]
-end
-
-"""
-    list_children(store; filters...) -> Vector{Int}
-
-Distinct child ids matching the filter, ascending — the children of a component
-when `parent_id` is set.
-"""
-function list_children(
-    store::Store;
-    parent_id::Union{Nothing,Integer}=nothing,
-    parent_types::Union{Nothing,AbstractVector}=nothing,
-    child_id::Union{Nothing,Integer}=nothing,
-    child_types::Union{Nothing,AbstractVector}=nothing,
-)
-    return _parent_child_ids(
-        store, _parent_child_filter_json(parent_id, parent_types, child_id, child_types), 1
-    )
-end
-
-"""
-    list_parents(store; filters...) -> Vector{Int}
-
-Distinct parent ids matching the filter, ascending — the parents of a component
-when `child_id` is set.
-"""
-function list_parents(
-    store::Store;
-    parent_id::Union{Nothing,Integer}=nothing,
-    parent_types::Union{Nothing,AbstractVector}=nothing,
-    child_id::Union{Nothing,Integer}=nothing,
-    child_types::Union{Nothing,AbstractVector}=nothing,
-)
-    return _parent_child_ids(
-        store, _parent_child_filter_json(parent_id, parent_types, child_id, child_types), 0
-    )
-end
-
-"""
-    remove_parent_child_associations!(store; filters...) -> Int
-
-Remove every edge matching the filter, returning the number removed. Removing
-nothing is not an error.
-"""
-function remove_parent_child_associations!(
-    store::Store;
-    parent_id::Union{Nothing,Integer}=nothing,
-    parent_types::Union{Nothing,AbstractVector}=nothing,
-    child_id::Union{Nothing,Integer}=nothing,
-    child_types::Union{Nothing,AbstractVector}=nothing,
-)
-    filter_json = _parent_child_filter_json(parent_id, parent_types, child_id, child_types)
-    return _assoc_count_out(
-        out -> ccall(
-            (:infrastore_store_remove_parent_child_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{UInt64}),
-            store.handle,
-            filter_json,
-            out,
-        ),
-    )
-end
-
-"""
-    replace_parent_child_component_id!(store, old_id, new_id) -> Int
-
-Rewrite component `old_id` to `new_id` on both ends of every edge, returning the
-rows updated. Throws `DuplicateAssociationError` if the rewrite would duplicate
-an edge `new_id` already has.
-"""
-function replace_parent_child_component_id!(store::Store, old_id::Integer, new_id::Integer)
-    return _assoc_count_out(
-        out -> ccall(
-            (:infrastore_store_replace_parent_child_component_id, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Int64, Int64, Ref{UInt64}),
-            store.handle,
-            Int64(old_id),
-            Int64(new_id),
-            out,
-        ),
-    )
-end
-
-"""
-    count_parent_child_associations(store; filters...) -> Int
-
-Number of edges matching the filter.
-"""
-function count_parent_child_associations(
-    store::Store;
-    parent_id::Union{Nothing,Integer}=nothing,
-    parent_types::Union{Nothing,AbstractVector}=nothing,
-    child_id::Union{Nothing,Integer}=nothing,
-    child_types::Union{Nothing,AbstractVector}=nothing,
-)
-    out = Ref{Int64}(0)
-    _check(
-        ccall(
-            (:infrastore_store_count_parent_child_associations, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Cstring, Ref{Int64}),
-            store.handle,
-            _parent_child_filter_json(parent_id, parent_types, child_id, child_types),
-            out,
-        ),
-    )
-    return Int(out[])
-end
+# ---- Store-wide queries and maintenance ------------------------------------
 
 """
     get_forecast_parameters(store; resolution=nothing, interval=nothing) -> ForecastParameters
@@ -796,42 +523,28 @@ is `nothing` when no forecast matches.
 """
 function get_forecast_parameters(
     store::Store;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
 )
-    fres = _period_to_cstr(resolution)
-    fivl = _period_to_cstr(interval)
     present = Ref{Bool}(false)
-    horizon_out = Ref{Ptr{Cchar}}(C_NULL);
+    horizon_out = Ref{Ptr{Cchar}}(C_NULL)
     interval_out = Ref{Ptr{Cchar}}(C_NULL)
-    count = Ref{Int64}(-1);
-    resolution_out = Ref{Ptr{Cchar}}(C_NULL);
+    count = Ref{Int64}(-1)
+    resolution_out = Ref{Ptr{Cchar}}(C_NULL)
     initial_out = Ref{Int64}(-1)
-    code = ccall(
-        (:infrastore_store_get_forecast_parameters, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Cstring,
-            Cstring,
-            Ref{Bool},
-            Ref{Ptr{Cchar}},
-            Ref{Ptr{Cchar}},
-            Ref{Int64},
-            Ref{Ptr{Cchar}},
-            Ref{Int64},
-        ),
-        store.handle,
-        fres,
-        fivl,
-        present,
-        horizon_out,
-        interval_out,
-        count,
-        resolution_out,
-        initial_out,
+    _check(
+        @ccall lib_path().infrastore_store_get_forecast_parameters(
+            store.handle::Ptr{Cvoid},
+            _period_to_cstr(resolution)::Cstring,
+            _period_to_cstr(interval)::Cstring,
+            present::Ref{Bool},
+            horizon_out::Ref{Ptr{Cchar}},
+            interval_out::Ref{Ptr{Cchar}},
+            count::Ref{Int64},
+            resolution_out::Ref{Ptr{Cchar}},
+            initial_out::Ref{Int64},
+        )::Int32
     )
-    _check(code)
     return ForecastParameters(
         _take_period(horizon_out[]),
         _take_period(interval_out[]),
@@ -853,123 +566,66 @@ within a resolution; pass `resolution` (a `Period`) to scope the check to one
 grid. Throws `IntegrityError` when the `SingleTimeSeries` at a single
 resolution disagree on their `(initial_timestamp, length)`. One catalog query.
 """
-function check_static_consistency(store::Store; resolution::Union{Nothing,Period}=nothing)
+function check_static_consistency(store::Store; resolution::Union{Nothing, Period}=nothing)
     fres = _period_to_cstr(resolution)
-    out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_check_static_consistency, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        fres,
-        C_NULL,
-        UInt64(0),
-        out_len,
+    json = _probe(
+        (buf, cap, len) -> @ccall lib_path().infrastore_store_check_static_consistency(
+            store.handle::Ptr{Cvoid},
+            fres::Cstring,
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            len::Ref{UInt64},
+        )::Int32
     )
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_check_static_consistency, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Cstring, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        fres,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
-    _check(code)
-    rows = JSON.parse(String(buf[1:Int(out_len[])]))
     return StaticGrid[
         StaticGrid(
             _from_unix_ms(Int64(r["initial_timestamp_ms"])),
             _iso_to_period(String(r["resolution"])),
             Int(r["length"]),
-        ) for r in rows
+        ) for r in JSON.parse(json)
     ]
 end
 
-"""
+# `get_resolutions` and `get_intervals` share a signature and a decode; only the
+# export differs.
+for (fname, sym) in (
+    (:get_resolutions, :infrastore_store_get_resolutions),
+    (:get_intervals, :infrastore_store_get_intervals),
+)
+    @eval function $fname(store::Store; time_series_type::Union{Nothing, Type}=nothing)
+        has_type = time_series_type !== nothing
+        type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
+        json = _probe(
+            (buf, cap, len) -> @ccall lib_path().$sym(
+                store.handle::Ptr{Cvoid},
+                has_type::Bool,
+                type_arg::Int32,
+                buf::Ptr{UInt8},
+                cap::UInt64,
+                len::Ref{UInt64},
+            )::Int32
+        )
+        return Period[_iso_to_period(String(s)) for s in JSON.parse(json)]
+    end
+end
+
+@doc """
     get_resolutions(store; time_series_type=nothing) -> Vector{Period}
 
 Return the distinct resolutions stored, in the core's stored (lexical-by-ISO)
 order. When `time_series_type` (the Julia type) is given the result is
 restricted to that type. This is a single catalog query in the core rather than
 a scan of every association.
-"""
-function get_resolutions(store::Store; time_series_type::Union{Nothing,Type}=nothing)
-    has_type = time_series_type !== nothing
-    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
-    out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_resolutions, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        has_type,
-        type_arg,
-        C_NULL,
-        UInt64(0),
-        out_len,
-    )
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_get_resolutions, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        has_type,
-        type_arg,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
-    _check(code)
-    isos = JSON.parse(String(buf[1:Int(out_len[])]))
-    return Period[_iso_to_period(String(s)) for s in isos]
-end
+""" get_resolutions
 
-"""
+@doc """
     get_intervals(store; time_series_type=nothing) -> Vector{Period}
 
 Return the distinct forecast intervals stored (lexical-by-ISO order), the
 interval analog of [`get_resolutions`](@ref). When `time_series_type` (the Julia
 type) is given the result is restricted to that type; non-forecast types return
 an empty vector.
-"""
-function get_intervals(store::Store; time_series_type::Union{Nothing,Type}=nothing)
-    has_type = time_series_type !== nothing
-    type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
-    out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_intervals, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        has_type,
-        type_arg,
-        C_NULL,
-        UInt64(0),
-        out_len,
-    )
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_get_intervals, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Bool, Int32, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        has_type,
-        type_arg,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
-    _check(code)
-    isos = JSON.parse(String(buf[1:Int(out_len[])]))
-    return Period[_iso_to_period(String(s)) for s in isos]
-end
+""" get_intervals
 
 """
     read_only(store) -> Bool
@@ -978,14 +634,11 @@ Whether the store was opened read-only.
 """
 function read_only(store::Store)
     out = Ref{Bool}(false)
-    code = ccall(
-        (:infrastore_store_read_only, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{Bool}),
-        store.handle,
-        out,
+    _check(
+        @ccall lib_path().infrastore_store_read_only(
+            store.handle::Ptr{Cvoid}, out::Ref{Bool}
+        )::Int32
     )
-    _check(code)
     return out[]
 end
 
@@ -996,19 +649,17 @@ Return the store's [`CompressionSettings`](@ref). For a store opened from disk
 this reflects the policy it was created with; in-memory stores report `:none`.
 """
 function get_compression(store::Store)
-    kind = Ref{UInt8}(0);
-    level = Ref{UInt8}(0);
+    kind = Ref{UInt8}(0)
+    level = Ref{UInt8}(0)
     shuffle = Ref{Bool}(false)
-    code = ccall(
-        (:infrastore_store_get_compression, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{UInt8}, Ref{UInt8}, Ref{Bool}),
-        store.handle,
-        kind,
-        level,
-        shuffle,
+    _check(
+        @ccall lib_path().infrastore_store_get_compression(
+            store.handle::Ptr{Cvoid},
+            kind::Ref{UInt8},
+            level::Ref{UInt8},
+            shuffle::Ref{Bool},
+        )::Int32
     )
-    _check(code)
     return CompressionSettings(kind[] == 0 ? :none : :deflate, Int(level[]), shuffle[])
 end
 
@@ -1020,34 +671,18 @@ in-memory store.
 """
 function get_path(store::Store)
     has_path = Ref{Bool}(false)
-    out_len = Ref{UInt64}(0)
-    # Probe: a null buffer reports the required length without copying.
-    code = ccall(
-        (:infrastore_store_get_path, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{Bool}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        has_path,
-        C_NULL,
-        UInt64(0),
-        out_len,
+    json = _probe(
+        (buf, cap, len) -> @ccall lib_path().infrastore_store_get_path(
+            store.handle::Ptr{Cvoid},
+            has_path::Ref{Bool},
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            len::Ref{UInt64},
+        )::Int32
     )
-    _check(code)
-    has_path[] || return nothing
-    # +1 leaves room for the trailing NUL `write_str_out` appends.
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = ccall(
-        (:infrastore_store_get_path, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{Bool}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-        store.handle,
-        has_path,
-        buf,
-        UInt64(length(buf)),
-        out_len,
-    )
-    _check(code)
-    return _take_buffer_string(buf, out_len[])
+    # The probe sets `has_path` on its first (length-only) call; an in-memory
+    # store reports no path and an empty body.
+    return has_path[] ? json : nothing
 end
 
 """
@@ -1066,23 +701,18 @@ expected state, not corruption).
 """
 function verify_integrity(store::Store)
     out = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_verify, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ref{UInt64}),
-        store.handle,
-        out,
+    _check(
+        @ccall lib_path().infrastore_store_verify(
+            store.handle::Ptr{Cvoid}, out::Ref{UInt64}
+        )::Int32
     )
-    _check(code)
     return Int(out[])
 end
 
 function compact!(store::Store)
-    code = ccall(
-        (:infrastore_store_compact, lib_path()), Int32, (Ptr{Cvoid},), store.handle
+    return _check(
+        @ccall lib_path().infrastore_store_compact(store.handle::Ptr{Cvoid})::Int32
     )
-    _check(code)
-    return nothing
 end
 
 """
@@ -1092,9 +722,7 @@ Flush pending writes (NetCDF arrays + SQLite metadata) to disk. After this the
 on-disk `<path>.nc` and `<path>.sqlite` artifacts can be copied for persistence.
 """
 function flush!(store::Store)
-    code = ccall((:infrastore_store_flush, lib_path()), Int32, (Ptr{Cvoid},), store.handle)
-    _check(code)
-    return nothing
+    return _check(@ccall lib_path().infrastore_store_flush(store.handle::Ptr{Cvoid})::Int32)
 end
 
 """
@@ -1104,14 +732,11 @@ Persist the store to `path` (NetCDF) and `\$path.sqlite` (metadata), materializi
 an in-memory store to disk. Existing target files are overwritten.
 """
 function persist!(store::Store, path::AbstractString)
-    code = ccall(
-        (:infrastore_store_persist, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Cstring),
-        store.handle,
-        path,
+    _check(
+        @ccall lib_path().infrastore_store_persist(
+            store.handle::Ptr{Cvoid}, path::Cstring
+        )::Int32
     )
-    _check(code)
     return nothing
 end
 
@@ -1125,25 +750,21 @@ the clear to one owner pass both `owner_id` and `owner_category` (an
 """
 function clear!(
     store::Store;
-    owner_id::Union{Nothing,Integer}=nothing,
-    owner_category::Union{Nothing,OwnerCategory}=nothing,
+    owner_id::Union{Nothing, Integer}=nothing,
+    owner_category::Union{Nothing, OwnerCategory}=nothing,
 )
     has_owner = owner_id !== nothing
     if has_owner && owner_category === nothing
         throw(ArgumentError("clear! with owner_id also requires owner_category"))
     end
-    owner_arg = has_owner ? Int64(owner_id) : Int64(0)
-    category_arg = has_owner ? _category_int(owner_category) : Int32(0)
-    code = ccall(
-        (:infrastore_store_clear, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Bool, Int64, Int32),
-        store.handle,
-        has_owner,
-        owner_arg,
-        category_arg,
+    _check(
+        @ccall lib_path().infrastore_store_clear(
+            store.handle::Ptr{Cvoid},
+            has_owner::Bool,
+            (has_owner ? Int64(owner_id) : Int64(0))::Int64,
+            (has_owner ? _category_int(owner_category) : Int32(0))::Int32,
+        )::Int32
     )
-    _check(code)
     return nothing
 end
 
@@ -1163,16 +784,14 @@ function replace_owner!(
     owner_category::OwnerCategory,
 )
     out = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_replace_owner, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int64, Int32, Ref{UInt64}),
-        store.handle,
-        Int64(old_owner_id),
-        Int64(new_owner_id),
-        _category_int(owner_category),
-        out,
+    _check(
+        @ccall lib_path().infrastore_store_replace_owner(
+            store.handle::Ptr{Cvoid},
+            Int64(old_owner_id)::Int64,
+            Int64(new_owner_id)::Int64,
+            _category_int(owner_category)::Int32,
+            out::Ref{UInt64},
+        )::Int32
     )
-    _check(code)
     return Int(out[])
 end

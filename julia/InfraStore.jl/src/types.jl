@@ -15,7 +15,7 @@ const _DTYPE_JULIA = (Float64, Float32, Int64, Int32, UInt64, Bool)
 _julia_dtype(code::Integer) = _DTYPE_JULIA[Int(code) + 1]
 
 # The Julia element type for a catalog row's dtype name (the Rust `as_str` form).
-const _DTYPE_BY_NAME = Dict{String,Type}(
+const _DTYPE_BY_NAME = Dict{String, Type}(
     "f64" => Float64,
     "f32" => Float32,
     "i64" => Int64,
@@ -50,15 +50,15 @@ _maybe_string(s::AbstractString) = String(s)
 
 # ---- Single time series ---------------------------------------------------
 
-struct SingleTimeSeries{T,N}
+struct SingleTimeSeries{T, N}
     initial_timestamp::DateTime
     resolution::Period
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time)."
-    data::Array{T,N}
+    data::Array{T, N}
     "Association name (required; the same array may be stored under different names)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing,String}
+    ext::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -68,9 +68,9 @@ function SingleTimeSeries(
     resolution,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=nothing,
 )
-    return SingleTimeSeries{eltype(data),ndims(data)}(
+    return SingleTimeSeries{eltype(data), ndims(data)}(
         initial,
         resolution,
         data isa Array ? data : Array(data),
@@ -81,14 +81,14 @@ end
 
 # ---- Non-sequential time series -------------------------------------------
 
-struct NonSequentialTimeSeries{T,N}
+struct NonSequentialTimeSeries{T, N}
     timestamps::Vector{DateTime}
     "Values: a 1-D vector (scalar per step) or N-D array (dim 1 = time, one entry per timestamp)."
-    data::Array{T,N}
+    data::Array{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing,String}
+    ext::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -98,14 +98,14 @@ function NonSequentialTimeSeries(
     timestamps,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=nothing,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
     all(timestamps[i] < timestamps[i + 1] for i in 1:(length(timestamps) - 1)) ||
         throw(InvalidParameterError("timestamps must be strictly increasing"))
     arr = data isa Array ? data : Array(data)
-    return NonSequentialTimeSeries{eltype(arr),ndims(arr)}(
+    return NonSequentialTimeSeries{eltype(arr), ndims(arr)}(
         Vector{DateTime}(timestamps), arr, String(name), _maybe_string(ext)
     )
 end
@@ -132,18 +132,18 @@ the identity.
 """
 abstract type AbstractDeterministic end
 
-struct Deterministic{T,N} <: AbstractDeterministic
+struct Deterministic{T, N} <: AbstractDeterministic
     initial_timestamp::DateTime
     resolution::Period
     horizon::Period
     interval::Period
     count::Int
     "Values with canonical shape `(H, count, element_dims...)`."
-    data::Array{T,N}
+    data::Array{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing,String}
+    ext::Union{Nothing, String}
 end
 
 function Deterministic(
@@ -154,9 +154,9 @@ function Deterministic(
     count,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=nothing,
 )
-    return Deterministic{eltype(data),ndims(data)}(
+    return Deterministic{eltype(data), ndims(data)}(
         initial,
         resolution,
         horizon,
@@ -168,7 +168,7 @@ function Deterministic(
     )
 end
 
-struct Probabilistic{T,N}
+struct Probabilistic{T, N}
     initial_timestamp::DateTime
     resolution::Period
     horizon::Period
@@ -176,11 +176,11 @@ struct Probabilistic{T,N}
     count::Int
     percentiles::Vector{Float64}
     "Values with canonical shape `(num_percentiles, H, count, element_dims...)`."
-    data::Array{T,N}
+    data::Array{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing,String}
+    ext::Union{Nothing, String}
 end
 
 function Probabilistic(
@@ -192,9 +192,9 @@ function Probabilistic(
     percentiles,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=nothing,
 )
-    return Probabilistic{eltype(data),ndims(data)}(
+    return Probabilistic{eltype(data), ndims(data)}(
         initial,
         resolution,
         horizon,
@@ -207,7 +207,7 @@ function Probabilistic(
     )
 end
 
-struct Scenarios{T,N}
+struct Scenarios{T, N}
     initial_timestamp::DateTime
     resolution::Period
     horizon::Period
@@ -215,11 +215,11 @@ struct Scenarios{T,N}
     count::Int
     scenario_count::Int
     "Values with canonical shape `(scenario_count, H, count, element_dims...)`."
-    data::Array{T,N}
+    data::Array{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing,String}
+    ext::Union{Nothing, String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -231,9 +231,9 @@ function Scenarios(
     count,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing,AbstractString}=nothing,
+    ext::Union{Nothing, AbstractString}=nothing,
 )
-    return Scenarios{eltype(data),ndims(data)}(
+    return Scenarios{eltype(data), ndims(data)}(
         initial,
         resolution,
         horizon,

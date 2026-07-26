@@ -11,7 +11,7 @@ end
 
 function _finalize_key(k::TimeSeriesKey)
     if k.handle != C_NULL
-        ccall((:infrastore_key_free, lib_path()), Cvoid, (Ptr{Cvoid},), k.handle)
+        @ccall lib_path().infrastore_key_free(k.handle::Ptr{Cvoid})::Cvoid
         k.handle = C_NULL
     end
 end
@@ -29,7 +29,7 @@ end
 
 function close!(s::Store)
     if s.handle != C_NULL
-        ccall((:infrastore_store_free, lib_path()), Cvoid, (Ptr{Cvoid},), s.handle)
+        @ccall lib_path().infrastore_store_free(s.handle::Ptr{Cvoid})::Cvoid
         s.handle = C_NULL
     end
 end
@@ -48,8 +48,8 @@ in-memory stores and is persisted so later appends reuse it.
 """
 function Store(;
     in_memory::Bool=true,
-    path::Union{Nothing,AbstractString}=nothing,
-    compression::Union{Symbol,AbstractString}=:deflate,
+    path::Union{Nothing, AbstractString}=nothing,
+    compression::Union{Symbol, AbstractString}=:deflate,
     compression_level::Integer=3,
     shuffle::Bool=true,
 )
@@ -67,17 +67,14 @@ function Store(;
     end
     out = Ref{Ptr{Cvoid}}(C_NULL)
     cpath = path === nothing ? C_NULL : String(path)
-    code = ccall(
-        (:infrastore_store_create_with_compression, lib_path()),
-        Int32,
-        (Cstring, Bool, UInt8, UInt8, Bool, Ref{Ptr{Cvoid}}),
-        cpath,
-        in_memory,
-        compression_kind,
-        UInt8(compression_level),
-        shuffle,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_create_with_compression(
+        cpath::Cstring,
+        in_memory::Bool,
+        compression_kind::UInt8,
+        UInt8(compression_level)::UInt8,
+        shuffle::Bool,
+        out::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     return Store(out[])
 end
@@ -89,14 +86,9 @@ Open an existing on-disk store.
 """
 function open_store(path::AbstractString; read_only::Bool=false)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall(
-        (:infrastore_store_open, lib_path()),
-        Int32,
-        (Cstring, Bool, Ref{Ptr{Cvoid}}),
-        path,
-        read_only,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_open(
+        path::Cstring, read_only::Bool, out::Ref{Ptr{Cvoid}}
+    )::Int32
     _check(code)
     return Store(out[])
 end

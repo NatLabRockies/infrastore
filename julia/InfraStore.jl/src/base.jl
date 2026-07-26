@@ -12,14 +12,9 @@ features), delegated to the Rust core. Consistent with `hash`, so keys work as
 function Base.:(==)(a::TimeSeriesKey, b::TimeSeriesKey)
     out = Ref{Bool}(false)
     _check(
-        ccall(
-            (:infrastore_key_eq, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ptr{Cvoid}, Ref{Bool}),
-            a.handle,
-            b.handle,
-            out,
-        ),
+        @ccall lib_path().infrastore_key_eq(
+            a.handle::Ptr{Cvoid}, b.handle::Ptr{Cvoid}, out::Ref{Bool}
+        )::Int32
     )
     return out[]
 end
@@ -27,97 +22,50 @@ end
 function Base.hash(k::TimeSeriesKey, h::UInt)
     out = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_key_identity_hash, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ref{UInt64}),
-            k.handle,
-            out,
-        ),
+        @ccall lib_path().infrastore_key_identity_hash(
+            k.handle::Ptr{Cvoid}, out::Ref{UInt64}
+        )::Int32
     )
     return hash(out[], h)
 end
 
 function Base.show(io::IO, k::TimeSeriesKey)
-    if k.handle == C_NULL
-        print(io, "TimeSeriesKey(freed)")
-        return nothing
-    end
-    info = key_info(k)
+    k.handle == C_NULL && return print(io, "TimeSeriesKey(freed)")
+    i = key_info(k)
     return print(
         io,
-        "TimeSeriesKey(",
-        info.time_series_type,
-        " name=",
-        repr(info.name),
-        " owner_id=",
-        info.owner_id,
-        " owner_category=",
-        info.owner_category,
-        ")",
+        "TimeSeriesKey($(i.time_series_type) name=$(repr(i.name)) " *
+        "owner_id=$(i.owner_id) owner_category=$(i.owner_category))",
     )
 end
 
 function Base.show(io::IO, s::Store)
-    if s.handle == C_NULL
-        print(io, "Store(closed)")
-    else
-        print(io, "Store(read_only=", read_only(s), ")")
-    end
+    s.handle == C_NULL && return print(io, "Store(closed)")
+    return print(io, "Store(read_only=$(read_only(s)))")
 end
 
-function Base.show(io::IO, ts::SingleTimeSeries{T,N}) where {T,N}
+function Base.show(io::IO, ts::SingleTimeSeries{T, N}) where {T, N}
     return print(
         io,
-        "SingleTimeSeries{",
-        T,
-        ",",
-        N,
-        "}(name=",
-        repr(ts.name),
-        " length=",
-        size(ts.data, 1),
-        " initial_timestamp=",
-        ts.initial_timestamp,
-        " resolution=",
-        ts.resolution,
-        ")",
+        "SingleTimeSeries{$T,$N}(name=$(repr(ts.name)) length=$(size(ts.data, 1)) " *
+        "initial_timestamp=$(ts.initial_timestamp) resolution=$(ts.resolution))",
     )
 end
 
-function Base.show(io::IO, ts::NonSequentialTimeSeries{T,N}) where {T,N}
+function Base.show(io::IO, ts::NonSequentialTimeSeries{T, N}) where {T, N}
     return print(
         io,
-        "NonSequentialTimeSeries{",
-        T,
-        ",",
-        N,
-        "}(name=",
-        repr(ts.name),
-        " length=",
-        size(ts.data, 1),
-        ")",
+        "NonSequentialTimeSeries{$T,$N}(name=$(repr(ts.name)) length=$(size(ts.data, 1)))",
     )
 end
 
 for FT in (:Deterministic, :Probabilistic, :Scenarios)
-    @eval function Base.show(io::IO, ts::$FT{T,N}) where {T,N}
-        print(
+    @eval function Base.show(io::IO, ts::$FT{T, N}) where {T, N}
+        return print(
             io,
-            $(string(FT)),
-            "{",
-            T,
-            ",",
-            N,
-            "}(name=",
-            repr(ts.name),
-            " count=",
-            ts.count,
-            " horizon=",
-            ts.horizon,
-            " interval=",
-            ts.interval,
-            ")",
+            $("$FT") *
+            "{$T,$N}(name=$(repr(ts.name)) count=$(ts.count) " *
+            "horizon=$(ts.horizon) interval=$(ts.interval))",
         )
     end
 end
@@ -127,7 +75,7 @@ end
 for ST in (:SingleTimeSeries, :NonSequentialTimeSeries)
     @eval begin
         Base.length(ts::$ST) = length(ts.data)
-        Base.eltype(::Type{$ST{T,N}}) where {T,N} = T
+        Base.eltype(::Type{$ST{T, N}}) where {T, N} = T
         Base.getindex(ts::$ST, i...) = getindex(ts.data, i...)
         Base.iterate(ts::$ST) = iterate(ts.data)
         Base.iterate(ts::$ST, state) = iterate(ts.data, state)

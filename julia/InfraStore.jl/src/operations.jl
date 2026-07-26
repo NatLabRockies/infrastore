@@ -12,7 +12,7 @@ end
 
 # Lower an optional `(start, end)` DateTime range to the FFI's
 # (present::Bool, start_ms::Int64, end_ms::Int64) triple. `nothing` -> no range.
-function _time_range_args(time_range::Union{Nothing,Tuple{DateTime,DateTime}})
+function _time_range_args(time_range::Union{Nothing, Tuple{DateTime, DateTime}})
     time_range === nothing && return (false, Int64(0), Int64(0))
     return (true, _to_unix_ms(time_range[1]), _to_unix_ms(time_range[2]))
 end
@@ -87,7 +87,7 @@ end
 function _take_cstr(ptr::Ptr{Cchar})
     ptr == C_NULL && return nothing
     s = unsafe_string(ptr)
-    ccall((:infrastore_string_free, lib_path()), Cvoid, (Ptr{Cchar},), ptr)
+    @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
     return s
 end
 
@@ -108,7 +108,7 @@ end
 # `DeterministicSingleTimeSeries` is derived in-store via
 # `transform_single_time_series!`, never added directly).
 const _AddableTimeSeries = Union{
-    SingleTimeSeries,NonSequentialTimeSeries,Deterministic,Probabilistic,Scenarios
+    SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios
 }
 
 """
@@ -165,18 +165,14 @@ get_metadata(Scenarios, store, 42, Component, "wind"; resolution=Hour(1))
 ```
 """
 function get_metadata(store::Store, key::TimeSeriesKey)
-    json = _filter_probe(
-        store,
-        (buf, cap, out_len) -> ccall(
-            (:infrastore_store_get_metadata_by_key, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt8}, UInt64, Ref{UInt64}),
-            store.handle,
-            key.handle,
-            buf,
-            cap,
-            out_len,
-        ),
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_get_metadata_by_key(
+            store.handle::Ptr{Cvoid},
+            key.handle::Ptr{Cvoid},
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
     )
     return _decode_metadata(JSON.parse(json))
 end
@@ -187,9 +183,9 @@ function get_metadata(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 ) where {T}
     code = _type_code(T)
     # The family sentinel is not a stored type, so the core resolves it to the
@@ -224,8 +220,8 @@ function get_metadata(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     return get_metadata(
         SingleTimeSeries,
@@ -246,15 +242,12 @@ Rename the series identified by `key` to `new_name`, returning the renamed key
 """
 function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::AbstractString)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall(
-        (:infrastore_store_rename, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle,
-        key.handle,
-        String(new_name),
-        out_key,
-    )
+    code = @ccall lib_path().infrastore_store_rename(
+        store.handle::Ptr{Cvoid},
+        key.handle::Ptr{Cvoid},
+        String(new_name)::Cstring,
+        out_key::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     return TimeSeriesKey(out_key[])
 end
@@ -285,38 +278,25 @@ function get_time_series_key(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    interval::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    interval::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 ) where {T}
     resolution_iso = _period_to_cstr(resolution)
     interval_iso = _period_to_cstr(interval)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall(
-        (:infrastore_store_resolve_forecast_key, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Int64,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Cstring,
-            Int32,
-            Ref{Ptr{Cvoid}},
-        ),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        resolution_iso,
-        interval_iso,
-        features_json,
-        Int32(_type_code(T)),
-        out_key,
-    )
+    code = @ccall lib_path().infrastore_store_resolve_forecast_key(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        Int32(_type_code(T))::Int32,
+        out_key::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     return TimeSeriesKey(out_key[])
 end
@@ -335,27 +315,20 @@ function get_array_by_hash(
     out_dtype = Ref{Int32}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_get_array_by_hash, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, Ref{Int32}, Ref{Ptr{UInt8}}, Ref{UInt64}),
-        store.handle,
-        data_hash,
-        out_dtype,
-        out_data,
-        out_len,
-    )
+    code = @ccall lib_path().infrastore_store_get_array_by_hash(
+        store.handle::Ptr{Cvoid},
+        data_hash::Ptr{UInt8},
+        out_dtype::Ref{Int32},
+        out_data::Ref{Ptr{UInt8}},
+        out_len::Ref{UInt64},
+    )::Int32
     _check(code)
     nbytes = Int(out_len[])
     raw = unsafe_wrap(Array, out_data[], nbytes; own=false)
     bytes = copy(raw)
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_len[]::UInt64
+    )::Cvoid
     return collect(reinterpret(T, bytes))
 end
 
@@ -373,15 +346,12 @@ function count_array_references(store::Store, data_hash::Vector{UInt8})
     length(data_hash) == 32 || throw(InvalidParameterError("data_hash must be 32 bytes"))
     out_sts = Ref{UInt64}(0)
     out_dst = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_store_count_array_references, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{UInt8}, Ref{UInt64}, Ref{UInt64}),
-        store.handle,
-        data_hash,
-        out_sts,
-        out_dst,
-    )
+    code = @ccall lib_path().infrastore_store_count_array_references(
+        store.handle::Ptr{Cvoid},
+        data_hash::Ptr{UInt8},
+        out_sts::Ref{UInt64},
+        out_dst::Ref{UInt64},
+    )::Int32
     _check(code)
     return ArrayReferenceCounts(Int(out_sts[]), Int(out_dst[]))
 end
@@ -411,24 +381,21 @@ function has_time_series(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Bool}(false)
-    code = ccall(
-        (:infrastore_store_has_by_attrs, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring, Ref{Bool}),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        resolution_iso,
-        features_json,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_has_by_attrs(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        resolution_iso::Cstring,
+        features_json::Cstring,
+        out::Ref{Bool},
+    )::Int32
     _check(code)
     return out[]
 end
@@ -445,21 +412,18 @@ function has_for_owner(
     store::Store,
     owner_id::Integer,
     owner_category::OwnerCategory;
-    time_series_type::Union{Nothing,Type}=nothing,
+    time_series_type::Union{Nothing, Type}=nothing,
 )
     out = Ref{Bool}(false)
     use_type = time_series_type !== nothing
-    code = ccall(
-        (:infrastore_store_has_for_owner, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int32, Int32, Bool, Ref{Bool}),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        use_type ? _filter_type_code(time_series_type) : Int32(0),
-        use_type,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_has_for_owner(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        (use_type ? _filter_type_code(time_series_type) : Int32(0))::Int32,
+        use_type::Bool,
+        out::Ref{Bool},
+    )::Int32
     _check(code)
     return out[]
 end
@@ -475,22 +439,19 @@ function remove_time_series!(
     owner_id::Integer,
     owner_category::OwnerCategory,
     name::AbstractString;
-    resolution::Union{Nothing,Period}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    resolution::Union{Nothing, Period}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
-    code = ccall(
-        (:infrastore_store_remove_by_attrs, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Int64, Int32, Cstring, Cstring, Cstring),
-        store.handle,
-        Int64(owner_id),
-        _category_int(owner_category),
-        name,
-        resolution_iso,
-        features_json,
-    )
+    code = @ccall lib_path().infrastore_store_remove_by_attrs(
+        store.handle::Ptr{Cvoid},
+        Int64(owner_id)::Int64,
+        _category_int(owner_category)::Int32,
+        name::Cstring,
+        resolution_iso::Cstring,
+        features_json::Cstring,
+    )::Int32
     _check(code)
     return nothing
 end
@@ -498,7 +459,7 @@ end
 function get_time_series(
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     out_initial = Ref{Int64}(0)
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
@@ -509,57 +470,32 @@ function get_time_series(
     out_data_len = Ref{UInt64}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
-    code = ccall(
-        (:infrastore_store_get_single, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Ptr{Cvoid},
-            Bool,
-            Int64,
-            Int64,
-            Ref{Int64},
-            Ref{Ptr{Cchar}},
-            Ref{Int32},
-            Ref{Ptr{Int64}},
-            Ref{UInt64},
-            Ref{Ptr{UInt8}},
-            Ref{UInt64},
-            Ref{Ptr{Cchar}},
-        ),
-        store.handle,
-        key.handle,
-        tr_present,
-        tr_start,
-        tr_end,
-        out_initial,
-        out_resolution,
-        out_dtype,
-        out_shape,
-        out_shape_len,
-        out_data,
-        out_data_len,
-        out_ext,
-    )
+    code = @ccall lib_path().infrastore_store_get_single(
+        store.handle::Ptr{Cvoid},
+        key.handle::Ptr{Cvoid},
+        tr_present::Bool,
+        tr_start::Int64,
+        tr_end::Int64,
+        out_initial::Ref{Int64},
+        out_resolution::Ref{Ptr{Cchar}},
+        out_dtype::Ref{Int32},
+        out_shape::Ref{Ptr{Int64}},
+        out_shape_len::Ref{UInt64},
+        out_data::Ref{Ptr{UInt8}},
+        out_data_len::Ref{UInt64},
+        out_ext::Ref{Ptr{Cchar}},
+    )::Int32
     _check(code)
 
     # Full array shape [length, *element_shape] (row-major dims), then bytes.
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall(
-        (:infrastore_buffer_free_i64, lib_path()),
-        Cvoid,
-        (Ptr{Int64}, UInt64),
-        out_shape[],
-        out_shape_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_i64(
+        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
+    )::Cvoid
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_data_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
+    )::Cvoid
 
     T = _julia_dtype(out_dtype[])
     flat = collect(reinterpret(T, bytes))
@@ -587,47 +523,26 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_data = Ref{Ptr{UInt8}}(C_NULL);
     out_data_len = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_bulk_result_get_single, lib_path()),
-            Int32,
-            (
-                Ptr{Cvoid},
-                UInt64,
-                Ref{Int64},
-                Ref{Ptr{Cchar}},
-                Ref{Int32},
-                Ref{Ptr{Int64}},
-                Ref{UInt64},
-                Ref{Ptr{UInt8}},
-                Ref{UInt64},
-            ),
-            result,
-            UInt64(idx),
-            out_initial,
-            out_resolution,
-            out_dtype,
-            out_shape,
-            out_shape_len,
-            out_data,
-            out_data_len,
-        ),
+        @ccall lib_path().infrastore_bulk_result_get_single(
+            result::Ptr{Cvoid},
+            UInt64(idx)::UInt64,
+            out_initial::Ref{Int64},
+            out_resolution::Ref{Ptr{Cchar}},
+            out_dtype::Ref{Int32},
+            out_shape::Ref{Ptr{Int64}},
+            out_shape_len::Ref{UInt64},
+            out_data::Ref{Ptr{UInt8}},
+            out_data_len::Ref{UInt64},
+        )::Int32
     )
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall(
-        (:infrastore_buffer_free_i64, lib_path()),
-        Cvoid,
-        (Ptr{Int64}, UInt64),
-        out_shape[],
-        out_shape_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_i64(
+        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
+    )::Cvoid
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_data_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
+    )::Cvoid
     data = _decode_forecast_array(bytes, out_dtype[], dims)
     return SingleTimeSeries(
         _from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name
@@ -645,55 +560,30 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
     out_data = Ref{Ptr{UInt8}}(C_NULL);
     out_data_len = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_bulk_result_get_non_sequential, lib_path()),
-            Int32,
-            (
-                Ptr{Cvoid},
-                UInt64,
-                Ref{Ptr{Int64}},
-                Ref{UInt64},
-                Ref{Int32},
-                Ref{Ptr{Int64}},
-                Ref{UInt64},
-                Ref{Ptr{UInt8}},
-                Ref{UInt64},
-            ),
-            result,
-            UInt64(idx),
-            out_ts,
-            out_ts_len,
-            out_dtype,
-            out_shape,
-            out_shape_len,
-            out_data,
-            out_data_len,
-        ),
+        @ccall lib_path().infrastore_bulk_result_get_non_sequential(
+            result::Ptr{Cvoid},
+            UInt64(idx)::UInt64,
+            out_ts::Ref{Ptr{Int64}},
+            out_ts_len::Ref{UInt64},
+            out_dtype::Ref{Int32},
+            out_shape::Ref{Ptr{Int64}},
+            out_shape_len::Ref{UInt64},
+            out_data::Ref{Ptr{UInt8}},
+            out_data_len::Ref{UInt64},
+        )::Int32
     )
     ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_i64, lib_path()),
-        Cvoid,
-        (Ptr{Int64}, UInt64),
-        out_ts[],
-        out_ts_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_i64(
+        out_ts[]::Ptr{Int64}, out_ts_len[]::UInt64
+    )::Cvoid
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall(
-        (:infrastore_buffer_free_i64, lib_path()),
-        Cvoid,
-        (Ptr{Int64}, UInt64),
-        out_shape[],
-        out_shape_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_i64(
+        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
+    )::Cvoid
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_data_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
+    )::Cvoid
     data = _decode_forecast_array(bytes, out_dtype[], dims)
     return NonSequentialTimeSeries(_from_unix_ms.(ts_ms), data, name)
 end
@@ -717,69 +607,38 @@ function _bulk_forecast(
     out_pct = Ref{Ptr{Float64}}(C_NULL);
     out_pct_len = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_bulk_result_get_forecast, lib_path()),
-            Int32,
-            (
-                Ptr{Cvoid},
-                UInt64,
-                Ref{Int64},
-                Ref{Ptr{Cchar}},
-                Ref{Ptr{Cchar}},
-                Ref{Ptr{Cchar}},
-                Ref{UInt64},
-                Ref{UInt64},
-                Ref{UInt64},
-                Ref{Ptr{UInt64}},
-                Ref{Int32},
-                Ref{Ptr{UInt8}},
-                Ref{UInt64},
-                Ref{Ptr{Float64}},
-                Ref{UInt64},
-            ),
-            result,
-            UInt64(idx),
-            out_initial,
-            out_res,
-            out_horizon,
-            out_interval,
-            out_count,
-            out_scen,
-            out_ndims,
-            out_dims,
-            out_dtype,
-            out_data,
-            out_byte_len,
-            out_pct,
-            out_pct_len,
-        ),
+        @ccall lib_path().infrastore_bulk_result_get_forecast(
+            result::Ptr{Cvoid},
+            UInt64(idx)::UInt64,
+            out_initial::Ref{Int64},
+            out_res::Ref{Ptr{Cchar}},
+            out_horizon::Ref{Ptr{Cchar}},
+            out_interval::Ref{Ptr{Cchar}},
+            out_count::Ref{UInt64},
+            out_scen::Ref{UInt64},
+            out_ndims::Ref{UInt64},
+            out_dims::Ref{Ptr{UInt64}},
+            out_dtype::Ref{Int32},
+            out_data::Ref{Ptr{UInt8}},
+            out_byte_len::Ref{UInt64},
+            out_pct::Ref{Ptr{Float64}},
+            out_pct_len::Ref{UInt64},
+        )::Int32
     )
     nd = Int(out_ndims[])
     dims = Int.(copy(unsafe_wrap(Array, out_dims[], nd; own=false)))
-    ccall(
-        (:infrastore_buffer_free_u64, lib_path()),
-        Cvoid,
-        (Ptr{UInt64}, UInt64),
-        out_dims[],
-        out_ndims[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u64(
+        out_dims[]::Ptr{UInt64}, out_ndims[]::UInt64
+    )::Cvoid
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_byte_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_byte_len[]::UInt64
+    )::Cvoid
     percentiles = if Int(out_pct_len[]) > 0 && out_pct[] != C_NULL
         p = copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
-        ccall(
-            (:infrastore_buffer_free_f64, lib_path()),
-            Cvoid,
-            (Ptr{Float64}, UInt64),
-            out_pct[],
-            out_pct_len[],
-        )
+        @ccall lib_path().infrastore_buffer_free_f64(
+            out_pct[]::Ptr{Float64}, out_pct_len[]::UInt64
+        )::Cvoid
         p
     else
         Float64[]
@@ -813,7 +672,7 @@ dataset. Pass `time_range = (start, stop)` to slice every series to that window.
 function bulk_read(
     store::Store,
     keys::AbstractVector{TimeSeriesKey};
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     n = length(keys)
     out = Vector{Any}(undef, n)
@@ -822,32 +681,24 @@ function bulk_read(
     key_handles = Ptr{Cvoid}[k.handle for k in keys]
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
-    code = GC.@preserve keys key_handles ccall(
-        (:infrastore_store_bulk_read, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Ptr{Cvoid}}, UInt64, Bool, Int64, Int64, Ref{Ptr{Cvoid}}),
-        store.handle,
-        key_handles,
-        UInt64(n),
-        tr_present,
-        tr_start,
-        tr_end,
-        out_result,
-    )
+    code = GC.@preserve keys key_handles @ccall lib_path().infrastore_store_bulk_read(
+        store.handle::Ptr{Cvoid},
+        key_handles::Ptr{Ptr{Cvoid}},
+        UInt64(n)::UInt64,
+        tr_present::Bool,
+        tr_start::Int64,
+        tr_end::Int64,
+        out_result::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     result = out_result[]
     try
         for i in 1:n
             out_type = Ref{Int32}(0)
             _check(
-                ccall(
-                    (:infrastore_bulk_result_item_type, lib_path()),
-                    Int32,
-                    (Ptr{Cvoid}, UInt64, Ref{Int32}),
-                    result,
-                    UInt64(i - 1),
-                    out_type,
-                ),
+                @ccall lib_path().infrastore_bulk_result_item_type(
+                    result::Ptr{Cvoid}, UInt64(i - 1)::UInt64, out_type::Ref{Int32}
+                )::Int32
             )
             name = _key_name(keys[i])
             t = Int(out_type[])
@@ -860,7 +711,7 @@ function bulk_read(
             end
         end
     finally
-        ccall((:infrastore_bulk_result_free, lib_path()), Cvoid, (Ptr{Cvoid},), result)
+        @ccall lib_path().infrastore_bulk_result_free(result::Ptr{Cvoid})::Cvoid
     end
     return out
 end
@@ -869,7 +720,7 @@ function get_time_series(
     ::Type{NonSequentialTimeSeries},
     store::Store,
     key::TimeSeriesKey;
-    time_range::Union{Nothing,Tuple{DateTime,DateTime}}=nothing,
+    time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
 )
     out_timestamps = Ref{Ptr{Int64}}(C_NULL)
     out_timestamps_len = Ref{UInt64}(0)
@@ -881,71 +732,40 @@ function get_time_series(
     lt_buf = Vector{UInt8}(undef, 256)
     out_lt_len = Ref{UInt64}(0)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
-    code = ccall(
-        (:infrastore_store_get_non_sequential, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Ptr{Cvoid},
-            Bool,
-            Int64,
-            Int64,
-            Ref{Ptr{Int64}},
-            Ref{UInt64},
-            Ref{Int32},
-            Ref{Ptr{Int64}},
-            Ref{UInt64},
-            Ref{Ptr{UInt8}},
-            Ref{UInt64},
-            Ptr{UInt8},
-            UInt64,
-            Ref{UInt64},
-        ),
-        store.handle,
-        key.handle,
-        tr_present,
-        tr_start,
-        tr_end,
-        out_timestamps,
-        out_timestamps_len,
-        out_dtype,
-        out_shape,
-        out_shape_len,
-        out_data,
-        out_data_len,
-        lt_buf,
-        UInt64(length(lt_buf)),
-        out_lt_len,
-    )
+    code = @ccall lib_path().infrastore_store_get_non_sequential(
+        store.handle::Ptr{Cvoid},
+        key.handle::Ptr{Cvoid},
+        tr_present::Bool,
+        tr_start::Int64,
+        tr_end::Int64,
+        out_timestamps::Ref{Ptr{Int64}},
+        out_timestamps_len::Ref{UInt64},
+        out_dtype::Ref{Int32},
+        out_shape::Ref{Ptr{Int64}},
+        out_shape_len::Ref{UInt64},
+        out_data::Ref{Ptr{UInt8}},
+        out_data_len::Ref{UInt64},
+        lt_buf::Ptr{UInt8},
+        UInt64(length(lt_buf))::UInt64,
+        out_lt_len::Ref{UInt64},
+    )::Int32
     _check(code)
 
     timestamp_ms = copy(
         unsafe_wrap(Array, out_timestamps[], Int(out_timestamps_len[]); own=false)
     )
-    ccall(
-        (:infrastore_buffer_free_i64, lib_path()),
-        Cvoid,
-        (Ptr{Int64}, UInt64),
-        out_timestamps[],
-        out_timestamps_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_i64(
+        out_timestamps[]::Ptr{Int64}, out_timestamps_len[]::UInt64
+    )::Cvoid
     # Full array shape [length, *element_shape] (row-major dims), then bytes.
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    ccall(
-        (:infrastore_buffer_free_i64, lib_path()),
-        Cvoid,
-        (Ptr{Int64}, UInt64),
-        out_shape[],
-        out_shape_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_i64(
+        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
+    )::Cvoid
     bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    ccall(
-        (:infrastore_buffer_free_u8, lib_path()),
-        Cvoid,
-        (Ptr{UInt8}, UInt64),
-        out_data[],
-        out_data_len[],
-    )
+    @ccall lib_path().infrastore_buffer_free_u8(
+        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
+    )::Cvoid
     T = _julia_dtype(out_dtype[])
     flat = collect(reinterpret(T, bytes))
     nd = length(dims)

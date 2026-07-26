@@ -65,7 +65,7 @@ end
 
 function _finalize_static_reader(r::StaticReader)
     if r.handle != C_NULL
-        ccall((:infrastore_static_reader_free, lib_path()), Cvoid, (Ptr{Cvoid},), r.handle)
+        @ccall lib_path().infrastore_static_reader_free(r.handle::Ptr{Cvoid})::Cvoid
         r.handle = C_NULL
     end
 end
@@ -74,47 +74,38 @@ function _static_group_layout(handle::Ptr{Cvoid}, gi::Integer)
     out_dtype = Ref{Int32}(0)
     out_ncols = Ref{UInt64}(0)
     out_shape_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_static_reader_group_info, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
-        handle,
-        UInt64(gi),
-        out_dtype,
-        out_ncols,
-        C_NULL,
-        UInt64(0),
-        out_shape_len,
-    )
+    code = @ccall lib_path().infrastore_static_reader_group_info(
+        handle::Ptr{Cvoid},
+        UInt64(gi)::UInt64,
+        out_dtype::Ref{Int32},
+        out_ncols::Ref{UInt64},
+        C_NULL::Ptr{Int64},
+        UInt64(0)::UInt64,
+        out_shape_len::Ref{UInt64},
+    )::Int32
     _check(code)
     shape = Vector{Int64}(undef, Int(out_shape_len[]))
     if out_shape_len[] > 0
-        code = ccall(
-            (:infrastore_static_reader_group_info, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, Ref{Int32}, Ref{UInt64}, Ptr{Int64}, UInt64, Ref{UInt64}),
-            handle,
-            UInt64(gi),
-            out_dtype,
-            out_ncols,
-            shape,
-            UInt64(length(shape)),
-            out_shape_len,
-        )
+        code = @ccall lib_path().infrastore_static_reader_group_info(
+            handle::Ptr{Cvoid},
+            UInt64(gi)::UInt64,
+            out_dtype::Ref{Int32},
+            out_ncols::Ref{UInt64},
+            shape::Ptr{Int64},
+            UInt64(length(shape))::UInt64,
+            out_shape_len::Ref{UInt64},
+        )::Int32
         _check(code)
     end
     keys = Vector{TimeSeriesKey}(undef, Int(out_ncols[]))
     for col in 0:(Int(out_ncols[]) - 1)
         out_key = Ref{Ptr{Cvoid}}(C_NULL)
-        code = ccall(
-            (:infrastore_static_reader_group_key, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, UInt64, Ref{Ptr{Cvoid}}),
-            handle,
-            UInt64(gi),
-            UInt64(col),
-            out_key,
-        )
+        code = @ccall lib_path().infrastore_static_reader_group_key(
+            handle::Ptr{Cvoid},
+            UInt64(gi)::UInt64,
+            UInt64(col)::UInt64,
+            out_key::Ref{Ptr{Cvoid}},
+        )::Int32
         _check(code)
         keys[col + 1] = TimeSeriesKey(out_key[])
     end
@@ -132,10 +123,10 @@ series must share one grid (`initial_timestamp` + `length`).
 function build_static_reader(
     store::Store;
     resolution::Period,
-    owner_id::Union{Nothing,Integer}=nothing,
-    owner_category::Union{Nothing,OwnerCategory}=nothing,
-    name::Union{Nothing,AbstractString}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    owner_id::Union{Nothing, Integer}=nothing,
+    owner_category::Union{Nothing, OwnerCategory}=nothing,
+    name::Union{Nothing, AbstractString}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
@@ -145,31 +136,24 @@ function build_static_reader(
     resolution_iso = _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall(
-        (:infrastore_store_build_static_reader, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, Bool, Int64, Bool, Int32, Cstring, Cstring, Cstring, Ref{Ptr{Cvoid}}),
-        store.handle,
-        has_owner,
-        owner_arg,
-        has_category,
-        category_arg,
-        name_arg,
-        resolution_iso,
-        features_arg,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_build_static_reader(
+        store.handle::Ptr{Cvoid},
+        has_owner::Bool,
+        owner_arg::Int64,
+        has_category::Bool,
+        category_arg::Int32,
+        name_arg::Cstring,
+        resolution_iso::Cstring,
+        features_arg::Cstring,
+        out::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     handle = out[]
     out_n = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_static_reader_num_groups, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ref{UInt64}),
-            handle,
-            out_n,
-        ),
+        @ccall lib_path().infrastore_static_reader_num_groups(
+            handle::Ptr{Cvoid}, out_n::Ref{UInt64}
+        )::Int32
     )
     groups = [_static_group_layout(handle, gi) for gi in 0:(Int(out_n[]) - 1)]
     return StaticReader(handle, store, groups)
@@ -186,15 +170,12 @@ function static_grid(reader::StaticReader)
     out_res = Ref{Ptr{Cchar}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_static_reader_grid, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{UInt64}),
-            reader.handle,
-            out_initial,
-            out_res,
-            out_len,
-        ),
+        @ccall lib_path().infrastore_static_reader_grid(
+            reader.handle::Ptr{Cvoid},
+            out_initial::Ref{Int64},
+            out_res::Ref{Ptr{Cchar}},
+            out_len::Ref{UInt64},
+        )::Int32
     )
     return StaticGrid(_from_unix_ms(out_initial[]), _take_period(out_res[]), Int(out_len[]))
 end
@@ -215,14 +196,11 @@ Read the value of every series at `t`, filling the reader's buffers. Throws if
 """
 function static_read!(reader::StaticReader, t::DateTime)
     _check(
-        ccall(
-            (:infrastore_static_reader_read, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
-            reader.handle,
-            reader.store.handle,
-            _to_unix_ms(t),
-        ),
+        @ccall lib_path().infrastore_static_reader_read(
+            reader.handle::Ptr{Cvoid},
+            reader.store.handle::Ptr{Cvoid},
+            _to_unix_ms(t)::Int64,
+        )::Int32
     )
     return reader
 end
@@ -239,15 +217,12 @@ function static_values(reader::StaticReader, group_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_static_reader_group_values, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
-            reader.handle,
-            UInt64(group_index - 1),
-            out_ptr,
-            out_len,
-        ),
+        @ccall lib_path().infrastore_static_reader_group_values(
+            reader.handle::Ptr{Cvoid},
+            UInt64(group_index - 1)::UInt64,
+            out_ptr::Ref{Ptr{UInt8}},
+            out_len::Ref{UInt64},
+        )::Int32
     )
     dims = vcat(length(group.keys), group.element_shape)
     return _reader_values(out_ptr[], out_len[], group.dtype, dims)
@@ -291,9 +266,7 @@ end
 
 function _finalize_forecast_reader(r::ForecastReader)
     if r.handle != C_NULL
-        ccall(
-            (:infrastore_forecast_reader_free, lib_path()), Cvoid, (Ptr{Cvoid},), r.handle
-        )
+        @ccall lib_path().infrastore_forecast_reader_free(r.handle::Ptr{Cvoid})::Cvoid
         r.handle = C_NULL
     end
 end
@@ -301,54 +274,38 @@ end
 function _forecast_entry_layout(handle::Ptr{Cvoid}, ei::Integer)
     out_dtype = Ref{Int32}(0)
     out_shape_len = Ref{UInt64}(0)
-    code = ccall(
-        (:infrastore_forecast_reader_entry_info, lib_path()),
-        Int32,
-        (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
-        handle,
-        UInt64(ei),
-        out_dtype,
-        C_NULL,
-        UInt64(0),
-        out_shape_len,
-    )
+    code = @ccall lib_path().infrastore_forecast_reader_entry_info(
+        handle::Ptr{Cvoid},
+        UInt64(ei)::UInt64,
+        out_dtype::Ref{Int32},
+        C_NULL::Ptr{Int64},
+        UInt64(0)::UInt64,
+        out_shape_len::Ref{UInt64},
+    )::Int32
     _check(code)
     shape = Vector{Int64}(undef, Int(out_shape_len[]))
     if out_shape_len[] > 0
-        code = ccall(
-            (:infrastore_forecast_reader_entry_info, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, Ref{Int32}, Ptr{Int64}, UInt64, Ref{UInt64}),
-            handle,
-            UInt64(ei),
-            out_dtype,
-            shape,
-            UInt64(length(shape)),
-            out_shape_len,
-        )
+        code = @ccall lib_path().infrastore_forecast_reader_entry_info(
+            handle::Ptr{Cvoid},
+            UInt64(ei)::UInt64,
+            out_dtype::Ref{Int32},
+            shape::Ptr{Int64},
+            UInt64(length(shape))::UInt64,
+            out_shape_len::Ref{UInt64},
+        )::Int32
         _check(code)
     end
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_entry_key, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, Ref{Ptr{Cvoid}}),
-            handle,
-            UInt64(ei),
-            out_key,
-        ),
+        @ccall lib_path().infrastore_forecast_reader_entry_key(
+            handle::Ptr{Cvoid}, UInt64(ei)::UInt64, out_key::Ref{Ptr{Cvoid}}
+        )::Int32
     )
     out_slot = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_entry_slot, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, Ref{UInt64}),
-            handle,
-            UInt64(ei),
-            out_slot,
-        ),
+        @ccall lib_path().infrastore_forecast_reader_entry_slot(
+            handle::Ptr{Cvoid}, UInt64(ei)::UInt64, out_slot::Ref{UInt64}
+        )::Int32
     )
     return ForecastEntry(
         _julia_dtype(out_dtype[]), Int.(shape), TimeSeriesKey(out_key[]), Int(out_slot[])
@@ -370,10 +327,10 @@ function build_forecast_reader(
     store::Store,
     time_series_type::Type;
     resolution::Period,
-    owner_id::Union{Nothing,Integer}=nothing,
-    owner_category::Union{Nothing,OwnerCategory}=nothing,
-    name::Union{Nothing,AbstractString}=nothing,
-    features::AbstractDict=Dict{String,Any}(),
+    owner_id::Union{Nothing, Integer}=nothing,
+    owner_category::Union{Nothing, OwnerCategory}=nothing,
+    name::Union{Nothing, AbstractString}=nothing,
+    features::AbstractDict=Dict{String, Any}(),
 )
     type_code = _int_for_type(time_series_type)
     has_owner = owner_id !== nothing
@@ -384,43 +341,25 @@ function build_forecast_reader(
     resolution_iso = _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    code = ccall(
-        (:infrastore_store_build_forecast_reader, lib_path()),
-        Int32,
-        (
-            Ptr{Cvoid},
-            Bool,
-            Int64,
-            Bool,
-            Int32,
-            Int32,
-            Cstring,
-            Cstring,
-            Cstring,
-            Ref{Ptr{Cvoid}},
-        ),
-        store.handle,
-        has_owner,
-        owner_arg,
-        has_category,
-        category_arg,
-        Int32(type_code),
-        name_arg,
-        resolution_iso,
-        features_arg,
-        out,
-    )
+    code = @ccall lib_path().infrastore_store_build_forecast_reader(
+        store.handle::Ptr{Cvoid},
+        has_owner::Bool,
+        owner_arg::Int64,
+        has_category::Bool,
+        category_arg::Int32,
+        Int32(type_code)::Int32,
+        name_arg::Cstring,
+        resolution_iso::Cstring,
+        features_arg::Cstring,
+        out::Ref{Ptr{Cvoid}},
+    )::Int32
     _check(code)
     handle = out[]
     out_n = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_num_entries, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ref{UInt64}),
-            handle,
-            out_n,
-        ),
+        @ccall lib_path().infrastore_forecast_reader_num_entries(
+            handle::Ptr{Cvoid}, out_n::Ref{UInt64}
+        )::Int32
     )
     entries = [_forecast_entry_layout(handle, ei) for ei in 0:(Int(out_n[]) - 1)]
     return ForecastReader(handle, store, entries)
@@ -438,16 +377,13 @@ function forecast_timeline(reader::ForecastReader)
     out_interval = Ref{Ptr{Cchar}}(C_NULL)
     out_count = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_timeline, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ref{Int64}, Ref{Ptr{Cchar}}, Ref{Ptr{Cchar}}, Ref{UInt64}),
-            reader.handle,
-            out_initial,
-            out_res,
-            out_interval,
-            out_count,
-        ),
+        @ccall lib_path().infrastore_forecast_reader_timeline(
+            reader.handle::Ptr{Cvoid},
+            out_initial::Ref{Int64},
+            out_res::Ref{Ptr{Cchar}},
+            out_interval::Ref{Ptr{Cchar}},
+            out_count::Ref{UInt64},
+        )::Int32
     )
     return ForecastTimeline(
         _from_unix_ms(out_initial[]),
@@ -476,13 +412,9 @@ plan collapse to one slot, so this is `≤ length(forecast_entries(reader))`.
 function forecast_num_slots(reader::ForecastReader)
     out_n = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_num_slots, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ref{UInt64}),
-            reader.handle,
-            out_n,
-        ),
+        @ccall lib_path().infrastore_forecast_reader_num_slots(
+            reader.handle::Ptr{Cvoid}, out_n::Ref{UInt64}
+        )::Int32
     )
     return Int(out_n[])
 end
@@ -495,14 +427,11 @@ Throws if `t` is off the window timeline. Follow with [`forecast_values`].
 """
 function forecast_read!(reader::ForecastReader, t::DateTime)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_read, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, Ptr{Cvoid}, Int64),
-            reader.handle,
-            reader.store.handle,
-            _to_unix_ms(t),
-        ),
+        @ccall lib_path().infrastore_forecast_reader_read(
+            reader.handle::Ptr{Cvoid},
+            reader.store.handle::Ptr{Cvoid},
+            _to_unix_ms(t)::Int64,
+        )::Int32
     )
     return reader
 end
@@ -518,15 +447,12 @@ function forecast_values(reader::ForecastReader, entry_index::Integer)
     out_ptr = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     _check(
-        ccall(
-            (:infrastore_forecast_reader_entry_values, lib_path()),
-            Int32,
-            (Ptr{Cvoid}, UInt64, Ref{Ptr{UInt8}}, Ref{UInt64}),
-            reader.handle,
-            UInt64(entry_index - 1),
-            out_ptr,
-            out_len,
-        ),
+        @ccall lib_path().infrastore_forecast_reader_entry_values(
+            reader.handle::Ptr{Cvoid},
+            UInt64(entry_index - 1)::UInt64,
+            out_ptr::Ref{Ptr{UInt8}},
+            out_len::Ref{UInt64},
+        )::Int32
     )
     return _reader_values(out_ptr[], out_len[], entry.dtype, entry.window_shape)
 end
