@@ -2090,6 +2090,20 @@ pub const INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC: i32 = 100;
 /// `NonSequentialTimeSeries` (1) are rejected here so the forecast API reports a
 /// clear "invalid time_series_type" error up front rather than failing later in
 /// `emit_forecast_data` after a key is resolved and data is read.
+/// Map a *key resolution* request's type code to a [`core_lib::RequestedType`].
+/// Unlike [`requested_type_from_int`] this accepts every stored type, not just
+/// the forecasts: resolving an identity to its key is meaningful for a
+/// `SingleTimeSeries` too, and `Store::resolve_forecast_key` handles any
+/// concrete type (it filters candidates by the requested type, nothing more).
+/// The forecast *read* path keeps the narrower mapping, where a static type is
+/// a caller error worth reporting before any data is read.
+fn resolve_requested_type_from_int(i: i32) -> Option<core_lib::RequestedType> {
+    if i == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC {
+        return Some(core_lib::RequestedType::AbstractDeterministic);
+    }
+    time_series_type_from_int(i).map(core_lib::RequestedType::Concrete)
+}
+
 fn requested_type_from_int(i: i32) -> Option<core_lib::RequestedType> {
     use core_lib::TimeSeriesType as T;
     if i == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC {
@@ -4565,13 +4579,19 @@ pub unsafe extern "C" fn infrastore_store_rename(
     }
 }
 
-/// Resolve a forecast addressed by attributes plus a requested type to its
-/// concrete key, returned through `out_key`. `requested_type` is a concrete
-/// forecast code (`2`=Deterministic, `3`=DeterministicSingleTimeSeries,
-/// `4`=Probabilistic, `5`=Scenarios) or `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`),
-/// which matches a stored `Deterministic` *or* `DeterministicSingleTimeSeries`.
-/// `resolution` / `interval`, when non-null, narrow the identity. An ambiguous
-/// request returns `INFRASTORE_ERR_INVALID_PARAMETER`; a miss returns `INFRASTORE_ERR_NOT_FOUND`.
+/// Resolve a time series addressed by attributes plus a requested type to its
+/// concrete key, returned through `out_key`. `requested_type` is any stored type
+/// code (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
+/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios) or
+/// `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`), which matches a stored
+/// `Deterministic` *or* `DeterministicSingleTimeSeries`. `resolution` /
+/// `interval`, when non-null, narrow the identity. Unlike
+/// `infrastore_make_key_from_attrs`, which builds an identity without consulting
+/// the catalog, this validates: an ambiguous request returns
+/// `INFRASTORE_ERR_INVALID_PARAMETER` and a miss returns `INFRASTORE_ERR_NOT_FOUND`.
+///
+/// The name is historical — the underlying `Store::resolve_forecast_key` is not
+/// forecast-specific.
 ///
 /// # Safety
 ///
@@ -4622,10 +4642,12 @@ pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
         Ok(f) => f,
         Err(c) => return c,
     };
-    let requested = match requested_type_from_int(requested_type) {
+    let requested = match resolve_requested_type_from_int(requested_type) {
         Some(r) => r,
         None => {
-            set_error(format!("invalid requested forecast type {requested_type}"));
+            set_error(format!(
+                "invalid requested time series type {requested_type}"
+            ));
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };

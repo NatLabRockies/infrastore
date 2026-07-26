@@ -217,6 +217,23 @@ int32_t infrastore_store_get_association(const struct InfraStore *handle, const 
 int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
                                      const struct InfraStoreKey *key,
                                      char *buf, uint64_t cap, uint64_t *out_len);
+
+/* Resolve attributes plus a requested type to the key of the one matching stored
+   series. requested_type is any stored type code (0..5) or
+   INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100), which matches a stored Deterministic or
+   DeterministicSingleTimeSeries and yields the concrete one. Unlike
+   infrastore_make_key_from_attrs, which builds an identity without consulting the
+   catalog, this validates: INFRASTORE_ERR_NOT_FOUND on a miss and
+   INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
+   type, resolution, and/or interval). The name is historical — it is not
+   forecast-specific. Free the key with infrastore_key_free. */
+int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
+                                      int64_t owner_id, int32_t owner_category,
+                                      const char *name,
+                                      const char *resolution, const char *interval,
+                                      const char *features_json,
+                                      int32_t requested_type,
+                                      struct InfraStoreKey **out_key);
 ```
 
 `infrastore_store_get_metadata_by_key` + `infrastore_store_get_array_by_hash` is the read path used

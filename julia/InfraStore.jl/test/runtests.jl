@@ -1548,8 +1548,8 @@ end
     @test mixed[2] isa Deterministic
     @test mixed[2].data == det.data
 
-    # resolve_forecast_key resolves the abstract-deterministic family.
-    rk = resolve_forecast_key(AbstractDeterministic, store, 2, Component, "fc")
+    # get_time_series_key resolves the abstract-deterministic family.
+    rk = get_time_series_key(AbstractDeterministic, store, 2, Component, "fc")
     @test get_time_series(Deterministic, store, rk).data == det.data
 
     # rename_time_series! moves the association.
@@ -2660,7 +2660,7 @@ end
     @test get_metadata(AbstractDeterministic, store, 1, Component, "fc") == fmd
 
     # The same record, addressed by key rather than by attributes.
-    fkey = resolve_forecast_key(Deterministic, store, 1, Component, "fc")
+    fkey = get_time_series_key(Deterministic, store, 1, Component, "fc")
     @test get_metadata(store, fkey) == fmd
 
     # Key rows: owner_category is the enum, time_series_type the Julia type.
@@ -2947,4 +2947,70 @@ end
         Store, store, 1, Component, "a"
     )
     @test_throws InfraStore.InvalidParameterError list_keys(store; time_series_type=Store)
+end
+
+@testset "get_time_series_key addresses any type and validates" begin
+    # The attribute-addressed counterpart of get_time_series_keys: it works for
+    # static types too, not just forecasts, and the handle it returns always
+    # names something stored.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, res, Float64[1, 2, 3, 4], "a"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        NonSequentialTimeSeries([t0, t0 + Hour(2)], Float64[9, 8], "b"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        Scenarios(t0, res, Hour(2), Hour(1), 2, reshape(1.0:12.0, 3, 2, 2), "c"),
+    )
+
+    # A static key round-trips through the key-based readers.
+    sk = get_time_series_key(SingleTimeSeries, store, 1, Component, "a"; resolution=res)
+    @test key_info(sk).time_series_type == SingleTimeSeries
+    @test get_time_series(store, sk).data == Float64[1, 2, 3, 4]
+    @test get_metadata(store, sk).name == "a"
+    @test has_time_series(store, sk)
+
+    nk = get_time_series_key(NonSequentialTimeSeries, store, 1, Component, "b")
+    @test key_info(nk).time_series_type == NonSequentialTimeSeries
+    @test get_time_series(NonSequentialTimeSeries, store, nk).data == Float64[9, 8]
+
+    ck = get_time_series_key(Scenarios, store, 1, Component, "c"; resolution=res)
+    @test key_info(ck).time_series_type == Scenarios
+
+    # Keys from attributes feed a bulk read directly.
+    @test length(bulk_read(store, [sk, nk, ck])) == 3
+
+    # Resolution is against the catalog, so a miss and an ambiguous request are
+    # both reported rather than handing back a key that names nothing.
+    @test_throws InfraStore.NotFoundError get_time_series_key(
+        SingleTimeSeries, store, 1, Component, "missing"
+    )
+    @test_throws InfraStore.NotFoundError get_time_series_key(
+        Probabilistic, store, 1, Component, "a"
+    )
+
+    # The family sentinel picks whichever concrete type is stored.
+    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    @test key_info(
+        get_time_series_key(AbstractDeterministic, store, 1, Component, "a"; resolution=res)
+    ).time_series_type == DeterministicSingleTimeSeries
+
+    @test_throws InfraStore.InvalidParameterError get_time_series_key(
+        Store, store, 1, Component, "a"
+    )
 end

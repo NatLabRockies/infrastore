@@ -1476,13 +1476,19 @@ int32_t infrastore_store_rename(struct InfraStore *handle,
                                 struct InfraStoreKey **out_key);
 
 /**
- * Resolve a forecast addressed by attributes plus a requested type to its
- * concrete key, returned through `out_key`. `requested_type` is a concrete
- * forecast code (`2`=Deterministic, `3`=DeterministicSingleTimeSeries,
- * `4`=Probabilistic, `5`=Scenarios) or `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`),
- * which matches a stored `Deterministic` *or* `DeterministicSingleTimeSeries`.
- * `resolution` / `interval`, when non-null, narrow the identity. An ambiguous
- * request returns `INFRASTORE_ERR_INVALID_PARAMETER`; a miss returns `INFRASTORE_ERR_NOT_FOUND`.
+ * Resolve a time series addressed by attributes plus a requested type to its
+ * concrete key, returned through `out_key`. `requested_type` is any stored type
+ * code (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
+ * `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios) or
+ * `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`), which matches a stored
+ * `Deterministic` *or* `DeterministicSingleTimeSeries`. `resolution` /
+ * `interval`, when non-null, narrow the identity. Unlike
+ * `infrastore_make_key_from_attrs`, which builds an identity without consulting
+ * the catalog, this validates: an ambiguous request returns
+ * `INFRASTORE_ERR_INVALID_PARAMETER` and a miss returns `INFRASTORE_ERR_NOT_FOUND`.
+ *
+ * The name is historical — the underlying `Store::resolve_forecast_key` is not
+ * forecast-specific.
  *
  * # Safety
  *

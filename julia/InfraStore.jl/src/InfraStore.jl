@@ -90,7 +90,7 @@ export Store,
     list_owner_types,
     remove_by_filter!,
     rename_time_series!,
-    resolve_forecast_key,
+    get_time_series_key,
     has_for_owner,
     open_store,
     flush!,
@@ -1308,7 +1308,7 @@ function get_metadata(
     # The family sentinel is not a stored type, so the core resolves it to the
     # concrete key first; every other type addresses its key directly.
     key = if code == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
-        resolve_forecast_key(
+        get_time_series_key(
             T,
             store,
             owner_id,
@@ -1373,16 +1373,26 @@ function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::Abstrac
 end
 
 """
-    resolve_forecast_key(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesKey
+    get_time_series_key(T, store, owner_id, owner_category, name; resolution, interval, features=Dict()) -> TimeSeriesKey
 
-Resolve the forecast addressed by attributes plus the requested type `T` to its
-concrete key. `T` is a forecast type (`Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`) or
-`AbstractDeterministic` for the Deterministic / DeterministicSingleTimeSeries
-family, in which case the returned key names whichever concrete type is stored.
-Throws on an ambiguous match or a miss.
+The [`TimeSeriesKey`](@ref) of the stored time series of type `T` with the given
+attributes — the attribute-addressed counterpart of
+[`get_time_series_keys`](@ref), which enumerates one owner's keys.
+
+`T` is any stored type, or `AbstractDeterministic` to match whichever of
+`Deterministic` / `DeterministicSingleTimeSeries` is stored (the returned key
+names the concrete one). `resolution` and `interval` narrow the identity.
+
+The key is resolved against the catalog, so it always names something stored:
+a miss throws `NotFoundError`, and a request matching several series throws
+`InvalidParameterError` listing the candidates — narrow it with a concrete type,
+a `resolution`, and/or an `interval`.
+
+Use the returned handle with the key-based readers, [`bulk_read`](@ref),
+[`get_metadata`](@ref), [`rename_time_series!`](@ref), or
+[`remove_time_series!`](@ref).
 """
-function resolve_forecast_key(
+function get_time_series_key(
     ::Type{T},
     store::Store,
     owner_id::Integer,

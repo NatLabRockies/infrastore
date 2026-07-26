@@ -27,18 +27,19 @@ Exported names (types first, then functions):
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
 `get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
-`get_time_series`, `get_time_series_keys`, `has_for_owner`, `has_parent_child_association`,
-`has_supplemental_attribute_association`, `has_time_series`, `init_logging`, `key_info`,
-`list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`, `list_names`,
-`list_owner_ids`, `list_owner_types`, `list_parent_child_associations`, `list_parents`,
-`list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
-`num_distinct_arrays`, `open_store`, `persist!`, `read_only`, `remove_by_filter!`,
-`remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
-`remove_time_series!`, `rename_time_series!`, `replace_owner!`,
-`replace_parent_child_component_id!`, `replace_supplemental_attribute_component_id!`,
-`resolve_forecast_key`, `static_grid`, `static_groups`, `static_read!`, `static_summary`,
-`static_values`, `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`,
-`time_series_counts`, `transform_single_time_series!`, `verify_integrity`.
+`get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_for_owner`,
+`has_parent_child_association`, `has_supplemental_attribute_association`, `has_time_series`,
+`init_logging`, `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`,
+`list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
+`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
+`list_time_series`, `num_distinct_arrays`, `open_store`, `persist!`, `read_only`,
+`remove_by_filter!`, `remove_parent_child_associations!`,
+`remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
+`replace_owner!`, `replace_parent_child_component_id!`,
+`replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
+`static_summary`, `static_values`, `supplemental_attribute_counts_by_type`,
+`supplemental_attribute_summary`, `time_series_counts`, `transform_single_time_series!`,
+`verify_integrity`.
 
 ## Constructors
 
@@ -358,9 +359,21 @@ missing key aborts the whole batch.
 
 ```julia
 get_time_series_keys(store, owner_id, owner_category::OwnerCategory) -> Vector{TimeSeriesKey}
+get_time_series_key(T::Type, store, owner_id, owner_category::OwnerCategory, name;
+                    resolution=nothing, interval=nothing, features=Dict()) -> TimeSeriesKey
 key_info(key::TimeSeriesKey) -> KeyInfo
 # fields: owner_id, owner_category, name, time_series_type, resolution, features
 ```
+
+These two are the ways to obtain a `TimeSeriesKey` for a series already stored (`add_time_series!`
+returns one at write time, and the readers carry them on `StaticGroup` / `ForecastEntry`).
+`get_time_series_key` addresses one series by attributes, `T` being any stored type or
+`AbstractDeterministic` to match whichever of `Deterministic` / `DeterministicSingleTimeSeries` is
+stored. It resolves against the catalog, so the handle always names something stored: a miss throws
+`NotFoundError` and a request matching several series throws `InvalidParameterError` listing the
+candidates. Note that [`list_keys`](#store-wide-operations) returns `KeyRow` **description
+structs**, not handles — use `get_time_series_key` (or `get_time_series_keys`) when you need
+something to pass to a key-based reader or `bulk_read`.
 
 `get_time_series_keys` returns one key per stored association for the owner identified by the
 `(owner_id, owner_category)` pair, including `DeterministicSingleTimeSeries` rows derived by

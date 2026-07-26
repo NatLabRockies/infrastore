@@ -195,6 +195,17 @@ for k in get_time_series_keys(store, 42, Component)
 end
 ```
 
+To address one series rather than enumerate an owner, `get_time_series_key` resolves attributes to a
+key — for any stored type, and validated against the catalog (a miss or an ambiguous match throws):
+
+```julia
+k = get_time_series_key(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+window = get_time_series(Scenarios, store, k)
+```
+
+(`list_keys` returns `KeyRow` description structs, not handles; use these two when you need a key to
+pass to a reader or `bulk_read`.)
+
 `has_time_series`, `remove_time_series!`, and `copy_time_series!` take the time series type as their
 first argument to address anything other than a `SingleTimeSeries` (and take the same `resolution` /
 `interval` / `features` keywords). `copy_time_series!` re-points a stored series at another owner
