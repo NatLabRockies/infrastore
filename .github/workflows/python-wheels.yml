@@ -28,9 +28,6 @@ jobs:
           - os: macos-14
             macosx_deployment_target: "14.0"
           - os: windows-latest
-    defaults:
-      run:
-        working-directory: crates/infrastore-py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,10 +44,16 @@ jobs:
         with:
           package-dir: crates/infrastore-py
           output-dir: wheelhouse
+      # `output-dir` is resolved by the action against the workspace root, not
+      # against `package-dir`, so the wheels land in `<root>/wheelhouse`. Keep
+      # this path root-relative: pointing it under `crates/infrastore-py/`
+      # matches nothing, and upload-artifact only warns, so the publish job
+      # fails much later with an empty `dist/`.
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
-          path: crates/infrastore-py/wheelhouse/*.whl
+          path: wheelhouse/*.whl
+          if-no-files-found: error
 
   publish:
     name: publish to PyPI
