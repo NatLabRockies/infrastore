@@ -48,10 +48,8 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
-          manifest="$(cargo metadata --no-deps --format-version 1 | python3 -c '
-import json, sys
-pkgs = {p["name"]: p["version"] for p in json.load(sys.stdin)["packages"]}
-print(pkgs["infrastore-core"])')"
+          manifest="$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "infrastore-core") | .version')"
           if [ "$tag" != "$manifest" ]; then
             echo "::error::tag v$tag does not match workspace version $manifest"
             exit 1
@@ -67,12 +65,10 @@ print(pkgs["infrastore-core"])')"
         id: pending
         run: |
           set -euo pipefail
-          read -r version crates <<<"$(cargo metadata --no-deps --format-version 1 | python3 -c '
-import json, sys
-pkgs = json.load(sys.stdin)["packages"]
-# `publish: []` means publish = false; `null` means publishable.
-names = sorted(p["name"] for p in pkgs if p.get("publish") != [])
-print(next(p["version"] for p in pkgs if p["name"] == "infrastore-core"), " ".join(names))')"
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          version="$(jq -r '.packages[] | select(.name == "infrastore-core") | .version' <<<"$metadata")"
+          # `publish: []` means publish = false; `null` means publishable.
+          crates="$(jq -r '[.packages[] | select(.publish != []) | .name] | sort | join(" ")' <<<"$metadata")"
           pending=""
           for crate in $crates; do
             code="$(curl -sS -o /dev/null -w '%{http_code}' \
