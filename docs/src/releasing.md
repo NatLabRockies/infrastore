@@ -177,22 +177,35 @@ the Julia test job.
  JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 
  [compat]
-+InfraStore_jll = "0.1"
++InfraStore_jll = "0.2"
  JSON = "0.21, 1"
  julia = "1.10"
 ```
+
+The compat bound must match the version the JLL **first registers as**, not the version this
+document was written against. `InfraStore_jll` was never published at 0.1.x — the initial Yggdrasil
+PR was retargeted before it merged — so the floor is `"0.2"`. Check the registry rather than
+assuming: a bound below the earliest published version resolves to nothing.
 
 JLL UUIDs are derived deterministically from the package name, so that value is already known —
 `BinaryBuilder.jll_uuid("InfraStore_jll")`. (The same call reproduces the published UUIDs of
 `NetCDF_jll` and `HDF5_jll` exactly, which is how it was checked.)
 
-**Step 2 — `julia/InfraStore.jl/src/InfraStore.jl`.** Replace `_jll_library_path` and `lib_path`
-with a direct import. `INFRASTORE_LIB` stays ahead of the JLL: that ordering is what lets a local
+**Step 2 — `julia/InfraStore.jl/src/lib.jl`.** Replace `_jll_library_path` and `lib_path` with a
+direct import. `INFRASTORE_LIB` stays ahead of the JLL: that ordering is what lets a local
 `cargo build` shadow the released binary with no code change, and the CI job relies on it.
 
-```julia
-import InfraStore_jll
+The import itself belongs in `src/InfraStore.jl` with the other module-level `using` lines, in the
+`using X: X` form — the pre-commit Julia formatter rewrites a bare `import` and will otherwise fail
+the hook:
 
+```julia
+using InfraStore_jll: InfraStore_jll
+```
+
+Then, in `src/lib.jl`:
+
+```julia
 const _LIB_REF = Ref{String}("")
 
 """
