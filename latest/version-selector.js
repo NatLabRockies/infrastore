@@ -1,21 +1,21 @@
 (function () {
   "use strict";
 
-  // Determine the base path (e.g., "/time-series-store/")
-  var basePath = "/time-series-store/";
+  // Determine the base path (e.g., "/infrastore/")
+  var basePath = "/infrastore/";
 
   // Parse current version from URL path
   function getCurrentVersion() {
     var path = window.location.pathname;
-    // Match /time-series-store/<version>/ where version is "latest" or a tag like v1.2.3, v1.2.3-rc1
-    var match = path.match(/^\/torc\/(v[^/]+|latest)\//);
+    // Match /infrastore/<version>/ where version is "latest" or a tag like v1.2.3, v1.2.3-rc1
+    var match = path.match(/^\/infrastore\/(v[^/]+|latest)\//);
     return match ? match[1] : "latest";
   }
 
   // Get the relative page path within the versioned docs
   function getRelativePath() {
     var path = window.location.pathname;
-    var match = path.match(/^\/torc\/(?:v[^/]+|latest)\/(.*)/);
+    var match = path.match(/^\/infrastore\/(?:v[^/]+|latest)\/(.*)/);
     return match ? match[1] : "";
   }
 

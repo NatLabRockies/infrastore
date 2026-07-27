@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/guides/rust.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/guides/rust.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -187,8 +187,8 @@
                         <h1 id="rust-developer-guide"><a class="header" href="#rust-developer-guide">Rust Developer Guide</a></h1>
 <p>This guide covers using <code>infrastore-core</code> from Rust. For exact signatures see the
 <a href="../reference/rust-api.html">Rust API reference</a>.</p>
-<p>For a runnable end-to-end round-trip, <code>examples/basic_rust.rs</code> creates an in-memory store, adds a
-<code>SingleTimeSeries</code>, and reads it back:</p>
+<p>For a runnable end-to-end round-trip, <code>crates/infrastore-core/examples/basic.rs</code> creates an
+in-memory store, adds a <code>SingleTimeSeries</code>, and reads it back:</p>
 <pre><code class="language-sh">cargo run --manifest-path crates/infrastore-core/Cargo.toml --example basic
 </code></pre>
 <h2 id="add-the-dependency"><a class="header" href="#add-the-dependency">Add the Dependency</a></h2>

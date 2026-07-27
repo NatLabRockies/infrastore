@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/how-to/integrate-python.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/how-to/integrate-python.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -189,7 +189,7 @@
 <a href="../guides/python.html">Python Developer Guide</a>.</p>
 <h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
 <ul>
-<li>Python 3.10 or newer.</li>
+<li>Python 3.11 or newer.</li>
 <li>The <a href="./install.html#1-install-system-libraries">system libraries</a> (HDF5, NetCDF, Protobuf).</li>
 </ul>
 <h2 id="build-and-install-the-wheel-development"><a class="header" href="#build-and-install-the-wheel-development">Build and Install the Wheel (development)</a></h2>
@@ -208,10 +208,10 @@ pytest ../../python/tests
 <p>To produce a wheel you can install elsewhere:</p>
 <pre><code class="language-sh">cd crates/infrastore-py
 maturin build --release
-# -&gt; target/wheels/infrastore-&lt;version&gt;-cp310-abi3-&lt;platform&gt;.whl
+# -&gt; target/wheels/infrastore-&lt;version&gt;-cp311-abi3-&lt;platform&gt;.whl
 pip install ../../target/wheels/infrastore-*.whl
 </code></pre>
-<p>The wheel is built against the <strong><code>abi3-py310</code></strong> stable ABI, so a single wheel works on CPython 3.10
+<p>The wheel is built against the <strong><code>abi3-py311</code></strong> stable ABI, so a single wheel works on CPython 3.11
 and every newer 3.x without recompiling.</p>
 <h2 id="smoke-test"><a class="header" href="#smoke-test">Smoke Test</a></h2>
 <pre><code class="language-python">from datetime import datetime, timedelta, timezone

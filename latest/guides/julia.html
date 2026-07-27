@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/guides/julia.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/guides/julia.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -257,8 +257,13 @@ when a caller keeps its own identifiers (as an InfrastructureSystems.jl-side sto
     resolution = Hour(1),
     features = Dict("model_year" =&gt; 2030),
 )
-# meta :: (initial_timestamp::DateTime, resolution::Millisecond, length::Int,
-#          data_hash::Vector{UInt8}, dtype, ext)
+# meta :: TimeSeriesMetadata — the whole record: owner_id/owner_type/owner_category,
+#          name, time_series_type, data_hash, initial_timestamp, resolution, length,
+#          horizon/interval/count, percentiles, dtype, element_shape, features, units, ext
+
+# Any other stored type: pass it first, exactly as get_time_series does. Omitting
+# the type reads a SingleTimeSeries.
+scen = get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
 
 values = get_array_by_hash(store, meta.data_hash)     # Vector{Float64}; pass ::Type{T} for other dtypes
 
@@ -330,11 +335,24 @@ type — pass it straight to <code>get_time_series</code> (a <code>Deterministic
     series = get_time_series(info.time_series_type, store, k)
 end
 </code></pre>
-<p><code>has_typed</code>, <code>remove_typed!</code>, and <code>copy_time_series!</code> address a series by its <code>ts_type</code> integer code
-(and take the same <code>resolution</code> / <code>interval</code> / <code>features</code> keywords). <code>copy_time_series!</code> re-points a
-stored series at another owner without duplicating data — it writes one association row against the
-same content-addressed array, preserving the stored type (a DST stays a DST):</p>
-<pre><code class="language-julia">copy_time_series!(store, 42, Component, "load", 0, 43, "Generator")   # ts_type 0 = SingleTimeSeries
+<p>To address one series rather than enumerate an owner, <code>get_time_series_key</code> resolves attributes to a
+key — for any stored type, and validated against the catalog (a miss or an ambiguous match throws):</p>
+<pre><code class="language-julia">k = get_time_series_key(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+window = get_time_series(Scenarios, store, k)
+</code></pre>
+<p>(<code>list_keys</code> returns <code>KeyRow</code> description structs, not handles; use these two when you need a key to
+pass to a reader or <code>bulk_read</code>.)</p>
+<p><code>has_time_series</code>, <code>remove_time_series!</code>, and <code>copy_time_series!</code> take the time series type as their
+first argument to address anything other than a <code>SingleTimeSeries</code> (and take the same <code>resolution</code> /
+<code>interval</code> / <code>features</code> keywords). <code>copy_time_series!</code> re-points a stored series at another owner
+without duplicating data — it writes one association row against the same content-addressed array,
+preserving the stored type (a DST stays a DST):</p>
+<pre><code class="language-julia">has_time_series(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
+copy_time_series!(SingleTimeSeries, store, 42, Component, "load", 43, "Generator")
+</code></pre>
+<p>Every <code>time_series_type</code> filter keyword takes the Julia type as well:</p>
+<pre><code class="language-julia">list_keys(store; time_series_type = Deterministic)
+get_resolutions(store; time_series_type = SingleTimeSeries)
 </code></pre>
 <p>The low-level <code>get_metadata</code> + <code>get_array_by_hash</code> path is still available for raw access. See the
 <a href="../reference/julia-api.html#forecasts">Julia API reference</a>.</p>
@@ -347,7 +365,7 @@ forecasts. (Full signatures:
 <a href="../reference/julia-api.html#readers-per-timestamp-iteration">Julia API reference</a>.)</p>
 <h3 id="static-series"><a class="header" href="#static-series">Static series</a></h3>
 <pre><code class="language-julia">reader = build_static_reader(store; resolution = Hour(1))
-grid = static_grid(reader)                 # (initial_timestamp, resolution, length)
+grid = static_grid(reader)                 # StaticGrid: initial_timestamp, resolution, length
 for k in 0:(grid.length - 1)
     static_read!(reader, grid.initial_timestamp + grid.resolution * k)
     for (gi, g) in enumerate(static_groups(reader))
@@ -360,7 +378,7 @@ whose columns line up with the group's <code>keys</code>. All matched series mus
 (<code>initial_timestamp</code> + <code>length</code>), validated at build.</p>
 <h3 id="forecasts-1"><a class="header" href="#forecasts-1">Forecasts</a></h3>
 <pre><code class="language-julia">reader = build_forecast_reader(store, Deterministic; resolution = Hour(1))
-tl = forecast_timeline(reader)             # (initial_timestamp, resolution, interval, count)
+tl = forecast_timeline(reader)             # ForecastTimeline: initial_timestamp, resolution, interval, count
 for k in 0:(tl.count - 1)
     forecast_read!(reader, tl.initial_timestamp + tl.interval * k)
     for (i, e) in enumerate(forecast_entries(reader))
@@ -385,7 +403,7 @@ for (i, e) in enumerate(forecast_entries(reader))
 end
 </code></pre>
 <h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
-<pre><code class="language-julia">counts = get_counts(store)        # (components_with_time_series, static_time_series, forecasts)
+<pre><code class="language-julia">counts = get_counts(store)        # TimeSeriesCounts: components_with_time_series, static_time_series, forecasts
 nerr   = verify_integrity(store)  # 0 == arrays intact (catalog not checked)
 compact!(store)
 </code></pre>
@@ -418,9 +436,9 @@ list_supplemental_attribute_ids(store; component_id=43, attribute_types=["Outage
 count_supplemental_attributes(store)         # 2, distinct attributes
 count_components_with_attributes(store)      # 2, distinct components
 supplemental_attribute_counts_by_type(store)
-# [(type = "GeographicInfo", count = 2), (type = "Outage", count = 1)]
+# [SupplementalAttributeTypeCount("GeographicInfo", 2), SupplementalAttributeTypeCount("Outage", 1)]
 supplemental_attribute_summary(store)
-# [(component_type = "Generator", attribute_type = "GeographicInfo", count = 2), ...]
+# [SupplementalAttributeSummaryRow("Generator", "GeographicInfo", 2), ...]
 </code></pre>
 <p>Identity is the <code>(component_id, attribute_id)</code> pair. The type names ride along for filtering and are
 not part of it, so re-attaching the same pair under different type names is still a duplicate:</p>

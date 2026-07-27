@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/reference/rust-api.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/reference/rust-api.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -327,6 +327,10 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         owner_category: OwnerCategory,
     ) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;
     pub fn has_time_series(&amp;self, key: &amp;KeyIdentity) -&gt; Result&lt;bool&gt;;
+    // Existence over a filter without listing: "does this owner have any time
+    // series (of type T)?". Both probes answer from a covering index and are
+    // safe for hot loops.
+    pub fn has_any_time_series(&amp;self, filter: ListFilter) -&gt; Result&lt;bool&gt;;
 
     // Resolve a forecast addressed by attributes + a `RequestedType` to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
@@ -460,6 +464,18 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     pub fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
     pub fn verify_integrity(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     pub fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
+
+    // Cross-operation transactions: the operations between a begin and its
+    // matching commit either all take effect or none do. Removals are reversible
+    // only inside one -- outside, a freed array is gone. Calls nest (SQLite
+    // savepoints); only the outermost commit is durable. Composes with
+    // `bulk_add` rather than replacing it: batch each operation, and use a
+    // transaction when several must be atomic together. Holds the SQLite write
+    // lock until the outermost commit/rollback.
+    pub fn begin_transaction(&amp;mut self) -&gt; Result&lt;()&gt;;
+    pub fn commit_transaction(&amp;mut self) -&gt; Result&lt;()&gt;;
+    pub fn rollback_transaction(&amp;mut self) -&gt; Result&lt;()&gt;;
+    pub fn in_transaction(&amp;self) -&gt; bool;
     // Write the whole store (arrays + catalog) to `path` + `&lt;path&gt;.sqlite`,
     // overwriting them. Works for on-disk *and* in-memory stores.
     pub fn persist_to(&amp;mut self, path: &amp;Path) -&gt; Result&lt;()&gt;;

@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/getting-started/installation.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/getting-started/installation.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -185,24 +185,36 @@
                 <div id="content" class="content">
                     <main>
                         <h1 id="installation"><a class="header" href="#installation">Installation</a></h1>
-<p>infrastore is a Rust workspace. Building any of its interfaces requires a Rust toolchain plus the
-HDF5, NetCDF, and Protobuf system libraries. The Python and Julia bindings additionally need a
-Python interpreter (3.10+) or Julia (1.10+).</p>
-<h2 id="system-libraries"><a class="header" href="#system-libraries">System Libraries</a></h2>
-<h3 id="macos-homebrew"><a class="header" href="#macos-homebrew">macOS (Homebrew)</a></h3>
-<pre><code class="language-sh">brew install hdf5 netcdf protobuf maturin
+<p>Most users install a published package and need no build tools at all:</p>
+<div class="table-wrapper"><table><thead><tr><th>Language</th><th>Install</th></tr></thead><tbody>
+<tr><td>Rust</td><td><code>cargo add infrastore-core</code></td></tr>
+<tr><td>Python</td><td><code>pip install infrastore</code></td></tr>
+<tr><td>Julia</td><td><code>Pkg.add("InfraStore")</code></td></tr>
+<tr><td>CLI</td><td><code>cargo install infrastore-cli</code></td></tr>
+</tbody></table>
+</div>
+<p>The Python wheels and the Julia binary (<code>InfraStore_jll</code>) are prebuilt and self-contained. The Rust
+crates build NetCDF, HDF5, and zlib from vendored sources and link them statically, so they need
+<code>cmake</code> and a C compiler but <strong>no system NetCDF or HDF5</strong>. The same vendored, statically linked
+stack backs every channel, so the HDF5 version behind the on-disk format is pinned by infrastore
+rather than by the target environment.</p>
+<p>The rest of this page covers building the workspace from a checkout.</p>
+<h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
+<p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia
+bindings additionally need a Python interpreter (3.11+) or Julia (1.10+).</p>
+<pre><code class="language-sh">brew install cmake protobuf maturin              # macOS
+sudo apt-get install cmake protobuf-compiler     # Linux (Debian / Ubuntu)
 </code></pre>
-<p><code>hdf5</code> is a transitive dependency of <code>netcdf</code>, but the <code>hdf5-metno-sys</code> build script does not always
-locate it on its own. If <code>cargo build</code> fails with
-<code>Unable to locate HDF5 root directory and/or headers</code>, point it at the Homebrew install explicitly:</p>
-<pre><code class="language-sh">export HDF5_DIR="$(brew --prefix hdf5)"
-</code></pre>
-<p>Add that line to your shell profile to make it permanent.</p>
-<h3 id="linux-debian--ubuntu"><a class="header" href="#linux-debian--ubuntu">Linux (Debian / Ubuntu)</a></h3>
-<pre><code class="language-sh">sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
-# If the build script can't find HDF5:
-export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial
-</code></pre>
+<p>The first build compiles netcdf-c and HDF5 from source — a few minutes — and then caches the result.</p>
+<blockquote>
+<p><strong>Do not set <code>HDF5_DIR</code> or <code>NETCDF_DIR</code>.</strong> The vendored netcdf-c build forwards them to cmake as
+<code>HDF5_ROOT</code> while still requesting static libraries, which fails against a shared-only install. To
+build against system libraries instead, turn vendoring off with <code>--no-default-features</code> and
+install them (<code>brew install hdf5 netcdf</code> / <code>apt-get install libhdf5-dev libnetcdf-dev</code>).</p>
+<p>Because <code>netcdf-sys</code> declares <code>links = "netcdf"</code>, Cargo's feature unification makes the
+vendored-versus-system choice all-or-nothing across the whole dependency graph — an individual
+crate cannot opt out on its own.</p>
+</blockquote>
 <h2 id="rust-toolchain"><a class="header" href="#rust-toolchain">Rust Toolchain</a></h2>
 <p>The workspace targets <strong>edition 2024</strong> and declares an MSRV of <strong>Rust 1.94</strong> — that is the oldest
 toolchain it is guaranteed to build on. (<code>rust-version</code> in the root <code>Cargo.toml</code> is the authority;
@@ -210,7 +222,7 @@ the repo pins no <code>rust-toolchain</code> file, and CI builds on stable.)</p>
 <pre><code class="language-sh">rustup update stable
 </code></pre>
 <h2 id="build-the-workspace"><a class="header" href="#build-the-workspace">Build the Workspace</a></h2>
-<pre><code class="language-sh">git clone https://github.com/NatLabRockies/time-series-store
+<pre><code class="language-sh">git clone https://github.com/NatLabRockies/infrastore
 cd infrastore
 cargo build --workspace --all-features
 cargo test --workspace --all-features
@@ -223,7 +235,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 <tr><td><code>infrastore-core</code></td><td>Types, NetCDF + SQLite storage, hashing, Rust API</td></tr>
 <tr><td><code>infrastore-proto</code></td><td>Protobuf service definition + <code>tonic</code> codegen</td></tr>
 <tr><td><code>infrastore-server</code></td><td>gRPC server binary + Rust client</td></tr>
-<tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py310</code> wheel</td></tr>
+<tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py311</code> wheel</td></tr>
 <tr><td><code>infrastore-ffi</code></td><td>C ABI cdylib (the foundation of the Julia binding)</td></tr>
 <tr><td><code>infrastore-cli</code></td><td><code>infrastore</code> CLI binary (CSV add/read, inspect on-disk stores)</td></tr>
 <tr><td><code>infrastore-bench</code></td><td><code>infrastore-bench</code> binary (bulk-ingest + simulation-read benchmarks)</td></tr>

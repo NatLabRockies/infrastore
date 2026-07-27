@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/explanation/content-addressing.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/explanation/content-addressing.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -297,10 +297,11 @@ its array's <code>data_hash</code>, so a caller can group series by that hash to
 the same stored array — without reading any array bytes. Two cases land in the same group: arrays
 that were deduplicated because their content was identical, and a <code>SingleTimeSeries</code> together with
 any <code>DeterministicSingleTimeSeries</code> derived from it (the DST shares the backing array).</p>
-<p>In the Julia binding, <code>list_array_groups</code> returns the <code>list_keys</code> rows plus a <code>data_hash</code> field (a
-64-character hex string); group by it to find the shared sets. <code>count_array_references</code> reports, for
-one hash, how many <code>SingleTimeSeries</code> and <code>DeterministicSingleTimeSeries</code> associations point at it.</p>
-<pre><code class="language-julia">groups = Dict{String, Vector{NamedTuple}}()
+<p>In the Julia binding, <code>list_array_groups</code> returns <code>ArrayGroupRow</code>s — the <code>list_keys</code> fields plus a
+<code>data_hash</code> field (the 32 raw bytes, which hash and compare by content and so work directly as a
+<code>Dict</code> key); group by it to find the shared sets. <code>count_array_references</code> reports, for one hash,
+how many <code>SingleTimeSeries</code> and <code>DeterministicSingleTimeSeries</code> associations point at it.</p>
+<pre><code class="language-julia">groups = Dict{Vector{UInt8}, Vector{ArrayGroupRow}}()
 for row in list_array_groups(store)
     push!(get!(groups, row.data_hash, eltype(values(groups))[]), row)
 end

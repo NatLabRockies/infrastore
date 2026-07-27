@@ -147,10 +147,10 @@
                         <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store" title="Git repository" aria-label="Git repository">
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/NatLabRockies/time-series-store/edit/main/docs/src/explanation/bindings.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/NatLabRockies/infrastore/edit/main/docs/src/explanation/bindings.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -215,7 +215,7 @@ importable as <code>infrastore</code>. The binding:</p>
 <li>Translates the typed <code>TimeSeriesError</code> variants into a Python exception hierarchy rooted at
 <code>TimeSeriesError</code> (<code>NotFoundError</code>, <code>DuplicateTimeSeriesError</code>, <code>InvalidParameterError</code>,
 <code>IntegrityError</code>, <code>ReadOnlyStoreError</code>).</li>
-<li>Builds an <code>abi3-py310</code> wheel, so one wheel works across CPython 3.10+ without recompiling.</li>
+<li>Builds an <code>abi3-py311</code> wheel, so one wheel works across CPython 3.11+ without recompiling.</li>
 </ul>
 <p>The metadata side is owned entirely by Rust; Python never touches SQLite directly. See the
 <a href="../guides/python.html">Python guide</a> and <a href="../reference/python-api.html">Python API reference</a>.</p>
@@ -261,8 +261,10 @@ the fast block-write path through the existing batch / <code>add_time_series_bul
 <p>The model was shaped to drop into InfrastructureSystems.jl: owners are identified by integer
 component identifiers (<code>i64</code>), owner categories map to <code>Component</code> / <code>SupplementalAttribute</code>, and
 features accept string values so InfrastructureSystems.jl's feature dictionaries round-trip
-unchanged. The FFI exposes attribute-based metadata accessors (<code>infrastore_store_get_metadata</code>,
-<code>infrastore_store_has_by_attrs</code>, <code>infrastore_store_remove_by_attrs</code>) and a hash-based array fetch
+unchanged. The FFI exposes attribute-based accessors (<code>infrastore_store_has_by_attrs</code>,
+<code>infrastore_store_remove_by_attrs</code>), a whole-record metadata read
+(<code>infrastore_store_get_metadata_by_key</code>, reachable from attributes through
+<code>infrastore_make_key_from_attrs</code>), and a hash-based array fetch
 (<code>infrastore_store_get_array_by_hash</code>) so an InfrastructureSystems.jl-side store can keep its own
 key objects and reach the array layer directly.</p>
 <h2 id="grpc-server-and-client"><a class="header" href="#grpc-server-and-client">gRPC Server and Client</a></h2>
