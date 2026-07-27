@@ -165,7 +165,14 @@ def open_url(url: str, method: str, timeout: int) -> urllib.response.addinfourl:
     request = urllib.request.Request(
         url,
         method=method,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; infrastore-doc-link-check/1.0)"},
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; infrastore-doc-link-check/1.0)",
+            # urllib sends no Accept header at all, which makes content-negotiating
+            # hosts serve something other than the page a browser would get. crates.io
+            # answers 404 to an Accept-less request for a URL that is perfectly live,
+            # so without this every crates.io link reads as broken.
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
     )
     return urllib.request.urlopen(request, timeout=timeout)
 
