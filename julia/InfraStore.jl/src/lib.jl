@@ -2,30 +2,15 @@
 #
 # Resolution order:
 #   1. `INFRASTORE_LIB` environment variable (development override).
-#   2. `InfraStore_jll` (the BinaryBuilder/Yggdrasil binary) when installed.
-# The JLL is looked up without a hard dependency so this package still loads and
-# works via the env var before the JLL is published to the registry.
+#   2. `InfraStore_jll` (the BinaryBuilder/Yggdrasil binary).
+# The env var stays ahead of the JLL so a local `cargo build` shadows the
+# released binary with no code change; the CI job relies on that ordering.
 
 const _LIB_REF = Ref{String}("")
 
-function _jll_library_path()
-    pkgid = Base.identify_package("InfraStore_jll")
-    pkgid === nothing && return ""
-    mod = try
-        Base.require(pkgid)
-    catch
-        return ""
-    end
-    return if isdefined(mod, :libinfrastore_ffi)
-        String(getproperty(mod, :libinfrastore_ffi))
-    else
-        ""
-    end
-end
-
 """
-Path to the `libinfrastore_ffi` cdylib. Override with the
-`INFRASTORE_LIB` environment variable (development builds); otherwise the
+Path to the `libinfrastore_ffi` cdylib. The `INFRASTORE_LIB` environment
+variable takes precedence (development builds); otherwise the
 `InfraStore_jll` binary is used.
 """
 function lib_path()
@@ -34,12 +19,15 @@ function lib_path()
     end
     p = get(ENV, "INFRASTORE_LIB", "")
     if isempty(p)
-        p = _jll_library_path()
+        # The JLL is built for a fixed platform list, so a user on a target it
+        # does not cover (musl, i686, armv7, ...) gets a loadable package with
+        # no product. Say so, rather than failing later inside a `ccall`.
+        InfraStore_jll.is_available() || error(
+            "InfraStore_jll provides no binary for this platform. Build the " *
+            "cdylib from source and point INFRASTORE_LIB at it.",
+        )
+        p = InfraStore_jll.libinfrastore_ffi
     end
-    isempty(p) && error(
-        "Could not locate libinfrastore_ffi. Set the INFRASTORE_LIB " *
-        "environment variable to a built cdylib, or install InfraStore_jll.",
-    )
     _LIB_REF[] = p
     return p
 end

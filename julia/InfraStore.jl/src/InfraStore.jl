@@ -4,6 +4,8 @@ using Dates
 using JSON: JSON
 using Libdl: dlopen, dlsym
 
+using InfraStore_jll: InfraStore_jll
+
 export Store,
     SingleTimeSeries,
     NonSequentialTimeSeries,
