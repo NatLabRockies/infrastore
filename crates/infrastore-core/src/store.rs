@@ -1731,12 +1731,38 @@ impl Store {
         Ok(new_metas.len())
     }
 
+    /// True iff an association with exactly this key identity exists.
+    ///
+    /// A covering-index probe (`SELECT 1 ... LIMIT 1` on the uniqueness
+    /// index), safe for hot per-component loops: it fetches no row, hydrates
+    /// no metadata, and runs one statement. The key's feature set is matched
+    /// by its content hash — equal hash implies equal set, the same
+    /// content-addressing contract `feature_sets` storage relies on.
     pub fn has_time_series(&self, key: &KeyIdentity) -> Result<bool> {
-        match self.metadata.get_by_key(key) {
-            Ok(_) => Ok(true),
-            Err(TimeSeriesError::NotFound) => Ok(false),
-            Err(e) => Err(e),
-        }
+        self.metadata.exists(&MetadataFilter {
+            owner_id: Some(key.owner_id),
+            owner_category: Some(key.owner_category),
+            time_series_type: Some(key.time_series_type),
+            name: Some(key.name.clone()),
+            resolution: key.resolution,
+            interval: key.interval,
+            features: None,
+            features_hash: Some(crate::hash::features_hash(&key.features)),
+            owner_type: None,
+            name_glob: None,
+        })
+    }
+
+    /// True iff at least one association matches `filter` — the owner-level
+    /// counterpart of [`Self::has_time_series`], answering "does this
+    /// component have any time series (of type T)?" without listing them.
+    ///
+    /// Same covering-index probe as the keyed check (one statement, nothing
+    /// hydrated), so it is safe for hot loops. The one exception is a filter
+    /// carrying a `features` subset match, which cannot be answered from an
+    /// index and falls back to a full listing internally.
+    pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool> {
+        self.metadata.exists(&filter.into())
     }
 
     pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {

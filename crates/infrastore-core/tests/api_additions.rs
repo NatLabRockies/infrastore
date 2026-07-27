@@ -685,6 +685,97 @@ fn reading_with_the_wrong_time_series_type_is_not_found() {
 }
 
 #[test]
+fn has_any_time_series_answers_owner_level_existence() {
+    let mut store = create_store(None, true).unwrap();
+    add_sts(&mut store, 1, "load", 10.0);
+
+    let by_owner = |id| {
+        ListFilter::new()
+            .owner_id(id)
+            .owner_category(OwnerCategory::Component)
+    };
+    assert!(store.has_any_time_series(by_owner(1)).unwrap());
+    assert!(!store.has_any_time_series(by_owner(2)).unwrap());
+    // Category is part of the owner identity: the same id in the other
+    // category is a different owner.
+    assert!(
+        !store
+            .has_any_time_series(
+                ListFilter::new()
+                    .owner_id(1)
+                    .owner_category(OwnerCategory::SupplementalAttribute)
+            )
+            .unwrap()
+    );
+
+    // A type restriction narrows the probe.
+    assert!(
+        store
+            .has_any_time_series(by_owner(1).time_series_type(TimeSeriesType::SingleTimeSeries))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_any_time_series(by_owner(1).time_series_type(TimeSeriesType::Deterministic))
+            .unwrap()
+    );
+
+    // The empty filter asks "any association at all".
+    assert!(store.has_any_time_series(ListFilter::new()).unwrap());
+    store.clear_time_series(None).unwrap();
+    assert!(!store.has_any_time_series(ListFilter::new()).unwrap());
+}
+
+#[test]
+fn existence_probes_distinguish_features() {
+    let mut store = create_store(None, true).unwrap();
+    let mut high: Features = BTreeMap::new();
+    high.insert("scenario".into(), FeatureValue::Str("high".into()));
+    let mut low: Features = BTreeMap::new();
+    low.insert("scenario".into(), FeatureValue::Str("low".into()));
+
+    let key = store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+            )
+            .with_features(high.clone()),
+        )
+        .unwrap();
+
+    // The keyed probe matches the feature set by content hash, so a key that
+    // differs only in features is a miss.
+    assert!(store.has_time_series(key.identity()).unwrap());
+    let mut wrong = key.identity().clone();
+    wrong.features = Features::new();
+    assert!(!store.has_time_series(&wrong).unwrap());
+    wrong.features = low.clone();
+    assert!(!store.has_time_series(&wrong).unwrap());
+
+    // The filtered probe's `features` predicate is a subset match (in-memory
+    // fallback path, not the index probe).
+    let by_owner = || {
+        ListFilter::new()
+            .owner_id(1)
+            .owner_category(OwnerCategory::Component)
+    };
+    assert!(
+        store
+            .has_any_time_series(by_owner().features(high))
+            .unwrap()
+    );
+    assert!(!store.has_any_time_series(by_owner().features(low)).unwrap());
+    assert!(
+        store
+            .has_any_time_series(by_owner().features(Features::new()))
+            .unwrap()
+    );
+}
+
+#[test]
 fn empty_key_lists_are_no_ops_not_errors() {
     let mut store = create_store(None, true).unwrap();
     add_sts(&mut store, 1, "load", 10.0);

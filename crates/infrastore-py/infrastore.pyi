@@ -513,6 +513,19 @@ class Store:
         owner_category: OwnerCategory,
     ) -> list[TimeSeriesKey]: ...
     def has_time_series(self, key: TimeSeriesKey) -> bool: ...
+    def has_any_time_series(
+        self,
+        *,
+        owner_id: int | None = None,
+        owner_category: OwnerCategory | None = None,
+        owner_type: str | None = None,
+        time_series_type: TimeSeriesType | None = None,
+        name: str | None = None,
+        name_glob: str | None = None,
+        resolution: Period | None = None,
+        interval: Period | None = None,
+        features: dict[str, int | float | bool | str] | None = None,
+    ) -> bool: ...
     def get_resolutions(
         self, time_series_type: TimeSeriesType | None = None
     ) -> list[str]: ...

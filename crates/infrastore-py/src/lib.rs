@@ -1739,6 +1739,43 @@ impl PyStore {
         self.store()?.has_time_series(&key.inner).map_err(map_err)
     }
 
+    /// Return True if at least one time series matches the filters — e.g.
+    /// "does this owner have any time series (of type T)?" — without listing
+    /// them. Accepts the same keyword-only filters as `list_time_series` and
+    /// answers from a covering index probe, so it is safe to call in hot
+    /// loops (except with a `features` filter, which falls back to a full
+    /// listing internally).
+    #[pyo3(signature = (
+        *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
+        name=None, name_glob=None, resolution=None, interval=None, features=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn has_any_time_series(
+        &self,
+        owner_id: Option<i64>,
+        owner_category: Option<PyOwnerCategory>,
+        owner_type: Option<String>,
+        time_series_type: Option<PyTimeSeriesType>,
+        name: Option<String>,
+        name_glob: Option<String>,
+        resolution: Option<Bound<'_, PyAny>>,
+        interval: Option<Bound<'_, PyAny>>,
+        features: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<bool> {
+        let filter = build_list_filter(
+            owner_id,
+            owner_category,
+            owner_type,
+            time_series_type,
+            name,
+            name_glob,
+            resolution,
+            interval,
+            features,
+        )?;
+        self.store()?.has_any_time_series(filter).map_err(map_err)
+    }
+
     #[pyo3(signature = (time_series_type=None))]
     fn get_resolutions(
         &self,

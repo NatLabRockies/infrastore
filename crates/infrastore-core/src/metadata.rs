@@ -984,6 +984,38 @@ impl MetadataStore {
         metas.iter().map(TimeSeriesKey::from_metadata).collect()
     }
 
+    /// True iff at least one association matches `filter` — the existence
+    /// probe behind [`crate::Store::has_time_series`] and
+    /// [`crate::Store::has_any_time_series`], both of which consumers call in
+    /// hot per-component loops.
+    ///
+    /// `SELECT 1 ... LIMIT 1` over the same predicate [`Self::list`] uses, so
+    /// the answer comes straight off an index: a full key identity is a
+    /// covering seek of `uq_ts_assoc`, and an owner-only probe covers via
+    /// `idx_category_owner`. Unlike `list`, no row leaves the index — nothing
+    /// is hydrated, no JSON is parsed, and no second features query runs.
+    ///
+    /// The one predicate an index cannot answer is the in-memory
+    /// `features` subset match, so a filter carrying one falls back to
+    /// `list`. Callers testing an *exact* feature set (the keyed existence
+    /// check) pass `features_hash` instead, which stays on the index path.
+    pub fn exists(&self, filter: &MetadataFilter) -> Result<bool> {
+        if filter.features.as_ref().is_some_and(|f| !f.is_empty()) {
+            return Ok(!self.list(filter)?.is_empty());
+        }
+        let (where_clause, params_vec) = filter.to_sql();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let sql = format!("SELECT 1 FROM time_series_associations {where_clause} LIMIT 1");
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let found: Option<i64> = stmt
+            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),

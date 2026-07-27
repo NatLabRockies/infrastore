@@ -2044,9 +2044,9 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
         };
         filter = filter.time_series_type(t);
     }
-    match store.inner.list_time_series(filter) {
-        Ok(list) => {
-            unsafe { *out_present = !list.is_empty() };
+    match store.inner.has_any_time_series(filter) {
+        Ok(present) => {
+            unsafe { *out_present = present };
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),

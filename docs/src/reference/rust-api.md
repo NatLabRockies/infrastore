@@ -146,6 +146,10 @@ impl Store {
         owner_category: OwnerCategory,
     ) -> Result<Vec<TimeSeriesKey>>;
     pub fn has_time_series(&self, key: &KeyIdentity) -> Result<bool>;
+    // Existence over a filter without listing: "does this owner have any time
+    // series (of type T)?". Both probes answer from a covering index and are
+    // safe for hot loops.
+    pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool>;
 
     // Resolve a forecast addressed by attributes + a `RequestedType` to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.

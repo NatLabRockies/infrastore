@@ -327,6 +327,42 @@ def test_has_time_series():
     assert store.has_time_series(key) is False
 
 
+def test_has_any_time_series():
+    store = Store.create(in_memory=True)
+    _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
+
+    assert store.has_any_time_series(owner_id=1, owner_category=OWNER_CAT) is True
+    assert store.has_any_time_series(owner_id=2, owner_category=OWNER_CAT) is False
+    assert (
+        store.has_any_time_series(
+            owner_id=1, owner_category=OwnerCategory.SupplementalAttribute
+        )
+        is False
+    )
+
+    # A type restriction narrows the probe.
+    assert (
+        store.has_any_time_series(
+            owner_id=1, time_series_type=TimeSeriesType.SingleTimeSeries
+        )
+        is True
+    )
+    assert (
+        store.has_any_time_series(
+            owner_id=1, time_series_type=TimeSeriesType.Deterministic
+        )
+        is False
+    )
+
+    # No filters: any association at all.
+    assert store.has_any_time_series() is True
+
+    # The features filter is a subset match.
+    _add(store, 3, _sts("wind", np.arange(4, dtype=np.float64)), features={"s": "hi"})
+    assert store.has_any_time_series(owner_id=3, features={"s": "hi"}) is True
+    assert store.has_any_time_series(owner_id=3, features={"s": "lo"}) is False
+
+
 def test_remove_time_series_bulk():
     store = Store.create(in_memory=True)
     k1 = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
