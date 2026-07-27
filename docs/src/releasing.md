@@ -16,13 +16,18 @@ wheel on PyPI rather than as a crate, and the second is an internal benchmarking
 The Rust crates, the JLL, `InfraStore.jl`, and the Python package share the workspace version. Bump
 them together and tag the repo once per release, so every registry pins the same commit.
 
-The version lives in three places that must agree:
+The version lives in four places that must agree:
 
-| File                                  | Field                         |
-| ------------------------------------- | ----------------------------- |
-| `Cargo.toml`                          | `[workspace.package] version` |
-| `crates/infrastore-py/pyproject.toml` | `[project] version`           |
-| `julia/InfraStore.jl/Project.toml`    | `version`                     |
+| File                                  | Field                                                         |
+| ------------------------------------- | ------------------------------------------------------------- |
+| `Cargo.toml`                          | `[workspace.package] version`                                 |
+| `Cargo.toml`                          | `[workspace.dependencies]` pins on `infrastore-core`/`-proto` |
+| `crates/infrastore-py/pyproject.toml` | `[project] version`                                           |
+| `julia/InfraStore.jl/Project.toml`    | `version`                                                     |
+
+The `[workspace.dependencies]` pins are easy to miss and fail late: `cargo publish` uploads
+`infrastore-core` at the new version, then rejects `infrastore-proto` because its requirement still
+names the old one. Run `cargo update --workspace` after the edits so `Cargo.lock` moves too.
 
 The `crates-release` workflow refuses to publish if the tag does not match the workspace version.
 
@@ -76,9 +81,10 @@ un-skipping it is a separate change that needs its own CI run.
 
 ### 1. Bump and tag
 
-Update the three version fields above, then:
+Update the version fields above, then:
 
 ```sh
+cargo update --workspace              # moves Cargo.lock to the new version
 cargo publish --workspace --dry-run   # verifies every crate packages and builds
 git commit -am "Release v0.1.0"
 git tag v0.1.0
