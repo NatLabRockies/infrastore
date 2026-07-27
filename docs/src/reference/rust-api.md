@@ -279,6 +279,18 @@ impl Store {
     pub fn compact(&mut self) -> Result<CompactionReport>;
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
     pub fn flush(&mut self) -> Result<()>;
+
+    // Cross-operation transactions: the operations between a begin and its
+    // matching commit either all take effect or none do. Removals are reversible
+    // only inside one -- outside, a freed array is gone. Calls nest (SQLite
+    // savepoints); only the outermost commit is durable. Composes with
+    // `bulk_add` rather than replacing it: batch each operation, and use a
+    // transaction when several must be atomic together. Holds the SQLite write
+    // lock until the outermost commit/rollback.
+    pub fn begin_transaction(&mut self) -> Result<()>;
+    pub fn commit_transaction(&mut self) -> Result<()>;
+    pub fn rollback_transaction(&mut self) -> Result<()>;
+    pub fn in_transaction(&self) -> bool;
     // Write the whole store (arrays + catalog) to `path` + `<path>.sqlite`,
     // overwriting them. Works for on-disk *and* in-memory stores.
     pub fn persist_to(&mut self, path: &Path) -> Result<()>;

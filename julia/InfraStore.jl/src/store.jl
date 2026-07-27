@@ -123,3 +123,109 @@ function open_store(f::Function, path::AbstractString; read_only::Bool=false)
         close!(s)
     end
 end
+
+# ---- Transactions ----------------------------------------------------------
+
+"""
+    begin_transaction!(store)
+
+Begin a transaction spanning subsequent operations, so that adds, removals, and
+transforms either all take effect or none do. Calls nest; only the outermost
+commit makes anything durable.
+
+Prefer the do-block [`transaction`](@ref), which cannot leak an open
+transaction. Removals are reversible only inside one.
+
+Holds the SQLite write lock until the outermost commit or rollback, so another
+writer on the same artifact will block and then fail on its busy timeout. Scope
+a transaction to the span that actually needs atomicity.
+"""
+function begin_transaction!(store::Store)
+    _check(
+        @ccall lib_path().infrastore_store_begin_transaction(
+            store.handle::Ptr{Cvoid}
+        )::Int32
+    )
+    return nothing
+end
+
+"""
+    commit_transaction!(store)
+
+Commit the innermost open transaction. Committing the outermost one makes the
+whole span durable. Errors if no transaction is open.
+"""
+function commit_transaction!(store::Store)
+    _check(
+        @ccall lib_path().infrastore_store_commit_transaction(
+            store.handle::Ptr{Cvoid}
+        )::Int32
+    )
+    return nothing
+end
+
+"""
+    rollback_transaction!(store)
+
+Roll back the innermost open transaction, undoing every operation it covered.
+Errors if no transaction is open.
+"""
+function rollback_transaction!(store::Store)
+    _check(
+        @ccall lib_path().infrastore_store_rollback_transaction(
+            store.handle::Ptr{Cvoid}
+        )::Int32
+    )
+    return nothing
+end
+
+"""
+    in_transaction(store) -> Bool
+
+Whether a transaction is currently open on `store`.
+"""
+function in_transaction(store::Store)
+    out = Ref{Bool}(false)
+    _check(
+        @ccall lib_path().infrastore_store_in_transaction(
+            store.handle::Ptr{Cvoid}, out::Ref{Bool}
+        )::Int32
+    )
+    return out[]
+end
+
+"""
+    transaction(f, store)
+
+Run `f()` inside a transaction: commit if it returns, roll back if it throws.
+Returns `f`'s value.
+
+```julia
+transaction(store) do
+    add_time_series!(store, 1, "Generator", Component, ts)
+    remove_time_series!(store, old_key)
+end
+```
+
+Both operations take effect or neither does — including the removal, which
+outside a transaction is irreversible.
+
+A failure in the rollback itself is logged rather than thrown, so the error that
+caused the unwind is the one the caller sees.
+"""
+function transaction(f::Function, store::Store)
+    begin_transaction!(store)
+    result = try
+        f()
+    catch
+        try
+            rollback_transaction!(store)
+        catch rollback_err
+            @error "InfraStore transaction rollback failed; the store may retain " *
+                "partial work from the transaction" exception = rollback_err
+        end
+        rethrow()
+    end
+    commit_transaction!(store)
+    return result
+end

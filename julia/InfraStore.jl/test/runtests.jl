@@ -3014,3 +3014,52 @@ end
         Store, store, 1, Component, "a"
     )
 end
+
+@testset "transactions span operations and reverse removals" begin
+    store = Store(in_memory=true)
+    mkts(base) = SingleTimeSeries(
+        DateTime(2024, 1, 1), Hour(1), Float64[base + i for i in 0:7], "load"
+    )
+    add(owner, base) =
+        add_time_series!(store, owner, "Generator", Component, mkts(base))
+
+    k1 = add(1, 0.0)
+    @test !in_transaction(store)
+
+    # A throwing block rolls back everything it did, adds and removals alike.
+    # Outside a transaction the removal would be irreversible.
+    @test_throws ErrorException transaction(store) do
+        add(2, 100.0)
+        remove_time_series!(store, k1)
+        @test in_transaction(store)
+        @test length(list_keys(store)) == 1   # uncommitted work is visible inside
+        error("boom")
+    end
+    @test !in_transaction(store)
+    @test length(list_keys(store)) == 1
+    # The array behind the removed association survived, not just its catalog row.
+    @test get_time_series(store, k1).data[1] == 0.0
+
+    # A clean block commits.
+    transaction(store) do
+        add(3, 200.0)
+    end
+    @test length(list_keys(store)) == 2
+    @test !in_transaction(store)
+
+    # Nesting: an inner rollback leaves the outer transaction open and intact.
+    transaction(store) do
+        add(4, 300.0)
+        @test_throws ErrorException transaction(store) do
+            add(5, 400.0)
+            error("inner")
+        end
+        @test in_transaction(store)
+        @test length(list_keys(store)) == 3
+    end
+    @test length(list_keys(store)) == 3
+
+    # Committing what was never begun is an error, not a silent no-op.
+    @test_throws InfraStore.InvalidParameterError commit_transaction!(store)
+    @test_throws InfraStore.InvalidParameterError rollback_transaction!(store)
+end

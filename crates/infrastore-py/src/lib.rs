@@ -1222,6 +1222,55 @@ impl PyForecastReader {
     }
 }
 
+/// The context manager returned by `Store.transaction()`.
+///
+/// Holds a Python-level reference to its store rather than a Rust borrow, so the
+/// transaction is store state for the block's duration and nothing has to be
+/// borrowed across `__enter__`/`__exit__`.
+#[pyclass(name = "Transaction", module = "infrastore", unsendable)]
+pub struct PyTransaction {
+    store: Py<PyStore>,
+}
+
+#[pymethods]
+impl PyTransaction {
+    /// Begin the transaction. Returns the store, so `as` binds something useful.
+    fn __enter__(&self, py: Python<'_>) -> PyResult<Py<PyStore>> {
+        self.store.borrow_mut(py).begin_transaction()?;
+        Ok(self.store.clone_ref(py))
+    }
+
+    /// Commit on a clean exit, roll back otherwise. Never suppresses the
+    /// exception that caused the unwind: if the rollback itself fails, that
+    /// failure is reported as a warning so the original error still propagates.
+    #[pyo3(signature = (exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<Py<PyAny>>,
+        _exc_value: Option<Py<PyAny>>,
+        _traceback: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let mut store = self.store.borrow_mut(py);
+        if exc_type.is_none() {
+            store.commit_transaction()?;
+        } else if let Err(e) = store.rollback_transaction() {
+            drop(store);
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyRuntimeWarning>(),
+                std::ffi::CString::new(format!(
+                    "infrastore transaction rollback failed; the store may retain partial \
+                     work from the transaction: {e}"
+                ))?
+                .as_c_str(),
+                1,
+            )?;
+        }
+        Ok(false)
+    }
+}
+
 #[pyclass(name = "Store", module = "infrastore", unsendable)]
 pub struct PyStore {
     /// `None` once `close()` (or `__exit__`) has dropped the store; every store
@@ -1805,6 +1854,57 @@ impl PyStore {
 
     fn flush(&mut self) -> PyResult<()> {
         self.store_mut()?.flush().map_err(map_err)
+    }
+
+    // ---- Transactions -----------------------------------------------------
+
+    /// Begin a transaction spanning subsequent operations, so that adds,
+    /// removals, and transforms either all take effect or none do. Calls nest;
+    /// only the outermost commit makes anything durable.
+    ///
+    /// Prefer the `transaction()` context manager, which cannot leak an open
+    /// transaction. Removals are reversible only inside one.
+    ///
+    /// This holds the SQLite write lock until the outermost commit or rollback,
+    /// so another writer on the same artifact will block and then fail on its
+    /// busy timeout. Scope a transaction to the span that needs atomicity.
+    ///
+    /// Raises `ReadOnlyStoreError` if the store is read-only.
+    fn begin_transaction(&mut self) -> PyResult<()> {
+        self.store_mut()?.begin_transaction().map_err(map_err)
+    }
+
+    /// Commit the innermost open transaction. Raises `InvalidParameterError` if
+    /// none is open.
+    fn commit_transaction(&mut self) -> PyResult<()> {
+        self.store_mut()?.commit_transaction().map_err(map_err)
+    }
+
+    /// Roll back the innermost open transaction, undoing every operation it
+    /// covered. Raises `InvalidParameterError` if none is open.
+    fn rollback_transaction(&mut self) -> PyResult<()> {
+        self.store_mut()?.rollback_transaction().map_err(map_err)
+    }
+
+    /// Whether a transaction is currently open.
+    #[getter]
+    fn in_transaction(&self) -> PyResult<bool> {
+        Ok(self.store()?.in_transaction())
+    }
+
+    /// A context manager that commits on a clean exit and rolls back if the
+    /// block raises.
+    ///
+    /// ```python
+    /// with store.transaction():
+    ///     store.add_time_series(...)
+    ///     store.remove_time_series(old_key)
+    /// ```
+    ///
+    /// Both operations take effect or neither does — including the removal,
+    /// which outside a transaction is irreversible. Blocks nest.
+    fn transaction(slf: Py<Self>) -> PyTransaction {
+        PyTransaction { store: slf }
     }
 
     // ---- Readers ----------------------------------------------------------
@@ -2886,6 +2986,7 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         .try_init();
 
     m.add_class::<PyStore>()?;
+    m.add_class::<PyTransaction>()?;
     m.add_class::<PySingleTimeSeries>()?;
     m.add_class::<PyNonSequentialTimeSeries>()?;
     m.add_class::<PyDeterministic>()?;

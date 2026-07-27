@@ -194,12 +194,39 @@ pub struct ForecastParameters {
     pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Bookkeeping for an open cross-operation transaction (see
+/// [`Store::begin_transaction`]).
+///
+/// The SQLite half rolls back on its own; this tracks the NetCDF half, which has
+/// no transaction of its own to enlist. The trick is that the array store is
+/// content-addressed, so it can be made **append-only for the transaction's
+/// duration**: writes are recorded here and undone on rollback, and frees are
+/// deferred here and applied only once the outermost commit succeeds. Together
+/// those make both halves of the artifact roll back in step.
+#[derive(Debug, Default)]
+struct OpenTxn {
+    /// Savepoint nesting depth. Only the outermost commit/rollback touches the
+    /// backend; inner ones just release or unwind their savepoint.
+    depth: usize,
+    /// Arrays this transaction physically wrote, in write order. Removed on
+    /// rollback — they are unreachable once the catalog rolls back, and leaving
+    /// them would orphan bytes no association references.
+    staged_hashes: Vec<[u8; 32]>,
+    /// Arrays that a removal inside this transaction left unreferenced. The free
+    /// is deferred to the outermost commit: while the transaction is open the
+    /// bytes must survive, because a rollback restores the catalog rows that
+    /// point at them.
+    pending_free: HashSet<[u8; 32]>,
+}
+
 pub struct Store {
     backend: Box<dyn StorageBackend>,
     metadata: MetadataStore,
     read_only: bool,
     /// Filesystem path for the NetCDF file (None if `in_memory`).
     netcdf_path: Option<PathBuf>,
+    /// `Some` while a cross-operation transaction is open.
+    txn: Option<OpenTxn>,
 }
 
 impl Store {
@@ -228,6 +255,7 @@ impl Store {
                 metadata: MetadataStore::open_in_memory()?,
                 read_only: false,
                 netcdf_path: None,
+                txn: None,
             });
         }
         let nc_path = path.ok_or_else(|| {
@@ -241,6 +269,7 @@ impl Store {
             metadata,
             read_only: false,
             netcdf_path: Some(nc_path.to_path_buf()),
+            txn: None,
         })
     }
 
@@ -257,11 +286,185 @@ impl Store {
             metadata,
             read_only,
             netcdf_path: Some(path.to_path_buf()),
+            txn: None,
         })
     }
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// The SQLite savepoint scoping transaction nesting level `depth`.
+    fn txn_savepoint(depth: usize) -> String {
+        format!("infrastore_txn_{depth}")
+    }
+
+    /// True while a cross-operation transaction is open.
+    pub fn in_transaction(&self) -> bool {
+        self.txn.is_some()
+    }
+
+    /// Begin a transaction spanning any number of subsequent operations, so that
+    /// adds, removals, and transforms either all take effect or none do.
+    ///
+    /// Every mutating entry point is already atomic on its own; this composes
+    /// several of them into one unit. It does *not* replace [`Self::bulk_add`] —
+    /// batching is still what buys block-sized NetCDF writes and feature-set
+    /// dedup, and a loop of single adds under a transaction gets neither. Open a
+    /// transaction when you need several *operations* to be atomic together, and
+    /// keep using a bulk add for each one.
+    ///
+    /// Both halves of the artifact roll back, by different means. SQLite rolls
+    /// back its own statements. The NetCDF side, which has no transaction to
+    /// enlist, is instead made append-only for the duration: arrays written here
+    /// are removed on rollback, and arrays that removals leave unreferenced are
+    /// not freed until the outermost commit — so a rollback restores catalog rows
+    /// whose data is still there. Removals are therefore fully reversible, which
+    /// they are not outside a transaction.
+    ///
+    /// Reads inside the transaction see its uncommitted writes, because they go
+    /// through the same connection. Callers need no staging overlay of their own.
+    ///
+    /// Calls nest: an inner [`Self::begin_transaction`] opens a nested savepoint,
+    /// and only the outermost commit makes anything durable.
+    ///
+    /// # Concurrency
+    ///
+    /// This holds the SQLite write lock until the outermost commit or rollback.
+    /// Another writer on the same artifact — a CLI invocation, another process —
+    /// will block and then fail once its `busy_timeout` expires. Keep
+    /// transactions to the span that actually needs atomicity rather than
+    /// wrapping a whole session in one.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeSeriesError::ReadOnlyStore`] if the store is read-only.
+    pub fn begin_transaction(&mut self) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        let depth = self.txn.as_ref().map_or(0, |t| t.depth);
+        self.metadata
+            .execute_txn_stmt(&format!("SAVEPOINT {};", Self::txn_savepoint(depth)))?;
+        self.txn.get_or_insert_with(OpenTxn::default).depth = depth + 1;
+        tracing::debug!(depth = depth + 1, "transaction begun");
+        Ok(())
+    }
+
+    /// Commit the innermost open transaction. Committing the outermost one makes
+    /// the whole span durable and applies the array frees deferred by any
+    /// removals it performed.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeSeriesError::InvalidParameter`] if no transaction is open.
+    pub fn commit_transaction(&mut self) -> Result<()> {
+        let depth = self.txn_depth()? - 1;
+        // Decide what to free *before* releasing, while the transaction's view of
+        // the catalog is still the one the commit is about to make permanent.
+        let to_free = if depth == 0 {
+            self.unreferenced(|t| std::mem::take(&mut t.pending_free).into_iter().collect())?
+        } else {
+            Vec::new()
+        };
+        self.metadata
+            .execute_txn_stmt(&format!("RELEASE {};", Self::txn_savepoint(depth)))?;
+        if depth > 0 {
+            self.txn.as_mut().expect("checked above").depth = depth;
+            return Ok(());
+        }
+        self.txn = None;
+        for hash in &to_free {
+            self.backend.remove_array(hash)?;
+        }
+        tracing::debug!(freed = to_free.len(), "transaction committed");
+        Ok(())
+    }
+
+    /// Roll back the innermost open transaction, undoing every operation it
+    /// covered. Rolling back the outermost one also removes the arrays it wrote
+    /// and abandons its deferred frees, leaving both halves of the artifact as
+    /// they were when it began.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeSeriesError::InvalidParameter`] if no transaction is open.
+    pub fn rollback_transaction(&mut self) -> Result<()> {
+        let depth = self.txn_depth()? - 1;
+        let name = Self::txn_savepoint(depth);
+        // ROLLBACK TO rewinds to the savepoint but leaves it on the stack, so it
+        // must be released to actually pop this nesting level.
+        self.metadata
+            .execute_txn_stmt(&format!("ROLLBACK TO {name}; RELEASE {name};"))?;
+        if depth > 0 {
+            self.txn.as_mut().expect("checked above").depth = depth;
+            return Ok(());
+        }
+        // The catalog is back to its pre-transaction state, so anything this
+        // transaction wrote is now unreferenced and must go. Recheck rather than
+        // trusting the staged list: an array can predate the transaction and have
+        // been re-referenced by a rolled-back add.
+        let to_free =
+            self.unreferenced(|t| std::mem::take(&mut t.staged_hashes).into_iter().collect())?;
+        // Deferred frees are abandoned: rollback restored the rows pointing at
+        // those arrays, so the data must stay.
+        self.txn = None;
+        for hash in &to_free {
+            self.backend.remove_array(hash)?;
+        }
+        tracing::debug!(removed = to_free.len(), "transaction rolled back");
+        Ok(())
+    }
+
+    /// The current nesting depth, or an error when no transaction is open.
+    fn txn_depth(&self) -> Result<usize> {
+        self.txn.as_ref().map(|t| t.depth).ok_or_else(|| {
+            TimeSeriesError::InvalidParameter("no transaction is open on this store".into())
+        })
+    }
+
+    /// Take a set of candidate hashes off the open transaction with `take`, and
+    /// return those the catalog no longer references.
+    fn unreferenced(
+        &mut self,
+        take: impl FnOnce(&mut OpenTxn) -> Vec<[u8; 32]>,
+    ) -> Result<Vec<[u8; 32]>> {
+        let candidates = take(self.txn.as_mut().expect("caller checked a txn is open"));
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = self.metadata.savepoint()?;
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for hash in candidates {
+            if seen.insert(hash) && references_to_in_tx(&tx, &hash)? == 0 {
+                out.push(hash);
+            }
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Record an array this call physically wrote, so an open transaction can
+    /// remove it on rollback. A no-op outside a transaction, where each operation
+    /// stages and unwinds its own writes.
+    fn note_array_written(&mut self, hash: [u8; 32]) {
+        if let Some(txn) = self.txn.as_mut() {
+            txn.staged_hashes.push(hash);
+        }
+    }
+
+    /// Free `hash`, or defer the free to the outermost commit when a transaction
+    /// is open — while it is, a rollback can still restore the associations that
+    /// reference the array, so its bytes have to survive.
+    fn free_or_defer(&mut self, hash: [u8; 32]) -> Result<()> {
+        match self.txn.as_mut() {
+            Some(txn) => {
+                txn.pending_free.insert(hash);
+                Ok(())
+            }
+            None => self.backend.remove_array(&hash),
+        }
     }
 
     /// The compression policy applied to newly written arrays. For a store
@@ -335,7 +538,7 @@ impl Store {
 
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let mut keys = Vec::with_capacity(items.len());
         // Feature sets are shared, and a batch typically spans only a handful of
         // distinct ones; write each once rather than once per item.
@@ -381,6 +584,12 @@ impl Store {
         }
 
         tx.commit()?;
+        // Hand the writes to an enclosing transaction, which owns undoing them
+        // if it rolls back. Outside one this is a no-op: the call has already
+        // unwound its own writes on every failing path above.
+        for hash in staged_hashes {
+            self.note_array_written(hash);
+        }
         tracing::debug!(count = keys.len(), "transaction committed");
         Ok(keys)
     }
@@ -457,7 +666,7 @@ impl Store {
         }
 
         // Insert associations in input order; roll the whole batch back on error.
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let mut feature_sets = FeatureSetCache::default();
         for p in &parts {
             if let Err(e) = insert_association(&tx, &p.meta, &mut feature_sets) {
@@ -469,6 +678,9 @@ impl Store {
             }
         }
         tx.commit()?;
+        for hash in staged_hashes {
+            self.note_array_written(hash);
+        }
         tracing::debug!(count = parts.len(), "bulk-add transaction committed");
         Ok(parts.into_iter().map(|p| p.key).collect())
     }
@@ -478,7 +690,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let removed_hashes = MetadataStore::delete_by_key(&tx, key)?;
         if removed_hashes.is_empty() {
             return Err(TimeSeriesError::NotFound);
@@ -497,7 +709,7 @@ impl Store {
         }
         tx.commit()?;
         for h in to_drop {
-            self.backend.remove_array(&h)?;
+            self.free_or_defer(h)?;
         }
         Ok(())
     }
@@ -512,7 +724,7 @@ impl Store {
     /// Owner-scoped `clear_time_series` is deliberately exempt: it drops every
     /// association of the owner at once.
     fn check_no_orphaned_dst(
-        tx: &rusqlite::Transaction<'_>,
+        tx: &rusqlite::Connection,
         removed_sts_hashes: impl IntoIterator<Item = [u8; 32]>,
     ) -> Result<()> {
         let mut seen = HashSet::new();
@@ -572,7 +784,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let mut removed_hashes: Vec<[u8; 32]> = Vec::new();
         let mut removed_sts_hashes: Vec<[u8; 32]> = Vec::new();
         let mut count = 0usize;
@@ -603,7 +815,7 @@ impl Store {
         }
         tx.commit()?;
         for h in to_drop {
-            self.backend.remove_array(&h)?;
+            self.free_or_defer(h)?;
         }
         Ok(count)
     }
@@ -615,7 +827,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let removed = match owner {
             Some((id, category)) => MetadataStore::delete_by_owner(&tx, id, category)?,
             None => MetadataStore::delete_all(&tx)?,
@@ -629,7 +841,7 @@ impl Store {
         }
         tx.commit()?;
         for h in to_drop {
-            self.backend.remove_array(&h)?;
+            self.free_or_defer(h)?;
         }
         Ok(count)
     }
@@ -646,7 +858,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let updated = MetadataStore::replace_owner(&tx, old_owner, new_owner, owner_category)?;
         tx.commit()?;
         Ok(updated)
@@ -696,7 +908,7 @@ impl Store {
             return Err(TimeSeriesError::DuplicateTimeSeries);
         }
 
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         MetadataStore::insert(&tx, &meta)?;
         tx.commit()?;
 
@@ -1503,7 +1715,7 @@ impl Store {
             });
         }
 
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         // One cache for the whole batch: every derived row shares its source's
         // feature set, and sources overwhelmingly share sets with each other, so
         // the feature-set writes collapse to a handful regardless of how many
@@ -1580,7 +1792,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let updated = MetadataStore::rename(&tx, key, new_name)?;
         if updated == 0 {
             // No matching row; tx drops (rolls back a no-op).
@@ -1780,7 +1992,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         MetadataStore::insert_supplemental_attribute_association(&tx, &assoc)?;
         tx.commit()?;
         Ok(())
@@ -1797,7 +2009,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         for assoc in &assocs {
             MetadataStore::insert_supplemental_attribute_association(&tx, assoc)?;
         }
@@ -1851,7 +2063,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let removed = MetadataStore::delete_supplemental_attribute_associations(&tx, filter)?;
         tx.commit()?;
         Ok(removed)
@@ -1868,7 +2080,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let updated =
             MetadataStore::replace_supplemental_attribute_component_id(&tx, old_id, new_id)?;
         tx.commit()?;
@@ -1923,7 +2135,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         MetadataStore::insert_parent_child_association(&tx, &assoc)?;
         tx.commit()?;
         Ok(())
@@ -1938,7 +2150,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         for assoc in &assocs {
             MetadataStore::insert_parent_child_association(&tx, assoc)?;
         }
@@ -1980,7 +2192,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let removed = MetadataStore::delete_parent_child_associations(&tx, filter)?;
         tx.commit()?;
         Ok(removed)
@@ -1994,7 +2206,7 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         let updated = MetadataStore::replace_parent_child_component_id(&tx, old_id, new_id)?;
         tx.commit()?;
         Ok(updated)
@@ -2012,8 +2224,16 @@ impl Store {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
+        // Compaction physically reclaims slots, which a rollback could still need
+        // — an open transaction keeps removed arrays alive precisely so it can be
+        // undone. Reclaiming them mid-transaction would make that impossible.
+        if self.in_transaction() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "cannot compact while a transaction is open; commit or roll back first".into(),
+            ));
+        }
         let mut report = self.backend.compact()?;
-        let tx = self.metadata.transaction()?;
+        let tx = self.metadata.savepoint()?;
         report.feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
         tx.commit()?;
         Ok(report)
@@ -2434,7 +2654,7 @@ fn request_array(item: &AddRequest) -> &TypedArray {
 /// [`Store::transform_single_time_series`], so the only overlap reachable here is
 /// adding a `Deterministic` when a DST already exists.
 fn insert_association(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     meta: &TimeSeriesMetadata,
     cache: &mut FeatureSetCache,
 ) -> Result<()> {

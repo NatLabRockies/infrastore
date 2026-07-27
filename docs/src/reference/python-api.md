@@ -149,6 +149,23 @@ def compact(self) -> dict: ...
 def verify_integrity(self) -> dict: ...
 # {"ok": bool, "errors": list[str]}
 def flush(self) -> None: ...
+
+# -- transactions --
+# Span several operations so they all take effect or none do. Removals are
+# reversible only inside a transaction. Blocks nest; the write lock is held
+# until the outermost one ends.
+def transaction(self) -> Transaction: ...   # context manager: commit on exit, roll back on raise
+def begin_transaction(self) -> None: ...
+def commit_transaction(self) -> None: ...   # InvalidParameterError if none is open
+def rollback_transaction(self) -> None: ... # InvalidParameterError if none is open
+in_transaction: bool                        # property
+```
+
+```python
+with store.transaction():
+    store.add_time_series(...)
+    store.remove_time_series(old_key)
+# both applied, or neither -- including the removal
 ```
 
 > **Keyword-only arguments.** Every optional argument in the binding is keyword-only (the `*`
