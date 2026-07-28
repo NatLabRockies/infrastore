@@ -102,7 +102,7 @@ pub type Features = BTreeMap<String, FeatureValue>;
 /// ambiguity out of the store entirely.
 ///
 /// The comparison is exact and case-sensitive, matching how the catalog treats
-/// every other identifier: `model_year` is reserved, `Model_Year` is not.
+/// every other identifier: `resolution` is reserved, `Resolution` is not.
 ///
 /// Kept sorted so [`is_reserved_feature_name`] can binary-search it, and so a
 /// reader can scan it.
