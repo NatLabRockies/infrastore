@@ -253,8 +253,10 @@ reconstruction tag comes back with the data — no separate `get_metadata` call 
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
 `(owner_id, owner_category)`. `features` is serialized to JSON and must contain only JSON-scalar
-values (`Int`, `Float64`, `Bool`, `String`). Pass the type as the first argument to
-`get_time_series` to read a non-sequential series back.
+values (`Int`, `Float64`, `Bool`, `String`); a feature name that shadows a time-series or key field
+(`name`, `resolution`, `owner_id`, …) is rejected on add — see
+[reserved feature names](../explanation/data-model.md#reserved-feature-names). Pass the type as the
+first argument to `get_time_series` to read a non-sequential series back.
 
 `get_time_series` supports two unified calling conventions for **every** type: pass the
 `TimeSeriesKey` returned by `add_time_series!` (key-based), or pass `owner_id, owner_category, name`

@@ -1389,9 +1389,11 @@ impl PyStore {
     /// Add a time series. The association `name` comes from the time series
     /// object (`time_series.name`).
     ///
-    /// `features` is a `dict[str, int|float|bool|str]`. `units` and
-    /// `ext` are optional strings (`ext` is an opaque, package-owned
-    /// payload — typically JSON — stored verbatim on the association).
+    /// `features` is a `dict[str, int|float|bool|str]`. A feature name that
+    /// shadows a time-series or key field (`name`, `resolution`, `owner_id`,
+    /// …) is rejected with `InvalidParameterError`. `units` and `ext` are
+    /// optional strings (`ext` is an opaque, package-owned payload — typically
+    /// JSON — stored verbatim on the association).
     #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, ext=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(

@@ -20,7 +20,7 @@ use crate::types::key::{
     ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
     TimeSeriesKey,
 };
-use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata};
+use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
 use crate::types::time_series::{
     Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
@@ -2490,6 +2490,10 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
 /// (`NonSequentialTimeSeries` timestamps). `SingleTimeSeries` is packed; every
 /// other type is stored standalone.
 fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
+    // Every write funnels through here (per-column adds and buffered bulk adds
+    // alike), which makes it the one place the reserved-feature-name rule has
+    // to hold.
+    validate_features(&item.features)?;
     let (hash, resolution, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
             let hash = array_hash(&single.data);

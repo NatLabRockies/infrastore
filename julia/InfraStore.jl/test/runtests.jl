@@ -1121,6 +1121,33 @@ end
     @test length(keys) == 1
 end
 
+@testset "reserved feature names are rejected on add" begin
+    store = Store(in_memory=true)
+    ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load")
+
+    for name in ("name", "resolution", "owner_id", "ext")
+        @test_throws InfraStore.InvalidParameterError add_time_series!(
+            store, 900, "Generator", Component, ts;
+            features=Dict("model_year" => 2030, name => "shadowed"),
+        )
+    end
+    @test isempty(get_time_series_keys(store, 900, Component))
+
+    # A rejected item rolls the whole batch back.
+    batch = AddBatch()
+    add_time_series!(batch, 901, "Generator", Component, ts)
+    add_time_series!(
+        batch, 902, "Generator", Component, ts; features=Dict("horizon" => "PT2H")
+    )
+    @test_throws InfraStore.InvalidParameterError add_time_series_bulk!(store, batch)
+    @test isempty(get_time_series_keys(store, 901, Component))
+
+    # Exact, case-sensitive: a near miss is an ordinary feature.
+    features = Dict{String, Any}("Name" => "load", "resolution_hours" => 1)
+    key = add_time_series!(store, 903, "Generator", Component, ts; features=features)
+    @test key_info(key).features == features
+end
+
 @testset "owner category disambiguates a shared owner_id" begin
     # A Component and a SupplementalAttribute may reuse the SAME numeric owner_id
     # while keeping independent time series. Add identical-attribute

@@ -184,7 +184,7 @@ The CSV holds only numbers (plus a leading timestamp column for `non_sequential`
 | `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).             |
 | `units`                        | optional                    | Free-form label.                                           |
 | `ext`                          | optional                    | Opaque package-owned payload (e.g. JSON), stored verbatim. |
-| `features`                     | optional                    | JSON object; int/float/bool/string values.                 |
+| `features`                     | optional                    | JSON object; int/float/bool/string values. See below.      |
 | `initial_timestamp`            | all except `non_sequential` |                                                            |
 | `resolution`                   | all except `non_sequential` |                                                            |
 | `horizon`, `interval`, `count` | forecasts                   |                                                            |
@@ -194,6 +194,10 @@ The CSV holds only numbers (plus a leading timestamp column for `non_sequential`
 Unknown keys are rejected. Any key not in the table above — including a typo like `resolutionn` — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than
 silently dropping a setting.
+
+Inside `features`, a name that shadows a time-series or key field (`name`, `resolution`, `owner_id`,
+…) is rejected when the series is added — see
+[reserved feature names](../explanation/data-model.md#reserved-feature-names).
 
 ## CSV Layout
 

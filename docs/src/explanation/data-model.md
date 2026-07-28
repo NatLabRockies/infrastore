@@ -155,6 +155,25 @@ features = {"model_year": 2030, "scenario": "high", "calibrated": True}
 Feature values are one of four kinds: `int`, `float`, `bool`, or `str`. Internally the map is sorted
 by key (a `BTreeMap`), which gives a stable order for hashing and for the uniqueness constraint.
 
+### Reserved feature names
+
+A feature name may not collide with a field of a time series or of the [key](#keys) that addresses
+one. Consumers routinely spread a feature map into a keyword-argument query — for example
+`get_time_series(...; name = "load", model_year = 2030)` — and a feature called `name` or
+`resolution` would shadow the real field there and silently change what the query means. Adding a
+time series with one of these names raises `InvalidParameter`:
+
+```text
+count, data, data_hash, dtype, element_shape, ext, features, horizon, initial_timestamp,
+interval, length, name, owner_category, owner_id, owner_type, percentiles, resolution,
+scenario_count, time_series_type, timestamps, units
+```
+
+The match is exact and case-sensitive, like every other identifier in the catalog: `resolution` is
+rejected, while `Resolution` and `resolution_hours` are ordinary feature names. The rule applies to
+writes only, so a store written before it existed stays readable and its series can still be listed
+and removed.
+
 ## Keys
 
 A **`TimeSeriesKey`** is the logical handle that re-finds a series. It is exactly the tuple that

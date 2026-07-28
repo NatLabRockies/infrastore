@@ -970,6 +970,17 @@ pub type Features = BTreeMap<String, FeatureValue>;
 `Features` is sorted by key, which fixes hash order and the uniqueness constraint. `FeatureValue`
 canonicalizes `NaN` for hashing and equality.
 
+Feature names that would shadow a time-series or key field are rejected on the write path with
+`InvalidParameter` — see
+[reserved feature names](../explanation/data-model.md#reserved-feature-names). The list and the
+check are public:
+
+```rust
+pub const RESERVED_FEATURE_NAMES: &[&str];        // sorted, exact, case-sensitive
+pub fn is_reserved_feature_name(name: &str) -> bool;
+pub fn validate_features(features: &Features) -> Result<()>;
+```
+
 ### `TimeSeriesMetadata`
 
 The full record returned by `list_time_series` and `get_metadata`: owner fields, `time_series_type`,

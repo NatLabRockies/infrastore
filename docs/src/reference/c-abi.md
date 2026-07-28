@@ -30,7 +30,10 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   functions and stored uninterpreted.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`ext`, `features_json`, `units`)
   accept `NULL`.
-- **Features** are passed as a JSON object string whose values are int / float / bool / string.
+- **Features** are passed as a JSON object string whose values are int / float / bool / string. An
+  add call whose feature names shadow a time-series or key field (`name`, `resolution`, `owner_id`,
+  …) fails with `INFRASTORE_ERR_INVALID_PARAMETER`; see
+  [reserved feature names](../explanation/data-model.md#reserved-feature-names).
 - **Timestamps** are `int64_t` Unix milliseconds. **Resolutions/horizons/intervals** are ISO-8601
   duration strings (e.g. `"PT1H"`, `"P1M"`, `"P1Y"`); a `NULL` (or empty) string means unset. On
   output they are owned `char *` strings — free each with `infrastore_string_free`.
