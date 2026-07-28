@@ -115,6 +115,130 @@ fn bulk_push_preserves_ext() {
     );
 }
 
+// ---- reserved feature names ------------------------------------------------
+
+fn reserved_features(name: &str) -> Features {
+    let mut features: Features = BTreeMap::new();
+    features.insert("model_year".into(), FeatureValue::Int(2030));
+    features.insert(name.into(), FeatureValue::Str("shadowed".into()));
+    features
+}
+
+fn assert_reserved_err(err: TimeSeriesError, name: &str) {
+    match err {
+        TimeSeriesError::InvalidParameter(msg) => {
+            assert!(msg.contains(name), "{name} should be named in {msg:?}")
+        }
+        other => panic!("{name}: expected InvalidParameter, got {other:?}"),
+    }
+}
+
+/// Every write entry point rejects a feature that shadows a time-series or key
+/// field, and rejects it before writing anything.
+#[test]
+fn write_paths_reject_reserved_feature_names() {
+    let request = |name: &str, series: &str| {
+        AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts(series, 10.0, 4)),
+        )
+        .with_features(reserved_features(name))
+    };
+
+    for name in ["name", "resolution", "initial_timestamp", "owner_id", "ext"] {
+        let mut store = create_store(None, true).unwrap();
+
+        assert_reserved_err(store.add(request(name, "load")).unwrap_err(), name);
+        assert_reserved_err(
+            store
+                .add_time_series(
+                    1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+                    reserved_features(name),
+                    None,
+                )
+                .unwrap_err(),
+            name,
+        );
+        assert_reserved_err(
+            store
+                .add_time_series_bulk(vec![request(name, "load")])
+                .unwrap_err(),
+            name,
+        );
+        let err = {
+            let mut bulk = store.bulk_add();
+            bulk.push(request(name, "load"));
+            bulk.commit().unwrap_err()
+        };
+        assert_reserved_err(err, name);
+
+        assert!(
+            store.list_keys(ListFilter::new()).unwrap().is_empty(),
+            "{name}: a rejected add must not write anything"
+        );
+    }
+}
+
+/// A rejected item aborts the whole batch, including the valid items alongside
+/// it — the same all-or-nothing contract every other bulk failure has.
+#[test]
+fn a_reserved_feature_name_rolls_back_the_whole_batch() {
+    let mut store = create_store(None, true).unwrap();
+    let valid = AddRequest::new(
+        1,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(sts("good", 1.0, 4)),
+    );
+    let offending = AddRequest::new(
+        2,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(sts("bad", 2.0, 4)),
+    )
+    .with_features(reserved_features("horizon"));
+
+    assert_reserved_err(
+        store
+            .add_time_series_bulk(vec![valid, offending])
+            .unwrap_err(),
+        "horizon",
+    );
+    assert!(store.list_keys(ListFilter::new()).unwrap().is_empty());
+}
+
+/// The rule is exact-match: an ordinary feature that merely resembles a field
+/// name still goes in, and reads back unchanged.
+#[test]
+fn near_miss_feature_names_are_accepted() {
+    let mut store = create_store(None, true).unwrap();
+    let mut features: Features = BTreeMap::new();
+    features.insert("Name".into(), FeatureValue::Str("load".into()));
+    features.insert("resolution_hours".into(), FeatureValue::Int(1));
+    features.insert("model_year".into(), FeatureValue::Int(2030));
+
+    let key = store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+            )
+            .with_features(features.clone()),
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_metadata(key.identity()).unwrap().features,
+        features
+    );
+}
+
 // ---- 1.5 bulk / filtered delete -------------------------------------------
 
 #[test]

@@ -121,6 +121,11 @@ Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
 supplemental attribute (a signed 64-bit integer). The association `name` comes
 from the time series object (`ts.name`).
 
+A `features` key that shadows a field of a time series or of the key that
+addresses one (`name`, `resolution`, `owner_id`, …) is rejected: those names are
+reserved so that a feature can never silently change the meaning of a
+keyword-argument query.
+
 The same methods accept an [`AddBatch`](@ref) in place of the `Store` to stage
 many adds for one [`add_time_series_bulk!`](@ref) commit; a single-store add is
 exactly a one-item batch.

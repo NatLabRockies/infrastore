@@ -111,6 +111,53 @@ class TestNameGlob:
         assert sum(len(g["keys"]) for g in reader.groups()) == 2
 
 
+class TestReservedFeatureNames:
+    def test_reserved_feature_name_raises_invalid_parameter(self):
+        store = Store.create(in_memory=True)
+        for name in ("name", "resolution", "owner_id", "ext"):
+            with pytest.raises(infrastore.InvalidParameterError, match=name):
+                store.add_time_series(
+                    1,
+                    "Generator",
+                    OwnerCategory.Component,
+                    sts("load"),
+                    features={"model_year": 2030, name: "shadowed"},
+                )
+        assert store.get_time_series_keys(1, OwnerCategory.Component) == []
+
+    def test_reserved_feature_name_raises_in_bulk_add(self):
+        store = Store.create(in_memory=True)
+        with pytest.raises(infrastore.InvalidParameterError, match="horizon"):
+            store.add_time_series_bulk(
+                [
+                    {
+                        "owner_id": 1,
+                        "owner_type": "Generator",
+                        "owner_category": OwnerCategory.Component,
+                        "time_series": sts("good"),
+                    },
+                    {
+                        "owner_id": 2,
+                        "owner_type": "Generator",
+                        "owner_category": OwnerCategory.Component,
+                        "time_series": sts("bad"),
+                        "features": {"horizon": "PT2H"},
+                    },
+                ]
+            )
+        assert store.get_time_series_keys(1, OwnerCategory.Component) == []
+        assert store.get_time_series_keys(2, OwnerCategory.Component) == []
+
+    def test_near_miss_feature_names_are_accepted(self):
+        # The rule is exact and case-sensitive.
+        store = Store.create(in_memory=True)
+        features = {"Name": "load", "resolution_hours": 1, "model_year": 2030}
+        key = store.add_time_series(
+            1, "Generator", OwnerCategory.Component, sts("load"), features=features
+        )
+        assert key.features == features
+
+
 class TestKeywordOnly:
     def test_filter_args_are_keyword_only(self):
         store = populated()

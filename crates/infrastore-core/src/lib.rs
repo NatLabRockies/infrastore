@@ -37,7 +37,10 @@ pub use types::{
         ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
         TimeSeriesKey,
     },
-    metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata},
+    metadata::{
+        FeatureValue, Features, OwnerCategory, RESERVED_FEATURE_NAMES, TimeSeriesMetadata,
+        is_reserved_feature_name, validate_features,
+    },
     period::Period,
     time_series::{
         Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
