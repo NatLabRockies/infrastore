@@ -2289,6 +2289,21 @@ mod index_plan_tests {
     }
 
     #[test]
+    fn named_existence_probe_uses_an_index() {
+        // The hot per-component probe behind `exists` when a caller asks
+        // "does this owner have a series of this type with this name?" —
+        // the exact SQL `MetadataFilter::to_sql` renders for that filter.
+        // The four bound predicates form a left prefix of the uniqueness
+        // index, so the planner answers with a covering four-column seek.
+        assert_uses_index(
+            "SELECT 1 FROM time_series_associations
+             WHERE 1=1 AND owner_id = ? AND owner_category = ?
+               AND time_series_type = ? AND name = ? LIMIT 1",
+            "uq_ts_assoc_coalesced",
+        );
+    }
+
+    #[test]
     fn the_full_identity_lookup_uses_the_unique_index() {
         // The hot single-key read: `get_by_key` resolves one row by its whole
         // identity and must land on the unique index, not scan.

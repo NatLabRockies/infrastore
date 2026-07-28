@@ -2053,6 +2053,70 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
     }
 }
 
+/// True iff at least one association matches the filter — the existence probe
+/// over the full `infrastore_store_list_keys` filter surface (all-optional,
+/// independent predicates; `features_json` is a subset match). Unlike
+/// `infrastore_store_has_typed`, which matches one exact key identity (its
+/// feature set compared by content hash), this answers "is there any series
+/// like this?" without hydrating or serializing a single row, so it is safe
+/// for hot per-component loops. The one exception is a non-empty
+/// `features_json`: the subset match cannot be answered from an index and
+/// falls back to a full listing internally, so callers testing an exact
+/// feature set in a hot loop should prefer `infrastore_store_has_typed`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle. The scalar filter flags/values are
+/// plain scalars. `name`, `resolution`, `interval`, and `features_json` must
+/// each be null or a null-terminated UTF-8 string. `out_present` must be valid
+/// for writing one `bool`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
+    handle: *const InfraStoreHandle,
+    has_owner: bool,
+    owner_id: i64,
+    has_owner_category: bool,
+    owner_category: i32,
+    has_time_series_type: bool,
+    time_series_type: i32,
+    name: *const c_char,
+    resolution: *const c_char,
+    interval: *const c_char,
+    features_json: *const c_char,
+    out_present: *mut bool,
+) -> i32 {
+    clear_error();
+    let store = deref_handle!(ref handle);
+    if out_present.is_null() {
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let filter = match unsafe {
+        build_list_filter(
+            has_owner,
+            owner_id,
+            has_owner_category,
+            owner_category,
+            has_time_series_type,
+            time_series_type,
+            name,
+            resolution,
+            interval,
+            features_json,
+        )
+    } {
+        Ok(f) => f,
+        Err(c) => return c,
+    };
+    match store.inner.has_any_time_series(filter) {
+        Ok(present) => {
+            unsafe { *out_present = present };
+            INFRASTORE_OK
+        }
+        Err(e) => map_core_error(e),
+    }
+}
+
 /// Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
 /// other association still references its content hash.
 ///

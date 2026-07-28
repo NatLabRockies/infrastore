@@ -613,6 +613,52 @@ end
     @test num_distinct_arrays(store) == 1
 end
 
+@testset "has_any_time_series covers the list_keys filter surface" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    vals = Float64[1, 2, 3, 4]
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(t0, Hour(1), vals, "load");
+        features=Dict("scenario" => "high", "model" => "m1"),
+    )
+    add_time_series!(
+        store, 1, "Generator", Component, SingleTimeSeries(t0, Minute(5), vals, "wind")
+    )
+    add_time_series!(
+        store, 2, "Bus", SupplementalAttribute, SingleTimeSeries(t0, Hour(1), vals, "load")
+    )
+
+    @test has_any_time_series(store)
+    @test has_any_time_series(store; owner_id=1, owner_category=Component)
+    @test !has_any_time_series(store; owner_id=99, owner_category=Component)
+    # The category is an independent predicate, not implied by the owner id.
+    @test !has_any_time_series(store; owner_id=2, owner_category=Component)
+    @test has_any_time_series(store; owner_id=2, owner_category=SupplementalAttribute)
+    @test has_any_time_series(store; owner_id=1, owner_category=Component, name="load")
+    @test !has_any_time_series(store; owner_id=2, owner_category=Component, name="wind")
+    @test has_any_time_series(store; time_series_type=SingleTimeSeries, name="wind")
+    @test !has_any_time_series(store; time_series_type=Deterministic)
+    @test has_any_time_series(store; name="wind", resolution=Minute(5))
+    @test !has_any_time_series(store; name="wind", resolution=Hour(1))
+    # A period equal to the stored one matches regardless of spelling.
+    @test has_any_time_series(store; name="wind", resolution=Second(300))
+    # Features are a subset match: any stored series carrying at least the
+    # requested pairs counts, unlike the exact-set has_time_series forms.
+    @test has_any_time_series(store; owner_id=1, features=Dict("scenario" => "high"))
+    @test has_any_time_series(
+        store;
+        owner_id=1,
+        features=Dict("scenario" => "high", "model" => "m1"),
+    )
+    @test !has_any_time_series(store; owner_id=1, features=Dict("scenario" => "mid"))
+    # No-features filter matches featured and featureless rows alike.
+    @test has_any_time_series(store; owner_id=1, name="load")
+end
+
 @testset "list_array_groups annotates rows with the content hash" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
