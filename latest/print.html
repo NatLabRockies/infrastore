@@ -905,6 +905,20 @@ versus 2050. <strong>Features</strong> disambiguate them. A feature map is a set
 </code></pre>
 <p>Feature values are one of four kinds: <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Internally the map is sorted
 by key (a <code>BTreeMap</code>), which gives a stable order for hashing and for the uniqueness constraint.</p>
+<h3 id="reserved-feature-names"><a class="header" href="#reserved-feature-names">Reserved feature names</a></h3>
+<p>A feature name may not collide with a field of a time series or of the <a href="explanation/data-model.html#keys">key</a> that addresses
+one. Consumers routinely spread a feature map into a keyword-argument query — for example
+<code>get_time_series(...; name = "load", model_year = 2030)</code> — and a feature called <code>name</code> or
+<code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
+time series with one of these names raises <code>InvalidParameter</code>:</p>
+<pre><code class="language-text">count, data, data_hash, dtype, element_shape, ext, features, horizon, initial_timestamp,
+interval, length, name, owner_category, owner_id, owner_type, percentiles, resolution,
+scenario_count, time_series_type, timestamps, units
+</code></pre>
+<p>The match is exact and case-sensitive, like every other identifier in the catalog: <code>resolution</code> is
+rejected, while <code>Resolution</code> and <code>resolution_hours</code> are ordinary feature names. The rule applies to
+writes only, so a store written before it existed stays readable and its series can still be listed
+and removed.</p>
 <h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
 <p>A <strong><code>TimeSeriesKey</code></strong> is the logical handle that re-finds a series. It is exactly the tuple that
 must be unique:</p>
@@ -4378,6 +4392,16 @@ pub type Features = BTreeMap&lt;String, FeatureValue&gt;;
 <span class="boring">}</span></code></pre></pre>
 <p><code>Features</code> is sorted by key, which fixes hash order and the uniqueness constraint. <code>FeatureValue</code>
 canonicalizes <code>NaN</code> for hashing and equality.</p>
+<p>Feature names that would shadow a time-series or key field are rejected on the write path with
+<code>InvalidParameter</code> — see
+<a href="reference/../explanation/data-model.html#reserved-feature-names">reserved feature names</a>. The list and the
+check are public:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub const RESERVED_FEATURE_NAMES: &amp;[&amp;str];        // sorted, exact, case-sensitive
+pub fn is_reserved_feature_name(name: &amp;str) -&gt; bool;
+pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
+<span class="boring">}</span></code></pre></pre>
 <h3 id="timeseriesmetadata"><a class="header" href="#timeseriesmetadata"><code>TimeSeriesMetadata</code></a></h3>
 <p>The full record returned by <code>list_time_series</code> and <code>get_metadata</code>: owner fields, <code>time_series_type</code>,
 <code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields (<code>initial_timestamp</code>, <code>resolution</code>,
@@ -4760,6 +4784,8 @@ flag, and <code>closed</code> once closed.</p>
 ) -&gt; TimeSeriesKey: ...
 # `name` comes from the time_series object
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
+# A `features` key that shadows a time-series or key field (`name`, `resolution`,
+# `owner_id`, ...) raises InvalidParameterError.
 
 def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
@@ -4938,6 +4964,9 @@ key.resolution        -&gt; str | None   # ISO 8601 duration, e.g. "PT1H"
 key.interval          -&gt; str | None   # ISO 8601 duration
 key.features          -&gt; dict[str, int | float | bool | str]
 </code></pre>
+<p>Feature names that would shadow one of these key fields, or a field of a time-series object, are
+rejected when the series is added — see
+<a href="reference/../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</p>
 <h2 id="enums"><a class="header" href="#enums">Enums</a></h2>
 <pre><code class="language-python">TimeSeriesType.SingleTimeSeries
 TimeSeriesType.NonSequentialTimeSeries
@@ -5542,8 +5571,10 @@ reconstruction tag comes back with the data — no separate <code>get_metadata</
 <p><code>owner_id</code> is an integer identifier (<code>Int64</code>) and <code>owner_category</code> (<code>Component</code> /
 <code>SupplementalAttribute</code>) completes the owner identity — the owner is the pair
 <code>(owner_id, owner_category)</code>. <code>features</code> is serialized to JSON and must contain only JSON-scalar
-values (<code>Int</code>, <code>Float64</code>, <code>Bool</code>, <code>String</code>). Pass the type as the first argument to
-<code>get_time_series</code> to read a non-sequential series back.</p>
+values (<code>Int</code>, <code>Float64</code>, <code>Bool</code>, <code>String</code>); a feature name that shadows a time-series or key field
+(<code>name</code>, <code>resolution</code>, <code>owner_id</code>, …) is rejected on add — see
+<a href="reference/../explanation/data-model.html#reserved-feature-names">reserved feature names</a>. Pass the type as the
+first argument to <code>get_time_series</code> to read a non-sequential series back.</p>
 <p><code>get_time_series</code> supports two unified calling conventions for <strong>every</strong> type: pass the
 <code>TimeSeriesKey</code> returned by <code>add_time_series!</code> (key-based), or pass <code>owner_id, owner_category, name</code>
 plus optional <code>resolution</code> / <code>features</code> keywords (attribute-based, the same addressing used by
@@ -6124,7 +6155,10 @@ recorded with the association at add time.</li>
 functions and stored uninterpreted.</li>
 <li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>ext</code>, <code>features_json</code>, <code>units</code>)
 accept <code>NULL</code>.</li>
-<li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string.</li>
+<li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
+add call whose feature names shadow a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
+…) fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; see
+<a href="reference/../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</li>
 <li><strong>Timestamps</strong> are <code>int64_t</code> Unix milliseconds. <strong>Resolutions/horizons/intervals</strong> are ISO-8601
 duration strings (e.g. <code>"PT1H"</code>, <code>"P1M"</code>, <code>"P1Y"</code>); a <code>NULL</code> (or empty) string means unset. On
 output they are owned <code>char *</code> strings — free each with <code>infrastore_string_free</code>.</li>
@@ -7355,7 +7389,7 @@ The CSV holds only numbers (plus a leading timestamp column for <code>non_sequen
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>
 <tr><td><code>units</code></td><td>optional</td><td>Free-form label.</td></tr>
 <tr><td><code>ext</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
-<tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values.</td></tr>
+<tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>all except <code>non_sequential</code></td><td></td></tr>
 <tr><td><code>resolution</code></td><td>all except <code>non_sequential</code></td><td></td></tr>
 <tr><td><code>horizon</code>, <code>interval</code>, <code>count</code></td><td>forecasts</td><td></td></tr>
@@ -7366,6 +7400,9 @@ The CSV holds only numbers (plus a leading timestamp column for <code>non_sequen
 <p>Unknown keys are rejected. Any key not in the table above — including a typo like <code>resolutionn</code> — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than
 silently dropping a setting.</p>
+<p>Inside <code>features</code>, a name that shadows a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
+…) is rejected when the series is added — see
+<a href="reference/../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</p>
 <h2 id="csv-layout"><a class="header" href="#csv-layout">CSV Layout</a></h2>
 <p><code>infrastore</code> computes the full array shape from the descriptor and reads the CSV's value cells in
 <strong>row-major</strong> order to fill it. The total cell count must equal the product of the shape.</p>

@@ -413,8 +413,10 @@ reconstruction tag comes back with the data — no separate <code>get_metadata</
 <p><code>owner_id</code> is an integer identifier (<code>Int64</code>) and <code>owner_category</code> (<code>Component</code> /
 <code>SupplementalAttribute</code>) completes the owner identity — the owner is the pair
 <code>(owner_id, owner_category)</code>. <code>features</code> is serialized to JSON and must contain only JSON-scalar
-values (<code>Int</code>, <code>Float64</code>, <code>Bool</code>, <code>String</code>). Pass the type as the first argument to
-<code>get_time_series</code> to read a non-sequential series back.</p>
+values (<code>Int</code>, <code>Float64</code>, <code>Bool</code>, <code>String</code>); a feature name that shadows a time-series or key field
+(<code>name</code>, <code>resolution</code>, <code>owner_id</code>, …) is rejected on add — see
+<a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>. Pass the type as the
+first argument to <code>get_time_series</code> to read a non-sequential series back.</p>
 <p><code>get_time_series</code> supports two unified calling conventions for <strong>every</strong> type: pass the
 <code>TimeSeriesKey</code> returned by <code>add_time_series!</code> (key-based), or pass <code>owner_id, owner_category, name</code>
 plus optional <code>resolution</code> / <code>features</code> keywords (attribute-based, the same addressing used by

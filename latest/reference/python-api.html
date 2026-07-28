@@ -246,6 +246,8 @@ flag, and <code>closed</code> once closed.</p>
 ) -&gt; TimeSeriesKey: ...
 # `name` comes from the time_series object
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
+# A `features` key that shadows a time-series or key field (`name`, `resolution`,
+# `owner_id`, ...) raises InvalidParameterError.
 
 def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
@@ -424,6 +426,9 @@ key.resolution        -&gt; str | None   # ISO 8601 duration, e.g. "PT1H"
 key.interval          -&gt; str | None   # ISO 8601 duration
 key.features          -&gt; dict[str, int | float | bool | str]
 </code></pre>
+<p>Feature names that would shadow one of these key fields, or a field of a time-series object, are
+rejected when the series is added — see
+<a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</p>
 <h2 id="enums"><a class="header" href="#enums">Enums</a></h2>
 <pre><code class="language-python">TimeSeriesType.SingleTimeSeries
 TimeSeriesType.NonSequentialTimeSeries

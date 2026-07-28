@@ -1100,6 +1100,16 @@ pub type Features = BTreeMap&lt;String, FeatureValue&gt;;
 <span class="boring">}</span></code></pre></pre>
 <p><code>Features</code> is sorted by key, which fixes hash order and the uniqueness constraint. <code>FeatureValue</code>
 canonicalizes <code>NaN</code> for hashing and equality.</p>
+<p>Feature names that would shadow a time-series or key field are rejected on the write path with
+<code>InvalidParameter</code> — see
+<a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>. The list and the
+check are public:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub const RESERVED_FEATURE_NAMES: &amp;[&amp;str];        // sorted, exact, case-sensitive
+pub fn is_reserved_feature_name(name: &amp;str) -&gt; bool;
+pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
+<span class="boring">}</span></code></pre></pre>
 <h3 id="timeseriesmetadata"><a class="header" href="#timeseriesmetadata"><code>TimeSeriesMetadata</code></a></h3>
 <p>The full record returned by <code>list_time_series</code> and <code>get_metadata</code>: owner fields, <code>time_series_type</code>,
 <code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields (<code>initial_timestamp</code>, <code>resolution</code>,

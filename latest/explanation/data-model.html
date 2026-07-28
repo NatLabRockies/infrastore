@@ -312,6 +312,20 @@ versus 2050. <strong>Features</strong> disambiguate them. A feature map is a set
 </code></pre>
 <p>Feature values are one of four kinds: <code>int</code>, <code>float</code>, <code>bool</code>, or <code>str</code>. Internally the map is sorted
 by key (a <code>BTreeMap</code>), which gives a stable order for hashing and for the uniqueness constraint.</p>
+<h3 id="reserved-feature-names"><a class="header" href="#reserved-feature-names">Reserved feature names</a></h3>
+<p>A feature name may not collide with a field of a time series or of the <a href="#keys">key</a> that addresses
+one. Consumers routinely spread a feature map into a keyword-argument query — for example
+<code>get_time_series(...; name = "load", model_year = 2030)</code> — and a feature called <code>name</code> or
+<code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
+time series with one of these names raises <code>InvalidParameter</code>:</p>
+<pre><code class="language-text">count, data, data_hash, dtype, element_shape, ext, features, horizon, initial_timestamp,
+interval, length, name, owner_category, owner_id, owner_type, percentiles, resolution,
+scenario_count, time_series_type, timestamps, units
+</code></pre>
+<p>The match is exact and case-sensitive, like every other identifier in the catalog: <code>resolution</code> is
+rejected, while <code>Resolution</code> and <code>resolution_hours</code> are ordinary feature names. The rule applies to
+writes only, so a store written before it existed stays readable and its series can still be listed
+and removed.</p>
 <h2 id="keys"><a class="header" href="#keys">Keys</a></h2>
 <p>A <strong><code>TimeSeriesKey</code></strong> is the logical handle that re-finds a series. It is exactly the tuple that
 must be unique:</p>

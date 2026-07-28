@@ -213,7 +213,10 @@ recorded with the association at add time.</li>
 functions and stored uninterpreted.</li>
 <li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>ext</code>, <code>features_json</code>, <code>units</code>)
 accept <code>NULL</code>.</li>
-<li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string.</li>
+<li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
+add call whose feature names shadow a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
+…) fails with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; see
+<a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</li>
 <li><strong>Timestamps</strong> are <code>int64_t</code> Unix milliseconds. <strong>Resolutions/horizons/intervals</strong> are ISO-8601
 duration strings (e.g. <code>"PT1H"</code>, <code>"P1M"</code>, <code>"P1Y"</code>); a <code>NULL</code> (or empty) string means unset. On
 output they are owned <code>char *</code> strings — free each with <code>infrastore_string_free</code>.</li>
