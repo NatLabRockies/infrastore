@@ -756,6 +756,35 @@ int32_t infrastore_store_has_for_owner(const struct InfraStore *handle,
                                        bool *out_present);
 
 /**
+ * True iff at least one association matches the filter — the existence probe
+ * over the full `infrastore_store_list_keys` filter surface (all-optional,
+ * independent predicates; `features_json` is a subset match). Unlike
+ * `infrastore_store_has_typed`, which matches one exact key identity (its
+ * feature set compared by content hash), this answers "is there any series
+ * like this?" without hydrating or serializing a single row, so it is safe
+ * for hot per-component loops.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle. The scalar filter flags/values are
+ * plain scalars. `name`, `resolution`, `interval`, and `features_json` must
+ * each be null or a null-terminated UTF-8 string. `out_present` must be valid
+ * for writing one `bool`.
+ */
+int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
+                                           bool has_owner,
+                                           int64_t owner_id,
+                                           bool has_owner_category,
+                                           int32_t owner_category,
+                                           bool has_time_series_type,
+                                           int32_t time_series_type,
+                                           const char *name,
+                                           const char *resolution,
+                                           const char *interval,
+                                           const char *features_json,
+                                           bool *out_present);
+
+/**
  * Remove a SingleTimeSeries by attributes. Drops the underlying array iff no
  * other association still references its content hash.
  *

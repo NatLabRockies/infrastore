@@ -564,6 +564,50 @@ function has_time_series(store::Store, key::TimeSeriesKey)
 end
 
 """
+    has_any_time_series(store; owner_id=nothing, owner_category=nothing,
+                        time_series_type=nothing, name=nothing, resolution=nothing,
+                        interval=nothing, features=Dict()) -> Bool
+
+True iff at least one stored time series matches the filter — the existence
+probe over the same (all-optional, independent) filters as [`list_keys`](@ref),
+answered off the catalog indexes without hydrating or marshaling any rows, so
+it is safe for hot per-component loops. `features` is a subset match, unlike
+the exact-key [`has_time_series`](@ref) forms, which compare the whole feature
+set by content hash.
+"""
+function has_any_time_series(
+    store::Store;
+    owner_id=nothing,
+    owner_category=nothing,
+    time_series_type=nothing,
+    name=nothing,
+    resolution=nothing,
+    interval=nothing,
+    features=Dict{String, Any}(),
+)
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
+        owner_id, owner_category, time_series_type, name, resolution, interval, features
+    )
+    out = Ref{Bool}(false)
+    code = @ccall lib_path().infrastore_store_has_any_by_filter(
+        store.handle::Ptr{Cvoid},
+        has_owner::Bool,
+        owner_arg::Int64,
+        has_category::Bool,
+        category_arg::Int32,
+        has_type::Bool,
+        type_arg::Int32,
+        name_arg::Cstring,
+        resolution_iso::Cstring,
+        interval_iso::Cstring,
+        features_json::Cstring,
+        out::Ref{Bool},
+    )::Int32
+    _check(code)
+    return out[]
+end
+
+"""
     get_counts(store) -> TimeSeriesCounts
 
 Association counts: components with time series, static series, and forecasts.

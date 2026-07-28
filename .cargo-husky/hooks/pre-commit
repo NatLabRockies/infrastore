@@ -14,8 +14,14 @@ echo '+dprint check'
 dprint check
 
 if command -v shellcheck >/dev/null 2>&1; then
-  echo '+shellcheck (all .sh files)'
-  find . -name '*.sh' -not -path './target/*' -not -path './.venv/*' -not -path '*/\.venv/*' -type f -exec shellcheck {} +
+  # Lint only files git knows about (the index, so staged additions count).
+  # Walking the tree instead picks up scripts we do not own, such as the
+  # vendored netcdf-c shell scripts left behind by a local BinaryBuilder run.
+  sh_files=$(git ls-files -- '*.sh')
+  if [ -n "$sh_files" ]; then
+    echo '+shellcheck (tracked .sh files)'
+    echo "$sh_files" | xargs shellcheck
+  fi
 else
   echo 'shellcheck not found, skipping shell script linting'
 fi

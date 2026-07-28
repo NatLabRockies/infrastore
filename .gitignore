@@ -18,10 +18,13 @@ __pycache__/
 **/Manifest.toml
 
 # BinaryBuilder scratch from testing yggdrasil/build_tarballs.jl locally.
-# These hold unpacked JLL artifacts, whose vendored docs otherwise get picked
-# up by `dprint` and fail the pre-commit hook.
+# These hold unpacked JLL artifacts, whose vendored docs and shell scripts
+# otherwise get picked up by `dprint`/`shellcheck` and fail the pre-commit hook.
+# The recipe drops them next to whichever directory it was invoked from.
 /build/
 /products/
+/yggdrasil/build/
+/yggdrasil/products/
 
 # macOS
 .DS_Store

@@ -27,20 +27,20 @@ Exported names (types first, then functions):
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
 `get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
-`get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_for_owner`,
-`has_parent_child_association`, `has_supplemental_attribute_association`, `has_time_series`,
-`in_transaction`, `init_logging`, `key_info`, `list_array_groups`, `list_children`,
-`list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`, `list_owner_types`,
-`list_parent_child_associations`, `list_parents`, `list_supplemental_attribute_associations`,
-`list_supplemental_attribute_ids`, `list_time_series`, `num_distinct_arrays`, `open_store`,
-`persist!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
-`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
-`remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
-`replace_owner!`, `replace_parent_child_component_id!`,
-`replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
-`static_summary`, `static_values`, `supplemental_attribute_counts_by_type`,
-`supplemental_attribute_summary`, `time_series_counts`, `transform_single_time_series!`,
-`verify_integrity`.
+`get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_any_time_series`,
+`has_for_owner`, `has_parent_child_association`, `has_supplemental_attribute_association`,
+`has_time_series`, `in_transaction`, `init_logging`, `key_info`, `list_array_groups`,
+`list_children`, `list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`,
+`list_owner_types`, `list_parent_child_associations`, `list_parents`,
+`list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
+`num_distinct_arrays`, `open_store`, `persist!`, `read_only`, `rollback_transaction!`,
+`transaction`, `begin_transaction!`, `commit_transaction!`, `remove_by_filter!`,
+`remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
+`remove_time_series!`, `rename_time_series!`, `replace_owner!`,
+`replace_parent_child_component_id!`, `replace_supplemental_attribute_component_id!`, `static_grid`,
+`static_groups`, `static_read!`, `static_summary`, `static_values`,
+`supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
+`transform_single_time_series!`, `verify_integrity`.
 
 ## Constructors
 
@@ -719,6 +719,16 @@ and independent, and combine as a conjunction; with none set the whole store is 
 
 Physical storage detail (`data_hash`, `dtype`, `ext`, `percentiles`) is not on a key — read it via
 `get_metadata` / `list_time_series`.
+
+```julia
+has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+                    name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Bool
+```
+
+`has_any_time_series` is the existence probe over the same seven filters: true iff `list_keys` with
+that filter would return at least one row, answered off the catalog indexes without hydrating or
+marshaling any rows, so it is safe for hot per-component loops. `features` is a subset match here,
+unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash.
 
 `list_array_groups` takes the same seven filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves
