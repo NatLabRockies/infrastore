@@ -208,20 +208,20 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
 <code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
 <code>get_forecast_parameters</code>, <code>get_intervals</code>, <code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>,
-<code>get_time_series</code>, <code>get_time_series_key</code>, <code>get_time_series_keys</code>, <code>has_for_owner</code>,
-<code>has_parent_child_association</code>, <code>has_supplemental_attribute_association</code>, <code>has_time_series</code>,
-<code>in_transaction</code>, <code>init_logging</code>, <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>,
-<code>list_components_with_attributes</code>, <code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>,
-<code>list_parent_child_associations</code>, <code>list_parents</code>, <code>list_supplemental_attribute_associations</code>,
-<code>list_supplemental_attribute_ids</code>, <code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_store</code>,
-<code>persist!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
-<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
-<code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
-<code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
-<code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
-<code>static_summary</code>, <code>static_values</code>, <code>supplemental_attribute_counts_by_type</code>,
-<code>supplemental_attribute_summary</code>, <code>time_series_counts</code>, <code>transform_single_time_series!</code>,
-<code>verify_integrity</code>.</p>
+<code>get_time_series</code>, <code>get_time_series_key</code>, <code>get_time_series_keys</code>, <code>has_any_time_series</code>,
+<code>has_for_owner</code>, <code>has_parent_child_association</code>, <code>has_supplemental_attribute_association</code>,
+<code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>, <code>key_info</code>, <code>list_array_groups</code>,
+<code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>,
+<code>list_owner_types</code>, <code>list_parent_child_associations</code>, <code>list_parents</code>,
+<code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>, <code>list_time_series</code>,
+<code>num_distinct_arrays</code>, <code>open_store</code>, <code>persist!</code>, <code>read_only</code>, <code>rollback_transaction!</code>,
+<code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>, <code>remove_by_filter!</code>,
+<code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
+<code>remove_time_series!</code>, <code>rename_time_series!</code>, <code>replace_owner!</code>,
+<code>replace_parent_child_component_id!</code>, <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>,
+<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_values</code>,
+<code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
+<code>transform_single_time_series!</code>, <code>verify_integrity</code>.</p>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
 <pre><code class="language-julia">Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
@@ -783,6 +783,16 @@ filter).</li>
 </ul>
 <p>Physical storage detail (<code>data_hash</code>, <code>dtype</code>, <code>ext</code>, <code>percentiles</code>) is not on a key — read it via
 <code>get_metadata</code> / <code>list_time_series</code>.</p>
+<pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
+                    name=nothing, resolution=nothing, interval=nothing, features=Dict()) -&gt; Bool
+</code></pre>
+<p><code>has_any_time_series</code> is the existence probe over the same seven filters: true iff <code>list_keys</code> with
+that filter would return at least one row, answered off the catalog indexes without hydrating or
+marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a subset match here,
+unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content hash —
+and it is the one exception to the index-only guarantee: a non-empty <code>features</code> filter cannot be
+answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
+hot loops when the whole feature set is known.</p>
 <p><code>list_array_groups</code> takes the same seven filters and returns the same row fields as <code>list_keys</code>, but
 each row additionally carries <code>data_hash</code> — the 32-byte content hash of the array the row resolves
 to (a <code>Vector{UInt8}</code> hashes and compares by content, so it groups directly as a <code>Dict</code> key). Rows
