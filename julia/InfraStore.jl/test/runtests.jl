@@ -613,7 +613,7 @@ end
     @test num_distinct_arrays(store) == 1
 end
 
-@testset "has_any_time_series answers every list_keys filter without listing" begin
+@testset "has_any_time_series covers the list_keys filter surface" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     vals = Float64[1, 2, 3, 4]

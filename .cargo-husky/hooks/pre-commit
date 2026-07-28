@@ -17,10 +17,9 @@ if command -v shellcheck >/dev/null 2>&1; then
   # Lint only files git knows about (the index, so staged additions count).
   # Walking the tree instead picks up scripts we do not own, such as the
   # vendored netcdf-c shell scripts left behind by a local BinaryBuilder run.
-  sh_files=$(git ls-files -- '*.sh')
-  if [ -n "$sh_files" ]; then
+  if git ls-files -- '*.sh' | grep -q .; then
     echo '+shellcheck (tracked .sh files)'
-    echo "$sh_files" | xargs shellcheck
+    git ls-files -z -- '*.sh' | xargs -0 shellcheck --
   fi
 else
   echo 'shellcheck not found, skipping shell script linting'

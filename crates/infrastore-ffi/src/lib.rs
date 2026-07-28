@@ -2059,7 +2059,10 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
 /// `infrastore_store_has_typed`, which matches one exact key identity (its
 /// feature set compared by content hash), this answers "is there any series
 /// like this?" without hydrating or serializing a single row, so it is safe
-/// for hot per-component loops.
+/// for hot per-component loops. The one exception is a non-empty
+/// `features_json`: the subset match cannot be answered from an index and
+/// falls back to a full listing internally, so callers testing an exact
+/// feature set in a hot loop should prefer `infrastore_store_has_typed`.
 ///
 /// # Safety
 ///

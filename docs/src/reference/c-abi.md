@@ -160,8 +160,10 @@ int32_t infrastore_store_has_for_owner(const struct InfraStore *handle,
 /* Filter-based existence probe: true iff any association matches the filter —
    the same all-optional, independent predicates as infrastore_store_list_keys
    (features_json is a subset match), answered off the catalog indexes without
-   hydrating rows. Distinct from infrastore_store_has_typed, which matches one
-   exact key identity (feature set compared by content hash). */
+   hydrating rows — except a non-empty features_json, whose subset match falls
+   back to a full listing internally. Distinct from infrastore_store_has_typed,
+   which matches one exact key identity (feature set compared by content hash)
+   and stays on the index path. */
 int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                    bool has_owner, int64_t owner_id,
                                    bool has_owner_category, int32_t owner_category,

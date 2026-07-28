@@ -728,7 +728,10 @@ has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series
 `has_any_time_series` is the existence probe over the same seven filters: true iff `list_keys` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. `features` is a subset match here,
-unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash.
+unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash —
+and it is the one exception to the index-only guarantee: a non-empty `features` filter cannot be
+answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
+hot loops when the whole feature set is known.
 
 `list_array_groups` takes the same seven filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves
