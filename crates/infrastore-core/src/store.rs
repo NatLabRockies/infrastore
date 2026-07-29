@@ -2326,6 +2326,11 @@ impl Store {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        // Checkpoint the catalog's WAL so the `.sqlite` file is complete on
+        // its own: after a flush the two on-disk artifacts can be copied as a
+        // pair (`Self::persist_to` relies on this via the `flush` it opens
+        // with).
+        self.metadata.checkpoint()?;
         self.backend.flush()
     }
 

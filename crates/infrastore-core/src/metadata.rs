@@ -507,13 +507,27 @@ impl MetadataStore {
         // handle to the same on-disk artifact holds a lock (e.g. a CLI writer
         // and the read-only gRPC server overlapping). Harmless for in-memory and
         // read-only connections, which still acquire SHARED locks.
-        //
-        // NOTE: we intentionally do NOT switch to WAL / synchronous=NORMAL here.
-        // WAL would raise write throughput, but it persists `-wal`/`-shm` sidecar
-        // files (complicating the "move the .nc and .sqlite together" artifact
-        // contract) and can prevent a read-only connection from opening the
-        // database in some deployments. That trade-off deserves its own change.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // WAL journal mode, for the *read* path: in rollback-journal mode every
+        // read transaction pays a hot-journal `stat()` plus a shared-lock
+        // fcntl dance per statement — ~20% of a key lookup in a per-series
+        // read loop. WAL drops both (readers coordinate through the WAL
+        // index) and also lets readers overlap a writer. The `-wal`/`-shm`
+        // sidecars do not outlive the store: SQLite checkpoints and removes
+        // them when the last connection closes, and `Store::persist_to`
+        // checkpoints explicitly before copying the artifact pair, so the
+        // "move the file and its .sqlite together" contract holds. A sidecar
+        // can survive a crash; a read-write open recovers it (a read-only
+        // open of a crashed store fails until one happens).
+        //
+        // Skipped for read-only connections (the pragma writes the header on
+        // a rollback-mode file; a cleanly closed WAL store reads fine without
+        // it) and no-ops for in-memory databases.
+        if !conn.is_readonly(rusqlite::DatabaseName::Main)? {
+            // `journal_mode` returns a row ("wal"); use `query_row` to consume
+            // it — `execute` would report a misuse error.
+            conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+        }
         // `prepare_cached` keys on SQL text, and `MetadataFilter` renders a
         // distinct statement per combination of set predicates (times two, since
         // `list` issues a row query and a features query). rusqlite's default
@@ -532,6 +546,23 @@ impl MetadataStore {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// Flush the WAL into the main database file and truncate it, so the
+    /// `.sqlite` artifact is complete on its own (required before any
+    /// file-level copy of it). No-op for read-only connections — which cannot
+    /// checkpoint, and see only cleanly closed stores whose WAL is already
+    /// empty — for in-memory databases (not in WAL mode), and while a
+    /// transaction is open on this connection: checkpointing there would error
+    /// (`SQLITE_LOCKED`), and mid-transaction the artifact is incomplete by
+    /// definition — the post-commit flush checkpoints instead.
+    pub fn checkpoint(&self) -> Result<()> {
+        if self.read_only || !self.conn.is_autocommit() {
+            return Ok(());
+        }
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     }
 
