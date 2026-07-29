@@ -568,10 +568,10 @@ probe over the same (all-optional, independent) filters as [`list_keys`](@ref),
 answered off the catalog indexes without hydrating or marshaling any rows, so
 it is safe for hot per-component loops. `features` is a subset match, unlike
 the exact-key [`has_time_series`](@ref) forms, which compare the whole feature
-set by content hash. It is also the one exception to the index-only guarantee:
-a non-empty `features` filter cannot be answered from an index and falls back
-to a full listing internally, so prefer the exact-key forms in hot loops when
-the whole feature set is known.
+set by content hash — but it stays on indexes: the store probes the requested
+set as an exact set (by hash) first, so callers passing the complete feature
+set get a single covering-index seek; only genuinely partial feature lists take
+the indexed per-feature fallback probe.
 """
 function has_any_time_series(
     store::Store;

@@ -1053,13 +1053,26 @@ impl MetadataStore {
     /// `idx_category_owner`. Unlike `list`, no row leaves the index — nothing
     /// is hydrated, no JSON is parsed, and no second features query runs.
     ///
-    /// The one predicate an index cannot answer is the in-memory
-    /// `features` subset match, so a filter carrying one falls back to
-    /// `list`. Callers testing an *exact* feature set (the keyed existence
-    /// check) pass `features_hash` instead, which stays on the index path.
+    /// A `features` filter keeps that guarantee through a two-step strategy
+    /// (ported from InfrastructureSystems.jl's optimized `has_metadata`): the
+    /// requested set is hashed and probed as an *exact* set first — callers
+    /// overwhelmingly pass the complete feature set, and that equality rides
+    /// `uq_ts_assoc` like any other keyed probe. Only when the exact probe
+    /// misses (a genuinely partial feature list, or a true miss) does the
+    /// indexed subset fallback [`Self::exists_feature_subset`] run.
     pub fn exists(&self, filter: &MetadataFilter) -> Result<bool> {
-        if filter.features.as_ref().is_some_and(|f| !f.is_empty()) {
-            return Ok(!self.list(filter)?.is_empty());
+        if let Some(required) = filter.features.as_ref().filter(|f| !f.is_empty()) {
+            // The exact-set shortcut substitutes its own hash, so it must not
+            // override a caller that already pinned one.
+            if filter.features_hash.is_none() {
+                let mut exact = filter.clone();
+                exact.features = None;
+                exact.features_hash = Some(features_hash(required));
+                if self.exists(&exact)? {
+                    return Ok(true);
+                }
+            }
+            return self.exists_feature_subset(filter, required);
         }
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1067,6 +1080,45 @@ impl MetadataStore {
             .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
             .collect();
         let sql = format!("SELECT 1 FROM time_series_associations {where_clause} LIMIT 1");
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let found: Option<i64> = stmt
+            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Subset-match existence probe answered entirely in SQL: one correlated
+    /// `EXISTS` seek of `feature_sets`' `(features_hash, key)` primary key per
+    /// requested feature — nothing hydrated, no JSON parsed. The value
+    /// comparison is kind-strict, matching [`is_subset`]'s `FeatureValue`
+    /// equality (an `Int(2030)` never matches a `Str("2030")`).
+    ///
+    /// The SQL text depends only on the shape (feature count and value kinds
+    /// in key order), so `prepare_cached` reuses statements across calls the
+    /// same way the plain probes do.
+    fn exists_feature_subset(&self, filter: &MetadataFilter, required: &Features) -> Result<bool> {
+        let (where_clause, mut params_vec) = filter.to_sql();
+        let mut sql = format!("SELECT 1 FROM time_series_associations {where_clause}");
+        for (key, value) in required {
+            let (kind, column, param): (&str, &str, Box<dyn rusqlite::ToSql>) = match value {
+                FeatureValue::Int(i) => ("int", "value_int", Box::new(*i)),
+                FeatureValue::Float(f) => ("float", "value_float", Box::new(*f)),
+                FeatureValue::Bool(b) => ("bool", "value_bool", Box::new(*b as i64)),
+                FeatureValue::Str(s) => ("str", "value_str", Box::new(s.clone())),
+            };
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM feature_sets fs \
+                 WHERE fs.features_hash = time_series_associations.features_hash \
+                 AND fs.key = ? AND fs.value_kind = '{kind}' AND fs.{column} = ?)"
+            ));
+            params_vec.push(Box::new(key.clone()));
+            params_vec.push(param);
+        }
+        sql.push_str(" LIMIT 1");
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let found: Option<i64> = stmt
             .query_row(param_refs.as_slice(), |r| r.get(0))

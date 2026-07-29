@@ -879,8 +879,9 @@ fn existence_probes_distinguish_features() {
     wrong.features = low.clone();
     assert!(!store.has_time_series(&wrong).unwrap());
 
-    // The filtered probe's `features` predicate is a subset match (in-memory
-    // fallback path, not the index probe).
+    // The filtered probe's `features` predicate is a subset match. A complete
+    // set is answered by the exact-hash fast path; a wrong value falls through
+    // to the SQL subset probe and still misses.
     let by_owner = || {
         ListFilter::new()
             .owner_id(1)
@@ -895,6 +896,107 @@ fn existence_probes_distinguish_features() {
     assert!(
         store
             .has_any_time_series(by_owner().features(Features::new()))
+            .unwrap()
+    );
+}
+
+#[test]
+fn has_any_time_series_feature_subset_probe() {
+    let mut store = create_store(None, true).unwrap();
+    let mut stored: Features = BTreeMap::new();
+    stored.insert("scenario".into(), FeatureValue::Str("high".into()));
+    stored.insert("model_year".into(), FeatureValue::Int(2030));
+    stored.insert("validated".into(), FeatureValue::Bool(true));
+    store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+            )
+            .with_features(stored.clone()),
+        )
+        .unwrap();
+
+    let by_owner = || {
+        ListFilter::new()
+            .owner_id(1)
+            .owner_category(OwnerCategory::Component)
+    };
+    let feats = |pairs: &[(&str, FeatureValue)]| -> Features {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    };
+
+    // Complete set: exact-hash fast path.
+    assert!(
+        store
+            .has_any_time_series(by_owner().features(stored.clone()))
+            .unwrap()
+    );
+    // Partial lists exercise the SQL subset fallback: every stored pair and
+    // every 2-subset must match.
+    for pair in [
+        ("scenario", FeatureValue::Str("high".into())),
+        ("model_year", FeatureValue::Int(2030)),
+        ("validated", FeatureValue::Bool(true)),
+    ] {
+        assert!(
+            store
+                .has_any_time_series(by_owner().features(feats(&[pair])))
+                .unwrap()
+        );
+    }
+    assert!(
+        store
+            .has_any_time_series(by_owner().features(feats(&[
+                ("scenario", FeatureValue::Str("high".into())),
+                ("validated", FeatureValue::Bool(true)),
+            ])))
+            .unwrap()
+    );
+
+    // Wrong value, wrong key, and one-good-one-bad all miss.
+    for bad in [
+        feats(&[("scenario", FeatureValue::Str("low".into()))]),
+        feats(&[("nonexistent", FeatureValue::Str("high".into()))]),
+        feats(&[
+            ("scenario", FeatureValue::Str("high".into())),
+            ("model_year", FeatureValue::Int(2031)),
+        ]),
+    ] {
+        assert!(!store.has_any_time_series(by_owner().features(bad)).unwrap());
+    }
+
+    // Value matching is kind-strict, like the in-memory subset filter:
+    // Int(2030) is not Str("2030") or Float(2030.0).
+    assert!(
+        !store
+            .has_any_time_series(
+                by_owner().features(feats(&[("model_year", FeatureValue::Str("2030".into()))]))
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_any_time_series(
+                by_owner().features(feats(&[("model_year", FeatureValue::Float(2030.0))]))
+            )
+            .unwrap()
+    );
+
+    // A subset probe scoped by the other filter columns still honors them.
+    assert!(
+        !store
+            .has_any_time_series(
+                ListFilter::new()
+                    .owner_id(2)
+                    .owner_category(OwnerCategory::Component)
+                    .features(feats(&[("scenario", FeatureValue::Str("high".into()))]))
+            )
             .unwrap()
     );
 }

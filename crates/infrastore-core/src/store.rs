@@ -1812,9 +1812,10 @@ impl Store {
     /// component have any time series (of type T)?" without listing them.
     ///
     /// Same covering-index probe as the keyed check (one statement, nothing
-    /// hydrated), so it is safe for hot loops. The one exception is a filter
-    /// carrying a `features` subset match, which cannot be answered from an
-    /// index and falls back to a full listing internally.
+    /// hydrated), so it is safe for hot loops. A `features` filter stays on
+    /// indexes too: the requested set is probed as an exact set by hash first
+    /// (one covering seek when the caller passes the complete feature set),
+    /// with an indexed per-feature subset fallback for partial lists.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool> {
         self.metadata.exists(&filter.into())
     }
