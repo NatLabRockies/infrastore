@@ -3007,14 +3007,13 @@ end
     @test remove_by_filter!(store; time_series_type=Scenarios) == 1
     @test isempty(list_keys(store; time_series_type=Scenarios))
 
-    # A filter selects stored rows, so the request-only family sentinel is
-    # rejected rather than silently matching nothing.
-    @test_throws InfraStore.InvalidParameterError list_keys(
-        store; time_series_type=AbstractDeterministic
-    )
-    @test_throws InfraStore.InvalidParameterError get_resolutions(
-        store; time_series_type=AbstractDeterministic
-    )
+    # The `AbstractDeterministic` family is a valid filter: it matches both
+    # concrete members (here the three transform-derived / copied DSTs).
+    family = list_keys(store; time_series_type=AbstractDeterministic)
+    @test length(family) == 3
+    @test all(k.time_series_type == DeterministicSingleTimeSeries for k in family)
+    @test get_resolutions(store; time_series_type=AbstractDeterministic) ==
+        [Millisecond(res)]
     # A type that is not a time series type at all is rejected everywhere.
     @test_throws InfraStore.InvalidParameterError has_time_series(
         Store, store, 1, Component, "a"

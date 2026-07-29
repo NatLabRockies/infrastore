@@ -23,8 +23,8 @@ use crate::types::key::{
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
 use crate::types::time_series::{
-    Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesType, compute_h,
+    Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -32,7 +32,9 @@ pub struct ListFilter {
     pub owner_id: Option<i64>,
     pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
-    pub time_series_type: Option<TimeSeriesType>,
+    /// Type filter: a concrete stored type, or `RequestedType::AbstractDeterministic`
+    /// to match both `Deterministic` and `DeterministicSingleTimeSeries`.
+    pub time_series_type: Option<RequestedType>,
     pub name: Option<String>,
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
     /// wildcards). Applied in addition to `name` when both are set.
@@ -58,8 +60,8 @@ impl ListFilter {
         self.owner_type = Some(t.into());
         self
     }
-    pub fn time_series_type(mut self, t: TimeSeriesType) -> Self {
-        self.time_series_type = Some(t);
+    pub fn time_series_type(mut self, t: impl Into<RequestedType>) -> Self {
+        self.time_series_type = Some(t.into());
         self
     }
     pub fn name(mut self, n: impl Into<String>) -> Self {
@@ -1155,14 +1157,20 @@ impl Store {
                 let interval = required_interval(meta, "DeterministicSingleTimeSeries")?;
                 let count = required_count(meta, "DeterministicSingleTimeSeries")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                    TimeSeriesError::IntegrityError(format!(
-                        "DeterministicSingleTimeSeries: interval ({}) is not an integer \
-                         multiple of resolution ({})",
-                        interval.to_iso8601(),
-                        resolution.to_iso8601()
-                    ))
-                })?;
+                // A single-window view carries a zero interval; its one window
+                // starts at index 0, so the step width is irrelevant.
+                let interval_steps = if count == 1 && interval.is_zero() {
+                    0
+                } else {
+                    resolution.divide_into(&interval).map_err(|_| {
+                        TimeSeriesError::IntegrityError(format!(
+                            "DeterministicSingleTimeSeries: interval ({}) is not an integer \
+                             multiple of resolution ({})",
+                            interval.to_iso8601(),
+                            resolution.to_iso8601()
+                        ))
+                    })?
+                };
                 let total_len = arr.length();
                 // Validate that all windows fit in the underlying array.
                 let required = (count.saturating_sub(1)) * interval_steps + h;
@@ -1272,8 +1280,8 @@ impl Store {
         }
         // SingleTimeSeries-only; accept an explicit matching type, reject others.
         match filter.time_series_type {
-            None | Some(TimeSeriesType::SingleTimeSeries) => {
-                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
+            None | Some(RequestedType::Concrete(TimeSeriesType::SingleTimeSeries)) => {
+                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries.into());
             }
             Some(other) => {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -1318,12 +1326,15 @@ impl Store {
     /// [`crate::reader`].
     pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader> {
         let reported = match filter.time_series_type {
-            Some(
+            // The family reads exactly like a Deterministic reader, which is
+            // already abstract over its two concrete storage types.
+            Some(RequestedType::AbstractDeterministic) => TimeSeriesType::Deterministic,
+            Some(RequestedType::Concrete(
                 t @ (TimeSeriesType::Deterministic
                 | TimeSeriesType::DeterministicSingleTimeSeries
                 | TimeSeriesType::Probabilistic
                 | TimeSeriesType::Scenarios),
-            ) => t,
+            )) => t,
             Some(other) => {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "build_forecast_reader handles forecast types (Deterministic/\
@@ -1355,7 +1366,7 @@ impl Store {
         let mut items = Vec::new();
         for t in concrete {
             let mut f = filter.clone();
-            f.time_series_type = Some(t);
+            f.time_series_type = Some(t.into());
             for m in self.list_time_series(f)? {
                 let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
                 items.push((m, shape));
@@ -1619,7 +1630,7 @@ impl Store {
         // whose components are transformed one resolution at a time should not
         // pay to hydrate the other resolutions' features on every call.
         let sources = self.metadata.list(&MetadataFilter {
-            time_series_type: Some(TimeSeriesType::SingleTimeSeries),
+            time_series_type: Some(TimeSeriesType::SingleTimeSeries.into()),
             owner_category,
             resolution,
             ..Default::default()
@@ -1681,12 +1692,50 @@ impl Store {
                     src.name
                 )));
             }
+            let resolution = required_resolution(src, "transform_single_time_series")?;
+            let total_len = src.length.ok_or_else(|| {
+                TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
+            })?;
+            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "interval ({}) must be a positive integer multiple of resolution ({})",
+                    interval.to_iso8601(),
+                    resolution.to_iso8601()
+                ))
+            })?;
+            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
+            if h == 0 || h > total_len {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "horizon ({h} steps) exceeds SingleTimeSeries length ({total_len}) \
+                     for '{}'",
+                    src.name
+                )));
+            }
+            let count = (total_len - h) / interval_steps + 1;
+            // interval == horizon over a whole-series horizon yields one window
+            // with nothing to step to; record the canonical zero interval so
+            // the stored form matches directly-added single-window forecasts
+            // (mirroring InfrastructureSystems.jl, which presents that case as
+            // `Second(0)`). A single window derived at a *smaller* interval
+            // keeps it — the interval is still meaningful metadata there. The
+            // identity/idempotency check below uses the stored form.
+            let collapse_interval = count == 1 && interval == horizon;
+            let stored_interval = if collapse_interval {
+                Period::zero()
+            } else {
+                interval
+            };
+            let stored_interval_iso = if collapse_interval {
+                stored_interval.to_iso8601()
+            } else {
+                interval_iso.clone()
+            };
             let src_key = AssociationIdentity {
                 owner_id: src.owner_id,
                 owner_category: src.owner_category,
                 name: src.name.clone(),
                 resolution: src_resolution_iso,
-                interval: Some(interval_iso.clone()),
+                interval: Some(stored_interval_iso),
                 features_hash: src_features_hash,
             };
             if let Some(existing_horizon) = existing_dst.get(&src_key) {
@@ -1711,30 +1760,10 @@ impl Store {
                     horizon.to_iso8601(),
                 )));
             }
-            let resolution = required_resolution(src, "transform_single_time_series")?;
-            let total_len = src.length.ok_or_else(|| {
-                TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-            })?;
-            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                TimeSeriesError::InvalidParameter(format!(
-                    "interval ({}) must be a positive integer multiple of resolution ({})",
-                    interval.to_iso8601(),
-                    resolution.to_iso8601()
-                ))
-            })?;
-            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
-            if h == 0 || h > total_len {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "horizon ({h} steps) exceeds SingleTimeSeries length ({total_len}) \
-                     for '{}'",
-                    src.name
-                )));
-            }
-            let count = (total_len - h) / interval_steps + 1;
             new_metas.push(TimeSeriesMetadata {
                 time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
                 horizon: Some(horizon),
-                interval: Some(interval),
+                interval: Some(stored_interval),
                 count: Some(count),
                 ..src.clone()
             });
@@ -1767,7 +1796,7 @@ impl Store {
         self.metadata.exists(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
-            time_series_type: Some(key.time_series_type),
+            time_series_type: Some(key.time_series_type.into()),
             name: Some(key.name.clone()),
             resolution: key.resolution,
             interval: key.interval,
@@ -1790,7 +1819,7 @@ impl Store {
         self.metadata.exists(&filter.into())
     }
 
-    pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn get_resolutions(&self, time_series_type: Option<RequestedType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
@@ -1798,7 +1827,7 @@ impl Store {
     /// The interval analog of [`Self::get_resolutions`]; ordered lexically by
     /// ISO-8601 text (mixed period kinds have no numeric order). Non-forecast
     /// types have no interval, so they return an empty list.
-    pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn get_intervals(&self, time_series_type: Option<RequestedType>) -> Result<Vec<Period>> {
         self.metadata.distinct_intervals(time_series_type)
     }
 
@@ -1883,7 +1912,7 @@ impl Store {
             TimeSeriesType::Scenarios,
         ] {
             let rows = self.metadata.list(&MetadataFilter {
-                time_series_type: Some(ts_type),
+                time_series_type: Some(ts_type.into()),
                 resolution,
                 interval,
                 ..Default::default()
@@ -2005,7 +2034,7 @@ impl Store {
     pub fn list_owner_ids(
         &self,
         category: OwnerCategory,
-        time_series_type: Option<TimeSeriesType>,
+        time_series_type: Option<RequestedType>,
         resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         self.metadata
@@ -2929,6 +2958,23 @@ fn resolve_windows(
                 return Err(TimeSeriesError::InvalidParameter("end < start".into()));
             }
             if !interval.is_positive() {
+                // A single-window forecast may carry a zero interval (there is
+                // no second window to step to); its only window starts at
+                // `initial`, which is also the only valid `start`.
+                if count == 1 && interval.is_zero() {
+                    if start != initial {
+                        return Err(TimeSeriesError::InvalidParameter(
+                            "forecast start_time must align to a window boundary \
+                             (initial_timestamp + k·interval)"
+                                .into(),
+                        ));
+                    }
+                    return if initial < end {
+                        Ok((0, 1, initial))
+                    } else {
+                        Ok((0, 0, initial))
+                    };
+                }
                 return Err(TimeSeriesError::InvalidParameter(
                     "forecast interval must be positive".into(),
                 ));

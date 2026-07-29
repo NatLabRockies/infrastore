@@ -113,6 +113,14 @@ impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {
     }
 }
 
+// The catalog filters take a `RequestedType`; every Python-exposed type is a
+// concrete stored type, so the conversion goes through `TimeSeriesType`.
+impl From<PyTimeSeriesType> for core_lib::RequestedType {
+    fn from(v: PyTimeSeriesType) -> Self {
+        core_lib::TimeSeriesType::from(v).into()
+    }
+}
+
 impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
     fn from(v: core_lib::TimeSeriesType) -> Self {
         match v {
@@ -2876,7 +2884,7 @@ fn build_list_filter(
         filter = filter.owner_type(t);
     }
     if let Some(t) = time_series_type {
-        filter = filter.time_series_type(t.into());
+        filter = filter.time_series_type(core_lib::RequestedType::from(t));
     }
     if let Some(n) = name {
         filter = filter.name(n);

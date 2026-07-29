@@ -99,6 +99,20 @@ impl Period {
         }
     }
 
+    /// Whether the period is exactly zero (the interval of a single-window
+    /// forecast, which has no second window to step to).
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Period::Fixed(d) => d.num_milliseconds() == 0,
+            Period::Months(m) => *m == 0,
+        }
+    }
+
+    /// The zero period — the canonical interval of a single-window forecast.
+    pub fn zero() -> Self {
+        Period::Fixed(Duration::zero())
+    }
+
     /// Advance `dt` by `k` of this period (calendar-aware for [`Period::Months`]).
     /// Returns `None` on arithmetic overflow or an out-of-range date.
     pub fn add_to(&self, dt: DateTime<Utc>, k: i64) -> Option<DateTime<Utc>> {

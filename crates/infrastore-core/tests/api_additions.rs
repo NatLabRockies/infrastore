@@ -610,14 +610,14 @@ fn discovery_enumerations() {
             );
             assert!(
                 store
-                    .get_intervals(Some(TimeSeriesType::SingleTimeSeries))
+                    .get_intervals(Some(TimeSeriesType::SingleTimeSeries.into()))
                     .unwrap()
                     .is_empty(),
                 "{backend}"
             );
             assert_eq!(
                 store
-                    .get_intervals(Some(TimeSeriesType::Deterministic))
+                    .get_intervals(Some(TimeSeriesType::Deterministic.into()))
                     .unwrap(),
                 vec![Period::fixed(Duration::hours(1))],
                 "{backend}"

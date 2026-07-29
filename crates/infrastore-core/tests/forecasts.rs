@@ -1761,3 +1761,248 @@ fn non_positive_forecast_periods_are_rejected_through_the_add_path() {
         "a negative horizon must be rejected"
     );
 }
+
+// ---------------------------------------------------------------------------
+// AbstractDeterministic as a catalog *filter* (list/has/aggregate queries),
+// and zero-interval single-window forecasts.
+// ---------------------------------------------------------------------------
+
+/// The family sentinel in `ListFilter` matches a stored `Deterministic` and a
+/// stored `DeterministicSingleTimeSeries`, and nothing else — across the
+/// listing, existence, distinct-interval, and owner-id query paths.
+#[test]
+fn abstract_deterministic_filters_match_both_family_members() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(2);
+    let interval = Duration::hours(1);
+
+    for_each_backend(
+        |store| {
+            // Owner 1: a real Deterministic. Owner 2: a DST derived from an
+            // STS. Owner 3: a Probabilistic that must NOT match the family.
+            add_forecast(
+                store,
+                1,
+                "load",
+                TimeSeriesType::Deterministic,
+                initial,
+                resolution,
+                horizon,
+                interval,
+                3,
+                f64_arr(vec![2, 3], &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
+                None,
+            );
+            add_forecast(
+                store,
+                2,
+                "wind",
+                TimeSeriesType::DeterministicSingleTimeSeries,
+                initial,
+                resolution,
+                horizon,
+                interval,
+                7,
+                f64_arr(vec![8], &dst_source_vals()),
+                None,
+            );
+            add_forecast(
+                store,
+                3,
+                "prob",
+                TimeSeriesType::Probabilistic,
+                initial,
+                resolution,
+                horizon,
+                interval,
+                3,
+                f64_arr(
+                    vec![2, 2, 3],
+                    &(0..12).map(|i| i as f64).collect::<Vec<_>>(),
+                ),
+                Some(vec![0.25, 0.75]),
+            );
+        },
+        |store, _, backend| {
+            let family = ListFilter::new().time_series_type(RequestedType::AbstractDeterministic);
+            let keys = store.list_keys(family.clone()).unwrap();
+            assert_eq!(keys.len(), 2, "{backend}: family list matches Det + DST");
+            assert!(
+                store.has_any_time_series(family).unwrap(),
+                "{backend}: family existence probe"
+            );
+            let mut ids = store
+                .list_owner_ids(
+                    OwnerCategory::Component,
+                    Some(RequestedType::AbstractDeterministic),
+                    None,
+                )
+                .unwrap();
+            ids.sort();
+            assert_eq!(ids, vec![1, 2], "{backend}: family owner ids");
+            let intervals = store
+                .get_intervals(Some(RequestedType::AbstractDeterministic))
+                .unwrap();
+            assert_eq!(
+                intervals,
+                vec![Period::from(interval)],
+                "{backend}: family intervals"
+            );
+        },
+    );
+}
+
+/// A single-window forecast (`count == 1`) may carry a zero interval: it round
+/// trips, and a `time_range` anchored at `initial` selects its only window.
+#[test]
+fn zero_interval_single_window_forecast_round_trips() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(4);
+    let vals: Vec<f64> = (0..4).map(|i| i as f64).collect();
+
+    for_each_backend(
+        |store| {
+            add_forecast(
+                store,
+                1,
+                "load",
+                TimeSeriesType::Deterministic,
+                initial,
+                resolution,
+                horizon,
+                Duration::zero(),
+                1,
+                f64_arr(vec![4, 1], &vals),
+                None,
+            )
+        },
+        |store, key, backend| {
+            let got = store.get_time_series(key.identity(), None).unwrap();
+            let det = got.as_deterministic().unwrap();
+            assert_eq!(det.count, 1, "{backend}: count");
+            assert!(det.interval.is_zero(), "{backend}: zero interval preserved");
+            assert_eq!(det.data.to_f64_vec().unwrap(), vals, "{backend}: values");
+
+            // The only valid windowed read starts at `initial`.
+            let sliced = store
+                .get_time_series(key.identity(), Some((initial, initial + horizon)))
+                .unwrap();
+            assert_eq!(
+                sliced.as_deterministic().unwrap().count,
+                1,
+                "{backend}: range read selects the single window"
+            );
+            assert!(
+                store
+                    .get_time_series(
+                        key.identity(),
+                        Some((initial + Duration::hours(1), initial + horizon)),
+                    )
+                    .is_err(),
+                "{backend}: an off-initial start is rejected"
+            );
+        },
+    );
+}
+
+/// A transform that derives exactly one window records the canonical zero
+/// interval (matching directly-added single-window forecasts), stays
+/// idempotent under the same arguments, and reads back.
+#[test]
+fn single_window_transform_stores_zero_interval_and_stays_idempotent() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(8);
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution,
+                f64_arr(vec![8], &dst_source_vals()),
+                "load",
+            )),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+
+    // horizon spans the whole series => one window.
+    assert_eq!(
+        store
+            .transform_single_time_series(horizon, horizon, None, None)
+            .unwrap(),
+        1
+    );
+    let key = store
+        .list_keys(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    let det = got.as_deterministic().unwrap();
+    assert_eq!(det.count, 1);
+    assert!(
+        det.interval.is_zero(),
+        "stored interval is normalized to zero"
+    );
+    assert_eq!(det.data.to_f64_vec().unwrap(), dst_source_vals());
+
+    // Re-running with the same arguments derives nothing new.
+    assert_eq!(
+        store
+            .transform_single_time_series(horizon, horizon, None, None)
+            .unwrap(),
+        0
+    );
+}
+
+/// A single window derived at an interval *smaller* than the horizon keeps
+/// that interval — only the interval-equals-horizon case collapses to zero.
+#[test]
+fn single_window_transform_at_a_smaller_interval_keeps_it() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(8); // spans the whole series => count == 1
+    let interval = Duration::hours(1);
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution,
+                f64_arr(vec![8], &dst_source_vals()),
+                "load",
+            )),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .transform_single_time_series(horizon, interval, None, None)
+            .unwrap(),
+        1
+    );
+    let key = store
+        .list_keys(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    let det = got.as_deterministic().unwrap();
+    assert_eq!(det.count, 1);
+    assert_eq!(det.interval, Period::from(interval));
+}

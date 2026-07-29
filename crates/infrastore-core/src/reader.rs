@@ -235,6 +235,16 @@ fn index_on_grid(
     at: DateTime<Utc>,
     what: &str,
 ) -> Result<usize> {
+    // A single-window forecast may carry a zero interval; its grid has exactly
+    // one point, `initial`.
+    if step.is_zero() && len == 1 {
+        if at == initial {
+            return Ok(0);
+        }
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} is off the single-point {what} grid at {initial}"
+        )));
+    }
     // `steps_between` is calendar-aware and rejects off-grid / pre-origin
     // timestamps; here we add the extent bound.
     let idx = step.steps_between(initial, at)?;
@@ -743,15 +753,21 @@ fn entry_layout(
             let horizon = m.horizon.ok_or_else(|| missing("horizon"))?;
             let interval = m.interval.ok_or_else(|| missing("interval"))?;
             let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                TimeSeriesError::IntegrityError(format!(
-                    "DeterministicSingleTimeSeries '{}' interval ({}) is not a multiple of \
-                     resolution ({})",
-                    m.name,
-                    interval.to_iso8601(),
-                    resolution.to_iso8601()
-                ))
-            })?;
+            // A single-window view carries a zero interval; its one window
+            // starts at index 0, so the step width is irrelevant.
+            let interval_steps = if count == 1 && interval.is_zero() {
+                0
+            } else {
+                resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::IntegrityError(format!(
+                        "DeterministicSingleTimeSeries '{}' interval ({}) is not a multiple of \
+                         resolution ({})",
+                        m.name,
+                        interval.to_iso8601(),
+                        resolution.to_iso8601()
+                    ))
+                })?
+            };
             let total_len = shape.first().copied().unwrap_or(0);
             let required = count.saturating_sub(1) * interval_steps + h;
             if required > total_len {

@@ -18,7 +18,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
-use crate::types::time_series::TimeSeriesType;
+use crate::types::time_series::{RequestedType, TimeSeriesType};
 
 pub struct MetadataStore {
     conn: Connection,
@@ -343,7 +343,9 @@ pub struct MetadataFilter {
     pub owner_id: Option<i64>,
     pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
-    pub time_series_type: Option<TimeSeriesType>,
+    /// Type filter: a concrete stored type, or the `AbstractDeterministic`
+    /// family (matching `Deterministic` and `DeterministicSingleTimeSeries`).
+    pub time_series_type: Option<RequestedType>,
     pub name: Option<String>,
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*`/`?` wildcards).
     /// Combined with `name` as AND when both are set.
@@ -407,6 +409,32 @@ impl From<AssociationIdentity> for SeriesFamily {
     }
 }
 
+/// Append the `time_series_type` predicate for `requested` to `sql`/`params`:
+/// an equality for a concrete type, an `IN (…)` over both concrete members for
+/// the `AbstractDeterministic` family. Shared by every catalog query that
+/// filters on type.
+fn push_type_predicate(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    requested: RequestedType,
+) {
+    match requested {
+        RequestedType::Concrete(t) => {
+            sql.push_str(" AND time_series_type = ?");
+            params.push(Box::new(t.as_str().to_string()));
+        }
+        RequestedType::AbstractDeterministic => {
+            sql.push_str(" AND time_series_type IN (?, ?)");
+            params.push(Box::new(TimeSeriesType::Deterministic.as_str().to_string()));
+            params.push(Box::new(
+                TimeSeriesType::DeterministicSingleTimeSeries
+                    .as_str()
+                    .to_string(),
+            ));
+        }
+    }
+}
+
 impl MetadataFilter {
     /// Render the filter as a `WHERE` clause plus its bound parameters, so the
     /// same predicate can be reused across the row query and the batched
@@ -429,9 +457,8 @@ impl MetadataFilter {
             sql.push_str(" AND owner_type = ?");
             params_vec.push(Box::new(owner_type.clone()));
         }
-        if let Some(ts_type) = self.time_series_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(ts_type.as_str().to_string()));
+        if let Some(requested) = self.time_series_type {
+            push_type_predicate(&mut sql, &mut params_vec, requested);
         }
         if let Some(ref name) = self.name {
             sql.push_str(" AND name = ?");
@@ -1051,7 +1078,7 @@ impl MetadataStore {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
-            time_series_type: Some(key.time_series_type),
+            time_series_type: Some(key.time_series_type.into()),
             name: Some(key.name.clone()),
             resolution: key.resolution,
             interval: key.interval,
@@ -1073,15 +1100,14 @@ impl MetadataStore {
         }
     }
 
-    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn distinct_resolutions(&self, ts_type: Option<RequestedType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT resolution FROM time_series_associations
              WHERE resolution IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(t.as_str().to_string()));
+            push_type_predicate(&mut sql, &mut params_vec, t);
         }
         sql.push_str(" ORDER BY resolution ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1101,15 +1127,14 @@ impl MetadataStore {
     /// mixed period kinds have no numeric order, so text order is the stable
     /// choice. Only forecast rows carry an interval, so non-forecast types yield
     /// an empty list.
-    pub fn distinct_intervals(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn distinct_intervals(&self, ts_type: Option<RequestedType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT interval FROM time_series_associations
              WHERE interval IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(t.as_str().to_string()));
+            push_type_predicate(&mut sql, &mut params_vec, t);
         }
         sql.push_str(" ORDER BY interval ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1360,20 +1385,28 @@ impl MetadataStore {
     pub fn list_owner_ids(
         &self,
         category: OwnerCategory,
-        ts_type: Option<TimeSeriesType>,
+        ts_type: Option<RequestedType>,
         resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
-        let ts_type_str = ts_type.map(|t| t.as_str());
-        let res_iso = resolution.map(period_to_iso);
-        let mut stmt = self.conn.prepare(
+        let mut sql = String::from(
             "SELECT DISTINCT owner_id FROM time_series_associations
-             WHERE owner_category = ?1
-               AND (?2 IS NULL OR time_series_type = ?2)
-               AND (?3 IS NULL OR resolution = ?3)",
-        )?;
-        let rows = stmt.query_map(params![category.as_str(), ts_type_str, res_iso], |r| {
-            r.get::<_, i64>(0)
-        })?;
+             WHERE owner_category = ?",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(category.as_str().to_string())];
+        if let Some(t) = ts_type {
+            push_type_predicate(&mut sql, &mut params_vec, t);
+        }
+        if let Some(res) = resolution {
+            sql.push_str(" AND resolution = ?");
+            params_vec.push(Box::new(period_to_iso(res)));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |r| r.get::<_, i64>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }

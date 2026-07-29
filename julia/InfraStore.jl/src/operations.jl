@@ -502,16 +502,7 @@ function get_time_series(
         out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
     )::Cvoid
 
-    T = _julia_dtype(out_dtype[])
-    flat = collect(reinterpret(T, bytes))
-    nd = length(dims)
-    # Stored row-major → canonical column-major Julia layout (see get_array_nd).
-    data = if nd <= 1
-        flat
-    else
-        permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
-    end
-
+    data = _decode_array(bytes, out_dtype[], dims)
     initial = _from_unix_ms(out_initial[])
     resolution = _take_period(out_resolution[])
     ext = _take_cstr(out_ext[])
@@ -548,7 +539,7 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     @ccall lib_path().infrastore_buffer_free_u8(
         out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
     )::Cvoid
-    data = _decode_forecast_array(bytes, out_dtype[], dims)
+    data = _decode_array(bytes, out_dtype[], dims)
     return SingleTimeSeries(
         _from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name
     )
@@ -589,7 +580,7 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
     @ccall lib_path().infrastore_buffer_free_u8(
         out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
     )::Cvoid
-    data = _decode_forecast_array(bytes, out_dtype[], dims)
+    data = _decode_array(bytes, out_dtype[], dims)
     return NonSequentialTimeSeries(_from_unix_ms.(ts_ms), data, name)
 end
 
@@ -648,7 +639,7 @@ function _bulk_forecast(
     else
         Float64[]
     end
-    data = _decode_forecast_array(bytes, out_dtype[], dims)
+    data = _decode_array(bytes, out_dtype[], dims)
     initial = _from_unix_ms(out_initial[]);
     resolution = _take_period(out_res[])
     horizon = _take_period(out_horizon[]);
@@ -771,15 +762,7 @@ function get_time_series(
     @ccall lib_path().infrastore_buffer_free_u8(
         out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
     )::Cvoid
-    T = _julia_dtype(out_dtype[])
-    flat = collect(reinterpret(T, bytes))
-    nd = length(dims)
-    # Stored row-major → canonical column-major Julia layout (see get_array_nd).
-    data = if nd <= 1
-        flat
-    else
-        permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, nd)))
-    end
+    data = _decode_array(bytes, out_dtype[], dims)
     n = min(Int(out_lt_len[]), length(lt_buf))
     ext = n == 0 ? nothing : String(lt_buf[1:n])
     name = _key_name(key)

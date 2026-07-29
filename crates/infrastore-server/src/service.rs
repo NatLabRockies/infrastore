@@ -199,7 +199,9 @@ impl CatalogStoreSvc for CatalogStoreService {
             None => None,
         };
         let store = self.store.lock().await;
-        let durations = store.get_resolutions(ts_type).map_err(map_err)?;
+        let durations = store
+            .get_resolutions(ts_type.map(Into::into))
+            .map_err(map_err)?;
         Ok(Response::new(ResolutionsResp {
             resolution: durations.iter().map(|p| p.to_iso8601()).collect(),
         }))
@@ -379,7 +381,7 @@ impl CatalogStoreSvc for CatalogStoreService {
         let resolution = req.resolution.as_deref().map(parse_period).transpose()?;
         let store = self.store.lock().await;
         let ids = store
-            .list_owner_ids(category, ts_type, resolution)
+            .list_owner_ids(category, ts_type.map(Into::into), resolution)
             .map_err(map_err)?;
         Ok(Response::new(ListOwnerIdsResp { owner_id: ids }))
     }
@@ -398,7 +400,9 @@ impl CatalogStoreSvc for CatalogStoreService {
             None => None,
         };
         let store = self.store.lock().await;
-        let intervals = store.get_intervals(ts_type).map_err(map_err)?;
+        let intervals = store
+            .get_intervals(ts_type.map(Into::into))
+            .map_err(map_err)?;
         Ok(Response::new(IntervalsResp {
             interval: intervals.iter().map(|p| p.to_iso8601()).collect(),
         }))

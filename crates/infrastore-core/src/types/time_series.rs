@@ -72,7 +72,22 @@ pub enum RequestedType {
     AbstractDeterministic,
 }
 
+impl From<TimeSeriesType> for RequestedType {
+    fn from(t: TimeSeriesType) -> Self {
+        RequestedType::Concrete(t)
+    }
+}
+
 impl RequestedType {
+    /// The request's name: a concrete type's name, or `"AbstractDeterministic"`
+    /// for the family.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestedType::Concrete(t) => t.as_str(),
+            RequestedType::AbstractDeterministic => "AbstractDeterministic",
+        }
+    }
+
     /// Does the concrete stored type `concrete` satisfy this request?
     pub fn matches(self, concrete: TimeSeriesType) -> bool {
         match self {
@@ -186,7 +201,7 @@ impl Deterministic {
         name: impl Into<String>,
     ) -> Result<Self, String> {
         let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
-        validate_positive_periods(resolution, horizon, interval)?;
+        validate_forecast_periods(resolution, horizon, interval, count)?;
         let h = compute_h(horizon, resolution)?;
         // Derive element dims from trailing shape after [H, count].
         if data.shape.len() < 2 {
@@ -251,7 +266,7 @@ impl Probabilistic {
         name: impl Into<String>,
     ) -> Result<Self, String> {
         let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
-        validate_positive_periods(resolution, horizon, interval)?;
+        validate_forecast_periods(resolution, horizon, interval, count)?;
         if percentiles.is_empty() {
             return Err("Probabilistic: percentiles must be non-empty".to_string());
         }
@@ -322,7 +337,7 @@ impl Scenarios {
         name: impl Into<String>,
     ) -> Result<Self, String> {
         let (resolution, horizon, interval) = (resolution.into(), horizon.into(), interval.into());
-        validate_positive_periods(resolution, horizon, interval)?;
+        validate_forecast_periods(resolution, horizon, interval, count)?;
         let h = compute_h(horizon, resolution)?;
         let elem_dims: Vec<usize> = if data.shape.len() > 3 {
             data.shape[3..].to_vec()
@@ -363,11 +378,15 @@ pub(crate) fn compute_h(horizon: Period, resolution: Period) -> Result<usize, St
     resolution.divide_into(&horizon).map_err(|e| e.to_string())
 }
 
-/// Validate that resolution, horizon, and interval are all strictly positive.
-fn validate_positive_periods(
+/// Validate a forecast's periods: resolution and horizon must be strictly
+/// positive; interval must be strictly positive unless the forecast has a
+/// single window (`count == 1`), where a zero interval is meaningful — there
+/// is no second window to step to.
+fn validate_forecast_periods(
     resolution: Period,
     horizon: Period,
     interval: Period,
+    count: usize,
 ) -> Result<(), String> {
     let check = |p: Period, name: &str| {
         if !p.is_positive() {
@@ -378,7 +397,13 @@ fn validate_positive_periods(
     };
     check(resolution, "resolution")?;
     check(horizon, "horizon")?;
-    check(interval, "interval")?;
+    if !interval.is_positive() && !(count == 1 && interval.is_zero()) {
+        return Err(
+            "interval must be strictly positive (zero is allowed only for a single-window \
+             forecast)"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -589,30 +614,36 @@ mod tests {
     }
 
     #[test]
-    fn validate_positive_periods_rejects_zero_and_negative() {
+    fn validate_forecast_periods_rejects_zero_and_negative() {
         let ok = Period::Fixed(Duration::hours(1));
         let zero = Period::Fixed(Duration::zero());
         let neg = Period::Fixed(Duration::hours(-1));
 
-        assert!(validate_positive_periods(ok, ok, ok).is_ok());
-        for (r, h, i, which) in [
-            (zero, ok, ok, "resolution"),
-            (neg, ok, ok, "resolution"),
-            (ok, zero, ok, "horizon"),
-            (ok, neg, ok, "horizon"),
-            (ok, ok, zero, "interval"),
-            (ok, ok, neg, "interval"),
+        assert!(validate_forecast_periods(ok, ok, ok, 4).is_ok());
+        for (r, h, which) in [
+            (zero, ok, "resolution"),
+            (neg, ok, "resolution"),
+            (ok, zero, "horizon"),
+            (ok, neg, "horizon"),
         ] {
-            let err = validate_positive_periods(r, h, i).unwrap_err();
+            let err = validate_forecast_periods(r, h, ok, 4).unwrap_err();
             assert_eq!(err, format!("{which} must be strictly positive"));
         }
+        for bad_interval in [zero, neg] {
+            let err = validate_forecast_periods(ok, ok, bad_interval, 4).unwrap_err();
+            assert!(err.contains("interval must be strictly positive"), "{err}");
+        }
+        // A single-window forecast may carry a zero interval (there is no
+        // second window to step to) — but never a negative one.
+        assert!(validate_forecast_periods(ok, ok, zero, 1).is_ok());
+        assert!(validate_forecast_periods(ok, ok, neg, 1).is_err());
         // Calendar months follow the same rule.
         assert!(
-            validate_positive_periods(Period::Months(0), Period::Months(1), Period::Months(1))
+            validate_forecast_periods(Period::Months(0), Period::Months(1), Period::Months(1), 4)
                 .is_err()
         );
         assert!(
-            validate_positive_periods(Period::Months(-1), Period::Months(1), Period::Months(1))
+            validate_forecast_periods(Period::Months(-1), Period::Months(1), Period::Months(1), 4)
                 .is_err()
         );
     }
@@ -724,7 +755,37 @@ mod tests {
             "f",
         )
         .unwrap_err();
-        assert_eq!(err, "interval must be strictly positive");
+        assert!(err.contains("interval must be strictly positive"), "{err}");
+    }
+
+    #[test]
+    fn deterministic_accepts_zero_interval_for_a_single_window() {
+        // count == 1: there is no second window to step to, so a zero interval
+        // is the natural encoding (no interval-equals-horizon sentinel needed).
+        let d = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::zero(),
+            1,
+            arr(vec![2, 1]),
+            "f",
+        )
+        .unwrap();
+        assert!(d.interval.is_zero());
+
+        // count > 1 still requires a positive interval.
+        let err = Deterministic::new(
+            t0(),
+            Duration::hours(1),
+            Duration::hours(2),
+            Duration::zero(),
+            3,
+            arr(vec![2, 3]),
+            "f",
+        )
+        .unwrap_err();
+        assert!(err.contains("interval must be strictly positive"), "{err}");
     }
 
     // ---- Probabilistic::new ----------------------------------------------

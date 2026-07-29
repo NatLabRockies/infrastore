@@ -1238,7 +1238,7 @@ pub unsafe extern "C" fn infrastore_store_get_resolutions(
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1288,7 +1288,7 @@ pub unsafe extern "C" fn infrastore_store_get_intervals(
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1507,7 +1507,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
         }
     };
     let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -2037,7 +2037,7 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
         .owner_id(owner_id)
         .owner_category(category);
     if use_type {
-        let t = match time_series_type_from_int(ts_type) {
+        let t = match resolve_requested_type_from_int(ts_type) {
             Some(t) => t,
             None => {
                 set_error(format!("invalid time_series_type {ts_type}"));
@@ -4949,7 +4949,7 @@ unsafe fn build_list_filter(
         filter = filter.owner_category(category);
     }
     if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => filter = filter.time_series_type(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -6835,7 +6835,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
         set_error("out_reader is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let ts_type = match time_series_type_from_int(time_series_type) {
+    let ts_type = match requested_type_from_int(time_series_type) {
         Some(t) => t,
         None => {
             set_error(format!("invalid time_series_type {time_series_type}"));

@@ -42,6 +42,19 @@ function _row_major_bytes(arr::AbstractArray)
     return collect(reinterpret(UInt8, flat))
 end
 
+# Decode raw FFI bytes into a properly-shaped Julia array — the inverse of
+# `_row_major_bytes`. `dims` is in row-major order `[d0, d1, ...]`; the bytes
+# are reinterpreted as the dtype, reshaped with reversed dims, and the axes
+# permuted back to canonical column-major layout. Shared by every data-read
+# decode path (single, non-sequential, forecast, bulk).
+function _decode_array(bytes::Vector{UInt8}, dtype_code::Integer, dims::Vector{Int})
+    T = _julia_dtype(dtype_code)
+    flat = collect(reinterpret(T, bytes))
+    n = length(dims)
+    n <= 1 && return reshape(flat, dims...)
+    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, n)))
+end
+
 # `name` is a per-association attribute carried on the binding structs (matching
 # InfrastructureSystems.jl); it is not part of the deduplicated core data type.
 # `name` is required.
