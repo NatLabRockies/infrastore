@@ -53,7 +53,7 @@ pub const DEFAULT_COLS_PER_DATASET: usize = 1000;
 const MAX_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
 
 /// Bytes in one column's element block at a single timestep.
-fn element_block_bytes(dtype: Dtype, element_shape: &[usize]) -> usize {
+pub(crate) fn element_block_bytes(dtype: Dtype, element_shape: &[usize]) -> usize {
     element_shape.iter().product::<usize>() * dtype.size()
 }
 
@@ -61,7 +61,11 @@ fn element_block_bytes(dtype: Dtype, element_shape: &[usize]) -> usize {
 /// [`DEFAULT_COLS_PER_DATASET`] for un-managed writes) clamped to at least one
 /// column and to the [`MAX_CHUNK_BYTES`] budget, so a `(1, cols, *element_shape)`
 /// timestamp-row chunk stays bounded regardless of dtype or element shape.
-fn resolve_dataset_cols(requested: Option<usize>, dtype: Dtype, element_shape: &[usize]) -> usize {
+pub(crate) fn resolve_dataset_cols(
+    requested: Option<usize>,
+    dtype: Dtype,
+    element_shape: &[usize],
+) -> usize {
     let block = element_block_bytes(dtype, element_shape).max(1);
     let cap = (MAX_CHUNK_BYTES / block).max(1);
     requested.unwrap_or(DEFAULT_COLS_PER_DATASET).clamp(1, cap)
@@ -96,7 +100,7 @@ pub(crate) fn window_block_cols(dtype: Dtype, shape: &[usize], count_axis: usize
 /// The HDF5 chunk shape for a standalone array. `None` → one whole-array chunk
 /// (the historical layout, used for irregular series). `Some(axis)` → full on
 /// every axis except `axis`, which is blocked to [`window_block_cols`] windows.
-fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -> Vec<usize> {
+pub(crate) fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -> Vec<usize> {
     match window_axis {
         Some(axis) if axis < data.shape.len() && !data.shape.contains(&0) => {
             let cols = window_block_cols(data.dtype, &data.shape, axis);
@@ -110,12 +114,12 @@ fn standalone_chunks(data: &TypedArray, window_axis: Option<usize>) -> Vec<usize
     }
 }
 
-const ROOT_GROUP: &str = "time_series";
-const SINGLE_GROUP: &str = "single";
-const HASH_SUFFIX: &str = "_h";
-const STANDALONE_PREFIX: &str = "arr_";
+pub(crate) const ROOT_GROUP: &str = "time_series";
+pub(crate) const SINGLE_GROUP: &str = "single";
+pub(crate) const HASH_SUFFIX: &str = "_h";
+pub(crate) const STANDALONE_PREFIX: &str = "arr_";
 /// Global attribute recording the compression policy a store was created with.
-const COMPRESSION_ATTR: &str = "compression";
+pub(crate) const COMPRESSION_ATTR: &str = "compression";
 
 #[derive(Debug, Clone)]
 enum Location {
@@ -141,7 +145,7 @@ impl DatasetState {
     }
 }
 
-fn encode_shape(element_shape: &[usize]) -> String {
+pub(crate) fn encode_shape(element_shape: &[usize]) -> String {
     if element_shape.is_empty() {
         "s".to_string()
     } else {
@@ -153,7 +157,7 @@ fn encode_shape(element_shape: &[usize]) -> String {
     }
 }
 
-fn decode_shape(s: &str) -> Result<Vec<usize>> {
+pub(crate) fn decode_shape(s: &str) -> Result<Vec<usize>> {
     if s == "s" {
         return Ok(Vec::new());
     }
@@ -165,7 +169,7 @@ fn decode_shape(s: &str) -> Result<Vec<usize>> {
         .collect()
 }
 
-fn dataset_base_name(
+pub(crate) fn dataset_base_name(
     dtype: Dtype,
     element_shape: &[usize],
     length: usize,
@@ -182,7 +186,7 @@ fn dataset_base_name(
     )
 }
 
-fn spill_name(base: &str, n: usize) -> String {
+pub(crate) fn spill_name(base: &str, n: usize) -> String {
     if n == 0 {
         base.to_string()
     } else {
@@ -190,7 +194,7 @@ fn spill_name(base: &str, n: usize) -> String {
     }
 }
 
-fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, Period)> {
+pub(crate) fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, Period)> {
     let core = name.strip_prefix("sts_").ok_or_else(|| {
         TimeSeriesError::IntegrityError(format!("dataset {name} missing 'sts_' prefix"))
     })?;
@@ -212,7 +216,7 @@ fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, Period)> 
     Ok((dtype, element_shape, length, resolution))
 }
 
-fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
+pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
     if s.len() != 64 {
         return Err(TimeSeriesError::IntegrityError(format!(
             "hash hex string should be 64 chars, got {}",

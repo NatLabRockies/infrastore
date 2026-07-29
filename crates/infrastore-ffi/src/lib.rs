@@ -320,6 +320,75 @@ pub unsafe extern "C" fn infrastore_store_create_with_compression(
     INFRASTORE_OK
 }
 
+/// Create a store selecting the compression policy and the storage backend.
+///
+/// `compression_kind` is as in [`infrastore_store_create_with_compression`].
+/// `backend_kind` selects the on-disk backend: `0` = NetCDF (the default
+/// elsewhere), `1` = direct HDF5. Any other value is rejected. The backend is
+/// ignored for in-memory stores; `infrastore_store_open` detects the backend
+/// from the file, so only creation takes a choice.
+///
+/// # Safety
+///
+/// `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
+/// null-terminated UTF-8 string. The returned handle must be released exactly once with
+/// `infrastore_store_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_create_with_options(
+    path: *const c_char,
+    in_memory: bool,
+    compression_kind: u8,
+    deflate_level: u8,
+    shuffle: bool,
+    backend_kind: u8,
+    out: *mut *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let path = match unsafe { cstr_to_optional_path(path) } {
+        Ok(p) => p,
+        Err(code) => {
+            set_error("invalid path");
+            return code;
+        }
+    };
+    let compression = match compression_kind {
+        0 => core_lib::Compression::None,
+        1 => core_lib::Compression::Deflate {
+            level: deflate_level,
+            shuffle,
+        },
+        other => {
+            set_error(format!(
+                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let backend = match backend_kind {
+        0 => core_lib::BackendKind::NetCdf,
+        1 => core_lib::BackendKind::Hdf5,
+        other => {
+            set_error(format!(
+                "invalid backend_kind {other}, expected 0 (netcdf) or 1 (hdf5)"
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let store =
+        match core_lib::create_store_with_options(path.as_deref(), in_memory, compression, backend)
+        {
+            Ok(s) => s,
+            Err(e) => return map_core_error(e),
+        };
+    let handle = Box::new(InfraStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    INFRASTORE_OK
+}
+
 /// Open an existing time-series store and return an owning handle through `out`.
 ///
 /// # Safety

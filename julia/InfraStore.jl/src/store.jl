@@ -45,6 +45,11 @@ NetCDF file on disk.
 `:deflate` (default) applies DEFLATE at `compression_level` (0–9) with optional
 byte `shuffle`; `:none` disables compression. The setting is ignored for
 in-memory stores and is persisted so later appends reuse it.
+
+`backend` selects the on-disk storage backend: `:netcdf` (default) or `:hdf5`
+(spike; direct libhdf5, flat-cost forecast ingest). The default can be set via
+the `INFRASTORE_BACKEND` environment variable. `open_store` detects the backend
+from the file, so only creation takes a choice.
 """
 function Store(;
     in_memory::Bool=true,
@@ -52,6 +57,7 @@ function Store(;
     compression::Union{Symbol, AbstractString}=:deflate,
     compression_level::Integer=3,
     shuffle::Bool=true,
+    backend::Union{Symbol, AbstractString}=Symbol(get(ENV, "INFRASTORE_BACKEND", "netcdf")),
 )
     kind = Symbol(compression)
     compression_kind = if kind === :none
@@ -65,14 +71,27 @@ function Store(;
             ),
         )
     end
+    bkind = Symbol(backend)
+    backend_kind = if bkind === :netcdf
+        UInt8(0)
+    elseif bkind === :hdf5
+        UInt8(1)
+    else
+        throw(
+            ArgumentError(
+                "unknown backend $(repr(backend)), expected :netcdf or :hdf5"
+            ),
+        )
+    end
     out = Ref{Ptr{Cvoid}}(C_NULL)
     cpath = path === nothing ? C_NULL : String(path)
-    code = @ccall lib_path().infrastore_store_create_with_compression(
+    code = @ccall lib_path().infrastore_store_create_with_options(
         cpath::Cstring,
         in_memory::Bool,
         compression_kind::UInt8,
         UInt8(compression_level)::UInt8,
         shuffle::Bool,
+        backend_kind::UInt8,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)

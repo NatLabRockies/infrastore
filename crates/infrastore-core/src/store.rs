@@ -12,8 +12,8 @@ use crate::metadata::{
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
-    ArrayLayout, CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend,
-    StorageBackend,
+    ArrayLayout, BackendKind, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
+    MemoryBackend, NetCdfBackend, StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::key::{
@@ -248,6 +248,17 @@ impl Store {
         in_memory: bool,
         compression: Compression,
     ) -> Result<Self> {
+        Self::create_with_options(path, in_memory, compression, BackendKind::default())
+    }
+
+    /// Like [`Self::create_with_compression`], but also selects the on-disk
+    /// storage backend. `backend` is ignored for `in_memory` stores.
+    pub fn create_with_options(
+        path: Option<&Path>,
+        in_memory: bool,
+        compression: Compression,
+        backend: BackendKind,
+    ) -> Result<Self> {
         compression.validate()?;
         if in_memory {
             return Ok(Self {
@@ -263,9 +274,12 @@ impl Store {
         })?;
         let sqlite_path = catalog_sqlite_path(nc_path);
         let metadata = MetadataStore::open_path(&sqlite_path, false)?;
-        let backend = NetCdfBackend::create(nc_path, compression)?;
+        let backend: Box<dyn StorageBackend> = match backend {
+            BackendKind::NetCdf => Box::new(NetCdfBackend::create(nc_path, compression)?),
+            BackendKind::Hdf5 => Box::new(Hdf5Backend::create(nc_path, compression)?),
+        };
         Ok(Self {
-            backend: Box::new(backend),
+            backend,
             metadata,
             read_only: false,
             netcdf_path: Some(nc_path.to_path_buf()),
@@ -280,9 +294,11 @@ impl Store {
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
         // `Store::add_*` / `remove_*` guards.
-        let backend = NetCdfBackend::open(path, read_only)?;
+        // The backend that wrote the file is sniffed from its root attribute,
+        // so callers never choose on open.
+        let backend = open_backend(path, read_only)?;
         Ok(Self {
-            backend: Box::new(backend),
+            backend,
             metadata,
             read_only,
             netcdf_path: Some(path.to_path_buf()),
@@ -2334,7 +2350,9 @@ impl Store {
 
                 // Reopen before surfacing a copy failure, so a failed persist
                 // leaves the store usable instead of stranded on the placeholder.
-                self.backend = Box::new(NetCdfBackend::open(&src, self.read_only)?);
+                // Sniff the backend as in `Store::open` — the source may be
+                // either a netcdf- or hdf5-backend file.
+                self.backend = open_backend(&src, self.read_only)?;
                 copied?;
             }
             return Ok(());
@@ -2791,6 +2809,16 @@ fn forecast_key(
         interval,
         count,
     ))
+}
+
+/// Open the array backend for an existing store file, sniffing which backend
+/// wrote it from the file's root attribute (netcdf-written stores lack it).
+fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
+    Ok(if crate::storage::hdf5::is_hdf5_backend_file(path) {
+        Box::new(Hdf5Backend::open(path, read_only)?)
+    } else {
+        Box::new(NetCdfBackend::open(path, read_only)?)
+    })
 }
 
 fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {

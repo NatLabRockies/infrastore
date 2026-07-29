@@ -142,6 +142,29 @@ int32_t infrastore_store_create_with_compression(const char *path,
                                                  struct InfraStore **out);
 
 /**
+ * Create a store selecting the compression policy and the storage backend.
+ *
+ * `compression_kind` is as in [`infrastore_store_create_with_compression`].
+ * `backend_kind` selects the on-disk backend: `0` = NetCDF (the default
+ * elsewhere), `1` = direct HDF5. Any other value is rejected. The backend is
+ * ignored for in-memory stores; `infrastore_store_open` detects the backend
+ * from the file, so only creation takes a choice.
+ *
+ * # Safety
+ *
+ * `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
+ * null-terminated UTF-8 string. The returned handle must be released exactly once with
+ * `infrastore_store_free`.
+ */
+int32_t infrastore_store_create_with_options(const char *path,
+                                             bool in_memory,
+                                             uint8_t compression_kind,
+                                             uint8_t deflate_level,
+                                             bool shuffle,
+                                             uint8_t backend_kind,
+                                             struct InfraStore **out);
+
+/**
  * Open an existing time-series store and return an owning handle through `out`.
  *
  * # Safety

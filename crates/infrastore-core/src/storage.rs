@@ -10,14 +10,32 @@ use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::period::Period;
 
+pub mod hdf5;
 pub mod memory;
 pub mod netcdf;
 
 // The concrete backends and the trait seam are internal: the public surface is
 // `Store`, which owns a boxed backend. (The `netcdf` module stays `pub` so
 // white-box tests can reach `DEFAULT_COLS_PER_DATASET`.)
+pub(crate) use hdf5::Hdf5Backend;
 pub(crate) use memory::MemoryBackend;
 pub(crate) use netcdf::NetCdfBackend;
+
+/// Which on-disk storage backend a new store is created with.
+///
+/// Both write HDF5 files; they differ in the library driving the writes and in
+/// layout details, and are not mutually readable. [`crate::Store::open`]
+/// detects the backend from the file, so readers never need to choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendKind {
+    /// NetCDF4 via netcdf-c (the historical default).
+    #[default]
+    NetCdf,
+    /// Direct HDF5 via libhdf5 (spike): flat-cost standalone-array creation
+    /// (no netcdf-c define-mode whole-file sync), compact layout for small
+    /// arrays.
+    Hdf5,
+}
 
 /// Compression filter applied to NetCDF4 data variables when they are created.
 ///

@@ -26,7 +26,7 @@ pub use metadata::{
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
 };
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
-pub use storage::{CompactionReport, Compression, IntegrityReport};
+pub use storage::{BackendKind, CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
     TimeSeriesCounts, TimeSeriesCountsDetailed,
@@ -68,6 +68,18 @@ pub fn create_store_with_compression(
     compression: Compression,
 ) -> Result<Store> {
     Store::create_with_compression(path, in_memory, compression)
+}
+
+/// Create a new store selecting both the compression policy and the on-disk
+/// storage backend (both ignored for `in_memory` stores). [`open_store`]
+/// detects the backend from the file, so only creation takes a choice.
+pub fn create_store_with_options(
+    path: Option<&std::path::Path>,
+    in_memory: bool,
+    compression: Compression,
+    backend: BackendKind,
+) -> Result<Store> {
+    Store::create_with_options(path, in_memory, compression, backend)
 }
 
 /// Open an existing store from disk.
