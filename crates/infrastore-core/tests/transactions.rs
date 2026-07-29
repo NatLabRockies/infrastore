@@ -66,7 +66,7 @@ fn each_backend(body: impl Fn(&mut Store, &str)) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.nc");
         let mut store = create_store(Some(path.as_path()), false).unwrap();
-        body(&mut store, "netcdf");
+        body(&mut store, "disk");
     }
 }
 

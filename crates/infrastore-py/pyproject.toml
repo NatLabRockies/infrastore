@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
 authors = [{ name = "Daniel Thom", email = "daniel.thom@nlr.gov" }]
-keywords = ["time-series", "netcdf", "hdf5", "energy", "simulation"]
+keywords = ["time-series", "hdf5", "energy", "simulation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -40,11 +40,11 @@ features = ["pyo3/extension-module"]
 module-name = "infrastore"
 
 # cibuildwheel builds one abi3 wheel per platform (the crate targets abi3-py311).
-# The cdylib statically links netcdf-c + HDF5 + zlib, built from vendored sources
-# by infrastore's default `vendored` feature, so the build environment needs no
-# system NetCDF/HDF5 -- only a Rust toolchain, cmake, and a C compiler. Never set
-# HDF5_DIR or NETCDF_DIR here: they redirect the vendored netcdf-c build at an
-# external HDF5 while still requesting static libraries, which fails.
+# The cdylib statically links HDF5 + zlib, built from vendored sources by
+# infrastore's default `vendored` feature, so the build environment needs no
+# system HDF5 -- only a Rust toolchain, cmake, and a C compiler. Never set
+# HDF5_DIR here: it redirects the vendored build at an external HDF5 while
+# still requesting static libraries, which fails.
 [tool.cibuildwheel]
 build = "cp311-*"
 # 32-bit Windows (win32) is skipped: the abi3 wheel targets x64 only.

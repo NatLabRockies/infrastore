@@ -3,14 +3,14 @@
 Julia bindings for [infrastore](https://github.com/NatLabRockies/infrastore) — time-series storage
 for power-systems and energy simulations.
 
-Numerical arrays are persisted in NetCDF4; the metadata associating each array with its owning
+Numerical arrays are persisted in HDF5; the metadata associating each array with its owning
 component lives in SQLite. Identical arrays are stored once and shared through content addressing.
 
 The package wraps the `libinfrastore_ffi` C ABI, distributed as `InfraStore_jll`. The binary
-statically links its own pinned NetCDF/HDF5 (no `NetCDF_jll` / `HDF5_jll` dependency, no MPI); its
-symbols are not exported, so it coexists with HDF5.jl's `libhdf5` in the same process. Opening a
-live store's `.nc` file directly with HDF5.jl or NCDatasets.jl is not supported — access the store
-through this package.
+statically links its own pinned HDF5 (no `HDF5_jll` dependency, no MPI); its symbols are not
+exported, so it coexists with HDF5.jl's `libhdf5` in the same process. Opening a live store's `.nc`
+file directly with HDF5.jl or NCDatasets.jl is not supported — access the store through this
+package.
 
 ## Install
 

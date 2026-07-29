@@ -666,7 +666,7 @@ end
 """
     get_path(store) -> Union{Nothing,String}
 
-Return the filesystem path backing the store's NetCDF file, or `nothing` for an
+Return the filesystem path backing the store's HDF5 array file, or `nothing` for an
 in-memory store.
 """
 function get_path(store::Store)
@@ -691,7 +691,7 @@ end
 Recompute each stored array's content hash and return how many disagree with the
 hash recorded alongside them. `0` means every array checked out.
 
-Checks the NetCDF half of the store only — the SQLite catalog is not inspected,
+Checks the HDF5 half of the store only — the SQLite catalog is not inspected,
 so `0` does not mean the store as a whole is sound. A catalog that is corrupted,
 truncated, or paired with the wrong `.nc` file still returns `0`, while every read
 of the affected series throws. For catalog-side checks use
@@ -718,7 +718,7 @@ end
 """
     flush!(store)
 
-Flush pending writes (NetCDF arrays + SQLite metadata) to disk. After this the
+Flush pending writes (HDF5 arrays + SQLite metadata) to disk. After this the
 on-disk `<path>.nc` and `<path>.sqlite` artifacts can be copied for persistence.
 """
 function flush!(store::Store)
@@ -728,7 +728,7 @@ end
 """
     persist!(store, path)
 
-Persist the store to `path` (NetCDF) and `\$path.sqlite` (metadata), materializing
+Persist the store to `path` (HDF5 arrays) and `\$path.sqlite` (metadata), materializing
 an in-memory store to disk. Existing target files are overwritten.
 """
 function persist!(store::Store, path::AbstractString)

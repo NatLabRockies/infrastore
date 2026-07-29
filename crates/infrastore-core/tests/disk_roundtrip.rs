@@ -1,6 +1,6 @@
-//! NetCDF persistence integration tests.
+//! On-disk (HDF5) persistence integration tests.
 //!
-//! These exercise the on-disk format and slot map: write to a real `.nc` file,
+//! These exercise the on-disk format and slot map: write to a real store file,
 //! close, reopen, and verify what comes back. Also covers the spill-on-1001
 //! and compaction tombstone behaviours documented in the spec.
 
@@ -60,7 +60,7 @@ fn persistent_round_trip() {
 }
 
 /// Persisting an *on-disk* store copies both halves and leaves the source store
-/// usable. `persist_to` has to close its NetCDF handle around the copy — HDF5
+/// usable. `persist_to` has to close its HDF5 handle around the copy — HDF5
 /// keeps a byte-range lock on an open file, which makes the copy fail on Windows
 /// with ERROR_LOCK_VIOLATION — so this also covers the reopen after that swap.
 #[test]
@@ -343,7 +343,7 @@ fn compression_policies_round_trip() {
 
 /// A read-only open must not require write permission on either artifact:
 /// stores on read-only media (or shared, permission-locked deployments) must
-/// still be readable. Regression test: the NetCDF side used to open in append
+/// still be readable. Regression test: the array side used to open in append
 /// mode regardless of `read_only`, which failed on write-protected files.
 #[test]
 fn read_only_open_works_on_write_protected_files() {
@@ -494,7 +494,7 @@ fn multiple_resolutions_separate_datasets() {
 }
 
 #[test]
-fn time_range_slicing_through_netcdf() {
+fn time_range_slicing_through_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
 
@@ -539,7 +539,7 @@ fn time_range_slicing_through_netcdf() {
 
 #[test]
 fn spill_into_new_dataset_past_capacity() {
-    use infrastore_core::storage::netcdf::DEFAULT_COLS_PER_DATASET;
+    use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
@@ -847,18 +847,18 @@ fn data_format_version_is_recorded() {
     {
         let _ = create_store(Some(path.as_path()), false).unwrap();
     }
-    // Open the file with the netcdf crate directly to read the attribute.
-    let f = netcdf::open(&path).unwrap();
-    let attr = f.attribute("data_format_version").expect("attr present");
-    let value = attr.value().unwrap();
-    let netcdf::AttributeValue::Str(s) = value else {
-        panic!("expected str, got {value:?}");
-    };
-    assert_eq!(s, infrastore_core::DATA_FORMAT_VERSION);
+    // Open the file with hdf5-metno directly to read the attribute.
+    let f = hdf5_metno::File::open(&path).unwrap();
+    let s = f
+        .attr("data_format_version")
+        .expect("attr present")
+        .read_scalar::<hdf5_metno::types::VarLenUnicode>()
+        .unwrap();
+    assert_eq!(s.as_str(), infrastore_core::DATA_FORMAT_VERSION);
 }
 
 #[test]
-fn netcdf_roundtrips_multidim_element_tuples() {
+fn disk_roundtrips_multidim_element_tuples() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
 
@@ -970,10 +970,7 @@ fn opening_a_store_from_an_older_format_is_rejected() {
 
     // Backdate the recorded format version in place, simulating a store written
     // by an older build.
-    {
-        let mut f = netcdf::append(&path).unwrap();
-        f.add_attribute("data_format_version", "0.9.0").unwrap();
-    }
+    set_format_attr(&path, "0.9.0");
 
     let Err(err) = open_store(path.as_path(), true) else {
         panic!("expected an older-format store to be rejected");
@@ -1021,18 +1018,27 @@ fn sqlite_path_of(nc: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(p)
 }
 
-/// The name of the packed data variable (not its `_h` companion, not a
+/// The name of the packed data dataset (not its `_h` companion, not a
 /// standalone `arr_*`) inside the `time_series/single` group of a store file.
 fn packed_data_variable(path: &std::path::Path) -> String {
-    let f = netcdf::open(path).unwrap();
-    // `File::group` returns `Result<Option<_>>`; `Group::group` returns `Option<_>`.
-    let ts = f.group("time_series").unwrap().expect("time_series group");
-    let single = ts.group("single").expect("single group");
+    let f = hdf5_metno::File::open(path).unwrap();
+    let single = f.group("time_series/single").expect("single group");
     single
-        .variables()
-        .map(|v| v.name())
+        .member_names()
+        .unwrap()
+        .into_iter()
         .find(|n| !n.ends_with("_h") && !n.starts_with("arr_"))
-        .expect("a packed data variable exists")
+        .expect("a packed data dataset exists")
+}
+
+/// Overwrite the store's recorded `data_format_version` root attribute.
+fn set_format_attr(path: &std::path::Path, value: &str) {
+    use std::str::FromStr;
+    let f = hdf5_metno::File::open_rw(path).unwrap();
+    f.attr("data_format_version")
+        .expect("attr present")
+        .write_scalar(&hdf5_metno::types::VarLenUnicode::from_str(value).unwrap())
+        .unwrap();
 }
 
 #[test]
@@ -1046,15 +1052,14 @@ fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
     let dataset = packed_data_variable(&path);
 
     {
-        let mut f = netcdf::append(&path).unwrap();
-        let mut ts = f
-            .group_mut("time_series")
-            .unwrap()
-            .expect("time_series group");
-        let mut single = ts.group_mut("single").expect("single group");
-        let mut var = single.variable_mut(&dataset).expect("data variable");
-        // Flip row 0, column 0 to a value the recorded hash does not describe.
-        var.put_value(-999.5f64, [0, 0]).unwrap();
+        let f = hdf5_metno::File::open_rw(&path).unwrap();
+        let single = f.group("time_series/single").expect("single group");
+        let ds = single.dataset(&dataset).expect("data dataset");
+        // Flip the first stored element to a value the recorded hash does not
+        // describe.
+        let mut vals = ds.read_raw::<f64>().unwrap();
+        vals[0] = -999.5;
+        ds.write_raw(&vals).unwrap();
     }
 
     let store = open_store(path.as_path(), true).unwrap();
@@ -1074,7 +1079,7 @@ fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
 #[test]
 fn verify_integrity_does_not_inspect_the_sqlite_catalog() {
     // FINDING F3 (TEST_COVERAGE_PLAN.md §9): `Store::verify_integrity`
-    // delegates straight to the NetCDF backend, which walks only its own
+    // delegates straight to the storage backend, which walks only its own
     // hash index. A `data_hash` corrupted in the SQLite catalog — the half that
     // maps a key to an array — is therefore NOT reported, even though every
     // read of that key now fails or returns the wrong array. Pinned as-is; the
@@ -1151,7 +1156,7 @@ fn opening_a_store_whose_sqlite_half_is_missing_read_only_errors() {
 }
 
 #[test]
-fn opening_a_zero_byte_netcdf_file_is_rejected() {
+fn opening_a_zero_byte_file_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
     std::fs::write(&path, b"").unwrap();
@@ -1159,8 +1164,8 @@ fn opening_a_zero_byte_netcdf_file_is_rejected() {
     let Err(err) = open_store(path.as_path(), true) else {
         panic!("a zero-byte file is not a store");
     };
-    // It is not a NetCDF file at all, so the failure comes from the HDF5 open,
-    // not from the format-version check.
+    // It is not an HDF5 file at all, so the failure comes from the backend
+    // check, not from the format-version check.
     assert!(
         !matches!(err, TimeSeriesError::IncompatibleFormat { .. }),
         "expected an open failure, got {err:?}"
@@ -1169,7 +1174,7 @@ fn opening_a_zero_byte_netcdf_file_is_rejected() {
 }
 
 #[test]
-fn opening_a_truncated_netcdf_file_is_rejected() {
+fn opening_a_truncated_file_is_rejected() {
     // A file with a plausible prefix but no valid trailer.
     let (_dir, path, _key) = store_on_disk();
     let bytes = std::fs::read(&path).unwrap();
@@ -1208,10 +1213,7 @@ fn opening_a_store_from_a_newer_format_is_rejected() {
     // by a *newer* build is just as unreadable as an older one, and must say so
     // rather than being parsed hopefully.
     let (_dir, path, _key) = store_on_disk();
-    {
-        let mut f = netcdf::append(&path).unwrap();
-        f.add_attribute("data_format_version", "99.0.0").unwrap();
-    }
+    set_format_attr(&path, "99.0.0");
 
     let Err(err) = open_store(path.as_path(), true) else {
         panic!("expected a newer-format store to be rejected");
@@ -1228,13 +1230,21 @@ fn opening_a_store_from_a_newer_format_is_rejected() {
 #[test]
 fn opening_a_store_with_no_format_attribute_is_rejected_as_unspecified() {
     // A file that predates the attribute entirely reports `found:
-    // "unspecified"`. Build one from scratch with the netcdf crate: a store
-    // created by this build always carries the attribute, and the crate has no
-    // attribute-removal API.
+    // "unspecified"`. Build one from scratch with hdf5-metno: a store created
+    // by this build always carries the attribute. The `storage_backend`
+    // attribute is still required, or the file is rejected as not a store at
+    // all before the format check.
+    use std::str::FromStr;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.nc");
     {
-        let _f = netcdf::create(&path).unwrap();
+        let f = hdf5_metno::File::create(&path).unwrap();
+        let attr = f
+            .new_attr::<hdf5_metno::types::VarLenUnicode>()
+            .create("storage_backend")
+            .unwrap();
+        attr.write_scalar(&hdf5_metno::types::VarLenUnicode::from_str("hdf5").unwrap())
+            .unwrap();
     }
 
     // Opened read-write so the companion catalog is created; a read-only open
@@ -1260,10 +1270,7 @@ fn the_catalog_half_is_opened_before_the_format_check() {
     // a bug report: a `Sqlite(CannotOpen)` does not rule out a version
     // mismatch underneath it.
     let (_dir, path, _key) = store_on_disk();
-    {
-        let mut f = netcdf::append(&path).unwrap();
-        f.add_attribute("data_format_version", "99.0.0").unwrap();
-    }
+    set_format_attr(&path, "99.0.0");
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
     let Err(err) = open_store(path.as_path(), true) else {

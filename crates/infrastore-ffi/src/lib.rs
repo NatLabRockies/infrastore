@@ -263,7 +263,7 @@ pub unsafe extern "C" fn infrastore_store_create(
     INFRASTORE_OK
 }
 
-/// Create a store with an explicit NetCDF compression policy.
+/// Create a store with an explicit compression policy.
 ///
 /// `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
 /// DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
@@ -312,75 +312,6 @@ pub unsafe extern "C" fn infrastore_store_create_with_compression(
     };
     let store =
         match core_lib::create_store_with_compression(path.as_deref(), in_memory, compression) {
-            Ok(s) => s,
-            Err(e) => return map_core_error(e),
-        };
-    let handle = Box::new(InfraStoreHandle { inner: store });
-    unsafe { *out = Box::into_raw(handle) };
-    INFRASTORE_OK
-}
-
-/// Create a store selecting the compression policy and the storage backend.
-///
-/// `compression_kind` is as in [`infrastore_store_create_with_compression`].
-/// `backend_kind` selects the on-disk backend: `0` = NetCDF (the default
-/// elsewhere), `1` = direct HDF5. Any other value is rejected. The backend is
-/// ignored for in-memory stores; `infrastore_store_open` detects the backend
-/// from the file, so only creation takes a choice.
-///
-/// # Safety
-///
-/// `out` must be valid for writing one pointer. When non-null, `path` must point to a valid,
-/// null-terminated UTF-8 string. The returned handle must be released exactly once with
-/// `infrastore_store_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_create_with_options(
-    path: *const c_char,
-    in_memory: bool,
-    compression_kind: u8,
-    deflate_level: u8,
-    shuffle: bool,
-    backend_kind: u8,
-    out: *mut *mut InfraStoreHandle,
-) -> i32 {
-    clear_error();
-    if out.is_null() {
-        set_error("out pointer is null");
-        return INFRASTORE_ERR_NULL_POINTER;
-    }
-    let path = match unsafe { cstr_to_optional_path(path) } {
-        Ok(p) => p,
-        Err(code) => {
-            set_error("invalid path");
-            return code;
-        }
-    };
-    let compression = match compression_kind {
-        0 => core_lib::Compression::None,
-        1 => core_lib::Compression::Deflate {
-            level: deflate_level,
-            shuffle,
-        },
-        other => {
-            set_error(format!(
-                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let backend = match backend_kind {
-        0 => core_lib::BackendKind::NetCdf,
-        1 => core_lib::BackendKind::Hdf5,
-        other => {
-            set_error(format!(
-                "invalid backend_kind {other}, expected 0 (netcdf) or 1 (hdf5)"
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
-    };
-    let store =
-        match core_lib::create_store_with_options(path.as_deref(), in_memory, compression, backend)
-        {
             Ok(s) => s,
             Err(e) => return map_core_error(e),
         };
@@ -1399,7 +1330,7 @@ pub unsafe extern "C" fn infrastore_store_read_only(
     INFRASTORE_OK
 }
 
-/// Write the store's backing NetCDF path into `buf` (probe-then-fetch: call with a
+/// Write the store's backing HDF5 file path into `buf` (probe-then-fetch: call with a
 /// null `buf` to learn `*out_len`, then again with a buffer of that size). An
 /// in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.
 ///
@@ -1421,7 +1352,7 @@ pub unsafe extern "C" fn infrastore_store_get_path(
         set_error("out_has_path or out_len is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    match store.inner.netcdf_path() {
+    match store.inner.file_path() {
         Some(path) => {
             unsafe { *out_has_path = true };
             unsafe { write_str_out(&path.to_string_lossy(), buf, cap, out_len) };
@@ -1766,9 +1697,9 @@ pub unsafe extern "C" fn infrastore_store_get_compression(
 /// Recompute each stored array's content hash and report how many disagree with
 /// the hash recorded alongside them through `out_error_count`.
 ///
-/// Covers the NetCDF half of the store only: the SQLite catalog is not inspected,
+/// Covers the HDF5 half of the store only: the SQLite catalog is not inspected,
 /// so a zero count does not mean the store as a whole is sound. A catalog that is
-/// corrupted, truncated, or paired with the wrong NetCDF file still reports zero,
+/// corrupted, truncated, or paired with the wrong HDF5 file still reports zero,
 /// while every read of the affected series fails.
 ///
 /// # Safety
@@ -1914,7 +1845,7 @@ pub unsafe extern "C" fn infrastore_store_flush(handle: *mut InfraStoreHandle) -
     }
 }
 
-/// Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+/// Persist the store's data to `path` (HDF5 arrays) and `<path>.sqlite` (metadata),
 /// materializing in-memory stores to disk. Existing target files are overwritten.
 ///
 /// # Safety

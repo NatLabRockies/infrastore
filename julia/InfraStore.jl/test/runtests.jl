@@ -2159,9 +2159,9 @@ end
         # "it throws".
         @test_throws InfraStore.TimeSeriesException open_store(missing_path; read_only=true)
 
-        # A file that is not a NetCDF store at all.
+        # A file that is not an HDF5 store at all.
         junk = joinpath(dir, "junk.nc")
-        write(junk, "not a netcdf file")
+        write(junk, "not an hdf5 file")
         @test_throws InfraStore.TimeSeriesException open_store(junk; read_only=true)
 
         # A directory is not a store either.

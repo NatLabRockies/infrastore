@@ -1063,14 +1063,14 @@ fn replace_owner_is_rejected_on_a_read_only_store() {
     ));
 }
 
-// ---- read_only() / netcdf_path() across all three store states ------------
+// ---- read_only() / file_path() across all three store states --------------
 
 #[test]
 fn read_only_and_path_accessors_report_each_store_state() {
     // 1. In-memory: writable, no path.
     let mem = create_store(None, true).unwrap();
     assert!(!mem.read_only());
-    assert_eq!(mem.netcdf_path(), None);
+    assert_eq!(mem.file_path(), None);
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.nc");
@@ -1079,7 +1079,7 @@ fn read_only_and_path_accessors_report_each_store_state() {
     {
         let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
         assert!(!store.read_only());
-        assert_eq!(store.netcdf_path(), Some(path.as_path()));
+        assert_eq!(store.file_path(), Some(path.as_path()));
         add_sts(&mut store, 1, "load", 10.0);
         store.flush().unwrap();
     }
@@ -1087,12 +1087,12 @@ fn read_only_and_path_accessors_report_each_store_state() {
     // 3. Reopened read-write, then read-only.
     let rw = infrastore_core::open_store(path.as_path(), false).unwrap();
     assert!(!rw.read_only());
-    assert_eq!(rw.netcdf_path(), Some(path.as_path()));
+    assert_eq!(rw.file_path(), Some(path.as_path()));
     drop(rw);
 
     let ro = infrastore_core::open_store(path.as_path(), true).unwrap();
     assert!(ro.read_only());
-    assert_eq!(ro.netcdf_path(), Some(path.as_path()));
+    assert_eq!(ro.file_path(), Some(path.as_path()));
 }
 
 #[test]

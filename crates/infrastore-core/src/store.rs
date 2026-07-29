@@ -12,8 +12,8 @@ use crate::metadata::{
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
-    ArrayLayout, BackendKind, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
-    MemoryBackend, NetCdfBackend, StorageBackend,
+    ArrayLayout, CompactionReport, Compression, Hdf5Backend, IntegrityReport, MemoryBackend,
+    StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::key::{
@@ -197,7 +197,7 @@ pub struct ForecastParameters {
 /// Bookkeeping for an open cross-operation transaction (see
 /// [`Store::begin_transaction`]).
 ///
-/// The SQLite half rolls back on its own; this tracks the NetCDF half, which has
+/// The SQLite half rolls back on its own; this tracks the HDF5 half, which has
 /// no transaction of its own to enlist. The trick is that the array store is
 /// content-addressed, so it can be made **append-only for the transaction's
 /// duration**: writes are recorded here and undone on rollback, and frees are
@@ -223,15 +223,15 @@ pub struct Store {
     backend: Box<dyn StorageBackend>,
     metadata: MetadataStore,
     read_only: bool,
-    /// Filesystem path for the NetCDF file (None if `in_memory`).
-    netcdf_path: Option<PathBuf>,
+    /// Filesystem path for the HDF5 array file (None if `in_memory`).
+    file_path: Option<PathBuf>,
     /// `Some` while a cross-operation transaction is open.
     txn: Option<OpenTxn>,
 }
 
 impl Store {
     /// Create a new store. With `in_memory=true`, no filesystem I/O occurs;
-    /// otherwise a NetCDF4 file is created at `path` and a catalog SQLite
+    /// otherwise an HDF5 file is created at `path` and a catalog SQLite
     /// file at `<path>.sqlite` holds metadata.
     ///
     /// Uses the default compression policy ([`Compression::default`]). Use
@@ -240,7 +240,7 @@ impl Store {
         Self::create_with_compression(path, in_memory, Compression::default())
     }
 
-    /// Like [`Self::create`], but applies `compression` to NetCDF data
+    /// Like [`Self::create`], but applies `compression` to HDF5 data
     /// variables. The setting is persisted with the store so later appends
     /// reuse it. It is ignored for `in_memory` stores, which never touch disk.
     pub fn create_with_compression(
@@ -248,41 +248,26 @@ impl Store {
         in_memory: bool,
         compression: Compression,
     ) -> Result<Self> {
-        Self::create_with_options(path, in_memory, compression, BackendKind::default())
-    }
-
-    /// Like [`Self::create_with_compression`], but also selects the on-disk
-    /// storage backend. `backend` is ignored for `in_memory` stores.
-    pub fn create_with_options(
-        path: Option<&Path>,
-        in_memory: bool,
-        compression: Compression,
-        backend: BackendKind,
-    ) -> Result<Self> {
         compression.validate()?;
         if in_memory {
             return Ok(Self {
                 backend: Box::new(MemoryBackend::new()),
                 metadata: MetadataStore::open_in_memory()?,
                 read_only: false,
-                netcdf_path: None,
+                file_path: None,
                 txn: None,
             });
         }
-        let nc_path = path.ok_or_else(|| {
+        let file_path = path.ok_or_else(|| {
             TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
         })?;
-        let sqlite_path = catalog_sqlite_path(nc_path);
+        let sqlite_path = catalog_sqlite_path(file_path);
         let metadata = MetadataStore::open_path(&sqlite_path, false)?;
-        let backend: Box<dyn StorageBackend> = match backend {
-            BackendKind::NetCdf => Box::new(NetCdfBackend::create(nc_path, compression)?),
-            BackendKind::Hdf5 => Box::new(Hdf5Backend::create(nc_path, compression)?),
-        };
         Ok(Self {
-            backend,
+            backend: Box::new(Hdf5Backend::create(file_path, compression)?),
             metadata,
             read_only: false,
-            netcdf_path: Some(nc_path.to_path_buf()),
+            file_path: Some(file_path.to_path_buf()),
             txn: None,
         })
     }
@@ -290,18 +275,16 @@ impl Store {
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
         let metadata = MetadataStore::open_path(&sqlite_path, read_only)?;
-        // A read-only store opens both halves read-only: the NetCDF side needs
+        // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
         // `Store::add_*` / `remove_*` guards.
-        // The backend that wrote the file is sniffed from its root attribute,
-        // so callers never choose on open.
         let backend = open_backend(path, read_only)?;
         Ok(Self {
             backend,
             metadata,
             read_only,
-            netcdf_path: Some(path.to_path_buf()),
+            file_path: Some(path.to_path_buf()),
             txn: None,
         })
     }
@@ -325,13 +308,13 @@ impl Store {
     ///
     /// Every mutating entry point is already atomic on its own; this composes
     /// several of them into one unit. It does *not* replace [`Self::bulk_add`] —
-    /// batching is still what buys block-sized NetCDF writes and feature-set
+    /// batching is still what buys block-sized HDF5 writes and feature-set
     /// dedup, and a loop of single adds under a transaction gets neither. Open a
     /// transaction when you need several *operations* to be atomic together, and
     /// keep using a bulk add for each one.
     ///
     /// Both halves of the artifact roll back, by different means. SQLite rolls
-    /// back its own statements. The NetCDF side, which has no transaction to
+    /// back its own statements. The HDF5 side, which has no transaction to
     /// enlist, is instead made append-only for the duration: arrays written here
     /// are removed on rollback, and arrays that removals leave unreferenced are
     /// not freed until the outermost commit — so a rollback restores catalog rows
@@ -490,10 +473,10 @@ impl Store {
         self.backend.compression()
     }
 
-    /// The filesystem path backing this store's NetCDF file, or `None` for an
-    /// in-memory store.
-    pub fn netcdf_path(&self) -> Option<&Path> {
-        self.netcdf_path.as_deref()
+    /// The filesystem path backing this store's HDF5 array file, or `None`
+    /// for an in-memory store.
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is
@@ -2260,7 +2243,7 @@ impl Store {
     }
 
     /// Reclaim space in both halves of the artifact: reusable packed slots and
-    /// unreachable arrays in the NetCDF file, and feature sets in the SQLite
+    /// unreachable arrays in the HDF5 file, and feature sets in the SQLite
     /// catalog that no association references any more.
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
@@ -2286,15 +2269,15 @@ impl Store {
     ///
     /// # Scope: the array half only
     ///
-    /// A persisted store is two artifacts — the NetCDF file and its companion
+    /// A persisted store is two artifacts — the HDF5 file and its companion
     /// `<path>.sqlite` catalog — but this checks only the first. It reads each
-    /// array the NetCDF side knows about, rehashes it, and compares. It does
+    /// array the HDF5 side knows about, rehashes it, and compares. It does
     /// **not** open, parse, or cross-reference the catalog, so an empty report is
     /// not a statement that the store as a whole is sound. In particular these
     /// are all invisible to it:
     ///
     /// - a `data_hash` in the catalog that names no stored array (a truncated or
-    ///   corrupted catalog, or a catalog paired with the wrong NetCDF file) —
+    ///   corrupted catalog, or a catalog paired with the wrong HDF5 file) —
     ///   every read of the affected key fails, but this reports no error;
     /// - a catalog row whose `dtype`, `element_shape`, or `length` misdescribes
     ///   the array it points at;
@@ -2320,7 +2303,7 @@ impl Store {
         self.backend.flush()
     }
 
-    /// Persist this store's data to `path` (the NetCDF arrays) and its companion
+    /// Persist this store's data to `path` (the HDF5 arrays) and its companion
     /// `<path>.sqlite` (the metadata). Works for both on-disk stores (copies the
     /// two artifacts) and in-memory stores (materializes arrays + metadata to
     /// disk). Existing target files are overwritten.
@@ -2332,12 +2315,12 @@ impl Store {
         self.flush()?;
         let sqlite_path = catalog_sqlite_path(path);
 
-        if let Some(src) = self.netcdf_path.clone() {
+        if let Some(src) = self.file_path.clone() {
             if src != path {
                 // HDF5 keeps a byte-range lock on an open file. On Windows that
                 // makes `fs::copy` (CopyFileEx) fail with ERROR_LOCK_VIOLATION
                 // ("another process has locked a portion of the file"), so drop
-                // the NetCDF handle for the duration of the copy and reopen it
+                // the HDF5 handle for the duration of the copy and reopen it
                 // afterwards. The placeholder backend is never observed: nothing
                 // else runs between the swap and the reopen.
                 drop(std::mem::replace(
@@ -2350,8 +2333,6 @@ impl Store {
 
                 // Reopen before surfacing a copy failure, so a failed persist
                 // leaves the store usable instead of stranded on the placeholder.
-                // Sniff the backend as in `Store::open` — the source may be
-                // either a netcdf- or hdf5-backend file.
                 self.backend = open_backend(&src, self.read_only)?;
                 copied?;
             }
@@ -2363,7 +2344,7 @@ impl Store {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(&sqlite_path);
         {
-            let mut nc = NetCdfBackend::create(path, self.compression())?;
+            let mut nc = Hdf5Backend::create(path, self.compression())?;
             // Plan each distinct array's layout before writing: packed is only
             // valid for arrays that every referencing association reads as a
             // series along axis 0 (SingleTimeSeries and its derived DST views).
@@ -2811,14 +2792,20 @@ fn forecast_key(
     ))
 }
 
-/// Open the array backend for an existing store file, sniffing which backend
-/// wrote it from the file's root attribute (netcdf-written stores lack it).
+/// Open the array backend for an existing store file. The `storage_backend`
+/// root attribute identifies files written by [`Hdf5Backend`]; files without it
+/// (including stores written by the removed netcdf backend) are rejected with
+/// an actionable error instead of being misread.
 fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
-    Ok(if crate::storage::hdf5::is_hdf5_backend_file(path) {
-        Box::new(Hdf5Backend::open(path, read_only)?)
-    } else {
-        Box::new(NetCdfBackend::open(path, read_only)?)
-    })
+    if !crate::storage::hdf5::is_hdf5_backend_file(path) {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "{} is not an infrastore hdf5 store (stores written by the removed \
+             netcdf backend are no longer supported; re-create the store to \
+             migrate)",
+            path.display()
+        )));
+    }
+    Ok(Box::new(Hdf5Backend::open(path, read_only)?))
 }
 
 fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {

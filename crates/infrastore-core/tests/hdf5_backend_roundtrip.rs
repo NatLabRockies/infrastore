@@ -1,11 +1,11 @@
-//! Store-level integration tests for the direct-HDF5 backend (spike): create
-//! with `BackendKind::Hdf5`, round-trip static + forecast data through the
-//! full `Store` API, reopen via sniffing, and persist_to.
+//! Store-level integration tests for the direct-HDF5 backend: round-trip
+//! static + forecast data through the full `Store` API, reopen, and
+//! persist_to.
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    BackendKind, Compression, Deterministic, Features, OwnerCategory, SingleTimeSeries,
-    TimeSeriesData, TypedArray, create_store_with_options, open_store,
+    Deterministic, Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
+    create_store, open_store,
 };
 
 fn series(length: usize, base: f64) -> SingleTimeSeries {
@@ -40,13 +40,7 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     let path = dir.path().join("store.h5");
 
     {
-        let mut store = create_store_with_options(
-            Some(path.as_path()),
-            false,
-            Compression::default(),
-            BackendKind::Hdf5,
-        )
-        .unwrap();
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
         store
             .add_time_series(
                 1,
@@ -70,7 +64,7 @@ fn hdf5_store_round_trip_reopen_and_persist() {
         store.flush().unwrap();
     }
 
-    // Reopen: `open_store` sniffs the backend from the file.
+    // Reopen: `open_store` validates the backend attribute from the file.
     let mut store = open_store(path.as_path(), false).unwrap();
     let keys = store
         .get_time_series_keys(1, OwnerCategory::Component)
@@ -81,8 +75,8 @@ fn hdf5_store_round_trip_reopen_and_persist() {
     }
     assert!(store.verify_integrity().unwrap().ok());
 
-    // persist_to must reopen the source with the sniffed backend (regression:
-    // it used to hard-code NetCdfBackend and fail on hdf5-backend files).
+    // persist_to must reopen the source afterwards (regression: it used to
+    // hard-code a different backend type and fail on hdf5-backend files).
     let dest = dir.path().join("copy.h5");
     store.persist_to(dest.as_path()).unwrap();
     let copy = open_store(dest.as_path(), true).unwrap();

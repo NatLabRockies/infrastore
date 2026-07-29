@@ -1732,7 +1732,7 @@ fn a_nonexistent_store_path_is_an_error_on_a_read_command() {
 
 #[test]
 fn verify_exits_one_on_a_corrupt_store() {
-    // Corrupt the *NetCDF* side — flip one stored element without touching the
+    // Corrupt the *HDF5* side — flip one stored element without touching the
     // recorded content hash — which is the corruption `verify_integrity`
     // detects. A healthy store exits 0; this one must exit exactly 1, since a
     // shell caller branches on that.
@@ -1742,24 +1742,19 @@ fn verify_exits_one_on_a_corrupt_store() {
     assert_eq!(exit_code(&store, &["verify"]), 0, "a healthy store exits 0");
 
     {
-        let mut f = netcdf::append(&store).unwrap();
-        let mut ts = f
-            .group_mut("time_series")
+        let f = hdf5_metno::File::open_rw(&store).unwrap();
+        let single = f.group("time_series/single").expect("single group");
+        // Find the packed data dataset (not its `_h` companion).
+        let dataset = single
+            .member_names()
             .unwrap()
-            .expect("time_series group");
-        let mut single = ts.group_mut("single").expect("single group");
-        let dataset = {
-            let read = netcdf::open(&store);
-            drop(read);
-            // Find the packed data variable (not its `_h` companion).
-            single
-                .variables()
-                .map(|v| v.name())
-                .find(|n| !n.ends_with("_h") && !n.starts_with("arr_"))
-                .expect("a packed data variable")
-        };
-        let mut var = single.variable_mut(&dataset).expect("data variable");
-        var.put_value(-999.5f64, [0, 0]).unwrap();
+            .into_iter()
+            .find(|n| !n.ends_with("_h") && !n.starts_with("arr_"))
+            .expect("a packed data dataset");
+        let ds = single.dataset(&dataset).expect("data dataset");
+        let mut vals = ds.read_raw::<f64>().unwrap();
+        vals[0] = -999.5;
+        ds.write_raw(&vals).unwrap();
     }
 
     assert_eq!(

@@ -3,7 +3,7 @@
 //! Simulations consume the store with a `for` loop over every timestamp: at
 //! each timestamp they want the value of *every* time series at that instant.
 //! [`StaticReader`] serves exactly that access pattern for `SingleTimeSeries`,
-//! which is why those arrays are kept in the compacted/packed NetCDF format
+//! which is why those arrays are kept in the compacted/packed on-disk format
 //! (one timestamp across all columns of a packed dataset is a single hyperslab).
 //!
 //! # Design (locked 2026-06-25)
@@ -36,7 +36,7 @@ use std::ops::Range;
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::storage::netcdf::window_block_cols;
+use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     /// Populate `store` with the same mixed-dtype, mixed-shape set used to
-    /// exercise both the default and NetCDF read paths.
+    /// exercise both the default and on-disk read paths.
     fn populate(store: &mut Store) {
         add_f64(store, 2, "load", &[20.0, 21.0, 22.0, 23.0]);
         add_f64(store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
@@ -1059,11 +1059,11 @@ mod tests {
         );
     }
 
-    /// On-disk store: drives `NetCdfBackend::read_index_into` (the one-hyperslab-
+    /// On-disk store: drives `Hdf5Backend::read_index_into` (the one-hyperslab-
     /// per-dataset override) and cross-checks it byte-for-byte against the
     /// in-memory backend (the default per-hash path).
     #[test]
-    fn netcdf_override_matches_default() {
+    fn disk_override_matches_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.nc");
 
@@ -1198,7 +1198,7 @@ mod tests {
             .resolution(Duration::hours(1))
     }
 
-    /// On-disk forecast reader (drives the NetCDF hyperslab window read) cross-
+    /// On-disk forecast reader (drives the HDF5 hyperslab window read) cross-
     /// checked byte-for-byte against the in-memory default, plus concrete value
     /// assertions including a multi-dimensional per-step shape.
     #[test]
@@ -1481,7 +1481,7 @@ mod tests {
             );
             // Concrete expectation: window k = [sts[k], sts[k+1]].
             assert_eq!(f64_window(dst), vec![sts[k as usize], sts[k as usize + 1]]);
-            // NetCDF (packed underlying hyperslab) == in-memory default.
+            // On-disk (packed underlying hyperslab) == in-memory default.
             assert_eq!(dst.window(), rm.entry_slot(0).window());
             assert_eq!(det_entry.window(), rm.entry_slot(1).window());
         }
@@ -1492,7 +1492,7 @@ mod tests {
     // The strongest correctness check: a reader's bytes must equal what the
     // independent, separately-tested `get_time_series` path returns for the
     // same series at the same timestamp / window. These run on-disk so they
-    // exercise the NetCDF hyperslab overrides.
+    // exercise the HDF5 hyperslab overrides.
 
     /// Encode `vals` into `dtype`'s little-endian bytes for a typed array.
     fn typed_from(dtype: Dtype, shape: Vec<usize>, vals: &[f64]) -> TypedArray {

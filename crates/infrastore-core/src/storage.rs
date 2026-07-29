@@ -2,7 +2,7 @@
 //!
 //! The [`StorageBackend`] trait is the only seam between the public API and
 //! the actual array-storage implementation. v0 ships two implementations:
-//! [`MemoryBackend`] (in-memory) and [`NetCdfBackend`] (NetCDF4 on disk).
+//! [`MemoryBackend`] (in-memory) and [`Hdf5Backend`] (HDF5 on disk).
 
 use std::ops::Range;
 
@@ -10,44 +10,27 @@ use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::period::Period;
 
+pub mod common;
 pub mod hdf5;
 pub mod memory;
-pub mod netcdf;
 
 // The concrete backends and the trait seam are internal: the public surface is
-// `Store`, which owns a boxed backend. (The `netcdf` module stays `pub` so
+// `Store`, which owns a boxed backend. (The `common` module stays `pub` so
 // white-box tests can reach `DEFAULT_COLS_PER_DATASET`.)
 pub(crate) use hdf5::Hdf5Backend;
 pub(crate) use memory::MemoryBackend;
-pub(crate) use netcdf::NetCdfBackend;
 
-/// Which on-disk storage backend a new store is created with.
-///
-/// Both write HDF5 files; they differ in the library driving the writes and in
-/// layout details, and are not mutually readable. [`crate::Store::open`]
-/// detects the backend from the file, so readers never need to choose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BackendKind {
-    /// NetCDF4 via netcdf-c (the historical default).
-    #[default]
-    NetCdf,
-    /// Direct HDF5 via libhdf5 (spike): flat-cost standalone-array creation
-    /// (no netcdf-c define-mode whole-file sync), compact layout for small
-    /// arrays.
-    Hdf5,
-}
-
-/// Compression filter applied to NetCDF4 data variables when they are created.
+/// Compression filter applied to HDF5 data variables when they are created.
 ///
 /// This is a write-time storage policy: it controls how arrays are encoded on
 /// disk but never affects the logical data, which is decoded transparently by
-/// NetCDF/HDF5 on read regardless of the filter used. Stores created with
+/// HDF5 on read regardless of the filter used. Stores created with
 /// different settings therefore remain mutually readable, and the on-disk
 /// [`DATA_FORMAT_VERSION`](crate::version::DATA_FORMAT_VERSION) is unaffected.
 ///
 /// The chosen policy is persisted as a global attribute so that appends made
 /// after re-opening a store reuse the same filter (see
-/// [`NetCdfBackend::open`]).
+/// [`Hdf5Backend::open`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
     /// No compression filter is applied; arrays are stored uncompressed.
@@ -100,7 +83,7 @@ impl Default for Compression {
 }
 
 impl Compression {
-    /// Reject DEFLATE levels outside the NetCDF-supported 0–9 range.
+    /// Reject DEFLATE levels outside the zlib-supported 0–9 range.
     pub fn validate(&self) -> Result<()> {
         if let Compression::Deflate { level, .. } = self
             && *level > 9
@@ -112,7 +95,7 @@ impl Compression {
         Ok(())
     }
 
-    /// Encode as a stable string for persistence in a NetCDF global attribute.
+    /// Encode as a stable string for persistence in an HDF5 root attribute.
     pub(crate) fn encode(&self) -> String {
         match self {
             Compression::None => "none".to_string(),
@@ -152,7 +135,7 @@ pub struct CompactionReport {
     /// referenced any more, and were deleted. Feature sets are shared, so
     /// removing an association cannot cascade-delete them; they accumulate as
     /// unreachable rows until a compaction sweeps them, exactly as deleted
-    /// arrays leave unreachable NetCDF variables behind.
+    /// arrays leave unreachable HDF5 datasets behind.
     pub feature_sets_reclaimed: usize,
 }
 
@@ -208,7 +191,7 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// for each input that this call physically wrote (so the caller can stage it
     /// for rollback).
     ///
-    /// The default loops [`Self::put_array`] with `packed = true`. The NetCDF
+    /// The default loops [`Self::put_array`] with `packed = true`. The on-disk
     /// backend overrides it to create batch-sized datasets and fill whole chunks
     /// with one timestamp-row write per chunk, avoiding the per-column
     /// read-modify-write that the timestamp-major chunking imposes on single adds.
@@ -231,7 +214,7 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// Read many full arrays at once, returning one [`TypedArray`] per input hash
     /// in order (duplicate hashes each yield a copy).
     ///
-    /// The default loops [`Self::get_array`]. The NetCDF backend overrides it to
+    /// The default loops [`Self::get_array`]. The on-disk backend overrides it to
     /// read each packed dataset's needed column span in a single hyperslab —
     /// decompressing each timestamp-major chunk once — then scatter the columns
     /// out, rather than re-reading every chunk once per series. This is the bulk
@@ -253,7 +236,7 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// out row-major as `[column, *element_shape]`. Reusing the caller's buffer
     /// keeps a per-timestamp read loop allocation-free.
     ///
-    /// The default reads each array's one-step slice individually; the NetCDF
+    /// The default reads each array's one-step slice individually; the on-disk
     /// backend overrides this to read a whole packed-dataset row per hyperslab.
     fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
         out.clear();
@@ -266,7 +249,7 @@ pub(crate) trait StorageBackend: Send + Sync {
 
     /// The stored `(dtype, shape)` of an array, ideally without reading its data.
     /// Used by the forecast reader to plan window slicing. The default reads the
-    /// whole array; the NetCDF backend overrides it to inspect dimensions only.
+    /// whole array; the on-disk backend overrides it to inspect dimensions only.
     fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
         let arr = self.get_array(hash)?;
         Ok((arr.dtype, arr.shape))
@@ -280,7 +263,7 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// it. Backs the forecast reader's chunk-aligned block cache.
     ///
     /// The default materializes the whole array and copies the block out; the
-    /// NetCDF backend overrides this to read just the block with one hyperslab,
+    /// on-disk backend overrides this to read just the block with one hyperslab,
     /// decompressing only the storage chunks it overlaps.
     fn read_window_block_into(
         &self,
@@ -299,7 +282,7 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// filling `out` (cleared first) with their row-major, little-endian bytes.
     /// Backs `DeterministicSingleTimeSeries` window reads, which gather a
     /// contiguous run from the packed underlying `SingleTimeSeries`; on the
-    /// NetCDF backend [`Self::get_slice`] is already a single packed hyperslab.
+    /// on-disk backend [`Self::get_slice`] is already a single packed hyperslab.
     fn read_range_into(
         &self,
         hash: &[u8; 32],
@@ -330,7 +313,7 @@ pub(crate) trait StorageBackend: Send + Sync {
 
     /// The compression policy applied to newly written arrays. In-memory
     /// backends report [`Compression::None`] since they never compress; the
-    /// NetCDF backend reports the policy it was created or reopened with.
+    /// on-disk backend reports the policy it was created or reopened with.
     fn compression(&self) -> Compression {
         Compression::None
     }

@@ -1,22 +1,23 @@
-//! Direct-HDF5 storage backend (spike).
+//! Direct-HDF5 storage backend.
 //!
-//! Same logical layout as [`super::netcdf::NetCdfBackend`] — packed
+//! Layout (shared policy in [`super::common`]): packed
 //! `sts_{dtype}_{shape}_{length}_{res}` datasets for SingleTimeSeries/DST
 //! arrays, one standalone `arr_{hexhash}` dataset per irregular series or
-//! dense forecast — but written through libhdf5 directly instead of netcdf-c.
-//! The motivation is netcdf-c's define-mode semantics: every new variable
+//! dense forecast, written through libhdf5 via `hdf5-metno`.
+//!
+//! This backend replaced a netcdf-c–driven one with the same logical layout.
+//! The motivation was netcdf-c's define-mode semantics: every new variable
 //! followed by a data write triggers an implicit whole-file `H5Fflush` that
 //! iterates every open dataset, making a forecast-heavy ingest O(N²). Plain
 //! HDF5 dataset creation is O(log n) and flushes metadata lazily, so the
-//! per-array standalone layout stays flat with store size.
+//! per-array standalone layout stays flat with store size. Its files are not
+//! readable by this backend (`Store::open` checks the `storage_backend` root
+//! attribute, which netcdf-written stores lack, and rejects them).
 //!
-//! Differences from the NetCDF layout (this backend's files are not readable
-//! by the netcdf backend and vice versa; `Store::open` sniffs the
-//! `storage_backend` root attribute):
+//! Layout details specific to this backend:
 //!
 //! * A packed dataset's per-column hashes live in a `{name}_h` dataset of
-//!   shape `(cols, 64)` u8 (hex bytes; an all-zero row = free slot) instead of
-//!   a NetCDF string variable.
+//!   shape `(cols, 64)` u8 (hex bytes; an all-zero row = free slot).
 //! * Standalone arrays at or below [`COMPACT_MAX_BYTES`] use HDF5's compact
 //!   layout: the data lives in the object header, no chunk B-tree, no filter
 //!   pipeline. (Compact datasets cannot be compressed; arrays that small gain
@@ -41,15 +42,16 @@ use crate::types::array::{Dtype, TypedArray};
 use crate::types::period::Period;
 use crate::version::DATA_FORMAT_VERSION;
 
-use super::netcdf::{
+use super::common::{
     COMPRESSION_ATTR, HASH_SUFFIX, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX, dataset_base_name,
     element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
     standalone_chunks,
 };
 use super::{CompactionReport, IntegrityReport, StorageBackend};
 
-/// Root attribute naming the backend that wrote the file; `Store::open` sniffs
-/// it to pick the right backend (absent on netcdf-written stores).
+/// Root attribute naming the backend that wrote the file; `Store::open` checks
+/// it (absent on stores written by the removed netcdf backend, which are
+/// rejected).
 pub(crate) const BACKEND_ATTR: &str = "storage_backend";
 pub(crate) const BACKEND_NAME: &str = "hdf5";
 
@@ -550,7 +552,7 @@ impl Inner {
         let cols = resolve_dataset_cols(requested_cols, dtype, element_shape);
         let mut shape = vec![length, cols];
         shape.extend_from_slice(element_shape);
-        // Chunk one timestamp row across every column, matching the NetCDF
+        // Chunk one timestamp row across every column, matching the packed
         // backend: a read-by-timestamp gathers one chunk and a full-width bulk
         // write fills whole chunks.
         let mut chunks = vec![1, cols];
@@ -764,7 +766,7 @@ impl Inner {
         }
         let single = self.single()?;
         // Small arrays go compact (no chunks, no filters, data in the object
-        // header). Larger ones keep the netcdf backend's chunking policy:
+        // header). Larger ones keep the shared chunking policy:
         // whole-array for irregular series, bounded blocks along the window
         // axis for dense forecasts.
         let ds = if data.bytes.len() <= COMPACT_MAX_BYTES || data.shape.contains(&0) {
@@ -1194,7 +1196,7 @@ impl StorageBackend for Hdf5Backend {
         };
         match loc {
             // Standalone: drop from the index; the dataset lingers as a
-            // tombstone until compact (matching the netcdf backend, and
+            // tombstone until compact (HDF5 cannot reclaim the space in place, and
             // keeping re-adds of the same content a pure re-index).
             Location::Standalone { .. } => Ok(()),
             Location::Packed { dataset, col } => {
@@ -1477,10 +1479,44 @@ mod tests {
     fn backend_sniff() {
         let dir = tempfile::tempdir().unwrap();
         let h5_path = dir.path().join("h.h5");
-        let nc_path = dir.path().join("n.nc");
+        let plain_path = dir.path().join("p.h5");
         Hdf5Backend::create(&h5_path, Compression::default()).unwrap();
-        super::super::netcdf::NetCdfBackend::create(&nc_path, Compression::default()).unwrap();
+        // A valid HDF5 file without the backend attribute (e.g. one written by
+        // the removed netcdf backend) is not recognized as ours.
+        h5::File::create(&plain_path).unwrap();
         assert!(is_hdf5_backend_file(&h5_path));
-        assert!(!is_hdf5_backend_file(&nc_path));
+        assert!(!is_hdf5_backend_file(&plain_path));
+    }
+
+    #[test]
+    fn standalone_chunk_shapes_follow_the_layout_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        // Big enough to skip the compact layout so a chunk shape exists.
+        let windowed = f64_array(vec![3, 4000], 0.0);
+        let whole = f64_array(vec![3, 4000], 1.0);
+        let (hw, hn) = (array_hash(&windowed), array_hash(&whole));
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(
+            &hw,
+            &windowed,
+            res(),
+            ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        )
+        .unwrap();
+        be.put_array(&hn, &whole, res(), ArrayLayout::Standalone)
+            .unwrap();
+        let inner = be.inner.lock().unwrap();
+        // Full on the horizon axis, blocked along the count axis.
+        let cols = super::super::common::window_block_cols(Dtype::F64, &[3, 4000], 1);
+        let ds = inner
+            .dataset(&format!("{STANDALONE_PREFIX}{}", hash_hex(&hw)))
+            .unwrap();
+        assert_eq!(ds.chunk(), Some(vec![3, cols]));
+        // No window axis -> a single whole-array chunk.
+        let ds = inner
+            .dataset(&format!("{STANDALONE_PREFIX}{}", hash_hex(&hn)))
+            .unwrap();
+        assert_eq!(ds.chunk(), Some(vec![3, 4000]));
     }
 }

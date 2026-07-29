@@ -209,7 +209,7 @@ fn differing_nan_bit_patterns_content_address_to_one_array() {
 }
 
 #[test]
-fn netcdf_default_fill_value_is_not_special_cased() {
+fn hdf5_default_fill_value_is_not_special_cased() {
     // NetCDF's default f64 `_FillValue` is 9.969209968386869e+36. A stored
     // value that happens to equal it must survive a reopen as data, not be
     // read back as "missing".

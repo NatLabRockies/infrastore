@@ -3,7 +3,7 @@
 //! These tests target the three layers of index arithmetic a returned slice
 //! depends on, all of which must agree:
 //!   1. `store.rs` — turning a `time_range` into `start_idx..end_idx`;
-//!   2. `netcdf.rs` `packed_extents` — `(time_range, col, element_shape)` -> extents;
+//!   2. `hdf5.rs` `packed_ranges` — `(time_range, col, element_shape)` -> ranges;
 //!   3. `memory.rs::get_slice` — `row_bytes` byte arithmetic.
 //!
 //! Every battery runs against BOTH backends via [`for_each_backend`]: the

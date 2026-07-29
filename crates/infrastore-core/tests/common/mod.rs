@@ -10,7 +10,7 @@ use infrastore_core::{Store, create_store, open_store};
 /// backend. For NetCDF the store is flushed, dropped, and reopened read-only
 /// between the two phases, exercising the persisted format.
 ///
-/// `verify` receives the backend name (`"memory"` / `"netcdf"`) so assertion
+/// `verify` receives the backend name (`"memory"` / `"disk"`) so assertion
 /// messages identify which variant failed.
 #[allow(dead_code)]
 pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&Store, &T, &str)) {
@@ -31,7 +31,7 @@ pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&
             state
         };
         let store = open_store(path.as_path(), true).unwrap();
-        verify(&store, &state, "netcdf");
+        verify(&store, &state, "disk");
     }
 }
 
@@ -62,6 +62,6 @@ pub fn for_each_backend_mut<T>(
             state
         };
         let mut store = open_store(path.as_path(), false).unwrap();
-        verify(&mut store, &state, "netcdf");
+        verify(&mut store, &state, "disk");
     }
 }

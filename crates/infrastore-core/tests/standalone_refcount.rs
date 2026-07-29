@@ -2,7 +2,7 @@
 //! the storage kind used by `NonSequentialTimeSeries` (plain standalone) and the
 //! dense forecasts `Deterministic` / `Probabilistic` / `Scenarios` (windowed
 //! standalone). The packed (`sts_*`) path is exercised in `round_trip.rs`,
-//! `api_additions.rs`, and `netcdf_roundtrip.rs`; standalone arrays reclaim
+//! `api_additions.rs`, and `disk_roundtrip.rs`; standalone arrays reclaim
 //! differently (NetCDF cannot delete a variable, so the last-reference case
 //! leaves an unreachable variable rather than a reusable slot) and were
 //! previously only checked at the reader-slot level, never through a delete.
