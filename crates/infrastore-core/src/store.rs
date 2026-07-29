@@ -921,6 +921,32 @@ impl Store {
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
         let meta = self.metadata.get_by_key(key)?;
+        self.materialize_time_series(&meta, time_range)
+    }
+
+    /// Like [`Self::get_time_series`], but also returns the association's
+    /// catalog row from the same single lookup. Callers that need both the
+    /// reconstructed series and row-level detail (the FFI getters read the
+    /// `ext` payload alongside the data) would otherwise pay a second SQLite
+    /// key lookup per read — at 100k-series scale that lookup is ~20% of a
+    /// full read.
+    pub fn get_time_series_with_metadata(
+        &self,
+        key: &KeyIdentity,
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<(TimeSeriesData, TimeSeriesMetadata)> {
+        let meta = self.metadata.get_by_key(key)?;
+        let data = self.materialize_time_series(&meta, time_range)?;
+        Ok((data, meta))
+    }
+
+    /// Reconstruct the series described by `meta`, reading its array (or the
+    /// requested `time_range` slice) from the backend.
+    fn materialize_time_series(
+        &self,
+        meta: &TimeSeriesMetadata,
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
@@ -982,7 +1008,7 @@ impl Store {
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
-                let timestamps = meta.timestamps.ok_or_else(|| {
+                let timestamps = meta.timestamps.clone().ok_or_else(|| {
                     TimeSeriesError::IntegrityError(
                         "NonSequentialTimeSeries missing timestamps".into(),
                     )
@@ -1017,11 +1043,11 @@ impl Store {
             }
             TimeSeriesType::Deterministic => {
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "Deterministic")?;
-                let resolution = required_resolution(&meta, "Deterministic")?;
-                let horizon = required_horizon(&meta, "Deterministic")?;
-                let interval = required_interval(&meta, "Deterministic")?;
-                let count = required_count(&meta, "Deterministic")?;
+                let initial = required_initial(meta, "Deterministic")?;
+                let resolution = required_resolution(meta, "Deterministic")?;
+                let horizon = required_horizon(meta, "Deterministic")?;
+                let interval = required_interval(meta, "Deterministic")?;
+                let count = required_count(meta, "Deterministic")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // Validate stored shape: [H, count, *E].
                 validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
@@ -1047,11 +1073,11 @@ impl Store {
 
             TimeSeriesType::Probabilistic => {
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "Probabilistic")?;
-                let resolution = required_resolution(&meta, "Probabilistic")?;
-                let horizon = required_horizon(&meta, "Probabilistic")?;
-                let interval = required_interval(&meta, "Probabilistic")?;
-                let count = required_count(&meta, "Probabilistic")?;
+                let initial = required_initial(meta, "Probabilistic")?;
+                let resolution = required_resolution(meta, "Probabilistic")?;
+                let horizon = required_horizon(meta, "Probabilistic")?;
+                let interval = required_interval(meta, "Probabilistic")?;
+                let count = required_count(meta, "Probabilistic")?;
                 let percentiles = meta.percentiles.clone().ok_or_else(|| {
                     TimeSeriesError::IntegrityError("Probabilistic missing percentiles".into())
                 })?;
@@ -1082,11 +1108,11 @@ impl Store {
 
             TimeSeriesType::Scenarios => {
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "Scenarios")?;
-                let resolution = required_resolution(&meta, "Scenarios")?;
-                let horizon = required_horizon(&meta, "Scenarios")?;
-                let interval = required_interval(&meta, "Scenarios")?;
-                let count = required_count(&meta, "Scenarios")?;
+                let initial = required_initial(meta, "Scenarios")?;
+                let resolution = required_resolution(meta, "Scenarios")?;
+                let horizon = required_horizon(meta, "Scenarios")?;
+                let interval = required_interval(meta, "Scenarios")?;
+                let count = required_count(meta, "Scenarios")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // scenario_count = arr.shape[0]; validate remaining dims.
                 if arr.shape.len() < 3 {
@@ -1123,11 +1149,11 @@ impl Store {
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "DeterministicSingleTimeSeries")?;
-                let resolution = required_resolution(&meta, "DeterministicSingleTimeSeries")?;
-                let horizon = required_horizon(&meta, "DeterministicSingleTimeSeries")?;
-                let interval = required_interval(&meta, "DeterministicSingleTimeSeries")?;
-                let count = required_count(&meta, "DeterministicSingleTimeSeries")?;
+                let initial = required_initial(meta, "DeterministicSingleTimeSeries")?;
+                let resolution = required_resolution(meta, "DeterministicSingleTimeSeries")?;
+                let horizon = required_horizon(meta, "DeterministicSingleTimeSeries")?;
+                let interval = required_interval(meta, "DeterministicSingleTimeSeries")?;
+                let count = required_count(meta, "DeterministicSingleTimeSeries")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 let interval_steps = resolution.divide_into(&interval).map_err(|_| {
                     TimeSeriesError::IntegrityError(format!(

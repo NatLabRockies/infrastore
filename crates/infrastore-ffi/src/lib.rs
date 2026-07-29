@@ -775,8 +775,11 @@ pub unsafe extern "C" fn infrastore_store_get_single(
             Ok(r) => r,
             Err(c) => return c,
         };
-    let data = match store.inner.get_time_series(&key.inner, time_range) {
-        Ok(d) => d,
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(&key.inner, time_range)
+    {
+        Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
     let single = match data {
@@ -801,14 +804,11 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         }
     };
     // The extension payload lives on the metadata row, not on the reconstructed
-    // series; a null `out_ext` skips the lookup.
+    // series; the row came back with the data from the single catalog lookup.
     let ext_cstr = if out_ext.is_null() {
         std::ptr::null_mut()
     } else {
-        match store.inner.get_metadata(&key.inner) {
-            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
-            Err(error) => return map_core_error(error),
-        }
+        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
@@ -896,28 +896,30 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
             Ok(r) => r,
             Err(c) => return c,
         };
-    let series = match store.inner.get_time_series(&key.inner, time_range) {
-        Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(series)) => series,
-        Ok(core_lib::TimeSeriesData::SingleTimeSeries(_)) => {
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(&key.inner, time_range)
+    {
+        Ok(pair) => pair,
+        Err(error) => return map_core_error(error),
+    };
+    let series = match data {
+        core_lib::TimeSeriesData::NonSequentialTimeSeries(series) => series,
+        core_lib::TimeSeriesData::SingleTimeSeries(_) => {
             set_error("key does not identify a NonSequentialTimeSeries");
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
         // Forecast types are not yet exposed through this FFI entry point.
-        Ok(
-            core_lib::TimeSeriesData::Deterministic(_)
-            | core_lib::TimeSeriesData::Probabilistic(_)
-            | core_lib::TimeSeriesData::Scenarios(_),
-        ) => {
+        core_lib::TimeSeriesData::Deterministic(_)
+        | core_lib::TimeSeriesData::Probabilistic(_)
+        | core_lib::TimeSeriesData::Scenarios(_) => {
             set_error("key identifies a forecast type; use the forecast FFI");
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
-        Err(error) => return map_core_error(error),
     };
-    // The extension payload lives on the metadata row, not on the reconstructed series.
-    let ext = match store.inner.get_metadata(&key.inner) {
-        Ok(meta) => meta.ext.unwrap_or_default(),
-        Err(error) => return map_core_error(error),
-    };
+    // The extension payload lives on the metadata row, not on the reconstructed
+    // series; the row came back with the data from the single catalog lookup.
+    let ext = meta.ext.unwrap_or_default();
     let mut timestamps = match series
         .timestamps
         .iter()
@@ -3810,19 +3812,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     } else {
         None
     };
-    let data = match store.inner.get_time_series(key.identity(), time_range) {
-        Ok(d) => d,
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(key.identity(), time_range)
+    {
+        Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
-    // The association's `ext` payload lives on the metadata row; a null
-    // `out_ext` skips the lookup.
+    // The association's `ext` payload lives on the metadata row; the row came
+    // back with the data from the single catalog lookup.
     let ext_cstr = if out_ext.is_null() {
         std::ptr::null_mut()
     } else {
-        match store.inner.get_metadata(key.identity()) {
-            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
-            Err(error) => return map_core_error(error),
-        }
+        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
     let code = unsafe {
         *out_matched_type = matched_type;
@@ -4118,19 +4120,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     } else {
         None
     };
-    let data = match store.inner.get_time_series(&key.inner, time_range) {
-        Ok(d) => d,
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(&key.inner, time_range)
+    {
+        Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
-    // The association's `ext` payload lives on the metadata row; a null
-    // `out_ext` skips the lookup.
+    // The association's `ext` payload lives on the metadata row; the row came
+    // back with the data from the single catalog lookup.
     let ext_cstr = if out_ext.is_null() {
         std::ptr::null_mut()
     } else {
-        match store.inner.get_metadata(&key.inner) {
-            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
-            Err(error) => return map_core_error(error),
-        }
+        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
     let code = unsafe {
         *out_matched_type = matched_type;
