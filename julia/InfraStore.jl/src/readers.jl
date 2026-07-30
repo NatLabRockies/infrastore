@@ -8,12 +8,10 @@
 # valid across subsequent reads.
 
 # A forecast reader covers one forecast type, so it takes a narrower set than
-# `_type_code`: static types are rejected here. `AbstractDeterministic` is
-# accepted and reads like a `Deterministic` reader (which is already abstract
-# over the deterministic pair).
+# `_type_code`: static types are rejected here. A `Deterministic` reader spans
+# both deterministic storage forms, matching the read request rule.
 const _FORECAST_TYPES = (
-    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios,
-    AbstractDeterministic,
+    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios
 )
 
 function _int_for_type(::Type{T}) where {T}

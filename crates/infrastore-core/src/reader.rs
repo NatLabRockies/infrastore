@@ -695,17 +695,11 @@ impl ForecastReader {
 }
 
 /// Whether a stored forecast of concrete type `concrete` belongs in a reader
-/// built for `reported`. A `Deterministic` reader is abstract — it also accepts
-/// `DeterministicSingleTimeSeries` (mirroring core's `AbstractDeterministic`),
-/// which is read into an identical `[H, *E]` window. Other types are exact.
+/// built for `reported` — the shared request rule, so a `Deterministic` reader
+/// admits a `DeterministicSingleTimeSeries` (read into an identical `[H, *E]`
+/// window) without restating it here.
 fn type_accepted(reported: TimeSeriesType, concrete: TimeSeriesType) -> bool {
-    match reported {
-        TimeSeriesType::Deterministic => matches!(
-            concrete,
-            TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries
-        ),
-        other => concrete == other,
-    }
+    reported.accepts(concrete)
 }
 
 /// Derive one entry's `(window_shape, read)` from its stored shape, concrete

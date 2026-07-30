@@ -29,6 +29,28 @@ impl OwnerCategory {
             _ => return None,
         })
     }
+
+    /// The storage code written to the SQLite catalog.
+    ///
+    /// As with [`crate::TimeSeriesType::code`], this is the *storage* encoding
+    /// and [`Self::as_str`] is the *display and serde* one. Part of the on-disk
+    /// contract: changing it requires a [`crate::DATA_FORMAT_VERSION`] bump.
+    pub fn code(self) -> i64 {
+        match self {
+            OwnerCategory::Component => 0,
+            OwnerCategory::SupplementalAttribute => 1,
+        }
+    }
+
+    /// Inverse of [`Self::code`]. `None` for an unknown code, which in the
+    /// catalog means a store written by an incompatible version.
+    pub fn from_code(code: i64) -> Option<Self> {
+        Some(match code {
+            0 => OwnerCategory::Component,
+            1 => OwnerCategory::SupplementalAttribute,
+            _ => return None,
+        })
+    }
 }
 
 impl FromStr for OwnerCategory {

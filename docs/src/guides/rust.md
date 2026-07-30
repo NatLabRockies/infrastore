@@ -275,13 +275,14 @@ let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 When a forecast is addressed by its attributes rather than by a key you already hold, use
 `resolve_forecast_key`: it resolves
 `(owner_id, owner_category, name, resolution, interval,
-features)` plus a `RequestedType` to the
-single matching key, erroring with `NotFound` if nothing matches and `InvalidParameter` if the
-request is ambiguous. `RequestedType::AbstractDeterministic` matches a stored `Deterministic` _or_ a
-`DeterministicSingleTimeSeries`, so callers need not know which one is stored:
+features)` plus a requested `TimeSeriesType`
+to the single matching key, erroring with `NotFound` if nothing matches and `InvalidParameter` if
+the request is ambiguous. Requesting `TimeSeriesType::Deterministic` matches a stored
+`Deterministic` _or_ a `DeterministicSingleTimeSeries`, so callers need not know which one is
+stored; the returned key's `time_series_type` reports the form that matched:
 
 ```rust
-use infrastore_core::RequestedType;
+use infrastore_core::TimeSeriesType;
 
 let key = store.resolve_forecast_key(
     42,
@@ -290,7 +291,7 @@ let key = store.resolve_forecast_key(
     None,                                  // resolution: Option<Period> (None = any)
     None,                                  // interval: Option<Period> (None = any)
     Features::new(),
-    RequestedType::AbstractDeterministic,
+    TimeSeriesType::Deterministic,
 )?;
 ```
 

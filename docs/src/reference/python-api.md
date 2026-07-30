@@ -123,7 +123,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: RequestedType | None = None,
+    time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     resolution: timedelta | str | None = None,
@@ -134,11 +134,10 @@ def list_time_series(
 def list_array_groups(self, *, ...) -> list[dict]: ...
 # Same keyword-only filter arguments as list_time_series; so do list_keys,
 # list_names, list_owner_types, and remove_by_filter.
-# `time_series_type` is a RequestedType: a TimeSeriesType, or the string
-# "abstract_deterministic" to match Deterministic and
-# DeterministicSingleTimeSeries in one query. Every filter surface takes it,
-# including has_any_time_series, get_resolutions, get_intervals,
-# list_owner_ids, and build_forecast_reader.
+# `time_series_type` is a TimeSeriesType. TimeSeriesType.Deterministic matches
+# both Deterministic and DeterministicSingleTimeSeries rows. Every filter
+# surface takes it, including has_any_time_series, get_resolutions,
+# get_intervals, list_owner_ids, and build_forecast_reader.
 
 def get_time_series_keys(
     self,
@@ -149,7 +148,7 @@ def has_time_series(self, key: TimeSeriesKey) -> bool: ...
 def has_any_time_series(self, *, ...) -> bool: ...
 # Existence without listing ("does this owner have any time series?"); same
 # keyword-only filter arguments as list_time_series. Index-probe fast.
-def get_resolutions(self, time_series_type: RequestedType | None = None) -> list[str]: ...
+def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -> list[str]: ...
 # resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
 def get_time_series_counts(self) -> dict: ...
 def get_forecast_parameters(self, *, resolution: str | None = None,
@@ -291,17 +290,14 @@ OwnerCategory.Component
 OwnerCategory.SupplementalAttribute
 ```
 
-`TimeSeriesType` names a _stored_ type. Queries take a slightly wider value, `RequestedType`:
-
-```python
-RequestedType = TimeSeriesType | Literal["abstract_deterministic"]
-```
-
-`"abstract_deterministic"` is the family of both deterministic storage forms — it matches a stored
-`Deterministic` _or_ `DeterministicSingleTimeSeries` in one query, which is what a caller asking
-"does this owner have a deterministic forecast?" wants. It is request-only: no row is stored under
-it, and no returned `time_series_type` is ever the family. Anything else raises
-`InvalidParameterError`; a value that is neither a `TimeSeriesType` nor a string raises `TypeError`.
+`TimeSeriesType` names a _stored_ type, and is also what a query asks for. Every member matches only
+itself with one exception: **`TimeSeriesType.Deterministic` also matches a stored
+`DeterministicSingleTimeSeries`**, which is what a caller asking "does this owner have a
+deterministic forecast?" wants — whether the forecast was added densely or derived by
+`transform_single_time_series` is a storage detail. Returned rows and keys still carry the concrete
+stored type, and `TimeSeriesType.DeterministicSingleTimeSeries` narrows to the derived form for
+callers auditing which forecasts are synthetic. Passing anything that is not a `TimeSeriesType`
+raises `TypeError`.
 
 ## Forecasts
 
@@ -423,7 +419,7 @@ def static_read(self, reader: StaticReader, when: datetime) -> None: ...
 
 def build_forecast_reader(
     self,
-    time_series_type: RequestedType,
+    time_series_type: TimeSeriesType,
     resolution: timedelta | str,
     *,
     owner_id: int | None = None,
@@ -477,10 +473,10 @@ filter must name a forecast type and pin a resolution; a `Deterministic` reader 
 includes `DeterministicSingleTimeSeries` (read into identical `(horizon, *element_shape)` windows).
 All matched forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
 
-`time_series_type` must be one of the concrete forecast types — `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios` — or the string
-`"abstract_deterministic"`, which reads exactly like a `Deterministic` reader; any other raises
-`InvalidParameterError`.
+`time_series_type` must be one of the forecast types — `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios`; any other raises
+`InvalidParameterError`. A `Deterministic` reader also covers stored `DeterministicSingleTimeSeries`
+forecasts, matching the read request rule.
 
 ```python
 class ForecastReader:

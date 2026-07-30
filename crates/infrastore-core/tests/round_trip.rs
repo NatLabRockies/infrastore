@@ -522,7 +522,7 @@ fn non_sequential_round_trip_and_time_slice() {
     assert_eq!(counts.static_time_series, 1);
     assert!(
         store
-            .get_resolutions(Some(TimeSeriesType::NonSequentialTimeSeries.into()))
+            .get_resolutions(Some(TimeSeriesType::NonSequentialTimeSeries))
             .unwrap()
             .is_empty()
     );

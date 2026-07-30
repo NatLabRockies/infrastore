@@ -98,23 +98,22 @@ function _type_for_code(code::Integer)
 end
 
 # The integer type code for a Julia time series type — the inverse of
-# `_type_for_code`, plus the request-only `AbstractDeterministic` family
-# sentinel, which is a valid thing to ask for but never a stored type.
+# `_type_for_code`. Every code names a stored type; the widening of a
+# `Deterministic` request to both deterministic storage forms happens in the
+# Rust core, not here.
 _type_code(::Type{SingleTimeSeries}) = INFRASTORE_TYPE_SINGLE
 _type_code(::Type{NonSequentialTimeSeries}) = INFRASTORE_TYPE_NON_SEQUENTIAL
 _type_code(::Type{Deterministic}) = INFRASTORE_TYPE_DETERMINISTIC
 _type_code(::Type{DeterministicSingleTimeSeries}) = INFRASTORE_TYPE_DETERMINISTIC_SINGLE
 _type_code(::Type{Probabilistic}) = INFRASTORE_TYPE_PROBABILISTIC
 _type_code(::Type{Scenarios}) = INFRASTORE_TYPE_SCENARIOS
-_type_code(::Type{AbstractDeterministic}) = INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
 function _type_code(::Type{T}) where {T}
     return throw(InvalidParameterError("$T is not a time series type"))
 end
 
-# The type code a catalog *filter* takes: any stored type, or the
-# `AbstractDeterministic` family sentinel, which the core expands to its two
-# concrete members (`Deterministic` and `DeterministicSingleTimeSeries`) in the
-# catalog predicate.
+# The type code a catalog *filter* takes: any stored type. `Deterministic` is
+# widened to both deterministic storage forms by the core's catalog predicate,
+# so a filter never has to name `DeterministicSingleTimeSeries` to see it.
 _filter_type_code(::Type{T}) where {T} = Int32(_type_code(T))
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).
@@ -280,9 +279,10 @@ List the key of every stored time series matching the (all-optional, independent
 filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 
 - `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
-- `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, ...),
-  or `AbstractDeterministic` to match both `Deterministic` and
-  `DeterministicSingleTimeSeries`.
+- `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, ...).
+  `Deterministic` also matches the `DeterministicSingleTimeSeries` rows that
+  `transform_single_time_series!` derives; each row still reports its own stored
+  type, and passing `DeterministicSingleTimeSeries` selects only those.
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and

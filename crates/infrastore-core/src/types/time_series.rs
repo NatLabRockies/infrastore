@@ -10,10 +10,24 @@ use super::period::Period;
 ///
 /// Static series carry runtime variants in [`TimeSeriesData`]. Forecast types
 /// use the forecast-specific store API.
+///
+/// # Encodings
+///
+/// Two, deliberately: [`Self::as_str`] is the *display and serde* form (JSON,
+/// proto, CLI, binding names), and [`Self::code`] is the *storage* form written
+/// to the SQLite catalog and passed across the C ABI.
+///
+/// The codes are part of the on-disk contract — changing one requires a
+/// [`crate::DATA_FORMAT_VERSION`] bump. In particular `Deterministic` and
+/// `DeterministicSingleTimeSeries` **must stay adjacent**: a request for
+/// `Deterministic` matches both, and [`Self::code_span`] turns that into a
+/// single index range scan rather than a two-value `IN`. The adjacency is
+/// asserted by `deterministic_codes_are_adjacent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TimeSeriesType {
     SingleTimeSeries,
     NonSequentialTimeSeries,
+    // Keep these two adjacent — see the type docs.
     Deterministic,
     DeterministicSingleTimeSeries,
     Probabilistic,
@@ -43,60 +57,103 @@ impl TimeSeriesType {
             _ => return None,
         })
     }
+
+    /// The storage code written to the SQLite catalog and passed across the C
+    /// ABI. Part of the on-disk contract — see the type docs.
+    pub fn code(self) -> i64 {
+        match self {
+            TimeSeriesType::SingleTimeSeries => 0,
+            TimeSeriesType::NonSequentialTimeSeries => 1,
+            TimeSeriesType::Deterministic => 2,
+            TimeSeriesType::DeterministicSingleTimeSeries => 3,
+            TimeSeriesType::Probabilistic => 4,
+            TimeSeriesType::Scenarios => 5,
+        }
+    }
+
+    /// Inverse of [`Self::code`]. `None` for an unknown code, which in the
+    /// catalog means a store written by an incompatible version.
+    pub fn from_code(code: i64) -> Option<Self> {
+        Some(match code {
+            0 => TimeSeriesType::SingleTimeSeries,
+            1 => TimeSeriesType::NonSequentialTimeSeries,
+            2 => TimeSeriesType::Deterministic,
+            3 => TimeSeriesType::DeterministicSingleTimeSeries,
+            4 => TimeSeriesType::Probabilistic,
+            5 => TimeSeriesType::Scenarios,
+            _ => return None,
+        })
+    }
+
+    /// The inclusive `(low, high)` code range a *request* for `self` matches.
+    ///
+    /// Every type spans only itself, with one deliberate exception: requesting
+    /// `Deterministic` also matches a stored `DeterministicSingleTimeSeries`. A
+    /// DST is a synthetic view over a `SingleTimeSeries` produced by
+    /// [`crate::Store::transform_single_time_series`], it reads back as a
+    /// `Deterministic`, and callers should not have to know which of the two a
+    /// store happens to hold. This mirrors InfrastructureSystems.jl, where a
+    /// `Deterministic` request lowers to both concrete types.
+    ///
+    /// Requesting `DeterministicSingleTimeSeries` narrows to DST alone, which
+    /// is how a caller inspecting the catalog asks "which of these are
+    /// synthetic?".
+    ///
+    /// Because the two codes are adjacent this is a contiguous range, so the
+    /// SQL predicate is `BETWEEN` rather than `IN` — one index seek instead of
+    /// two. [`Self::accepts`] is the same rule in memory.
+    pub fn code_span(self) -> (i64, i64) {
+        match self {
+            TimeSeriesType::Deterministic => (
+                TimeSeriesType::Deterministic.code(),
+                TimeSeriesType::DeterministicSingleTimeSeries.code(),
+            ),
+            other => (other.code(), other.code()),
+        }
+    }
+
+    /// Does a stored series of type `stored` satisfy a *request* for `self`?
+    ///
+    /// Derived from [`Self::code_span`] so the in-memory rule and the SQL
+    /// predicate cannot drift apart.
+    pub fn accepts(self, stored: TimeSeriesType) -> bool {
+        let (lo, hi) = self.code_span();
+        (lo..=hi).contains(&stored.code())
+    }
+
+    /// Is this a forecast (windowed) type rather than a static series?
+    pub fn is_forecast(self) -> bool {
+        match self {
+            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => false,
+            TimeSeriesType::Deterministic
+            | TimeSeriesType::DeterministicSingleTimeSeries
+            | TimeSeriesType::Probabilistic
+            | TimeSeriesType::Scenarios => true,
+        }
+    }
+
+    /// The inclusive code range covering the static types, then the forecast
+    /// types — `(static_lo, static_hi, forecast_lo, forecast_hi)`.
+    ///
+    /// The two groups are contiguous blocks in the code space, so the summary
+    /// queries can select "all static" or "all forecast" rows with one
+    /// `BETWEEN` instead of enumerating names. `code_groups_partition_cleanly`
+    /// asserts the partition, so a renumbering that broke it would fail rather
+    /// than silently mis-scope those queries.
+    pub fn code_groups() -> (i64, i64, i64, i64) {
+        (
+            TimeSeriesType::SingleTimeSeries.code(),
+            TimeSeriesType::NonSequentialTimeSeries.code(),
+            TimeSeriesType::Deterministic.code(),
+            TimeSeriesType::Scenarios.code(),
+        )
+    }
 }
 
 impl FromStr for TimeSeriesType {
     type Err = ();
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Self::parse(s).ok_or(())
-    }
-}
-
-/// The time series type named by a *read* request.
-///
-/// A request may name a concrete [`TimeSeriesType`], or an abstract family that
-/// resolves to exactly one concrete type at read time. The abstract variant is
-/// never stored and never returned — it exists only to address a forecast whose
-/// concrete type the caller does not (or should not need to) know.
-///
-/// [`RequestedType::AbstractDeterministic`] mirrors InfrastructureSystems.jl's
-/// `AbstractDeterministic` supertype: it matches a stored `Deterministic` *or* a
-/// `DeterministicSingleTimeSeries`. Resolving it replaces the old
-/// guess-and-retry fallback in the bindings with an authoritative catalog
-/// lookup that returns the concrete type that matched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestedType {
-    /// Match exactly one concrete stored type.
-    Concrete(TimeSeriesType),
-    /// Match a stored `Deterministic` or `DeterministicSingleTimeSeries`.
-    AbstractDeterministic,
-}
-
-impl From<TimeSeriesType> for RequestedType {
-    fn from(t: TimeSeriesType) -> Self {
-        RequestedType::Concrete(t)
-    }
-}
-
-impl RequestedType {
-    /// The request's name: a concrete type's name, or `"AbstractDeterministic"`
-    /// for the family.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            RequestedType::Concrete(t) => t.as_str(),
-            RequestedType::AbstractDeterministic => "AbstractDeterministic",
-        }
-    }
-
-    /// Does the concrete stored type `concrete` satisfy this request?
-    pub fn matches(self, concrete: TimeSeriesType) -> bool {
-        match self {
-            RequestedType::Concrete(t) => t == concrete,
-            RequestedType::AbstractDeterministic => matches!(
-                concrete,
-                TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries
-            ),
-        }
     }
 }
 
@@ -522,16 +579,134 @@ mod tests {
     }
 
     #[test]
-    fn abstract_deterministic_matches_both_concrete_types() {
-        let abs = RequestedType::AbstractDeterministic;
-        assert!(abs.matches(TimeSeriesType::Deterministic));
-        assert!(abs.matches(TimeSeriesType::DeterministicSingleTimeSeries));
-        assert!(!abs.matches(TimeSeriesType::Probabilistic));
-        assert!(!abs.matches(TimeSeriesType::SingleTimeSeries));
+    fn deterministic_request_accepts_both_concrete_storage_forms() {
+        // The whole point of the rule: a caller asking for `Deterministic` gets
+        // a transformed DST without naming it.
+        let det = TimeSeriesType::Deterministic;
+        assert!(det.accepts(TimeSeriesType::Deterministic));
+        assert!(det.accepts(TimeSeriesType::DeterministicSingleTimeSeries));
+        assert!(!det.accepts(TimeSeriesType::Probabilistic));
+        assert!(!det.accepts(TimeSeriesType::SingleTimeSeries));
+    }
 
-        let concrete = RequestedType::Concrete(TimeSeriesType::Deterministic);
-        assert!(concrete.matches(TimeSeriesType::Deterministic));
-        assert!(!concrete.matches(TimeSeriesType::DeterministicSingleTimeSeries));
+    #[test]
+    fn dst_request_narrows_to_dst_alone() {
+        // The inspection direction still discriminates.
+        let dst = TimeSeriesType::DeterministicSingleTimeSeries;
+        assert!(dst.accepts(TimeSeriesType::DeterministicSingleTimeSeries));
+        assert!(!dst.accepts(TimeSeriesType::Deterministic));
+    }
+
+    #[test]
+    fn every_other_type_accepts_only_itself() {
+        for t in [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            for stored in [
+                TimeSeriesType::SingleTimeSeries,
+                TimeSeriesType::NonSequentialTimeSeries,
+                TimeSeriesType::Deterministic,
+                TimeSeriesType::DeterministicSingleTimeSeries,
+                TimeSeriesType::Probabilistic,
+                TimeSeriesType::Scenarios,
+            ] {
+                assert_eq!(t.accepts(stored), t == stored, "{t:?} vs {stored:?}");
+            }
+        }
+    }
+
+    const ALL_TYPES: [TimeSeriesType; 6] = [
+        TimeSeriesType::SingleTimeSeries,
+        TimeSeriesType::NonSequentialTimeSeries,
+        TimeSeriesType::Deterministic,
+        TimeSeriesType::DeterministicSingleTimeSeries,
+        TimeSeriesType::Probabilistic,
+        TimeSeriesType::Scenarios,
+    ];
+
+    #[test]
+    fn storage_codes_round_trip_and_are_unique() {
+        // The codes are an on-disk contract: a silent renumbering would
+        // misread every existing catalog row.
+        let mut seen = Vec::new();
+        for t in ALL_TYPES {
+            assert_eq!(TimeSeriesType::from_code(t.code()), Some(t), "{t:?}");
+            assert!(!seen.contains(&t.code()), "duplicate code for {t:?}");
+            seen.push(t.code());
+        }
+        assert_eq!(TimeSeriesType::from_code(6), None);
+        assert_eq!(TimeSeriesType::from_code(-1), None);
+    }
+
+    #[test]
+    fn deterministic_codes_are_adjacent() {
+        // Load-bearing: `code_span` relies on it to emit a contiguous BETWEEN
+        // instead of a two-value IN. Reordering the enum breaks this loudly
+        // rather than silently degrading the query plan.
+        assert_eq!(
+            TimeSeriesType::DeterministicSingleTimeSeries.code(),
+            TimeSeriesType::Deterministic.code() + 1
+        );
+    }
+
+    #[test]
+    fn code_span_widens_only_deterministic() {
+        let (lo, hi) = TimeSeriesType::Deterministic.code_span();
+        assert_eq!(
+            (lo, hi),
+            (
+                TimeSeriesType::Deterministic.code(),
+                TimeSeriesType::DeterministicSingleTimeSeries.code()
+            )
+        );
+        for t in ALL_TYPES {
+            if t == TimeSeriesType::Deterministic {
+                continue;
+            }
+            assert_eq!(t.code_span(), (t.code(), t.code()), "{t:?} must not widen");
+        }
+    }
+
+    #[test]
+    fn code_groups_partition_cleanly() {
+        // The summary queries select "all static" / "all forecast" with one
+        // BETWEEN each, which is only correct while the two groups are
+        // contiguous, disjoint, and cover every type.
+        let (s_lo, s_hi, f_lo, f_hi) = TimeSeriesType::code_groups();
+        assert!(s_lo <= s_hi && f_lo <= f_hi);
+        assert_eq!(s_hi + 1, f_lo, "the groups must be adjacent with no gap");
+        for t in ALL_TYPES {
+            let c = t.code();
+            let in_static = (s_lo..=s_hi).contains(&c);
+            let in_forecast = (f_lo..=f_hi).contains(&c);
+            assert!(
+                in_static ^ in_forecast,
+                "{t:?} must be in exactly one group"
+            );
+            assert_eq!(in_forecast, t.is_forecast(), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn code_span_agrees_with_accepts_over_every_pair() {
+        // `accepts` is derived from `code_span`, so this pins the derivation
+        // against the behavior the bindings document.
+        for t in ALL_TYPES {
+            for stored in ALL_TYPES {
+                let (lo, hi) = t.code_span();
+                let in_span = (lo..=hi).contains(&stored.code());
+                assert_eq!(in_span, t.accepts(stored), "{t:?} vs {stored:?}");
+            }
+        }
+        assert!(
+            TimeSeriesType::Deterministic.accepts(TimeSeriesType::DeterministicSingleTimeSeries)
+        );
+        assert!(
+            !TimeSeriesType::DeterministicSingleTimeSeries.accepts(TimeSeriesType::Deterministic)
+        );
     }
 
     // ---- SingleTimeSeries -------------------------------------------------

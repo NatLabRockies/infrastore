@@ -113,14 +113,6 @@ impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {
     }
 }
 
-// The catalog filters take a `RequestedType`; every Python-exposed type is a
-// concrete stored type, so the conversion goes through `TimeSeriesType`.
-impl From<PyTimeSeriesType> for core_lib::RequestedType {
-    fn from(v: PyTimeSeriesType) -> Self {
-        core_lib::TimeSeriesType::from(v).into()
-    }
-}
-
 impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
     fn from(v: core_lib::TimeSeriesType) -> Self {
         match v {
@@ -1638,10 +1630,12 @@ impl PyStore {
     /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
     /// must match. All filter arguments are keyword-only.
     ///
-    /// `time_series_type` is a `TimeSeriesType` or the string
-    /// `"abstract_deterministic"`, which matches both `Deterministic` and
-    /// `DeterministicSingleTimeSeries` in one query. Every method taking these
-    /// filter kwargs accepts the family the same way.
+    /// `time_series_type` is a `TimeSeriesType`. `TimeSeriesType.Deterministic`
+    /// also matches the `DeterministicSingleTimeSeries` rows that
+    /// `transform_single_time_series` derives — each row still reports its own
+    /// `time_series_type`, and passing
+    /// `TimeSeriesType.DeterministicSingleTimeSeries` selects only those. Every
+    /// method taking these filter kwargs reads the type the same way.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, resolution=None, interval=None, features=None
@@ -1756,10 +1750,9 @@ impl PyStore {
 
     /// Return True if at least one time series matches the filters — e.g.
     /// "does this owner have any time series (of type T)?" — without listing
-    /// them. Accepts the same keyword-only filters as `list_time_series`,
-    /// including `"abstract_deterministic"` for `time_series_type`, and answers
-    /// from index probes that hydrate no rows — a `features` filter included —
-    /// so it is safe to call in hot loops.
+    /// them. Accepts the same keyword-only filters as `list_time_series`, and
+    /// answers from index probes that hydrate no rows — a `features` filter
+    /// included — so it is safe to call in hot loops.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, resolution=None, interval=None, features=None
@@ -2001,9 +1994,9 @@ impl PyStore {
     }
 
     /// Build a `ForecastReader` over the forecasts of `time_series_type` matching
-    /// the filter. A `resolution` is required; a `Deterministic` reader — and
-    /// equally the `"abstract_deterministic"` family — also includes
-    /// `DeterministicSingleTimeSeries`. Drive it with `forecast_read`.
+    /// the filter. A `resolution` is required; a `Deterministic` reader also
+    /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
+    /// Drive it with `forecast_read`.
     #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
@@ -2399,9 +2392,10 @@ impl PyStore {
     }
 
     /// Resolve a forecast addressed by attributes plus a requested type to its
-    /// concrete key. `requested_type` is a `TimeSeriesType` or the string
-    /// `"abstract_deterministic"` (matches a stored `Deterministic` or
-    /// `DeterministicSingleTimeSeries`).
+    /// concrete key. `requested_type` is a `TimeSeriesType`;
+    /// `TimeSeriesType.Deterministic` also matches a stored
+    /// `DeterministicSingleTimeSeries`, and the returned key's
+    /// `time_series_type` reports which form was found.
     #[pyo3(signature = (owner_id, owner_category, name, requested_type, *, resolution=None, interval=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn resolve_forecast_key(
@@ -2839,31 +2833,23 @@ fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
 
 // ---- requested-type helpers -----------------------------------------------
 
-/// The string that names the `AbstractDeterministic` family in Python. The
-/// family is a *request*, not a stored type, so it has no `TimeSeriesType`
-/// member to name it (see [`core_lib::RequestedType`]).
-const ABSTRACT_DETERMINISTIC: &str = "abstract_deterministic";
-
-/// Accept a requested time series type as either a `TimeSeriesType` (one
-/// concrete stored type) or the string `"abstract_deterministic"` (the family
-/// matching a stored `Deterministic` *or* `DeterministicSingleTimeSeries`).
+/// Accept a requested time series type as a `TimeSeriesType`.
 ///
-/// `param` names the argument in error messages. As in [`pyany_to_period`], an
-/// unrecognized string stays inside the library's exception hierarchy while a
-/// wholly wrong argument type raises `TypeError`.
-fn pyany_to_requested_type(v: &Bound<'_, PyAny>, param: &str) -> PyResult<core_lib::RequestedType> {
-    if let Ok(s) = v.extract::<String>() {
-        if s == ABSTRACT_DETERMINISTIC {
-            return Ok(core_lib::RequestedType::AbstractDeterministic);
-        }
-        return Err(InvalidParameterError::new_err(format!(
-            "{param} string must be '{ABSTRACT_DETERMINISTIC}'; got '{s}'"
-        )));
-    }
+/// `TimeSeriesType.Deterministic` also matches a stored
+/// `DeterministicSingleTimeSeries` — the transform is an implementation detail
+/// of how a forecast is stored, and it reads back as a `Deterministic` either
+/// way. `TimeSeriesType.DeterministicSingleTimeSeries` narrows to the
+/// transformed form, which is how a caller inspects what it has.
+///
+/// `param` names the argument in error messages.
+fn pyany_to_requested_type(
+    v: &Bound<'_, PyAny>,
+    param: &str,
+) -> PyResult<core_lib::TimeSeriesType> {
     match v.extract::<PyTimeSeriesType>() {
         Ok(t) => Ok(t.into()),
         Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "{param} must be a TimeSeriesType or the string '{ABSTRACT_DETERMINISTIC}'"
+            "{param} must be a TimeSeriesType"
         ))),
     }
 }
@@ -2873,7 +2859,7 @@ fn pyany_to_requested_type(v: &Bound<'_, PyAny>, param: &str) -> PyResult<core_l
 fn pyany_to_requested_type_opt(
     v: Option<&Bound<'_, PyAny>>,
     param: &str,
-) -> PyResult<Option<core_lib::RequestedType>> {
+) -> PyResult<Option<core_lib::TimeSeriesType>> {
     match v {
         Some(v) => Ok(Some(pyany_to_requested_type(v, param)?)),
         None => Ok(None),

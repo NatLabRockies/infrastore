@@ -18,7 +18,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
-use crate::types::time_series::{RequestedType, TimeSeriesType};
+use crate::types::time_series::TimeSeriesType;
 
 pub struct MetadataStore {
     conn: Connection,
@@ -328,14 +328,18 @@ fn parse_opt_rfc3339(s: Option<String>) -> Result<Option<DateTime<Utc>>> {
     }
 }
 
-fn parse_category(s: &str) -> Result<OwnerCategory> {
-    OwnerCategory::parse(s)
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad owner_category {s}")))
+/// Decode a stored `owner_category` code. An unknown code means the catalog
+/// was written by an incompatible version, hence `IntegrityError`.
+fn decode_category(code: i64) -> Result<OwnerCategory> {
+    OwnerCategory::from_code(code)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad owner_category code {code}")))
 }
 
-fn parse_type(s: &str) -> Result<TimeSeriesType> {
-    TimeSeriesType::parse(s)
-        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad time_series_type {s}")))
+/// Decode a stored `time_series_type` code. As with [`decode_category`], an
+/// unknown code is an integrity failure rather than a filterable value.
+fn decode_type(code: i64) -> Result<TimeSeriesType> {
+    TimeSeriesType::from_code(code)
+        .ok_or_else(|| TimeSeriesError::IntegrityError(format!("bad time_series_type code {code}")))
 }
 
 #[derive(Debug, Default, Clone)]
@@ -343,9 +347,9 @@ pub struct MetadataFilter {
     pub owner_id: Option<i64>,
     pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
-    /// Type filter: a concrete stored type, or the `AbstractDeterministic`
-    /// family (matching `Deterministic` and `DeterministicSingleTimeSeries`).
-    pub time_series_type: Option<RequestedType>,
+    /// Type predicate: a widening read *request*, or one exact stored type.
+    /// See [`TypeMatch`].
+    pub time_series_type: Option<TypeMatch>,
     pub name: Option<String>,
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*`/`?` wildcards).
     /// Combined with `name` as AND when both are set.
@@ -409,33 +413,115 @@ impl From<AssociationIdentity> for SeriesFamily {
     }
 }
 
-/// Append the `time_series_type` predicate for `requested` to `sql`/`params`:
-/// an equality for a concrete type, an `IN (…)` over both concrete members for
-/// the `AbstractDeterministic` family. Shared by every catalog query that
-/// filters on type.
+/// How a `time_series_type` predicate matches stored rows.
+///
+/// The distinction is load-bearing for both correctness and cost. A caller that
+/// holds a [`crate::KeyIdentity`] already knows the row's concrete type, so
+/// widening it would probe the uniqueness index twice and could match a row the
+/// key does not name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeMatch {
+    /// A read *request*, per [`TimeSeriesType::accepts`]: `Deterministic` spans
+    /// both of its storage forms, every other type matches only itself.
+    Requested(TimeSeriesType),
+    /// Exactly one stored type — never widened.
+    Exact(TimeSeriesType),
+}
+
+impl TypeMatch {
+    /// The inclusive `(low, high)` storage-code range this predicate matches.
+    fn code_span(self) -> (i64, i64) {
+        match self {
+            TypeMatch::Requested(t) => t.code_span(),
+            TypeMatch::Exact(t) => (t.code(), t.code()),
+        }
+    }
+}
+
+/// Which SQL form a *widening* type predicate takes.
+///
+/// `Deterministic` and `DeterministicSingleTimeSeries` have adjacent codes, so
+/// a widening request is expressible either as a `BETWEEN` range or a two-value
+/// `IN`. Neither is universally better, and the difference is a query-plan
+/// cliff rather than a constant factor:
+///
+/// * Alone on `idx_ts_type` (counts, type-scoped scans), `BETWEEN` is one index
+///   seek where `IN` performs two — measured ~1.1x faster.
+/// * Inside `uq_ts_assoc`, `time_series_type` is a *middle* column, and an
+///   inequality there stops SQLite using every column after it. The plan drops
+///   from a five-column covering seek to a fallback on `idx_name`. `IN` is
+///   treated as equality-with-loop and keeps the full seek.
+///
+/// So the form is chosen by whether the filter also constrains a column that
+/// follows `time_series_type` in that index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpanForm {
+    /// `BETWEEN ? AND ?` — for predicates standing alone on `idx_ts_type`.
+    Range,
+    /// `IN (?, ?)` — preserves the composite seek on `uq_ts_assoc`.
+    In,
+}
+
+/// Append the `time_series_type` predicate for `requested` to `sql`/`params`.
+///
+/// The SQL form of [`TimeSeriesType::accepts`]: an equality when the predicate
+/// names one code, otherwise `form`'s widening shape. Driven by
+/// [`TypeMatch::code_span`] so the SQL and the in-memory rule cannot drift.
+/// Shared by every catalog query that filters on type.
 fn push_type_predicate(
     sql: &mut String,
     params: &mut Vec<Box<dyn rusqlite::ToSql>>,
-    requested: RequestedType,
+    requested: TypeMatch,
+    form: SpanForm,
 ) {
-    match requested {
-        RequestedType::Concrete(t) => {
-            sql.push_str(" AND time_series_type = ?");
-            params.push(Box::new(t.as_str().to_string()));
+    let (lo, hi) = requested.code_span();
+    if lo == hi {
+        sql.push_str(" AND time_series_type = ?");
+        params.push(Box::new(lo));
+        return;
+    }
+    match form {
+        SpanForm::Range => {
+            sql.push_str(" AND time_series_type BETWEEN ? AND ?");
+            params.push(Box::new(lo));
+            params.push(Box::new(hi));
         }
-        RequestedType::AbstractDeterministic => {
-            sql.push_str(" AND time_series_type IN (?, ?)");
-            params.push(Box::new(TimeSeriesType::Deterministic.as_str().to_string()));
-            params.push(Box::new(
-                TimeSeriesType::DeterministicSingleTimeSeries
-                    .as_str()
-                    .to_string(),
-            ));
+        SpanForm::In => {
+            sql.push_str(" AND time_series_type IN (");
+            for (i, code) in (lo..=hi).enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push('?');
+                params.push(Box::new(code));
+            }
+            sql.push(')');
         }
     }
 }
 
 impl MetadataFilter {
+    /// Which widening form the type predicate should take — see [`SpanForm`].
+    ///
+    /// `uq_ts_assoc` is
+    /// `(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)`.
+    /// If this filter constrains any column *after* `time_series_type`, the
+    /// query wants that composite seek and a range would truncate it, so the
+    /// `IN` form is used. Otherwise the predicate stands alone and the range
+    /// form is the cheaper one.
+    fn span_form(&self) -> SpanForm {
+        let constrains_later_column = self.name.is_some()
+            || self.name_glob.is_some()
+            || self.resolution.is_some()
+            || self.interval.is_some()
+            || self.features_hash.is_some();
+        if constrains_later_column {
+            SpanForm::In
+        } else {
+            SpanForm::Range
+        }
+    }
+
     /// Render the filter as a `WHERE` clause plus its bound parameters, so the
     /// same predicate can be reused across the row query and the batched
     /// features query without building the SQL twice.
@@ -451,14 +537,14 @@ impl MetadataFilter {
         }
         if let Some(owner_category) = self.owner_category {
             sql.push_str(" AND owner_category = ?");
-            params_vec.push(Box::new(owner_category.as_str().to_string()));
+            params_vec.push(Box::new(owner_category.code()));
         }
         if let Some(ref owner_type) = self.owner_type {
             sql.push_str(" AND owner_type = ?");
             params_vec.push(Box::new(owner_type.clone()));
         }
         if let Some(requested) = self.time_series_type {
-            push_type_predicate(&mut sql, &mut params_vec, requested);
+            push_type_predicate(&mut sql, &mut params_vec, requested, self.span_form());
         }
         if let Some(ref name) = self.name {
             sql.push_str(" AND name = ?");
@@ -682,8 +768,8 @@ impl MetadataStore {
         let result = insert_stmt.execute(params![
             meta.owner_id,
             meta.owner_type,
-            meta.owner_category.as_str(),
-            meta.time_series_type.as_str(),
+            meta.owner_category.code(),
+            meta.time_series_type.code(),
             meta.name,
             meta.data_hash.as_slice(),
             initial_ts,
@@ -801,8 +887,8 @@ impl MetadataStore {
             .query_map(
                 params![
                     key.owner_id,
-                    key.owner_category.as_str(),
-                    key.time_series_type.as_str(),
+                    key.owner_category.code(),
+                    key.time_series_type.code(),
                     key.name,
                     resolution_iso,
                     interval_iso,
@@ -836,7 +922,7 @@ impl MetadataStore {
             tx,
             "SELECT data_hash FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2",
-            params![owner_id, owner_category.as_str()],
+            params![owner_id, owner_category.code()],
         )?;
         let hashes = bytes_list
             .into_iter()
@@ -844,7 +930,7 @@ impl MetadataStore {
             .collect::<Vec<_>>();
         tx.execute(
             "DELETE FROM time_series_associations WHERE owner_id = ?1 AND owner_category = ?2",
-            params![owner_id, owner_category.as_str()],
+            params![owner_id, owner_category.code()],
         )?;
         Ok(hashes)
     }
@@ -865,7 +951,7 @@ impl MetadataStore {
         tx.execute(
             "UPDATE time_series_associations SET owner_id = ?1
              WHERE owner_id = ?2 AND owner_category = ?3",
-            params![new_owner, old_owner, owner_category.as_str()],
+            params![new_owner, old_owner, owner_category.code()],
         )
         .map_err(map_unique_violation)
     }
@@ -887,8 +973,8 @@ impl MetadataStore {
             params![
                 new_name,
                 key.owner_id,
-                key.owner_category.as_str(),
-                key.time_series_type.as_str(),
+                key.owner_category.code(),
+                key.time_series_type.code(),
                 key.name,
                 resolution_iso,
                 interval_iso,
@@ -999,10 +1085,10 @@ impl MetadataStore {
              FROM time_series_associations WHERE time_series_type = ?1",
         )?;
         let rows = stmt
-            .query_map(params![ts_type.as_str()], |row| {
+            .query_map(params![ts_type.code()], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
@@ -1017,11 +1103,7 @@ impl MetadataStore {
                 |(owner_id, cat, name, resolution, interval, hash_blob, horizon)| {
                     let identity = AssociationIdentity {
                         owner_id,
-                        owner_category: OwnerCategory::parse(&cat).ok_or_else(|| {
-                            TimeSeriesError::IntegrityError(format!(
-                                "unknown owner_category: {cat}"
-                            ))
-                        })?,
+                        owner_category: decode_category(cat)?,
                         name,
                         resolution,
                         interval,
@@ -1137,7 +1219,7 @@ impl MetadataStore {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
-            time_series_type: Some(key.time_series_type.into()),
+            time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
             name: Some(key.name.clone()),
             resolution: key.resolution,
             interval: key.interval,
@@ -1159,14 +1241,21 @@ impl MetadataStore {
         }
     }
 
-    pub fn distinct_resolutions(&self, ts_type: Option<RequestedType>) -> Result<Vec<Period>> {
+    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT resolution FROM time_series_associations
              WHERE resolution IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
-            push_type_predicate(&mut sql, &mut params_vec, t);
+            // Standalone predicate on `idx_ts_type` (no composite seek to
+            // truncate), so the cheaper range form applies — see `SpanForm`.
+            push_type_predicate(
+                &mut sql,
+                &mut params_vec,
+                TypeMatch::Requested(t),
+                SpanForm::Range,
+            );
         }
         sql.push_str(" ORDER BY resolution ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1186,14 +1275,21 @@ impl MetadataStore {
     /// mixed period kinds have no numeric order, so text order is the stable
     /// choice. Only forecast rows carry an interval, so non-forecast types yield
     /// an empty list.
-    pub fn distinct_intervals(&self, ts_type: Option<RequestedType>) -> Result<Vec<Period>> {
+    pub fn distinct_intervals(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT interval FROM time_series_associations
              WHERE interval IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
-            push_type_predicate(&mut sql, &mut params_vec, t);
+            // Standalone predicate on `idx_ts_type` (no composite seek to
+            // truncate), so the cheaper range form applies — see `SpanForm`.
+            push_type_predicate(
+                &mut sql,
+                &mut params_vec,
+                TypeMatch::Requested(t),
+                SpanForm::Range,
+            );
         }
         sql.push_str(" ORDER BY interval ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1211,7 +1307,7 @@ impl MetadataStore {
     pub fn count_by_type(&self, ts_type: TimeSeriesType) -> Result<i64> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM time_series_associations WHERE time_series_type = ?1",
-            params![ts_type.as_str()],
+            params![ts_type.code()],
             |r| r.get(0),
         )?;
         Ok(n)
@@ -1226,13 +1322,13 @@ impl MetadataStore {
              WHERE data_hash = ?1 GROUP BY time_series_type",
         )?;
         let rows = stmt.query_map(params![data_hash.as_slice()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })?;
         let mut sts = 0i64;
         let mut dst = 0i64;
         for row in rows {
             let (ts_type, n) = row?;
-            match TimeSeriesType::parse(&ts_type) {
+            match TimeSeriesType::from_code(ts_type) {
                 Some(TimeSeriesType::SingleTimeSeries) => sts = n,
                 Some(TimeSeriesType::DeterministicSingleTimeSeries) => dst = n,
                 _ => {}
@@ -1251,18 +1347,24 @@ impl MetadataStore {
         Ok(n)
     }
 
-    /// Association count grouped by time series type, as `(type, count)` pairs.
+    /// Association count grouped by time series type, as `(type, count)` pairs,
+    /// ordered by storage code (so `SingleTimeSeries` first, `Scenarios` last).
     /// One grouped query; types the core does not recognize are skipped.
+    ///
+    /// The `ORDER BY` is explicit rather than incidental: `GROUP BY` alone
+    /// returns rows in whatever order the grouping used, which changed when the
+    /// column became an integer code. Pinning it keeps the output stable for
+    /// callers that compare whole result lists.
     pub fn counts_by_type(&self) -> Result<Vec<(TimeSeriesType, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT time_series_type, COUNT(*) FROM time_series_associations
-             GROUP BY time_series_type",
+             GROUP BY time_series_type ORDER BY time_series_type",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         let mut out = Vec::new();
         for row in rows {
             let (ts_type, n) = row?;
-            if let Some(ty) = TimeSeriesType::parse(&ts_type) {
+            if let Some(ty) = TimeSeriesType::from_code(ts_type) {
                 out.push((ty, n));
             }
         }
@@ -1286,7 +1388,7 @@ impl MetadataStore {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(DISTINCT owner_id) FROM time_series_associations
              WHERE owner_category = ?1",
-            params![category.as_str()],
+            params![category.code()],
             |r| r.get(0),
         )?;
         Ok(n)
@@ -1303,10 +1405,10 @@ impl MetadataStore {
             "SELECT COUNT(DISTINCT data_hash) FROM time_series_associations
              WHERE time_series_type IN ({placeholders})"
         );
-        let names: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
+        let codes: Vec<i64> = types.iter().map(|t| t.code()).collect();
         let n: i64 = self
             .conn
-            .query_row(&sql, rusqlite::params_from_iter(names), |r| r.get(0))?;
+            .query_row(&sql, rusqlite::params_from_iter(codes), |r| r.get(0))?;
         Ok(n)
     }
 
@@ -1315,19 +1417,22 @@ impl MetadataStore {
     /// `(owner_type, owner_category, type, name, initial_timestamp, resolution,
     /// length)` with the association count. One `GROUP BY` query.
     pub fn static_summary(&self) -> Result<Vec<StaticSummaryRow>> {
-        let mut stmt = self.conn.prepare(
+        // The static types are a contiguous code block, so this is one range
+        // scan rather than a name list — see `TimeSeriesType::code_groups`.
+        let (static_lo, static_hi, ..) = TimeSeriesType::code_groups();
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT owner_type, owner_category, time_series_type, name,
                     initial_timestamp, resolution, length, COUNT(*)
              FROM time_series_associations
-             WHERE time_series_type IN ('SingleTimeSeries', 'NonSequentialTimeSeries')
+             WHERE time_series_type BETWEEN {static_lo} AND {static_hi}
              GROUP BY owner_type, owner_category, time_series_type, name,
                       initial_timestamp, resolution, length",
-        )?;
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
@@ -1340,8 +1445,8 @@ impl MetadataStore {
             let (owner_type, oc, tt, name, its, res, len, count) = row?;
             out.push(StaticSummaryRow {
                 owner_type,
-                owner_category: parse_category(&oc)?,
-                time_series_type: parse_type(&tt)?,
+                owner_category: decode_category(oc)?,
+                time_series_type: decode_type(tt)?,
                 name,
                 initial_timestamp: parse_opt_rfc3339(its)?,
                 resolution: res.map(|s| iso_to_period(&s)).transpose()?,
@@ -1357,20 +1462,21 @@ impl MetadataStore {
     /// horizon, interval, window_count)` with the association count. One
     /// `GROUP BY` query.
     pub fn forecast_summary(&self) -> Result<Vec<ForecastSummaryRow>> {
-        let mut stmt = self.conn.prepare(
+        // The forecast types are the other contiguous code block.
+        let (.., fc_lo, fc_hi) = TimeSeriesType::code_groups();
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT owner_type, owner_category, time_series_type, name,
                     initial_timestamp, resolution, horizon, interval, count, COUNT(*)
              FROM time_series_associations
-             WHERE time_series_type IN
-                   ('Deterministic', 'DeterministicSingleTimeSeries', 'Probabilistic', 'Scenarios')
+             WHERE time_series_type BETWEEN {fc_lo} AND {fc_hi}
              GROUP BY owner_type, owner_category, time_series_type, name,
                       initial_timestamp, resolution, horizon, interval, count",
-        )?;
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
@@ -1385,8 +1491,8 @@ impl MetadataStore {
             let (owner_type, oc, tt, name, its, res, hor, iv, wcount, count) = row?;
             out.push(ForecastSummaryRow {
                 owner_type,
-                owner_category: parse_category(&oc)?,
-                time_series_type: parse_type(&tt)?,
+                owner_category: decode_category(oc)?,
+                time_series_type: decode_type(tt)?,
                 name,
                 initial_timestamp: parse_opt_rfc3339(its)?,
                 resolution: res.map(|s| iso_to_period(&s)).transpose()?,
@@ -1416,7 +1522,7 @@ impl MetadataStore {
              ORDER BY resolution",
         )?;
         let rows = stmt.query_map(
-            params![TimeSeriesType::SingleTimeSeries.as_str(), res_iso],
+            params![TimeSeriesType::SingleTimeSeries.code(), res_iso],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -1444,17 +1550,23 @@ impl MetadataStore {
     pub fn list_owner_ids(
         &self,
         category: OwnerCategory,
-        ts_type: Option<RequestedType>,
+        ts_type: Option<TimeSeriesType>,
         resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         let mut sql = String::from(
             "SELECT DISTINCT owner_id FROM time_series_associations
              WHERE owner_category = ?",
         );
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(category.as_str().to_string())];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(category.code())];
         if let Some(t) = ts_type {
-            push_type_predicate(&mut sql, &mut params_vec, t);
+            // Standalone predicate on `idx_ts_type` (no composite seek to
+            // truncate), so the cheaper range form applies — see `SpanForm`.
+            push_type_predicate(
+                &mut sql,
+                &mut params_vec,
+                TypeMatch::Requested(t),
+                SpanForm::Range,
+            );
         }
         if let Some(res) = resolution {
             sql.push_str(" AND resolution = ?");
@@ -2040,8 +2152,8 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let features_hash: Vec<u8> = row.get(0)?;
     let owner_id: i64 = row.get(1)?;
     let owner_type: String = row.get(2)?;
-    let owner_category: String = row.get(3)?;
-    let time_series_type: String = row.get(4)?;
+    let owner_category: i64 = row.get(3)?;
+    let time_series_type: i64 = row.get(4)?;
     let name: String = row.get(5)?;
     let data_hash_bytes: Vec<u8> = row.get(6)?;
     let initial_timestamp: Option<String> = row.get(7)?;
@@ -2057,23 +2169,23 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let element_shape_json: Option<String> = row.get(17)?;
     let ext: Option<String> = row.get(18)?;
 
-    let owner_category = OwnerCategory::parse(&owner_category).ok_or_else(|| {
+    let owner_category = OwnerCategory::from_code(owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             3,
-            rusqlite::types::Type::Text,
+            rusqlite::types::Type::Integer,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("invalid owner_category: {owner_category}"),
+                format!("invalid owner_category code: {owner_category}"),
             )),
         )
     })?;
-    let ts_type = TimeSeriesType::parse(&time_series_type).ok_or_else(|| {
+    let ts_type = TimeSeriesType::from_code(time_series_type).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             4,
-            rusqlite::types::Type::Text,
+            rusqlite::types::Type::Integer,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("invalid time_series_type: {time_series_type}"),
+                format!("invalid time_series_type code: {time_series_type}"),
             )),
         )
     })?;
@@ -2206,7 +2318,7 @@ pub fn typed_references_to_in_tx(
             "SELECT COUNT(*) FROM time_series_associations
          WHERE data_hash = ?1 AND time_series_type = ?2",
         )?
-        .query_row(params![data_hash.as_slice(), ts_type.as_str()], |row| {
+        .query_row(params![data_hash.as_slice(), ts_type.code()], |row| {
             row.get(0)
         })?;
     Ok(count)
@@ -2247,8 +2359,8 @@ pub fn forecast_family_conflict(
         .query_row(
             params![
                 owner_id,
-                owner_category.as_str(),
-                conflicting_type.as_str(),
+                owner_category.code(),
+                conflicting_type.code(),
                 name,
                 resolution_iso,
                 features_hash.as_slice(),
@@ -2478,5 +2590,130 @@ mod index_plan_tests {
                 "index {expected} is missing; present: {names:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod type_predicate_tests {
+    //! Guards on the *shape* of the `time_series_type` predicate.
+    //!
+    //! `EXPLAIN QUERY PLAN` cannot fully separate these — SQLite renders an
+    //! `IN` list as `time_series_type=?`, the same text an equality produces —
+    //! so these assert on the generated SQL instead. Three rules are pinned:
+    //!
+    //! 1. A predicate naming one code is a plain equality.
+    //! 2. A widening request standing alone becomes `BETWEEN` (one index seek).
+    //! 3. A widening request inside an identity-shaped filter stays `IN`,
+    //!    because an inequality on a middle column of `uq_ts_assoc` truncates
+    //!    the composite seek — measured as a plan collapse to `idx_name`.
+
+    use super::{MetadataFilter, SpanForm, TypeMatch, push_type_predicate};
+    use crate::types::metadata::OwnerCategory;
+    use crate::types::time_series::TimeSeriesType;
+
+    fn predicate(m: TypeMatch, form: SpanForm) -> (String, usize) {
+        let mut sql = String::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        push_type_predicate(&mut sql, &mut params, m, form);
+        (sql, params.len())
+    }
+
+    #[test]
+    fn an_exact_predicate_is_one_equality_in_either_form() {
+        // The key-lookup path. Widening here would double the index probes on
+        // the hottest read path, and the form must not change that.
+        for form in [SpanForm::Range, SpanForm::In] {
+            let (sql, n) = predicate(TypeMatch::Exact(TimeSeriesType::Deterministic), form);
+            assert_eq!(sql, " AND time_series_type = ?", "{form:?}");
+            assert_eq!(n, 1, "{form:?}");
+        }
+    }
+
+    #[test]
+    fn a_standalone_deterministic_request_is_a_range() {
+        let (sql, n) = predicate(
+            TypeMatch::Requested(TimeSeriesType::Deterministic),
+            SpanForm::Range,
+        );
+        assert_eq!(sql, " AND time_series_type BETWEEN ? AND ?");
+        assert_eq!(n, 2, "the span's two endpoints");
+    }
+
+    #[test]
+    fn a_composite_deterministic_request_stays_in() {
+        let (sql, n) = predicate(
+            TypeMatch::Requested(TimeSeriesType::Deterministic),
+            SpanForm::In,
+        );
+        assert_eq!(sql, " AND time_series_type IN (?, ?)");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn every_non_deterministic_type_is_one_equality() {
+        for t in [
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+        ] {
+            for m in [TypeMatch::Requested(t), TypeMatch::Exact(t)] {
+                let (sql, n) = predicate(m, SpanForm::Range);
+                assert_eq!(sql, " AND time_series_type = ?", "{m:?}");
+                assert_eq!(n, 1, "{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn identity_shaped_filters_pick_the_in_form() {
+        // Anything constraining a column that follows `time_series_type` in
+        // `uq_ts_assoc` wants the composite seek preserved.
+        let base = MetadataFilter {
+            owner_id: Some(1),
+            owner_category: Some(OwnerCategory::Component),
+            ..Default::default()
+        };
+        assert_eq!(base.span_form(), SpanForm::Range, "type-scoped only");
+
+        for f in [
+            MetadataFilter {
+                name: Some("load".into()),
+                ..base.clone()
+            },
+            MetadataFilter {
+                name_glob: Some("lo*".into()),
+                ..base.clone()
+            },
+            MetadataFilter {
+                resolution: Some(crate::types::period::Period::from(chrono::Duration::hours(
+                    1,
+                ))),
+                ..base.clone()
+            },
+            MetadataFilter {
+                interval: Some(crate::types::period::Period::from(chrono::Duration::hours(
+                    1,
+                ))),
+                ..base.clone()
+            },
+            MetadataFilter {
+                features_hash: Some([0u8; 32]),
+                ..base.clone()
+            },
+        ] {
+            assert_eq!(f.span_form(), SpanForm::In, "{f:?}");
+        }
+    }
+
+    #[test]
+    fn the_widened_sql_binds_exactly_the_spanned_codes() {
+        // The bound values, not just the shape: a range whose endpoints did not
+        // match `code_span` would silently select the wrong types.
+        let (lo, hi) = TimeSeriesType::Deterministic.code_span();
+        assert_eq!(lo, TimeSeriesType::Deterministic.code());
+        assert_eq!(hi, TimeSeriesType::DeterministicSingleTimeSeries.code());
+        assert_eq!(hi - lo, 1, "adjacency is what makes the range correct");
     }
 }

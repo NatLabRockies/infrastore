@@ -504,8 +504,9 @@ end
     n = transform_single_time_series!(store, hor, ivl)
     @test n == 1
 
-    # The family read resolves to the stored DST (no concrete Deterministic here).
-    fc = get_time_series(AbstractDeterministic, store, 400, Component, "dst")
+    # Asking for `Deterministic` resolves the stored DST: the transform is a
+    # storage detail, not something the caller has to name.
+    fc = get_time_series(Deterministic, store, 400, Component, "dst")
     @test fc.count == 3
     @test size(fc.data) == (4, 3)
     @test fc.name == "dst"
@@ -513,10 +514,19 @@ end
     expected = Float64[underlying[(w - 1) * 2 + s] for s in 1:4, w in 1:3]
     @test fc.data == expected
 
-    # A concrete Deterministic request must NOT match a DST.
-    @test_throws InfraStore.NotFoundError get_time_series(
-        Deterministic, store, 400, Component, "dst"
-    )
+    # Naming the derived type explicitly reads the same values — it narrows the
+    # query, it does not change the result struct.
+    @test get_time_series(
+        DeterministicSingleTimeSeries, store, 400, Component, "dst"
+    ).data == expected
+
+    # The detail stays inspectable: the resolved key reports the stored type.
+    @test key_info(
+        get_time_series_key(Deterministic, store, 400, Component, "dst")
+    ).time_series_type == DeterministicSingleTimeSeries
+
+    # `AbstractDeterministic` is not part of the public surface.
+    @test !isdefined(InfraStore, :AbstractDeterministic)
 
     # get_time_series_keys enumerates both the source STS and the derived DST;
     # key_info lets us pick the DST and read it back by key (no key from transform).
@@ -873,12 +883,12 @@ end
     @test fs[1].time_series_type == Deterministic
 end
 
-@testset "AbstractDeterministic family resolution: miss and ambiguity" begin
-    # The family is resolved in the core; a real miss is no longer masked by the
-    # old guess-and-retry fallback.
+@testset "Deterministic resolution: miss and ambiguity" begin
+    # Resolution happens in the core; a real miss is not masked by a
+    # guess-and-retry fallback.
     store = Store(in_memory=true)
     @test_throws InfraStore.NotFoundError get_time_series(
-        AbstractDeterministic, store, 999, Component, "nope"
+        Deterministic, store, 999, Component, "nope"
     )
 
     # Two Deterministic forecasts of one variable at the same resolution but
@@ -1621,8 +1631,8 @@ end
     @test mixed[2] isa Deterministic
     @test mixed[2].data == det.data
 
-    # get_time_series_key resolves the abstract-deterministic family.
-    rk = get_time_series_key(AbstractDeterministic, store, 2, Component, "fc")
+    # get_time_series_key resolves a Deterministic request.
+    rk = get_time_series_key(Deterministic, store, 2, Component, "fc")
     @test get_time_series(Deterministic, store, rk).data == det.data
 
     # rename_time_series! moves the association.
@@ -2730,7 +2740,7 @@ end
     @test fmd.dtype == Float64
     @test fmd.owner_type == "Generator"
     # The family sentinel resolves to whichever concrete type is stored.
-    @test get_metadata(AbstractDeterministic, store, 1, Component, "fc") == fmd
+    @test get_metadata(Deterministic, store, 1, Component, "fc") == fmd
 
     # The same record, addressed by key rather than by attributes.
     fkey = get_time_series_key(Deterministic, store, 1, Component, "fc")
@@ -2773,8 +2783,9 @@ end
     @test get_counts(store) isa TimeSeriesCounts
     @test time_series_counts(store) isa TimeSeriesCountsDetailed
     @test time_series_counts(store).supplemental_attributes_with_time_series == 1
+    # Ordered by the stored type code, so SingleTimeSeries precedes Deterministic.
     @test counts_by_type(store) ==
-        [TimeSeriesTypeCount(Deterministic, 1), TimeSeriesTypeCount(SingleTimeSeries, 2)]
+        [TimeSeriesTypeCount(SingleTimeSeries, 2), TimeSeriesTypeCount(Deterministic, 1)]
     @test only(filter(r -> r.owner_type == "GeographicInfo", static_summary(store))) ==
         StaticSummaryRow(
         "GeographicInfo",
@@ -2907,8 +2918,8 @@ end
     @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
     dst = get_metadata(DeterministicSingleTimeSeries, store, 1, Component, "a")
     @test dst.time_series_type == DeterministicSingleTimeSeries
-    @test get_metadata(AbstractDeterministic, store, 1, Component, "a") == dst
-    @test get_metadata(AbstractDeterministic, store, 1, Component, "c").time_series_type ==
+    @test get_metadata(Deterministic, store, 1, Component, "a") == dst
+    @test get_metadata(Deterministic, store, 1, Component, "c").time_series_type ==
         Deterministic
 
     # The type-less shorthand is the SingleTimeSeries one, as on has_time_series.
@@ -3007,12 +3018,12 @@ end
     @test remove_by_filter!(store; time_series_type=Scenarios) == 1
     @test isempty(list_keys(store; time_series_type=Scenarios))
 
-    # The `AbstractDeterministic` family is a valid filter: it matches both
-    # concrete members (here the three transform-derived / copied DSTs).
-    family = list_keys(store; time_series_type=AbstractDeterministic)
+    # A `Deterministic` filter matches both storage forms (here the three
+    # transform-derived / copied DSTs).
+    family = list_keys(store; time_series_type=Deterministic)
     @test length(family) == 3
     @test all(k.time_series_type == DeterministicSingleTimeSeries for k in family)
-    @test get_resolutions(store; time_series_type=AbstractDeterministic) ==
+    @test get_resolutions(store; time_series_type=Deterministic) ==
         [Millisecond(res)]
     # A type that is not a time series type at all is rejected everywhere.
     @test_throws InfraStore.InvalidParameterError has_time_series(
@@ -3079,7 +3090,7 @@ end
     # The family sentinel picks whichever concrete type is stored.
     @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
     @test key_info(
-        get_time_series_key(AbstractDeterministic, store, 1, Component, "a"; resolution=res)
+        get_time_series_key(Deterministic, store, 1, Component, "a"; resolution=res)
     ).time_series_type == DeterministicSingleTimeSeries
 
     @test_throws InfraStore.InvalidParameterError get_time_series_key(

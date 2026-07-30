@@ -6,7 +6,7 @@ The public surface of `infrastore-core`. Import paths below are relative to the 
 use infrastore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
-    TimeSeriesData, TimeSeriesType, RequestedType, Period,
+    TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
     ListFilter, AddRequest,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
@@ -151,7 +151,7 @@ impl Store {
     // safe for hot loops.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool>;
 
-    // Resolve a forecast addressed by attributes + a `RequestedType` to the one
+    // Resolve a forecast addressed by attributes + a requested type to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
     pub fn resolve_forecast_key(
         &self,
@@ -161,7 +161,7 @@ impl Store {
         resolution: Option<Period>,
         interval: Option<Period>,
         features: Features,
-        requested: RequestedType,
+        requested: TimeSeriesType,
     ) -> Result<TimeSeriesKey>;
 
     pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata>;
@@ -343,7 +343,7 @@ can be moved between threads, but sharing one requires external synchronization 
   `list_keys_with_hash` pairs each key with its array's content hash in the same single catalog
   query, so callers can group keys by the data behind them.
 - **`resolve_forecast_key`** — Resolves a forecast addressed by attributes plus a
-  [`RequestedType`](#requestedtype) to the single matching key, whose `time_series_type` is the
+  [requested type](#requested-types) to the single matching key, whose `time_series_type` is the
   concrete type that matched. `resolution` and `interval` are optional filters; leave them `None` to
   match across them. `NotFound` if nothing matches, `InvalidParameter` if more than one does.
 - **`get_metadata` / `get_array_by_hash`** — The low-level pair used by external bindings: resolve a
@@ -1051,21 +1051,21 @@ impl BulkAdd<'_> {
 }
 ```
 
-### `RequestedType`
+### Requested types
 
-What [`Store::resolve_forecast_key`](#store) is asked to match: one concrete stored type, or the
-abstract "deterministic" family, which a stored `Deterministic` **or**
-`DeterministicSingleTimeSeries` satisfies (the two never coexist for one series, so at most one can
-match).
+What a query — [`Store::resolve_forecast_key`](#store), a `ListFilter`, or a reader build — is asked
+to match. Every type matches only itself, with one exception: **`Deterministic` also matches a
+stored `DeterministicSingleTimeSeries`**, since a DST is a synthetic view that reads back as a
+`Deterministic` and callers should not have to know which form a store holds. (The two never coexist
+for one identity, so this never creates ambiguity.) Requesting `DeterministicSingleTimeSeries`
+narrows to the derived form.
 
 ```rust
-pub enum RequestedType {
-    Concrete(TimeSeriesType),
-    AbstractDeterministic,
-}
-
-impl RequestedType {
-    pub fn matches(self, concrete: TimeSeriesType) -> bool;
+impl TimeSeriesType {
+    /// Does a stored series of type `stored` satisfy a request for `self`?
+    pub fn accepts(self, stored: TimeSeriesType) -> bool;
+    /// The same rule as catalog type names, for the SQL predicates.
+    pub fn stored_names(self) -> &'static [&'static str];
 }
 ```
 

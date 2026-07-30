@@ -51,11 +51,14 @@ transforming a stored `SingleTimeSeries`.
 `Deterministic`.** This is by design in every binding: `TimeSeriesData` has no
 `DeterministicSingleTimeSeries` variant, and a read synthesizes the windowed `Deterministic` from
 the underlying static array without copying it. The `DeterministicSingleTimeSeries` tag stays
-visible in _catalog_ surfaces — keys, metadata rows, counts, summaries — because callers need it to
-address, copy, or remove the association (and `RequestedType::AbstractDeterministic` exists so a
-query — a catalog filter, a key resolution, or a reader build — can match either concrete type
-without caring which is stored; Julia passes the `AbstractDeterministic` type, Python the string
-`"abstract_deterministic"`).
+visible in _catalog_ surfaces — keys, metadata rows, counts, summaries — so callers can see which of
+their forecasts are synthetic, and can address, copy, or remove the association.
+
+It is never something you must _ask for_. **A request for `Deterministic` matches both storage
+forms** — in reads, key resolution, catalog filters, and reader builds alike — so which one a store
+holds stays an internal detail. Requesting `DeterministicSingleTimeSeries` narrows to the derived
+form, which is how a caller audits what it has. This mirrors InfrastructureSystems.jl, where a
+`Deterministic` request lowers to both concrete type names.
 
 Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or

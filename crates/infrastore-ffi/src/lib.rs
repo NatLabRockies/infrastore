@@ -2253,44 +2253,33 @@ fn time_series_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
     })
 }
 
-/// Request-only `ts_type` sentinel for the `AbstractDeterministic` family. It is
-/// never a stored type and never returned through `out_matched_type`; it only
-/// addresses a forecast whose concrete type (`Deterministic` or
-/// `DeterministicSingleTimeSeries`) the caller does not need to know in advance.
-pub const INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC: i32 = 100;
-
-/// Map a forecast read request's `ts_type` code to a [`core_lib::RequestedType`]:
-/// a concrete forecast type (2..=5) or the [`INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC`]
-/// family. The non-forecast types `SingleTimeSeries` (0) and
-/// `NonSequentialTimeSeries` (1) are rejected here so the forecast API reports a
-/// clear "invalid time_series_type" error up front rather than failing later in
-/// `emit_forecast_data` after a key is resolved and data is read.
-/// Map a *key resolution* request's type code to a [`core_lib::RequestedType`].
+/// Map a *key resolution* request's type code to a [`core_lib::TimeSeriesType`].
 /// Unlike [`requested_type_from_int`] this accepts every stored type, not just
 /// the forecasts: resolving an identity to its key is meaningful for a
-/// `SingleTimeSeries` too, and `Store::resolve_forecast_key` handles any
-/// concrete type (it filters candidates by the requested type, nothing more).
-/// The forecast *read* path keeps the narrower mapping, where a static type is
-/// a caller error worth reporting before any data is read.
-fn resolve_requested_type_from_int(i: i32) -> Option<core_lib::RequestedType> {
-    if i == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC {
-        return Some(core_lib::RequestedType::AbstractDeterministic);
-    }
-    time_series_type_from_int(i).map(core_lib::RequestedType::Concrete)
+/// `SingleTimeSeries` too, and `Store::resolve_forecast_key` handles any type
+/// (it filters candidates by the requested type, nothing more).
+///
+/// There is no family sentinel: requesting `INFRASTORE_TYPE_DETERMINISTIC`
+/// already matches a stored `DeterministicSingleTimeSeries`, and
+/// `out_matched_type` reports which form was found.
+fn resolve_requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
+    time_series_type_from_int(i)
 }
 
-fn requested_type_from_int(i: i32) -> Option<core_lib::RequestedType> {
+/// Map a forecast read request's `ts_type` code to a [`core_lib::TimeSeriesType`].
+/// The non-forecast types `SingleTimeSeries` (0) and `NonSequentialTimeSeries`
+/// (1) are rejected here so the forecast API reports a clear "invalid
+/// time_series_type" error up front rather than failing later in
+/// `emit_forecast_data` after a key is resolved and data is read.
+fn requested_type_from_int(i: i32) -> Option<core_lib::TimeSeriesType> {
     use core_lib::TimeSeriesType as T;
-    if i == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC {
-        return Some(core_lib::RequestedType::AbstractDeterministic);
-    }
     match time_series_type_from_int(i) {
         Some(
             t @ (T::Deterministic
             | T::DeterministicSingleTimeSeries
             | T::Probabilistic
             | T::Scenarios),
-        ) => Some(core_lib::RequestedType::Concrete(t)),
+        ) => Some(t),
         _ => None,
     }
 }
@@ -3635,14 +3624,16 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 
 /// Fetch a forecast by attributes and return the full data array plus metadata.
 ///
-/// `ts_type` is a read request: a concrete type (`2`=Deterministic,
-/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios) or the
-/// `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`) family, which matches a stored
-/// `Deterministic` *or* `DeterministicSingleTimeSeries`. The catalog resolves the
-/// family authoritatively — no client-side guess-and-retry — and writes the
-/// concrete type that matched to `*out_matched_type`. An ambiguous family request
-/// (both concrete types share the identity) returns `INFRASTORE_ERR_INVALID_PARAMETER`;
-/// a genuine miss returns the unmasked not-found error.
+/// `ts_type` is a read request naming a forecast type (`2`=Deterministic,
+/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios).
+/// Requesting `2`=Deterministic also matches a stored
+/// `DeterministicSingleTimeSeries` — a transformed view reads back as a
+/// `Deterministic`, so callers need not know which form the store holds — while
+/// `3` narrows to the transformed form alone. The catalog resolves this
+/// authoritatively (no client-side guess-and-retry) and writes the concrete
+/// stored type that matched to `*out_matched_type`. An ambiguous request returns
+/// `INFRASTORE_ERR_INVALID_PARAMETER`; a genuine miss returns the unmasked
+/// not-found error.
 ///
 /// Reads a `Deterministic`, `Probabilistic`, or `Scenarios` forecast (DST is
 /// synthesized into `Deterministic`). On success, the caller owns two heap
@@ -3724,8 +3715,8 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     // percentiles (Probabilistic only; null + 0 for other types)
     out_percentiles: *mut *mut f64,
     out_percentiles_len: *mut u64,
-    // the concrete type that was matched (e.g. an AbstractDeterministic request
-    // resolves to 2=Deterministic or 3=DeterministicSingleTimeSeries)
+    // the concrete stored type that was matched (e.g. a request for
+    // 2=Deterministic resolves to 2=Deterministic or 3=DeterministicSingleTimeSeries)
     out_matched_type: *mut i32,
     // optional: the association's opaque `ext` payload (owned C string, freed
     // with `infrastore_string_free`; null when unset). Pass null to skip the
@@ -4826,10 +4817,11 @@ pub unsafe extern "C" fn infrastore_store_rename(
 /// Resolve a time series addressed by attributes plus a requested type to its
 /// concrete key, returned through `out_key`. `requested_type` is any stored type
 /// code (`0`=SingleTimeSeries, `1`=NonSequentialTimeSeries, `2`=Deterministic,
-/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios) or
-/// `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`), which matches a stored
-/// `Deterministic` *or* `DeterministicSingleTimeSeries`. `resolution` /
-/// `interval`, when non-null, narrow the identity. Unlike
+/// `3`=DeterministicSingleTimeSeries, `4`=Probabilistic, `5`=Scenarios);
+/// requesting `2`=Deterministic also matches a stored
+/// `DeterministicSingleTimeSeries`, and the returned key carries the concrete
+/// stored type. `resolution` / `interval`, when non-null, narrow the identity.
+/// Unlike
 /// `infrastore_make_key_from_attrs`, which builds an identity without consulting
 /// the catalog, this validates: an ambiguous request returns
 /// `INFRASTORE_ERR_INVALID_PARAMETER` and a miss returns `INFRASTORE_ERR_NOT_FOUND`.
@@ -6800,9 +6792,10 @@ pub unsafe extern "C" fn infrastore_static_reader_free(reader: *mut InfraStoreSt
 // ---- ForecastReader -------------------------------------------------------
 
 /// Build a [`InfraStoreForecastReaderHandle`] over the forecasts matching the filter.
-/// `time_series_type` must be a forecast type; a `Deterministic` reader is
-/// abstract and also includes `DeterministicSingleTimeSeries`. `resolution`
-/// must be positive; matched forecasts must share one window timeline.
+/// `time_series_type` must be a forecast type; a `Deterministic` reader also
+/// includes `DeterministicSingleTimeSeries`, matching the read request rule.
+/// `resolution` must be positive; matched forecasts must share one window
+/// timeline.
 ///
 /// # Safety
 ///

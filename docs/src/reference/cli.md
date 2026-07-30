@@ -189,11 +189,10 @@ and ignores underscores, so each has a short form and a full form:
 | `Probabilistic`                 | `probabilistic`                                         |
 | `Scenarios`                     | `scenarios`                                             |
 
-`--type` additionally accepts **`any_deterministic`** (also `abstract_deterministic`), which matches
-a stored `Deterministic` _or_ a `DeterministicSingleTimeSeries`. It is not a storable type — it is a
-query over the family — so it is only valid as a selector, never in a descriptor. Use it when you
-want every deterministic forecast regardless of how it got there: `--type deterministic` alone will
-not match what `transform` produced.
+`--type deterministic` matches a stored `Deterministic` _and_ the `DeterministicSingleTimeSeries`
+rows that `transform` produces — how a forecast came to exist is not something you need to know to
+select it. Listed rows still report their own stored type, so you can see which are synthetic, and
+`--type deterministic_single` selects only those.
 
 `deterministic_single` is not writable from a descriptor (use `transform`), but it _is_ selectable,
 and it is often required: `transform` derives a series that shares `(owner_id, name, resolution)`

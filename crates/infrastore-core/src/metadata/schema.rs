@@ -9,8 +9,14 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
     owner_id          INTEGER NOT NULL,
     owner_type        TEXT    NOT NULL,
-    owner_category    TEXT    NOT NULL CHECK(owner_category IN ('Component','SupplementalAttribute')),
-    time_series_type  TEXT    NOT NULL,
+    -- `owner_category` and `time_series_type` are stored as small INTEGER
+    -- codes (`OwnerCategory::code` / `TimeSeriesType::code`), not names. Both
+    -- sit in the wide composite indexes below, where a 1-byte code instead of a
+    -- 9-29 byte string shrinks the type/category-bearing indexes ~35% and the
+    -- whole catalog ~29% on a 400k-row store. The codes are an on-disk
+    -- contract; see `DATA_FORMAT_VERSION`.
+    owner_category    INTEGER NOT NULL CHECK(owner_category IN (0,1)),
+    time_series_type  INTEGER NOT NULL CHECK(time_series_type BETWEEN 0 AND 5),
     name              TEXT    NOT NULL,
     initial_timestamp TEXT,
     resolution        TEXT,
@@ -250,8 +256,21 @@ CREATE INDEX IF NOT EXISTS idx_parent_child_child
 -- DATA_FORMAT_VERSION bump is needed. Nothing in this crate reads the view --
 -- it exists purely for outside inspection -- so a read-only open of an older
 -- store that lacks it is harmless.
+-- Hand-inspection view: decodes the two integer discriminants and both content
+-- hashes back to readable text. Nothing in the library reads it.
 CREATE VIEW IF NOT EXISTS time_series_readable AS
-SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
+SELECT id, owner_id, owner_type,
+       CASE owner_category WHEN 0 THEN 'Component'
+                           WHEN 1 THEN 'SupplementalAttribute'
+                           ELSE 'unknown(' || owner_category || ')' END AS owner_category,
+       CASE time_series_type WHEN 0 THEN 'SingleTimeSeries'
+                             WHEN 1 THEN 'NonSequentialTimeSeries'
+                             WHEN 2 THEN 'Deterministic'
+                             WHEN 3 THEN 'DeterministicSingleTimeSeries'
+                             WHEN 4 THEN 'Probabilistic'
+                             WHEN 5 THEN 'Scenarios'
+                             ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
+       name,
        initial_timestamp, resolution, length, horizon, interval, count,
        units, dtype, element_shape, ext,
        lower(hex(data_hash))     AS data_hash,

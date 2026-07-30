@@ -340,7 +340,7 @@ async fn resolve_forecast_key_and_bulk_over_grpc() {
             None,
             None,
             Features::new(),
-            infrastore_core::RequestedType::AbstractDeterministic,
+            infrastore_core::TimeSeriesType::Deterministic,
         )
         .await
         .unwrap();

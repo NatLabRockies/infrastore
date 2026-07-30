@@ -10,19 +10,19 @@ using InfraStore
 
 Exported names (types first, then functions):
 
-`AbstractDeterministic`, `AddBatch`, `ArrayGroupRow`, `ArrayReferenceCounts`, `Component`,
-`CompressionSettings`, `Deterministic`, `DeterministicSingleTimeSeries`, `ForecastEntry`,
-`ForecastParameters`, `ForecastReader`, `ForecastSummaryRow`, `ForecastTimeline`, `KeyInfo`,
-`KeyRow`, `NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `Probabilistic`,
-`Scenarios`, `SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`, `StaticSummaryRow`,
-`Store`, `SupplementalAttribute`, `SupplementalAttributeAssociation`,
-`SupplementalAttributeSummaryRow`, `SupplementalAttributeTypeCount`, `TimeSeriesCounts`,
-`TimeSeriesCountsDetailed`, `TimeSeriesKey`, `TimeSeriesMetadata`, `TimeSeriesTypeCount`,
-`add_parent_child_association!`, `add_parent_child_associations!`,
-`add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
-`add_time_series!`, `add_time_series_bulk!`, `build_forecast_reader`, `build_static_reader`,
-`bulk_read`, `check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
-`count_array_references`, `count_components_with_attributes`, `count_parent_child_associations`,
+`AddBatch`, `ArrayGroupRow`, `ArrayReferenceCounts`, `Component`, `CompressionSettings`,
+`Deterministic`, `DeterministicSingleTimeSeries`, `ForecastEntry`, `ForecastParameters`,
+`ForecastReader`, `ForecastSummaryRow`, `ForecastTimeline`, `KeyInfo`, `KeyRow`,
+`NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `Probabilistic`, `Scenarios`,
+`SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`, `StaticSummaryRow`, `Store`,
+`SupplementalAttribute`, `SupplementalAttributeAssociation`, `SupplementalAttributeSummaryRow`,
+`SupplementalAttributeTypeCount`, `TimeSeriesCounts`, `TimeSeriesCountsDetailed`, `TimeSeriesKey`,
+`TimeSeriesMetadata`, `TimeSeriesTypeCount`, `add_parent_child_association!`,
+`add_parent_child_associations!`, `add_supplemental_attribute_association!`,
+`add_supplemental_attribute_associations!`, `add_time_series!`, `add_time_series_bulk!`,
+`build_forecast_reader`, `build_static_reader`, `bulk_read`, `check_static_consistency`, `clear!`,
+`close!`, `compact!`, `copy_time_series!`, `count_array_references`,
+`count_components_with_attributes`, `count_parent_child_associations`,
 `count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
@@ -89,7 +89,7 @@ struct NonSequentialTimeSeries{T,N}
 end
 NonSequentialTimeSeries(timestamps, data, name; ext=nothing)
 
-struct Deterministic{T,N} <: AbstractDeterministic
+struct Deterministic{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
@@ -131,16 +131,11 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
           ext=nothing)         # note: scenario_count is NOT a constructor argument
 
 # Marker type; never constructed and with no materialized struct. Derived via
-# transform_single_time_series! and read back as a Deterministic. Surfaces as a
-# key's time_series_type.
-abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
-
-# Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
-# Pass it as the requested type to get_time_series to read whichever of the two
-# is stored (see Reading forecast values), as a catalog filter to match both, or
-# to build_forecast_reader, where it reads like a Deterministic reader. No row is
-# ever stored under it.
-abstract type AbstractDeterministic end
+# transform_single_time_series! and read back as a Deterministic. You normally
+# do not request it: a Deterministic request matches it too. It surfaces as a
+# key's / row's time_series_type, so which forecasts are synthetic stays
+# inspectable, and passing it narrows a query to the derived ones.
+abstract type DeterministicSingleTimeSeries end
 
 mutable struct Store
     handle :: Ptr{Cvoid}
@@ -325,9 +320,9 @@ owner-scoped `clear!`, which is exempt.
 `get_metadata` returns the whole [`TimeSeriesMetadata`](#result-types) record — every stored type
 through the one function — and throws `NotFoundError` if absent. The attribute form takes the type
 as its first argument exactly like `get_time_series`: `SingleTimeSeries`, `NonSequentialTimeSeries`,
-`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`, or
-`AbstractDeterministic` to resolve whichever of the `Deterministic` /
-`DeterministicSingleTimeSeries` pair is stored. `interval` is only needed to disambiguate forecasts
+`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios` — where
+`Deterministic` resolves a stored `DeterministicSingleTimeSeries` too, and the returned record's
+`time_series_type` reports which form was found. `interval` is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a `SingleTimeSeries`, the same shorthand
 `has_time_series` and `remove_time_series!` use. Since every form returns the same struct, `ext`,
 `dtype`, `owner_type`, and `percentiles` are available whichever type was asked for and whichever
@@ -371,11 +366,11 @@ key_info(key::TimeSeriesKey) -> KeyInfo
 
 These two are the ways to obtain a `TimeSeriesKey` for a series already stored (`add_time_series!`
 returns one at write time, and the readers carry them on `StaticGroup` / `ForecastEntry`).
-`get_time_series_key` addresses one series by attributes, `T` being any stored type or
-`AbstractDeterministic` to match whichever of `Deterministic` / `DeterministicSingleTimeSeries` is
-stored. It resolves against the catalog, so the handle always names something stored: a miss throws
-`NotFoundError` and a request matching several series throws `InvalidParameterError` listing the
-candidates. Note that [`list_keys`](#store-wide-operations) returns `KeyRow` **description
+`get_time_series_key` addresses one series by attributes, `T` being any stored type — with
+`Deterministic` matching a stored `DeterministicSingleTimeSeries` too, the returned key naming the
+concrete form. It resolves against the catalog, so the handle always names something stored: a miss
+throws `NotFoundError` and a request matching several series throws `InvalidParameterError` listing
+the candidates. Note that [`list_keys`](#store-wide-operations) returns `KeyRow` **description
 structs**, not handles — use `get_time_series_key` (or `get_time_series_keys`) when you need
 something to pass to a key-based reader or `bulk_read`.
 
@@ -505,10 +500,6 @@ get_time_series(DeterministicSingleTimeSeries, store, owner_id, owner_category, 
 get_time_series(DeterministicSingleTimeSeries, store, key::TimeSeriesKey;
                 time_range=nothing) -> Deterministic
 
-get_time_series(AbstractDeterministic, store, owner_id, owner_category, name;
-                resolution=nothing, interval=nothing, features=Dict(),
-                time_range=nothing) -> Deterministic
-
 get_time_series(Probabilistic, store, owner_id, owner_category, name;
                 resolution=nothing, interval=nothing, features=Dict(),
                 time_range=nothing) -> Probabilistic
@@ -526,27 +517,30 @@ get_time_series(Scenarios, store, key::TimeSeriesKey; time_range=nothing) -> Sce
 forecasts under the same owner/name/type that differ solely by interval. A read that leaves it
 `nothing` when two such forecasts exist raises `InvalidParameterError`.
 
-#### Concrete types vs. the `AbstractDeterministic` family
+#### Reading a transformed forecast
 
-The concrete request types match **only themselves**:
-
-- `get_time_series(Deterministic, …)` matches a directly-stored `Deterministic` and does **not**
-  match a `DeterministicSingleTimeSeries` — asking for `Deterministic` when only a transformed DST
-  exists raises `NotFoundError`. There is no fallback.
-- `get_time_series(DeterministicSingleTimeSeries, …)` matches only a transformed DST. Since the type
-  has no materialized struct, it returns a `Deterministic`.
-
-To read whichever of the two is stored under an identity, request the family type
-`AbstractDeterministic` (attribute-based only — a key already names its exact stored type):
+**Always ask for `Deterministic`.** It matches a directly-stored `Deterministic` _and_ a
+`DeterministicSingleTimeSeries` derived by `transform_single_time_series!`, so how a forecast came
+to exist is not something you need to know to read it:
 
 ```julia
 transform_single_time_series!(store, Hour(4), Hour(2))
-fc = get_time_series(AbstractDeterministic, store, 400, Component, "dst")   # a Deterministic
+fc = get_time_series(Deterministic, store, 400, Component, "dst")   # a Deterministic
 ```
 
-The Rust core resolves the family in a single call — there is no guess-and-retry. A genuine miss
-raises `NotFoundError`, and an identity matching **both** a `Deterministic` and a
-`DeterministicSingleTimeSeries` is ambiguous and errors (request a concrete type instead).
+`get_time_series(DeterministicSingleTimeSeries, …)` narrows to the derived forecasts. It returns a
+`Deterministic` too — the type has no materialized struct — so it is only worth naming when you are
+auditing which forecasts are synthetic rather than reading values.
+
+The Rust core resolves this in a single call — there is no guess-and-retry. A genuine miss raises
+`NotFoundError`.
+
+To find out which form you have, read the `time_series_type` on the resolved key or metadata:
+
+```julia
+k = get_time_series_key(Deterministic, store, 400, Component, "dst")
+key_info(k).time_series_type    # DeterministicSingleTimeSeries
+```
 
 The **key-based** readers carry the exact stored type in the key, so the question does not arise: a
 `DeterministicSingleTimeSeries` key reads back as a `Deterministic`.
@@ -605,9 +599,8 @@ filter must name a forecast type and pin a resolution; a `Deterministic` reader 
 includes `DeterministicSingleTimeSeries` (read into identical `[H, *E]` windows). All matched
 forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
 
-`time_series_type` must be one of the four concrete forecast types — `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios` — or `AbstractDeterministic`, which
-reads exactly like a `Deterministic` reader (already abstract over the pair). Any other type raises
+`time_series_type` must be one of the four forecast types — `Deterministic`,
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios`. Any other type raises
 `InvalidParameterError`.
 
 ```julia
@@ -710,9 +703,9 @@ and independent, and combine as a conjunction; with none set the whole store is 
 
 - `owner_id`, `owner_category` — scope to one owner.
 - `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, …), the same value the
-  `time_series_type` field of a returned row carries, or `AbstractDeterministic` to match both
-  `Deterministic` and `DeterministicSingleTimeSeries` (no row is ever _stored_ under the family, so
-  it never appears in a returned row).
+  `time_series_type` field of a returned row carries. `Deterministic` additionally matches
+  `DeterministicSingleTimeSeries` rows; each row still reports its own stored type, and passing
+  `DeterministicSingleTimeSeries` selects only those.
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval

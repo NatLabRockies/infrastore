@@ -6,9 +6,8 @@ use chrono::{DateTime, Utc};
 use infrastore_core::{
     Deterministic, Dtype, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
     KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
-    Probabilistic, RequestedType, Scenarios, SingleTimeSeries, SingleTimeSeriesKey,
-    StaticSummaryRow, TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType,
-    TypedArray,
+    Probabilistic, Scenarios, SingleTimeSeries, SingleTimeSeriesKey, StaticSummaryRow,
+    TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
 };
 
 use crate::pb;
@@ -648,30 +647,16 @@ pub fn forecast_summary_row_from_pb(
     })
 }
 
-/// Decode a [`RequestedType`] from its proto oneof.
-pub fn requested_type_from_pb(r: pb::RequestedType) -> Result<RequestedType, ConvertError> {
-    match r.kind {
-        Some(pb::requested_type::Kind::Concrete(code)) => {
-            Ok(RequestedType::Concrete(ts_type_from_i32(code)?))
-        }
-        Some(pb::requested_type::Kind::AbstractDeterministic(_)) => {
-            Ok(RequestedType::AbstractDeterministic)
-        }
-        None => Err(ConvertError::MissingField("RequestedType.kind")),
-    }
+/// Decode a requested [`TimeSeriesType`] from its proto enum code. The widening
+/// of a `Deterministic` request to its two storage forms happens in the core
+/// (see [`TimeSeriesType::accepts`]), not on the wire.
+pub fn requested_type_from_pb(code: i32) -> Result<TimeSeriesType, ConvertError> {
+    ts_type_from_i32(code)
 }
 
-/// Encode a [`RequestedType`] into its proto oneof.
-pub fn requested_type_to_pb(r: RequestedType) -> pb::RequestedType {
-    let kind = match r {
-        RequestedType::Concrete(t) => {
-            pb::requested_type::Kind::Concrete(pb::TimeSeriesType::from(t) as i32)
-        }
-        RequestedType::AbstractDeterministic => {
-            pb::requested_type::Kind::AbstractDeterministic(true)
-        }
-    };
-    pb::RequestedType { kind: Some(kind) }
+/// Encode a requested [`TimeSeriesType`] as its proto enum code.
+pub fn requested_type_to_pb(t: TimeSeriesType) -> i32 {
+    pb::TimeSeriesType::from(t) as i32
 }
 
 fn owner_category_from_i32(v: i32) -> Result<OwnerCategory, ConvertError> {
@@ -1617,13 +1602,12 @@ mod convert_coverage_tests {
     #[test]
     fn requested_type_round_trips_for_every_form() {
         for requested in [
-            RequestedType::Concrete(TimeSeriesType::Deterministic),
-            RequestedType::Concrete(TimeSeriesType::DeterministicSingleTimeSeries),
-            RequestedType::Concrete(TimeSeriesType::Probabilistic),
-            RequestedType::Concrete(TimeSeriesType::Scenarios),
-            RequestedType::Concrete(TimeSeriesType::SingleTimeSeries),
-            RequestedType::Concrete(TimeSeriesType::NonSequentialTimeSeries),
-            RequestedType::AbstractDeterministic,
+            TimeSeriesType::Deterministic,
+            TimeSeriesType::DeterministicSingleTimeSeries,
+            TimeSeriesType::Probabilistic,
+            TimeSeriesType::Scenarios,
+            TimeSeriesType::SingleTimeSeries,
+            TimeSeriesType::NonSequentialTimeSeries,
         ] {
             let pb = requested_type_to_pb(requested);
             assert_eq!(
@@ -1633,16 +1617,9 @@ mod convert_coverage_tests {
             );
         }
 
-        // An unset oneof is a clean error.
+        // An unknown code is a clean error.
         assert!(matches!(
-            requested_type_from_pb(pb::RequestedType { kind: None }),
-            Err(ConvertError::MissingField("RequestedType.kind"))
-        ));
-        // An unknown concrete code is a clean error.
-        assert!(matches!(
-            requested_type_from_pb(pb::RequestedType {
-                kind: Some(pb::requested_type::Kind::Concrete(999)),
-            }),
+            requested_type_from_pb(999),
             Err(ConvertError::InvalidValue {
                 field: "time_series_type",
                 ..

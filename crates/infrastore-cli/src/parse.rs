@@ -2,7 +2,7 @@
 //! owner categories, time-series-type names, and `key=value` features.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use infrastore_core::{Dtype, FeatureValue, OwnerCategory, Period, RequestedType, TimeSeriesType};
+use infrastore_core::{Dtype, FeatureValue, OwnerCategory, Period, TimeSeriesType};
 
 /// Parse a period: an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`) for calendar or
 /// fixed periods, or the legacy human form (`1h`, `15min`, `7d`) which is always
@@ -92,9 +92,9 @@ pub fn parse_dtype(s: &str) -> Result<Dtype, String> {
 
 /// Every accepted `--type` spelling, in the order the help and error text list
 /// them. Kept in one place so the flag help, the error message, and
-/// [`parse_requested_type`] cannot drift apart.
+/// [`parse_ts_type`] cannot drift apart.
 pub const TS_TYPE_NAMES: &str = "single|non_sequential|deterministic|deterministic_single|\
-                                 probabilistic|scenarios|any_deterministic";
+                                 probabilistic|scenarios";
 
 /// Parse a time-series-type, accepting both short (`single`, `non_sequential`)
 /// and full (`SingleTimeSeries`) spellings.
@@ -114,22 +114,6 @@ pub fn parse_ts_type(s: &str) -> Result<TimeSeriesType, String> {
             ));
         }
     })
-}
-
-/// Parse a *requested* type: any concrete type [`parse_ts_type`] accepts, plus
-/// `any_deterministic` for the abstract family that matches both a stored
-/// `Deterministic` and a `DeterministicSingleTimeSeries`.
-///
-/// The family matters because `transform` derives DST rows that `--type
-/// deterministic` does not match, so without this there was no single flag that
-/// selected "every deterministic forecast".
-pub fn parse_requested_type(s: &str) -> Result<RequestedType, String> {
-    match s.to_ascii_lowercase().replace('_', "").as_str() {
-        "anydeterministic" | "abstractdeterministic" | "deterministicany" => {
-            Ok(RequestedType::AbstractDeterministic)
-        }
-        _ => parse_ts_type(s).map(RequestedType::Concrete),
-    }
 }
 
 /// Validate and normalize a content-hash prefix for `--data-hash`.
