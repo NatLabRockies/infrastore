@@ -198,7 +198,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries three global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.11.0"
+<pre><code class="language-text">data_format_version = "0.12.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 </code></pre>
@@ -219,16 +219,18 @@ no in-place migration.</p>
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
-payload (typically JSON) the store stores verbatim and never interprets; <code>0.10.0</code> replaced the
-per-association <code>features</code> table with the content-addressed <code>feature_sets</code> table below, so a feature
-map is stored once and shared by every association that uses it — dropping the <code>association_id</code>
-foreign key and its <code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to
-timestamp-major <code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to
-the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
-writes; <code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts
-of one variable that differ only by interval are now distinct series — widening both unique indexes
-(the <code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
+<p>(<code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from TEXT names to small INTEGER codes —
+see <a href="#discriminant-encoding">Discriminant encoding</a> below; <code>0.11.0</code> renamed the metadata column
+<code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension payload (typically JSON) the store
+stores verbatim and never interprets; <code>0.10.0</code> replaced the per-association <code>features</code> table with
+the content-addressed <code>feature_sets</code> table below, so a feature map is stored once and shared by
+every association that uses it — dropping the <code>association_id</code> foreign key and its
+<code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to timestamp-major
+<code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to the writing
+batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
+<code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts of one
+variable that differ only by interval are now distinct series — widening both unique indexes (the
+<code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
 <code>resolution</code>/<code>horizon</code>/<code>interval</code> calendar-aware <a href="../explanation/data-model.html">periods</a>: they are
 now encoded as ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) rather than integer
 milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
@@ -257,7 +259,7 @@ quadratic cost curve) has element shape <code>[3]</code>.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.11.0"
+├── attribute  data_format_version = "0.12.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -365,8 +367,8 @@ compaction physically removes.</li>
 <tr><td><code>id</code></td><td>INTEGER</td><td>Primary key</td></tr>
 <tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
 <tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
-<tr><td><code>owner_category</code></td><td>TEXT</td><td><code>CHECK</code> in (<code>Component</code>, <code>SupplementalAttribute</code>); part of key</td></tr>
-<tr><td><code>time_series_type</code></td><td>TEXT</td><td>One of the six <code>TimeSeriesType</code> names</td></tr>
+<tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
+<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> between 0 and 5; part of key — see below</td></tr>
 <tr><td><code>name</code></td><td>TEXT</td><td>Series name</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for <code>NonSequentialTimeSeries</code></td></tr>
 <tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for non-sequential</td></tr>
@@ -510,13 +512,25 @@ accumulating two equivalent index pairs. Index names are not part of the on-disk
 carries no <code>data_format_version</code> change.</p>
 <h3 id="time_series_readable-view"><a class="header" href="#time_series_readable-view"><code>time_series_readable</code> (view)</a></h3>
 <pre><code class="language-sql">CREATE VIEW time_series_readable AS
-SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
-       initial_timestamp, resolution, length, horizon, interval, count,
+SELECT id, owner_id, owner_type,
+       CASE owner_category WHEN 0 THEN 'Component'
+                           WHEN 1 THEN 'SupplementalAttribute'
+                           ELSE 'unknown(' || owner_category || ')' END AS owner_category,
+       CASE time_series_type WHEN 0 THEN 'SingleTimeSeries'
+                             WHEN 1 THEN 'NonSequentialTimeSeries'
+                             WHEN 2 THEN 'Deterministic'
+                             WHEN 3 THEN 'DeterministicSingleTimeSeries'
+                             WHEN 4 THEN 'Probabilistic'
+                             WHEN 5 THEN 'Scenarios'
+                             ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
+       name, initial_timestamp, resolution, length, horizon, interval, count,
        units, dtype, element_shape, ext,
        lower(hex(data_hash))     AS data_hash,
        lower(hex(features_hash)) AS features_hash
 FROM time_series_associations;
 </code></pre>
+<p>This view decodes both discriminants and both content hashes, so it is the convenient thing to query
+by hand. Nothing in the library reads it.</p>
 <p>A projection of the association table with both hashes hex-encoded, for humans opening the catalog
 in <code>sqlite3</code> — see <a href="#reading-the-catalog-by-hand">Reading the catalog by hand</a>. Nothing in the
 library reads it. It costs no storage, is created by the same idempotent DDL as the tables above,
@@ -536,6 +550,35 @@ compares case-insensitively while a hex <code>TEXT</code> column would not. The
 <li><strong><code>element_shape</code></strong> is the per-step shape only (the trailing axes); the time <code>length</code> is a
 separate column.</li>
 </ul>
+<h3 id="discriminant-encoding"><a class="header" href="#discriminant-encoding">Discriminant encoding</a></h3>
+<p><code>owner_category</code> and <code>time_series_type</code> are stored as small <strong>INTEGER codes</strong>, not names:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>owner_category</code></th><th>code</th><th></th><th><code>time_series_type</code></th><th>code</th></tr></thead><tbody>
+<tr><td><code>Component</code></td><td>0</td><td></td><td><code>SingleTimeSeries</code></td><td>0</td></tr>
+<tr><td><code>SupplementalAttribute</code></td><td>1</td><td></td><td><code>NonSequentialTimeSeries</code></td><td>1</td></tr>
+<tr><td></td><td></td><td></td><td><code>Deterministic</code></td><td>2</td></tr>
+<tr><td></td><td></td><td></td><td><code>DeterministicSingleTimeSeries</code></td><td>3</td></tr>
+<tr><td></td><td></td><td></td><td><code>Probabilistic</code></td><td>4</td></tr>
+<tr><td></td><td></td><td></td><td><code>Scenarios</code></td><td>5</td></tr>
+</tbody></table>
+</div>
+<p>Both columns sit in the two wide unique indexes, and <code>time_series_type</code> additionally in
+<code>idx_ts_type</code> while <code>owner_category</code> sits in <code>idx_owner</code> and <code>idx_category_owner</code>. A 1-byte code
+instead of a 9–29 byte string shrinks those indexes by roughly 35% and the whole catalog by roughly
+29% on a 400k-row store, and makes type-scoped scans about 1.2x faster warm (1.4–1.5x under page
+cache pressure). Point lookups by key are unaffected — those are dominated by the 32-byte
+<code>features_hash</code>.</p>
+<p>Two code assignments are load-bearing and cannot be reordered without a version bump:</p>
+<ul>
+<li><strong><code>Deterministic</code> (2) and <code>DeterministicSingleTimeSeries</code> (3) are adjacent.</strong> A request for
+<code>Deterministic</code> matches both (see <a href="../explanation/data-model.html">the data model</a>), so adjacency
+lets that widen to <code>time_series_type BETWEEN 2 AND 3</code> — one index seek instead of a two-value
+<code>IN</code>.</li>
+<li><strong>The static types (0–1) and forecast types (2–5) are contiguous blocks</strong>, so the static and
+forecast summary queries each scope with a single <code>BETWEEN</code>.</li>
+</ul>
+<p>The C ABI uses the same integers for its <code>ts_type</code> arguments, so there is one mapping rather than
+two. The <a href="#time_series_readable-view"><code>time_series_readable</code> view</a> decodes both columns for hand
+inspection.</p>
 <h2 id="inspecting-a-store-by-hand"><a class="header" href="#inspecting-a-store-by-hand">Inspecting a Store by Hand</a></h2>
 <p>The quickest route is the CLI, which resolves the hash-to-location step for you:</p>
 <pre><code class="language-sh">infrastore --store system.h5 store-info          # both file paths, format version, compression
@@ -546,8 +589,9 @@ infrastore --store system.h5 info --name load    # one series: data_hash, hdf5_d
 <pre><code class="language-sh">h5ls -r system.h5                        # groups, datasets, dtypes, shapes
 h5dump -A -n system.h5                   # root attributes and the object list
 sqlite3 system.h5.sqlite '.schema'
+# Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
-  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_associations;'
+  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_readable;'
 # Both association tables are absent in stores written before they existed.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'

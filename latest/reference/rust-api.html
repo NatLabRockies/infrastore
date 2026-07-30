@@ -191,7 +191,7 @@
 </span>use infrastore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
-    TimeSeriesData, TimeSeriesType, RequestedType, Period,
+    TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
     ListFilter, AddRequest,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
@@ -332,7 +332,7 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     // safe for hot loops.
     pub fn has_any_time_series(&amp;self, filter: ListFilter) -&gt; Result&lt;bool&gt;;
 
-    // Resolve a forecast addressed by attributes + a `RequestedType` to the one
+    // Resolve a forecast addressed by attributes + a requested type to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
     pub fn resolve_forecast_key(
         &amp;self,
@@ -342,7 +342,7 @@ changes how data is read back — see the <a href="../explanation/storage-model.
         resolution: Option&lt;Period&gt;,
         interval: Option&lt;Period&gt;,
         features: Features,
-        requested: RequestedType,
+        requested: TimeSeriesType,
     ) -&gt; Result&lt;TimeSeriesKey&gt;;
 
     pub fn get_metadata(&amp;self, key: &amp;KeyIdentity) -&gt; Result&lt;TimeSeriesMetadata&gt;;
@@ -522,7 +522,7 @@ name. Errors with <code>DuplicateTimeSeries</code> if the destination identity a
 <code>list_keys_with_hash</code> pairs each key with its array's content hash in the same single catalog
 query, so callers can group keys by the data behind them.</li>
 <li><strong><code>resolve_forecast_key</code></strong> — Resolves a forecast addressed by attributes plus a
-<a href="#requestedtype"><code>RequestedType</code></a> to the single matching key, whose <code>time_series_type</code> is the
+<a href="#requested-types">requested type</a> to the single matching key, whose <code>time_series_type</code> is the
 concrete type that matched. <code>resolution</code> and <code>interval</code> are optional filters; leave them <code>None</code> to
 match across them. <code>NotFound</code> if nothing matches, <code>InvalidParameter</code> if more than one does.</li>
 <li><strong><code>get_metadata</code> / <code>get_array_by_hash</code></strong> — The low-level pair used by external bindings: resolve a
@@ -1172,20 +1172,20 @@ committing discards the buffer and writes nothing.</p>
     pub fn commit(self) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;          // keys in push order
 }
 <span class="boring">}</span></code></pre></pre>
-<h3 id="requestedtype"><a class="header" href="#requestedtype"><code>RequestedType</code></a></h3>
-<p>What <a href="#store"><code>Store::resolve_forecast_key</code></a> is asked to match: one concrete stored type, or the
-abstract "deterministic" family, which a stored <code>Deterministic</code> <strong>or</strong>
-<code>DeterministicSingleTimeSeries</code> satisfies (the two never coexist for one series, so at most one can
-match).</p>
+<h3 id="requested-types"><a class="header" href="#requested-types">Requested types</a></h3>
+<p>What a query — <a href="#store"><code>Store::resolve_forecast_key</code></a>, a <code>ListFilter</code>, or a reader build — is asked
+to match. Every type matches only itself, with one exception: <strong><code>Deterministic</code> also matches a
+stored <code>DeterministicSingleTimeSeries</code></strong>, since a DST is a synthetic view that reads back as a
+<code>Deterministic</code> and callers should not have to know which form a store holds. (The two never coexist
+for one identity, so this never creates ambiguity.) Requesting <code>DeterministicSingleTimeSeries</code>
+narrows to the derived form.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub enum RequestedType {
-    Concrete(TimeSeriesType),
-    AbstractDeterministic,
-}
-
-impl RequestedType {
-    pub fn matches(self, concrete: TimeSeriesType) -&gt; bool;
+</span>impl TimeSeriesType {
+    /// Does a stored series of type `stored` satisfy a request for `self`?
+    pub fn accepts(self, stored: TimeSeriesType) -&gt; bool;
+    /// The same rule as catalog type names, for the SQL predicates.
+    pub fn stored_names(self) -&gt; &amp;'static [&amp;'static str];
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="association-types"><a class="header" href="#association-types">Association types</a></h3>

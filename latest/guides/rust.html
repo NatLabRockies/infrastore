@@ -427,13 +427,14 @@ let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 <span class="boring">}</span></code></pre></pre>
 <p>When a forecast is addressed by its attributes rather than by a key you already hold, use
 <code>resolve_forecast_key</code>: it resolves
-<code>(owner_id, owner_category, name, resolution, interval, features)</code> plus a <code>RequestedType</code> to the
-single matching key, erroring with <code>NotFound</code> if nothing matches and <code>InvalidParameter</code> if the
-request is ambiguous. <code>RequestedType::AbstractDeterministic</code> matches a stored <code>Deterministic</code> <em>or</em> a
-<code>DeterministicSingleTimeSeries</code>, so callers need not know which one is stored:</p>
+<code>(owner_id, owner_category, name, resolution, interval, features)</code> plus a requested <code>TimeSeriesType</code>
+to the single matching key, erroring with <code>NotFound</code> if nothing matches and <code>InvalidParameter</code> if
+the request is ambiguous. Requesting <code>TimeSeriesType::Deterministic</code> matches a stored
+<code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>, so callers need not know which one is
+stored; the returned key's <code>time_series_type</code> reports the form that matched:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use infrastore_core::RequestedType;
+</span>use infrastore_core::TimeSeriesType;
 
 let key = store.resolve_forecast_key(
     42,
@@ -442,7 +443,7 @@ let key = store.resolve_forecast_key(
     None,                                  // resolution: Option&lt;Period&gt; (None = any)
     None,                                  // interval: Option&lt;Period&gt; (None = any)
     Features::new(),
-    RequestedType::AbstractDeterministic,
+    TimeSeriesType::Deterministic,
 )?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="copy-remove-and-maintain"><a class="header" href="#copy-remove-and-maintain">Copy, Remove, and Maintain</a></h2>

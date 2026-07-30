@@ -317,14 +317,14 @@ optionally restricts the transform to one <code>owner_category</code> and/or one
 n = transform_single_time_series!(store, Hour(24), Hour(24);
                                   owner_category = Component, resolution = Hour(1))
 </code></pre>
-<p>Requesting the concrete <code>Deterministic</code> type does <strong>not</strong> match a transformed
-<code>DeterministicSingleTimeSeries</code> — that read throws <code>NotFoundError</code>. To read whichever of the two is
-stored under an identity, request the family type <code>AbstractDeterministic</code> (it returns a
-<code>Deterministic</code>, since a DST has no materialized struct):</p>
-<pre><code class="language-julia">fc = get_time_series(AbstractDeterministic, store, 42, Component, "load")
+<p>Requesting <code>Deterministic</code> also matches a transformed <code>DeterministicSingleTimeSeries</code>, so you read a
+forecast the same way whether it was added densely or derived (either returns a <code>Deterministic</code>,
+since a DST has no materialized struct):</p>
+<pre><code class="language-julia">fc = get_time_series(Deterministic, store, 42, Component, "load")
 </code></pre>
-<p>A genuine miss still throws <code>NotFoundError</code>, and an identity that holds both concrete types is
-ambiguous and errors — request a concrete type then.</p>
+<p>A genuine miss throws <code>NotFoundError</code>. To check which form you actually have, inspect the
+<code>time_series_type</code> on the key or metadata — or pass <code>DeterministicSingleTimeSeries</code> to select only
+the derived ones.</p>
 <p><code>transform_single_time_series!</code> returns no keys, so to read a derived forecast by key, enumerate the
 owner's keys with <code>get_time_series_keys(store, owner_id, owner_category)</code> (the owner is the
 <code>(owner_id, owner_category)</code> pair) and use <code>key_info</code>, whose <code>time_series_type</code> is the actual Julia

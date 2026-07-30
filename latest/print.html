@@ -821,11 +821,13 @@ transforming a stored <code>SingleTimeSeries</code>.</p>
 <code>Deterministic</code>.</strong> This is by design in every binding: <code>TimeSeriesData</code> has no
 <code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
 the underlying static array without copying it. The <code>DeterministicSingleTimeSeries</code> tag stays
-visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — because callers need it to
-address, copy, or remove the association (and <code>RequestedType::AbstractDeterministic</code> exists so a
-query — a catalog filter, a key resolution, or a reader build — can match either concrete type
-without caring which is stored; Julia passes the <code>AbstractDeterministic</code> type, Python the string
-<code>"abstract_deterministic"</code>).</p>
+visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — so callers can see which of
+their forecasts are synthetic, and can address, copy, or remove the association.</p>
+<p>It is never something you must <em>ask for</em>. <strong>A request for <code>Deterministic</code> matches both storage
+forms</strong> — in reads, key resolution, catalog filters, and reader builds alike — so which one a store
+holds stays an internal detail. Requesting <code>DeterministicSingleTimeSeries</code> narrows to the derived
+form, which is how a caller audits what it has. This mirrors InfrastructureSystems.jl, where a
+<code>Deterministic</code> request lowers to both concrete type names.</p>
 <p>Reading forecast <em>values</em> is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic <code>add_time_series</code> (a <code>Deterministic</code>, <code>Probabilistic</code>, or
 <code>Scenarios</code> object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
@@ -1739,13 +1741,14 @@ let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
 <span class="boring">}</span></code></pre></pre>
 <p>When a forecast is addressed by its attributes rather than by a key you already hold, use
 <code>resolve_forecast_key</code>: it resolves
-<code>(owner_id, owner_category, name, resolution, interval, features)</code> plus a <code>RequestedType</code> to the
-single matching key, erroring with <code>NotFound</code> if nothing matches and <code>InvalidParameter</code> if the
-request is ambiguous. <code>RequestedType::AbstractDeterministic</code> matches a stored <code>Deterministic</code> <em>or</em> a
-<code>DeterministicSingleTimeSeries</code>, so callers need not know which one is stored:</p>
+<code>(owner_id, owner_category, name, resolution, interval, features)</code> plus a requested <code>TimeSeriesType</code>
+to the single matching key, erroring with <code>NotFound</code> if nothing matches and <code>InvalidParameter</code> if
+the request is ambiguous. Requesting <code>TimeSeriesType::Deterministic</code> matches a stored
+<code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>, so callers need not know which one is
+stored; the returned key's <code>time_series_type</code> reports the form that matched:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use infrastore_core::RequestedType;
+</span>use infrastore_core::TimeSeriesType;
 
 let key = store.resolve_forecast_key(
     42,
@@ -1754,7 +1757,7 @@ let key = store.resolve_forecast_key(
     None,                                  // resolution: Option&lt;Period&gt; (None = any)
     None,                                  // interval: Option&lt;Period&gt; (None = any)
     Features::new(),
-    RequestedType::AbstractDeterministic,
+    TimeSeriesType::Deterministic,
 )?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="copy-remove-and-maintain"><a class="header" href="#copy-remove-and-maintain">Copy, Remove, and Maintain</a></h2>
@@ -2322,14 +2325,14 @@ optionally restricts the transform to one <code>owner_category</code> and/or one
 n = transform_single_time_series!(store, Hour(24), Hour(24);
                                   owner_category = Component, resolution = Hour(1))
 </code></pre>
-<p>Requesting the concrete <code>Deterministic</code> type does <strong>not</strong> match a transformed
-<code>DeterministicSingleTimeSeries</code> — that read throws <code>NotFoundError</code>. To read whichever of the two is
-stored under an identity, request the family type <code>AbstractDeterministic</code> (it returns a
-<code>Deterministic</code>, since a DST has no materialized struct):</p>
-<pre><code class="language-julia">fc = get_time_series(AbstractDeterministic, store, 42, Component, "load")
+<p>Requesting <code>Deterministic</code> also matches a transformed <code>DeterministicSingleTimeSeries</code>, so you read a
+forecast the same way whether it was added densely or derived (either returns a <code>Deterministic</code>,
+since a DST has no materialized struct):</p>
+<pre><code class="language-julia">fc = get_time_series(Deterministic, store, 42, Component, "load")
 </code></pre>
-<p>A genuine miss still throws <code>NotFoundError</code>, and an identity that holds both concrete types is
-ambiguous and errors — request a concrete type then.</p>
+<p>A genuine miss throws <code>NotFoundError</code>. To check which form you actually have, inspect the
+<code>time_series_type</code> on the key or metadata — or pass <code>DeterministicSingleTimeSeries</code> to select only
+the derived ones.</p>
 <p><code>transform_single_time_series!</code> returns no keys, so to read a derived forecast by key, enumerate the
 owner's keys with <code>get_time_series_keys(store, owner_id, owner_category)</code> (the owner is the
 <code>(owner_id, owner_category)</code> pair) and use <code>key_info</code>, whose <code>time_series_type</code> is the actual Julia
@@ -3178,7 +3181,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries three global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.11.0"
+<pre><code class="language-text">data_format_version = "0.12.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 </code></pre>
@@ -3199,16 +3202,18 @@ no in-place migration.</p>
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
-payload (typically JSON) the store stores verbatim and never interprets; <code>0.10.0</code> replaced the
-per-association <code>features</code> table with the content-addressed <code>feature_sets</code> table below, so a feature
-map is stored once and shared by every association that uses it — dropping the <code>association_id</code>
-foreign key and its <code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to
-timestamp-major <code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to
-the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
-writes; <code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts
-of one variable that differ only by interval are now distinct series — widening both unique indexes
-(the <code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
+<p>(<code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from TEXT names to small INTEGER codes —
+see <a href="reference/file-format.html#discriminant-encoding">Discriminant encoding</a> below; <code>0.11.0</code> renamed the metadata column
+<code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension payload (typically JSON) the store
+stores verbatim and never interprets; <code>0.10.0</code> replaced the per-association <code>features</code> table with
+the content-addressed <code>feature_sets</code> table below, so a feature map is stored once and shared by
+every association that uses it — dropping the <code>association_id</code> foreign key and its
+<code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to timestamp-major
+<code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to the writing
+batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
+<code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts of one
+variable that differ only by interval are now distinct series — widening both unique indexes (the
+<code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
 <code>resolution</code>/<code>horizon</code>/<code>interval</code> calendar-aware <a href="reference/../explanation/data-model.html">periods</a>: they are
 now encoded as ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) rather than integer
 milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
@@ -3237,7 +3242,7 @@ quadratic cost curve) has element shape <code>[3]</code>.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.11.0"
+├── attribute  data_format_version = "0.12.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -3345,8 +3350,8 @@ compaction physically removes.</li>
 <tr><td><code>id</code></td><td>INTEGER</td><td>Primary key</td></tr>
 <tr><td><code>owner_id</code></td><td>INTEGER</td><td>Owner identity; signed 64-bit integer identifier (part of key)</td></tr>
 <tr><td><code>owner_type</code></td><td>TEXT</td><td>Owner's concrete type, descriptive</td></tr>
-<tr><td><code>owner_category</code></td><td>TEXT</td><td><code>CHECK</code> in (<code>Component</code>, <code>SupplementalAttribute</code>); part of key</td></tr>
-<tr><td><code>time_series_type</code></td><td>TEXT</td><td>One of the six <code>TimeSeriesType</code> names</td></tr>
+<tr><td><code>owner_category</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> in (0, 1); part of key — see below</td></tr>
+<tr><td><code>time_series_type</code></td><td>INTEGER</td><td>Code, <code>CHECK</code> between 0 and 5; part of key — see below</td></tr>
 <tr><td><code>name</code></td><td>TEXT</td><td>Series name</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>TEXT</td><td>RFC 3339 string; <code>NULL</code> for <code>NonSequentialTimeSeries</code></td></tr>
 <tr><td><code>resolution</code></td><td>TEXT</td><td>ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, …); <code>NULL</code> for non-sequential</td></tr>
@@ -3490,13 +3495,25 @@ accumulating two equivalent index pairs. Index names are not part of the on-disk
 carries no <code>data_format_version</code> change.</p>
 <h3 id="time_series_readable-view"><a class="header" href="#time_series_readable-view"><code>time_series_readable</code> (view)</a></h3>
 <pre><code class="language-sql">CREATE VIEW time_series_readable AS
-SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
-       initial_timestamp, resolution, length, horizon, interval, count,
+SELECT id, owner_id, owner_type,
+       CASE owner_category WHEN 0 THEN 'Component'
+                           WHEN 1 THEN 'SupplementalAttribute'
+                           ELSE 'unknown(' || owner_category || ')' END AS owner_category,
+       CASE time_series_type WHEN 0 THEN 'SingleTimeSeries'
+                             WHEN 1 THEN 'NonSequentialTimeSeries'
+                             WHEN 2 THEN 'Deterministic'
+                             WHEN 3 THEN 'DeterministicSingleTimeSeries'
+                             WHEN 4 THEN 'Probabilistic'
+                             WHEN 5 THEN 'Scenarios'
+                             ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
+       name, initial_timestamp, resolution, length, horizon, interval, count,
        units, dtype, element_shape, ext,
        lower(hex(data_hash))     AS data_hash,
        lower(hex(features_hash)) AS features_hash
 FROM time_series_associations;
 </code></pre>
+<p>This view decodes both discriminants and both content hashes, so it is the convenient thing to query
+by hand. Nothing in the library reads it.</p>
 <p>A projection of the association table with both hashes hex-encoded, for humans opening the catalog
 in <code>sqlite3</code> — see <a href="reference/file-format.html#reading-the-catalog-by-hand">Reading the catalog by hand</a>. Nothing in the
 library reads it. It costs no storage, is created by the same idempotent DDL as the tables above,
@@ -3516,6 +3533,35 @@ compares case-insensitively while a hex <code>TEXT</code> column would not. The
 <li><strong><code>element_shape</code></strong> is the per-step shape only (the trailing axes); the time <code>length</code> is a
 separate column.</li>
 </ul>
+<h3 id="discriminant-encoding"><a class="header" href="#discriminant-encoding">Discriminant encoding</a></h3>
+<p><code>owner_category</code> and <code>time_series_type</code> are stored as small <strong>INTEGER codes</strong>, not names:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>owner_category</code></th><th>code</th><th></th><th><code>time_series_type</code></th><th>code</th></tr></thead><tbody>
+<tr><td><code>Component</code></td><td>0</td><td></td><td><code>SingleTimeSeries</code></td><td>0</td></tr>
+<tr><td><code>SupplementalAttribute</code></td><td>1</td><td></td><td><code>NonSequentialTimeSeries</code></td><td>1</td></tr>
+<tr><td></td><td></td><td></td><td><code>Deterministic</code></td><td>2</td></tr>
+<tr><td></td><td></td><td></td><td><code>DeterministicSingleTimeSeries</code></td><td>3</td></tr>
+<tr><td></td><td></td><td></td><td><code>Probabilistic</code></td><td>4</td></tr>
+<tr><td></td><td></td><td></td><td><code>Scenarios</code></td><td>5</td></tr>
+</tbody></table>
+</div>
+<p>Both columns sit in the two wide unique indexes, and <code>time_series_type</code> additionally in
+<code>idx_ts_type</code> while <code>owner_category</code> sits in <code>idx_owner</code> and <code>idx_category_owner</code>. A 1-byte code
+instead of a 9–29 byte string shrinks those indexes by roughly 35% and the whole catalog by roughly
+29% on a 400k-row store, and makes type-scoped scans about 1.2x faster warm (1.4–1.5x under page
+cache pressure). Point lookups by key are unaffected — those are dominated by the 32-byte
+<code>features_hash</code>.</p>
+<p>Two code assignments are load-bearing and cannot be reordered without a version bump:</p>
+<ul>
+<li><strong><code>Deterministic</code> (2) and <code>DeterministicSingleTimeSeries</code> (3) are adjacent.</strong> A request for
+<code>Deterministic</code> matches both (see <a href="reference/../explanation/data-model.html">the data model</a>), so adjacency
+lets that widen to <code>time_series_type BETWEEN 2 AND 3</code> — one index seek instead of a two-value
+<code>IN</code>.</li>
+<li><strong>The static types (0–1) and forecast types (2–5) are contiguous blocks</strong>, so the static and
+forecast summary queries each scope with a single <code>BETWEEN</code>.</li>
+</ul>
+<p>The C ABI uses the same integers for its <code>ts_type</code> arguments, so there is one mapping rather than
+two. The <a href="reference/file-format.html#time_series_readable-view"><code>time_series_readable</code> view</a> decodes both columns for hand
+inspection.</p>
 <h2 id="inspecting-a-store-by-hand"><a class="header" href="#inspecting-a-store-by-hand">Inspecting a Store by Hand</a></h2>
 <p>The quickest route is the CLI, which resolves the hash-to-location step for you:</p>
 <pre><code class="language-sh">infrastore --store system.h5 store-info          # both file paths, format version, compression
@@ -3526,8 +3572,9 @@ infrastore --store system.h5 info --name load    # one series: data_hash, hdf5_d
 <pre><code class="language-sh">h5ls -r system.h5                        # groups, datasets, dtypes, shapes
 h5dump -A -n system.h5                   # root attributes and the object list
 sqlite3 system.h5.sqlite '.schema'
+# Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
-  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_associations;'
+  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_readable;'
 # Both association tables are absent in stores written before they existed.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
@@ -3557,7 +3604,7 @@ given array is not derivable from its metadata — scan the <code>_h</code> data
 </span>use infrastore_core::{
     create_store, open_store, Store, BulkAdd, TimeSeriesKey, KeyIdentity,
     SingleTimeSeries, NonSequentialTimeSeries, Deterministic, Probabilistic, Scenarios,
-    TimeSeriesData, TimeSeriesType, RequestedType, Period,
+    TimeSeriesData, TimeSeriesType, Period,
     TypedArray, Dtype, Compression, OwnerCategory, FeatureValue, Features, TimeSeriesMetadata,
     ListFilter, AddRequest,
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
@@ -3698,7 +3745,7 @@ changes how data is read back — see the <a href="reference/../explanation/stor
     // safe for hot loops.
     pub fn has_any_time_series(&amp;self, filter: ListFilter) -&gt; Result&lt;bool&gt;;
 
-    // Resolve a forecast addressed by attributes + a `RequestedType` to the one
+    // Resolve a forecast addressed by attributes + a requested type to the one
     // matching key. `NotFound` if nothing matches; `InvalidParameter` if ambiguous.
     pub fn resolve_forecast_key(
         &amp;self,
@@ -3708,7 +3755,7 @@ changes how data is read back — see the <a href="reference/../explanation/stor
         resolution: Option&lt;Period&gt;,
         interval: Option&lt;Period&gt;,
         features: Features,
-        requested: RequestedType,
+        requested: TimeSeriesType,
     ) -&gt; Result&lt;TimeSeriesKey&gt;;
 
     pub fn get_metadata(&amp;self, key: &amp;KeyIdentity) -&gt; Result&lt;TimeSeriesMetadata&gt;;
@@ -3888,7 +3935,7 @@ name. Errors with <code>DuplicateTimeSeries</code> if the destination identity a
 <code>list_keys_with_hash</code> pairs each key with its array's content hash in the same single catalog
 query, so callers can group keys by the data behind them.</li>
 <li><strong><code>resolve_forecast_key</code></strong> — Resolves a forecast addressed by attributes plus a
-<a href="reference/rust-api.html#requestedtype"><code>RequestedType</code></a> to the single matching key, whose <code>time_series_type</code> is the
+<a href="reference/rust-api.html#requested-types">requested type</a> to the single matching key, whose <code>time_series_type</code> is the
 concrete type that matched. <code>resolution</code> and <code>interval</code> are optional filters; leave them <code>None</code> to
 match across them. <code>NotFound</code> if nothing matches, <code>InvalidParameter</code> if more than one does.</li>
 <li><strong><code>get_metadata</code> / <code>get_array_by_hash</code></strong> — The low-level pair used by external bindings: resolve a
@@ -4538,20 +4585,20 @@ committing discards the buffer and writes nothing.</p>
     pub fn commit(self) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;          // keys in push order
 }
 <span class="boring">}</span></code></pre></pre>
-<h3 id="requestedtype"><a class="header" href="#requestedtype"><code>RequestedType</code></a></h3>
-<p>What <a href="reference/rust-api.html#store"><code>Store::resolve_forecast_key</code></a> is asked to match: one concrete stored type, or the
-abstract "deterministic" family, which a stored <code>Deterministic</code> <strong>or</strong>
-<code>DeterministicSingleTimeSeries</code> satisfies (the two never coexist for one series, so at most one can
-match).</p>
+<h3 id="requested-types"><a class="header" href="#requested-types">Requested types</a></h3>
+<p>What a query — <a href="reference/rust-api.html#store"><code>Store::resolve_forecast_key</code></a>, a <code>ListFilter</code>, or a reader build — is asked
+to match. Every type matches only itself, with one exception: <strong><code>Deterministic</code> also matches a
+stored <code>DeterministicSingleTimeSeries</code></strong>, since a DST is a synthetic view that reads back as a
+<code>Deterministic</code> and callers should not have to know which form a store holds. (The two never coexist
+for one identity, so this never creates ambiguity.) Requesting <code>DeterministicSingleTimeSeries</code>
+narrows to the derived form.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>pub enum RequestedType {
-    Concrete(TimeSeriesType),
-    AbstractDeterministic,
-}
-
-impl RequestedType {
-    pub fn matches(self, concrete: TimeSeriesType) -&gt; bool;
+</span>impl TimeSeriesType {
+    /// Does a stored series of type `stored` satisfy a request for `self`?
+    pub fn accepts(self, stored: TimeSeriesType) -&gt; bool;
+    /// The same rule as catalog type names, for the SQL predicates.
+    pub fn stored_names(self) -&gt; &amp;'static [&amp;'static str];
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="association-types"><a class="header" href="#association-types">Association types</a></h3>
@@ -4908,7 +4955,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: RequestedType | None = None,
+    time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     resolution: timedelta | str | None = None,
@@ -4919,11 +4966,10 @@ def list_time_series(
 def list_array_groups(self, *, ...) -&gt; list[dict]: ...
 # Same keyword-only filter arguments as list_time_series; so do list_keys,
 # list_names, list_owner_types, and remove_by_filter.
-# `time_series_type` is a RequestedType: a TimeSeriesType, or the string
-# "abstract_deterministic" to match Deterministic and
-# DeterministicSingleTimeSeries in one query. Every filter surface takes it,
-# including has_any_time_series, get_resolutions, get_intervals,
-# list_owner_ids, and build_forecast_reader.
+# `time_series_type` is a TimeSeriesType. TimeSeriesType.Deterministic matches
+# both Deterministic and DeterministicSingleTimeSeries rows. Every filter
+# surface takes it, including has_any_time_series, get_resolutions,
+# get_intervals, list_owner_ids, and build_forecast_reader.
 
 def get_time_series_keys(
     self,
@@ -4934,7 +4980,7 @@ def has_time_series(self, key: TimeSeriesKey) -&gt; bool: ...
 def has_any_time_series(self, *, ...) -&gt; bool: ...
 # Existence without listing ("does this owner have any time series?"); same
 # keyword-only filter arguments as list_time_series. Index-probe fast.
-def get_resolutions(self, time_series_type: RequestedType | None = None) -&gt; list[str]: ...
+def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -&gt; list[str]: ...
 # resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
 def get_time_series_counts(self) -&gt; dict: ...
 def get_forecast_parameters(self, *, resolution: str | None = None,
@@ -5057,14 +5103,14 @@ TimeSeriesType.Scenarios
 OwnerCategory.Component
 OwnerCategory.SupplementalAttribute
 </code></pre>
-<p><code>TimeSeriesType</code> names a <em>stored</em> type. Queries take a slightly wider value, <code>RequestedType</code>:</p>
-<pre><code class="language-python">RequestedType = TimeSeriesType | Literal["abstract_deterministic"]
-</code></pre>
-<p><code>"abstract_deterministic"</code> is the family of both deterministic storage forms — it matches a stored
-<code>Deterministic</code> <em>or</em> <code>DeterministicSingleTimeSeries</code> in one query, which is what a caller asking
-"does this owner have a deterministic forecast?" wants. It is request-only: no row is stored under
-it, and no returned <code>time_series_type</code> is ever the family. Anything else raises
-<code>InvalidParameterError</code>; a value that is neither a <code>TimeSeriesType</code> nor a string raises <code>TypeError</code>.</p>
+<p><code>TimeSeriesType</code> names a <em>stored</em> type, and is also what a query asks for. Every member matches only
+itself with one exception: <strong><code>TimeSeriesType.Deterministic</code> also matches a stored
+<code>DeterministicSingleTimeSeries</code></strong>, which is what a caller asking "does this owner have a
+deterministic forecast?" wants — whether the forecast was added densely or derived by
+<code>transform_single_time_series</code> is a storage detail. Returned rows and keys still carry the concrete
+stored type, and <code>TimeSeriesType.DeterministicSingleTimeSeries</code> narrows to the derived form for
+callers auditing which forecasts are synthetic. Passing anything that is not a <code>TimeSeriesType</code>
+raises <code>TypeError</code>.</p>
 <h2 id="forecasts-6"><a class="header" href="#forecasts-6">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> objects and then
 passed to <a href="reference/python-api.html#methods"><code>add_time_series</code></a>. They are read back through <code>get_time_series</code>, which returns
@@ -5158,7 +5204,7 @@ def static_read(self, reader: StaticReader, when: datetime) -&gt; None: ...
 
 def build_forecast_reader(
     self,
-    time_series_type: RequestedType,
+    time_series_type: TimeSeriesType,
     resolution: timedelta | str,
     *,
     owner_id: int | None = None,
@@ -5201,10 +5247,10 @@ for ts in reader.timestamps():
 filter must name a forecast type and pin a resolution; a <code>Deterministic</code> reader is abstract and also
 includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>(horizon, *element_shape)</code> windows).
 All matched forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
-<p><code>time_series_type</code> must be one of the concrete forecast types — <code>Deterministic</code>,
-<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — or the string
-<code>"abstract_deterministic"</code>, which reads exactly like a <code>Deterministic</code> reader; any other raises
-<code>InvalidParameterError</code>.</p>
+<p><code>time_series_type</code> must be one of the forecast types — <code>Deterministic</code>,
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>; any other raises
+<code>InvalidParameterError</code>. A <code>Deterministic</code> reader also covers stored <code>DeterministicSingleTimeSeries</code>
+forecasts, matching the read request rule.</p>
 <pre><code class="language-python">class ForecastReader:
     def timeline(self) -&gt; dict: ...   # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "interval": ISO str, "count": int, "time_series_type": str}
     def entries(self) -&gt; list[TimeSeriesKey]: ...   # per-entry keys, in order (parallel to entry_values)
@@ -5437,19 +5483,19 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <pre><code class="language-julia">using InfraStore
 </code></pre>
 <p>Exported names (types first, then functions):</p>
-<p><code>AbstractDeterministic</code>, <code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>Component</code>,
-<code>CompressionSettings</code>, <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>,
-<code>ForecastParameters</code>, <code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>,
-<code>KeyRow</code>, <code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>,
-<code>Scenarios</code>, <code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>,
-<code>Store</code>, <code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>,
-<code>SupplementalAttributeSummaryRow</code>, <code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>,
-<code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>, <code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>,
-<code>add_parent_child_association!</code>, <code>add_parent_child_associations!</code>,
-<code>add_supplemental_attribute_association!</code>, <code>add_supplemental_attribute_associations!</code>,
-<code>add_time_series!</code>, <code>add_time_series_bulk!</code>, <code>build_forecast_reader</code>, <code>build_static_reader</code>,
-<code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
-<code>count_array_references</code>, <code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
+<p><code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>Component</code>, <code>CompressionSettings</code>,
+<code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>, <code>ForecastParameters</code>,
+<code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>, <code>KeyRow</code>,
+<code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>, <code>Scenarios</code>,
+<code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>, <code>Store</code>,
+<code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>, <code>SupplementalAttributeSummaryRow</code>,
+<code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>, <code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>,
+<code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>, <code>add_parent_child_association!</code>,
+<code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
+<code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
+<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>,
+<code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>, <code>count_array_references</code>,
+<code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
 <code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
 <code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
 <code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
@@ -5508,7 +5554,7 @@ struct NonSequentialTimeSeries{T,N}
 end
 NonSequentialTimeSeries(timestamps, data, name; ext=nothing)
 
-struct Deterministic{T,N} &lt;: AbstractDeterministic
+struct Deterministic{T,N}
     initial_timestamp :: DateTime
     resolution        :: Period
     horizon           :: Period
@@ -5550,16 +5596,11 @@ Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
           ext=nothing)         # note: scenario_count is NOT a constructor argument
 
 # Marker type; never constructed and with no materialized struct. Derived via
-# transform_single_time_series! and read back as a Deterministic. Surfaces as a
-# key's time_series_type.
-abstract type DeterministicSingleTimeSeries &lt;: AbstractDeterministic end
-
-# Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
-# Pass it as the requested type to get_time_series to read whichever of the two
-# is stored (see Reading forecast values), as a catalog filter to match both, or
-# to build_forecast_reader, where it reads like a Deterministic reader. No row is
-# ever stored under it.
-abstract type AbstractDeterministic end
+# transform_single_time_series! and read back as a Deterministic. You normally
+# do not request it: a Deterministic request matches it too. It surfaces as a
+# key's / row's time_series_type, so which forecasts are synthetic stays
+# inspectable, and passing it narrows a query to the derived ones.
+abstract type DeterministicSingleTimeSeries end
 
 mutable struct Store
     handle :: Ptr{Cvoid}
@@ -5713,9 +5754,9 @@ owner-scoped <code>clear!</code>, which is exempt.</p>
 <p><code>get_metadata</code> returns the whole <a href="reference/julia-api.html#result-types"><code>TimeSeriesMetadata</code></a> record — every stored type
 through the one function — and throws <code>NotFoundError</code> if absent. The attribute form takes the type
 as its first argument exactly like <code>get_time_series</code>: <code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>,
-<code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, <code>Scenarios</code>, or
-<code>AbstractDeterministic</code> to resolve whichever of the <code>Deterministic</code> /
-<code>DeterministicSingleTimeSeries</code> pair is stored. <code>interval</code> is only needed to disambiguate forecasts
+<code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — where
+<code>Deterministic</code> resolves a stored <code>DeterministicSingleTimeSeries</code> too, and the returned record's
+<code>time_series_type</code> reports which form was found. <code>interval</code> is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a <code>SingleTimeSeries</code>, the same shorthand
 <code>has_time_series</code> and <code>remove_time_series!</code> use. Since every form returns the same struct, <code>ext</code>,
 <code>dtype</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was asked for and whichever
@@ -5746,11 +5787,11 @@ key_info(key::TimeSeriesKey) -&gt; KeyInfo
 </code></pre>
 <p>These two are the ways to obtain a <code>TimeSeriesKey</code> for a series already stored (<code>add_time_series!</code>
 returns one at write time, and the readers carry them on <code>StaticGroup</code> / <code>ForecastEntry</code>).
-<code>get_time_series_key</code> addresses one series by attributes, <code>T</code> being any stored type or
-<code>AbstractDeterministic</code> to match whichever of <code>Deterministic</code> / <code>DeterministicSingleTimeSeries</code> is
-stored. It resolves against the catalog, so the handle always names something stored: a miss throws
-<code>NotFoundError</code> and a request matching several series throws <code>InvalidParameterError</code> listing the
-candidates. Note that <a href="reference/julia-api.html#store-wide-operations"><code>list_keys</code></a> returns <code>KeyRow</code> <strong>description
+<code>get_time_series_key</code> addresses one series by attributes, <code>T</code> being any stored type — with
+<code>Deterministic</code> matching a stored <code>DeterministicSingleTimeSeries</code> too, the returned key naming the
+concrete form. It resolves against the catalog, so the handle always names something stored: a miss
+throws <code>NotFoundError</code> and a request matching several series throws <code>InvalidParameterError</code> listing
+the candidates. Note that <a href="reference/julia-api.html#store-wide-operations"><code>list_keys</code></a> returns <code>KeyRow</code> <strong>description
 structs</strong>, not handles — use <code>get_time_series_key</code> (or <code>get_time_series_keys</code>) when you need
 something to pass to a key-based reader or <code>bulk_read</code>.</p>
 <p><code>get_time_series_keys</code> returns one key per stored association for the owner identified by the
@@ -5851,10 +5892,6 @@ get_time_series(DeterministicSingleTimeSeries, store, owner_id, owner_category, 
 get_time_series(DeterministicSingleTimeSeries, store, key::TimeSeriesKey;
                 time_range=nothing) -&gt; Deterministic
 
-get_time_series(AbstractDeterministic, store, owner_id, owner_category, name;
-                resolution=nothing, interval=nothing, features=Dict(),
-                time_range=nothing) -&gt; Deterministic
-
 get_time_series(Probabilistic, store, owner_id, owner_category, name;
                 resolution=nothing, interval=nothing, features=Dict(),
                 time_range=nothing) -&gt; Probabilistic
@@ -5870,23 +5907,22 @@ get_time_series(Scenarios, store, key::TimeSeriesKey; time_range=nothing) -&gt; 
 <p><code>interval</code> (a <code>Period</code>) pins the forecast interval; it is the only way to address one of two
 forecasts under the same owner/name/type that differ solely by interval. A read that leaves it
 <code>nothing</code> when two such forecasts exist raises <code>InvalidParameterError</code>.</p>
-<h4 id="concrete-types-vs-the-abstractdeterministic-family"><a class="header" href="#concrete-types-vs-the-abstractdeterministic-family">Concrete types vs. the <code>AbstractDeterministic</code> family</a></h4>
-<p>The concrete request types match <strong>only themselves</strong>:</p>
-<ul>
-<li><code>get_time_series(Deterministic, …)</code> matches a directly-stored <code>Deterministic</code> and does <strong>not</strong>
-match a <code>DeterministicSingleTimeSeries</code> — asking for <code>Deterministic</code> when only a transformed DST
-exists raises <code>NotFoundError</code>. There is no fallback.</li>
-<li><code>get_time_series(DeterministicSingleTimeSeries, …)</code> matches only a transformed DST. Since the type
-has no materialized struct, it returns a <code>Deterministic</code>.</li>
-</ul>
-<p>To read whichever of the two is stored under an identity, request the family type
-<code>AbstractDeterministic</code> (attribute-based only — a key already names its exact stored type):</p>
+<h4 id="reading-a-transformed-forecast"><a class="header" href="#reading-a-transformed-forecast">Reading a transformed forecast</a></h4>
+<p><strong>Always ask for <code>Deterministic</code>.</strong> It matches a directly-stored <code>Deterministic</code> <em>and</em> a
+<code>DeterministicSingleTimeSeries</code> derived by <code>transform_single_time_series!</code>, so how a forecast came
+to exist is not something you need to know to read it:</p>
 <pre><code class="language-julia">transform_single_time_series!(store, Hour(4), Hour(2))
-fc = get_time_series(AbstractDeterministic, store, 400, Component, "dst")   # a Deterministic
+fc = get_time_series(Deterministic, store, 400, Component, "dst")   # a Deterministic
 </code></pre>
-<p>The Rust core resolves the family in a single call — there is no guess-and-retry. A genuine miss
-raises <code>NotFoundError</code>, and an identity matching <strong>both</strong> a <code>Deterministic</code> and a
-<code>DeterministicSingleTimeSeries</code> is ambiguous and errors (request a concrete type instead).</p>
+<p><code>get_time_series(DeterministicSingleTimeSeries, …)</code> narrows to the derived forecasts. It returns a
+<code>Deterministic</code> too — the type has no materialized struct — so it is only worth naming when you are
+auditing which forecasts are synthetic rather than reading values.</p>
+<p>The Rust core resolves this in a single call — there is no guess-and-retry. A genuine miss raises
+<code>NotFoundError</code>.</p>
+<p>To find out which form you have, read the <code>time_series_type</code> on the resolved key or metadata:</p>
+<pre><code class="language-julia">k = get_time_series_key(Deterministic, store, 400, Component, "dst")
+key_info(k).time_series_type    # DeterministicSingleTimeSeries
+</code></pre>
 <p>The <strong>key-based</strong> readers carry the exact stored type in the key, so the question does not arise: a
 <code>DeterministicSingleTimeSeries</code> key reads back as a <code>Deterministic</code>.</p>
 <p>Alternatively, use <code>get_metadata</code> to obtain the <code>data_hash</code>, then <code>get_array_by_hash</code> for the raw
@@ -5930,9 +5966,8 @@ end
 filter must name a forecast type and pin a resolution; a <code>Deterministic</code> reader is abstract and also
 includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>[H, *E]</code> windows). All matched
 forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
-<p><code>time_series_type</code> must be one of the four concrete forecast types — <code>Deterministic</code>,
-<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — or <code>AbstractDeterministic</code>, which
-reads exactly like a <code>Deterministic</code> reader (already abstract over the pair). Any other type raises
+<p><code>time_series_type</code> must be one of the four forecast types — <code>Deterministic</code>,
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>. Any other type raises
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
@@ -6020,9 +6055,9 @@ and independent, and combine as a conjunction; with none set the whole store is 
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
 <li><code>time_series_type</code> — the Julia type (<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), the same value the
-<code>time_series_type</code> field of a returned row carries, or <code>AbstractDeterministic</code> to match both
-<code>Deterministic</code> and <code>DeterministicSingleTimeSeries</code> (no row is ever <em>stored</em> under the family, so
-it never appears in a returned row).</li>
+<code>time_series_type</code> field of a returned row carries. <code>Deterministic</code> additionally matches
+<code>DeterministicSingleTimeSeries</code> rows; each row still reports its own stored type, and passing
+<code>DeterministicSingleTimeSeries</code> selects only those.</li>
 <li><code>name</code> — exact association name.</li>
 <li><code>resolution</code> — a <code>Period</code>.</li>
 <li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval
@@ -6442,9 +6477,9 @@ int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
                                      char *buf, uint64_t cap, uint64_t *out_len);
 
 /* Resolve attributes plus a requested type to the key of the one matching stored
-   series. requested_type is any stored type code (0..5) or
-   INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100), which matches a stored Deterministic or
-   DeterministicSingleTimeSeries and yields the concrete one. Unlike
+   series. requested_type is any stored type code (0..5); 2 = Deterministic also
+   matches a stored DeterministicSingleTimeSeries, and the key names the concrete
+   stored type either way. Unlike
    infrastore_make_key_from_attrs, which builds an identity without consulting the
    catalog, this validates: INFRASTORE_ERR_NOT_FOUND on a miss and
    INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
@@ -6470,10 +6505,10 @@ reader.</p>
 <h2 id="forecasts-8"><a class="header" href="#forecasts-8">Forecasts</a></h2>
 <p>The forecast types are created and read through the C ABI. <code>ts_type</code> is the <code>TimeSeriesType</code>
 discriminant — <code>0 = SingleTimeSeries</code>, <code>1 = NonSequentialTimeSeries</code>, <code>2 = Deterministic</code>,
-<code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>, <code>5 = Scenarios</code> — plus one request-only
-sentinel, <code>INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC</code> (<code>100</code>), described below. Forecast values are
-dtype-generic raw little-endian byte buffers with explicit dimensions — the same <code>dtype</code>, <code>ndims</code>,
-<code>dims_ptr</code>, <code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
+<code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>, <code>5 = Scenarios</code>. As a <em>request</em> it is read
+per <a href="reference/c-abi.html#requested-forecast-types">the matching rule</a> below. Forecast values are dtype-generic raw
+little-endian byte buffers with explicit dimensions — the same <code>dtype</code>, <code>ndims</code>, <code>dims_ptr</code>,
+<code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
 <a href="reference/../explanation/data-model.html#forecasts">data model</a> for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
 <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is read like any other forecast but cannot be written through
@@ -6522,19 +6557,19 @@ and returns the decoded data buffer, its out-dimensions, the metadata, and — f
 the percentile vector. A stored <code>DeterministicSingleTimeSeries</code> is synthesized into <code>Deterministic</code>
 <em>values</em> (its dense windows are materialized from the backing <code>SingleTimeSeries</code>), but it remains a
 distinct stored type for addressing purposes.</p>
+<h4 id="requested-forecast-types"><a class="header" href="#requested-forecast-types">Requested forecast types</a></h4>
 <p>Its <code>ts_type</code> argument is a <strong>read request</strong>, not merely a stored-type filter:</p>
 <ul>
-<li>A concrete code (<code>2 = Deterministic</code>, <code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>,
-<code>5 = Scenarios</code>) matches <strong>only</strong> that exact stored type. Passing <code>2</code> does <em>not</em> find a stored
-<code>DeterministicSingleTimeSeries</code>, and passing <code>3</code> does not find a stored <code>Deterministic</code>. The
-non-forecast codes <code>0</code> and <code>1</code> are rejected with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>.</li>
-<li><code>INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC</code> (<code>100</code>) is a request-only sentinel — never a stored type
-— for the <code>AbstractDeterministic</code> family: it matches a stored <code>Deterministic</code> <strong>or</strong> a
-<code>DeterministicSingleTimeSeries</code>. This is the only way to address a deterministic forecast whose
-concrete type the caller does not know in advance. The catalog resolves the family authoritatively
-(no client-side guess-and-retry) and reports the concrete type that matched through
-<code>*out_matched_type</code>. If both concrete types share the identity the request is ambiguous and
-returns <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a genuine miss returns the usual not-found error.</li>
+<li><code>2 = Deterministic</code> matches a stored <code>Deterministic</code> <strong>or</strong> a stored
+<code>DeterministicSingleTimeSeries</code>. A DST is a synthetic view that reads back as a <code>Deterministic</code>,
+so a caller addresses a deterministic forecast without knowing which form the store holds. The
+catalog resolves this authoritatively (no client-side guess-and-retry) and reports the concrete
+stored type through <code>*out_matched_type</code>. An ambiguous request returns
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a genuine miss returns the usual not-found error.</li>
+<li><code>3 = DeterministicSingleTimeSeries</code> narrows to the derived form alone — for callers auditing which
+forecasts are synthetic rather than reading values.</li>
+<li><code>4 = Probabilistic</code> and <code>5 = Scenarios</code> match only themselves. The non-forecast codes <code>0</code> and <code>1</code>
+are rejected with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>.</li>
 </ul>
 <p><code>*out_matched_type</code> always receives the <strong>concrete</strong> <code>TimeSeriesType</code> that was matched — so a stored
 <code>DeterministicSingleTimeSeries</code> reports <code>3</code>, never <code>2</code>, and the <code>100</code> sentinel is never returned.</p>
@@ -6547,7 +6582,7 @@ ISO-8601 strings with <code>infrastore_string_free</code>.</p>
 <pre><code class="language-c">int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               int64_t owner_id, int32_t owner_category,
                               const char *name,
-                              int32_t ts_type,  /* 2..5, or INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100) */
+                              int32_t ts_type,  /* 2..5; 2 also matches a stored DST */
                               const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
                               const char *features_json,
                               bool time_range_present,
@@ -6664,12 +6699,11 @@ void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 and errors on divergence, so every column has a value at every valid timestamp (no presence mask).</p>
 <h3 id="forecastreader-2"><a class="header" href="#forecastreader-2">ForecastReader</a></h3>
 <p>Reads the forecast window at one timestamp for every matching forecast of one type. The build
-<code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) is abstract and also includes
-<code>DeterministicSingleTimeSeries</code> (<code>3</code>), read into identical <code>[H, *E]</code> windows. (Note the asymmetry
-with <code>infrastore_store_get_forecast</code>, where <code>2</code> matches only a stored <code>Deterministic</code> and the family
-request must be spelled <code>INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC</code>; the reader build takes no such
-sentinel.) All matched forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> +
-<code>count</code>). Each entry's window is a little-endian buffer of its <code>*_entry_info</code> shape.</p>
+<code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) also includes
+<code>DeterministicSingleTimeSeries</code> (<code>3</code>), read into identical <code>[H, *E]</code> windows — the same rule
+<code>infrastore_store_get_forecast</code> applies. All matched forecasts must share one window timeline
+(<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). Each entry's window is a little-endian buffer of its
+<code>*_entry_info</code> shape.</p>
 <pre><code class="language-c">int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                        bool has_owner, int64_t owner_id,
                                        bool has_owner_category, int32_t owner_category,
@@ -7506,11 +7540,10 @@ and ignores underscores, so each has a short form and a full form:</p>
 <tr><td><code>Scenarios</code></td><td><code>scenarios</code></td></tr>
 </tbody></table>
 </div>
-<p><code>--type</code> additionally accepts <strong><code>any_deterministic</code></strong> (also <code>abstract_deterministic</code>), which matches
-a stored <code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>. It is not a storable type — it is a
-query over the family — so it is only valid as a selector, never in a descriptor. Use it when you
-want every deterministic forecast regardless of how it got there: <code>--type deterministic</code> alone will
-not match what <code>transform</code> produced.</p>
+<p><code>--type deterministic</code> matches a stored <code>Deterministic</code> <em>and</em> the <code>DeterministicSingleTimeSeries</code>
+rows that <code>transform</code> produces — how a forecast came to exist is not something you need to know to
+select it. Listed rows still report their own stored type, so you can see which are synthetic, and
+<code>--type deterministic_single</code> selects only those.</p>
 <p><code>deterministic_single</code> is not writable from a descriptor (use <code>transform</code>), but it <em>is</em> selectable,
 and it is often required: <code>transform</code> derives a series that shares <code>(owner_id, name, resolution)</code>
 with its source <code>SingleTimeSeries</code>, so after a transform a query like

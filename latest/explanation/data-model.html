@@ -229,11 +229,13 @@ transforming a stored <code>SingleTimeSeries</code>.</p>
 <code>Deterministic</code>.</strong> This is by design in every binding: <code>TimeSeriesData</code> has no
 <code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
 the underlying static array without copying it. The <code>DeterministicSingleTimeSeries</code> tag stays
-visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — because callers need it to
-address, copy, or remove the association (and <code>RequestedType::AbstractDeterministic</code> exists so a
-query — a catalog filter, a key resolution, or a reader build — can match either concrete type
-without caring which is stored; Julia passes the <code>AbstractDeterministic</code> type, Python the string
-<code>"abstract_deterministic"</code>).</p>
+visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — so callers can see which of
+their forecasts are synthetic, and can address, copy, or remove the association.</p>
+<p>It is never something you must <em>ask for</em>. <strong>A request for <code>Deterministic</code> matches both storage
+forms</strong> — in reads, key resolution, catalog filters, and reader builds alike — so which one a store
+holds stays an internal detail. Requesting <code>DeterministicSingleTimeSeries</code> narrows to the derived
+form, which is how a caller audits what it has. This mirrors InfrastructureSystems.jl, where a
+<code>Deterministic</code> request lowers to both concrete type names.</p>
 <p>Reading forecast <em>values</em> is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic <code>add_time_series</code> (a <code>Deterministic</code>, <code>Probabilistic</code>, or
 <code>Scenarios</code> object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type

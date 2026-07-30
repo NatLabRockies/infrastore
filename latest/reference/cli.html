@@ -345,11 +345,10 @@ and ignores underscores, so each has a short form and a full form:</p>
 <tr><td><code>Scenarios</code></td><td><code>scenarios</code></td></tr>
 </tbody></table>
 </div>
-<p><code>--type</code> additionally accepts <strong><code>any_deterministic</code></strong> (also <code>abstract_deterministic</code>), which matches
-a stored <code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>. It is not a storable type — it is a
-query over the family — so it is only valid as a selector, never in a descriptor. Use it when you
-want every deterministic forecast regardless of how it got there: <code>--type deterministic</code> alone will
-not match what <code>transform</code> produced.</p>
+<p><code>--type deterministic</code> matches a stored <code>Deterministic</code> <em>and</em> the <code>DeterministicSingleTimeSeries</code>
+rows that <code>transform</code> produces — how a forecast came to exist is not something you need to know to
+select it. Listed rows still report their own stored type, so you can see which are synthetic, and
+<code>--type deterministic_single</code> selects only those.</p>
 <p><code>deterministic_single</code> is not writable from a descriptor (use <code>transform</code>), but it <em>is</em> selectable,
 and it is often required: <code>transform</code> derives a series that shares <code>(owner_id, name, resolution)</code>
 with its source <code>SingleTimeSeries</code>, so after a transform a query like

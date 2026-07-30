@@ -400,9 +400,9 @@ int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
                                      char *buf, uint64_t cap, uint64_t *out_len);
 
 /* Resolve attributes plus a requested type to the key of the one matching stored
-   series. requested_type is any stored type code (0..5) or
-   INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100), which matches a stored Deterministic or
-   DeterministicSingleTimeSeries and yields the concrete one. Unlike
+   series. requested_type is any stored type code (0..5); 2 = Deterministic also
+   matches a stored DeterministicSingleTimeSeries, and the key names the concrete
+   stored type either way. Unlike
    infrastore_make_key_from_attrs, which builds an identity without consulting the
    catalog, this validates: INFRASTORE_ERR_NOT_FOUND on a miss and
    INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
@@ -428,10 +428,10 @@ reader.</p>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
 <p>The forecast types are created and read through the C ABI. <code>ts_type</code> is the <code>TimeSeriesType</code>
 discriminant — <code>0 = SingleTimeSeries</code>, <code>1 = NonSequentialTimeSeries</code>, <code>2 = Deterministic</code>,
-<code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>, <code>5 = Scenarios</code> — plus one request-only
-sentinel, <code>INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC</code> (<code>100</code>), described below. Forecast values are
-dtype-generic raw little-endian byte buffers with explicit dimensions — the same <code>dtype</code>, <code>ndims</code>,
-<code>dims_ptr</code>, <code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
+<code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>, <code>5 = Scenarios</code>. As a <em>request</em> it is read
+per <a href="#requested-forecast-types">the matching rule</a> below. Forecast values are dtype-generic raw
+little-endian byte buffers with explicit dimensions — the same <code>dtype</code>, <code>ndims</code>, <code>dims_ptr</code>,
+<code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
 <a href="../explanation/data-model.html#forecasts">data model</a> for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
 <code>DeterministicSingleTimeSeries</code> (<code>3</code>) is read like any other forecast but cannot be written through
@@ -480,19 +480,19 @@ and returns the decoded data buffer, its out-dimensions, the metadata, and — f
 the percentile vector. A stored <code>DeterministicSingleTimeSeries</code> is synthesized into <code>Deterministic</code>
 <em>values</em> (its dense windows are materialized from the backing <code>SingleTimeSeries</code>), but it remains a
 distinct stored type for addressing purposes.</p>
+<h4 id="requested-forecast-types"><a class="header" href="#requested-forecast-types">Requested forecast types</a></h4>
 <p>Its <code>ts_type</code> argument is a <strong>read request</strong>, not merely a stored-type filter:</p>
 <ul>
-<li>A concrete code (<code>2 = Deterministic</code>, <code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>,
-<code>5 = Scenarios</code>) matches <strong>only</strong> that exact stored type. Passing <code>2</code> does <em>not</em> find a stored
-<code>DeterministicSingleTimeSeries</code>, and passing <code>3</code> does not find a stored <code>Deterministic</code>. The
-non-forecast codes <code>0</code> and <code>1</code> are rejected with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>.</li>
-<li><code>INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC</code> (<code>100</code>) is a request-only sentinel — never a stored type
-— for the <code>AbstractDeterministic</code> family: it matches a stored <code>Deterministic</code> <strong>or</strong> a
-<code>DeterministicSingleTimeSeries</code>. This is the only way to address a deterministic forecast whose
-concrete type the caller does not know in advance. The catalog resolves the family authoritatively
-(no client-side guess-and-retry) and reports the concrete type that matched through
-<code>*out_matched_type</code>. If both concrete types share the identity the request is ambiguous and
-returns <code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a genuine miss returns the usual not-found error.</li>
+<li><code>2 = Deterministic</code> matches a stored <code>Deterministic</code> <strong>or</strong> a stored
+<code>DeterministicSingleTimeSeries</code>. A DST is a synthetic view that reads back as a <code>Deterministic</code>,
+so a caller addresses a deterministic forecast without knowing which form the store holds. The
+catalog resolves this authoritatively (no client-side guess-and-retry) and reports the concrete
+stored type through <code>*out_matched_type</code>. An ambiguous request returns
+<code>INFRASTORE_ERR_INVALID_PARAMETER</code>; a genuine miss returns the usual not-found error.</li>
+<li><code>3 = DeterministicSingleTimeSeries</code> narrows to the derived form alone — for callers auditing which
+forecasts are synthetic rather than reading values.</li>
+<li><code>4 = Probabilistic</code> and <code>5 = Scenarios</code> match only themselves. The non-forecast codes <code>0</code> and <code>1</code>
+are rejected with <code>INFRASTORE_ERR_INVALID_PARAMETER</code>.</li>
 </ul>
 <p><code>*out_matched_type</code> always receives the <strong>concrete</strong> <code>TimeSeriesType</code> that was matched — so a stored
 <code>DeterministicSingleTimeSeries</code> reports <code>3</code>, never <code>2</code>, and the <code>100</code> sentinel is never returned.</p>
@@ -505,7 +505,7 @@ ISO-8601 strings with <code>infrastore_string_free</code>.</p>
 <pre><code class="language-c">int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               int64_t owner_id, int32_t owner_category,
                               const char *name,
-                              int32_t ts_type,  /* 2..5, or INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100) */
+                              int32_t ts_type,  /* 2..5; 2 also matches a stored DST */
                               const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
                               const char *features_json,
                               bool time_range_present,
@@ -622,12 +622,11 @@ void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 and errors on divergence, so every column has a value at every valid timestamp (no presence mask).</p>
 <h3 id="forecastreader"><a class="header" href="#forecastreader">ForecastReader</a></h3>
 <p>Reads the forecast window at one timestamp for every matching forecast of one type. The build
-<code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) is abstract and also includes
-<code>DeterministicSingleTimeSeries</code> (<code>3</code>), read into identical <code>[H, *E]</code> windows. (Note the asymmetry
-with <code>infrastore_store_get_forecast</code>, where <code>2</code> matches only a stored <code>Deterministic</code> and the family
-request must be spelled <code>INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC</code>; the reader build takes no such
-sentinel.) All matched forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> +
-<code>count</code>). Each entry's window is a little-endian buffer of its <code>*_entry_info</code> shape.</p>
+<code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) also includes
+<code>DeterministicSingleTimeSeries</code> (<code>3</code>), read into identical <code>[H, *E]</code> windows — the same rule
+<code>infrastore_store_get_forecast</code> applies. All matched forecasts must share one window timeline
+(<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). Each entry's window is a little-endian buffer of its
+<code>*_entry_info</code> shape.</p>
 <pre><code class="language-c">int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                        bool has_owner, int64_t owner_id,
                                        bool has_owner_category, int32_t owner_category,
