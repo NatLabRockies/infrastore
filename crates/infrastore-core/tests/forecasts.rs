@@ -1907,11 +1907,13 @@ fn zero_interval_single_window_forecast_round_trips() {
     );
 }
 
-/// A transform that derives exactly one window records the canonical zero
-/// interval (matching directly-added single-window forecasts), stays
-/// idempotent under the same arguments, and reads back.
+/// A transform that derives exactly one window (`interval == horizon`) records
+/// the requested interval verbatim — the same encoding a directly-added
+/// single-window forecast uses, so a client that looks the view up by its
+/// horizon finds it. It stays idempotent under the same arguments and reads
+/// back.
 #[test]
-fn single_window_transform_stores_zero_interval_and_stays_idempotent() {
+fn single_window_transform_stores_the_requested_interval_and_stays_idempotent() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(8);
@@ -1949,9 +1951,10 @@ fn single_window_transform_stores_zero_interval_and_stays_idempotent() {
     let got = store.get_time_series(key.identity(), None).unwrap();
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.count, 1);
-    assert!(
-        det.interval.is_zero(),
-        "stored interval is normalized to zero"
+    assert_eq!(
+        det.interval,
+        Period::from(horizon),
+        "the requested interval is stored verbatim, not collapsed to zero"
     );
     assert_eq!(det.data.to_f64_vec().unwrap(), dst_source_vals());
 
@@ -1965,7 +1968,7 @@ fn single_window_transform_stores_zero_interval_and_stays_idempotent() {
 }
 
 /// A single window derived at an interval *smaller* than the horizon keeps
-/// that interval — only the interval-equals-horizon case collapses to zero.
+/// that interval too: the transform never rewrites the requested interval.
 #[test]
 fn single_window_transform_at_a_smaller_interval_keeps_it() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();

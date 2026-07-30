@@ -1712,30 +1712,21 @@ impl Store {
                 )));
             }
             let count = (total_len - h) / interval_steps + 1;
-            // interval == horizon over a whole-series horizon yields one window
-            // with nothing to step to; record the canonical zero interval so
-            // the stored form matches directly-added single-window forecasts
-            // (mirroring InfrastructureSystems.jl, which presents that case as
-            // `Second(0)`). A single window derived at a *smaller* interval
-            // keeps it — the interval is still meaningful metadata there. The
-            // identity/idempotency check below uses the stored form.
-            let collapse_interval = count == 1 && interval == horizon;
-            let stored_interval = if collapse_interval {
-                Period::zero()
-            } else {
-                interval
-            };
-            let stored_interval_iso = if collapse_interval {
-                stored_interval.to_iso8601()
-            } else {
-                interval_iso.clone()
-            };
+            // The requested interval is stored verbatim, including the
+            // single-window `interval == horizon` case: that is exactly how a
+            // directly-added single-window forecast is stored (clients that
+            // model such a forecast with an empty interval — e.g.
+            // InfrastructureSystems.jl's `Second(0)` — map it to the horizon on
+            // write and back on read), so a derived view must not use a
+            // different encoding for the same state or those clients cannot
+            // find it. The identity/idempotency check below uses the stored
+            // form.
             let src_key = AssociationIdentity {
                 owner_id: src.owner_id,
                 owner_category: src.owner_category,
                 name: src.name.clone(),
                 resolution: src_resolution_iso,
-                interval: Some(stored_interval_iso),
+                interval: Some(interval_iso.clone()),
                 features_hash: src_features_hash,
             };
             if let Some(existing_horizon) = existing_dst.get(&src_key) {
@@ -1763,7 +1754,7 @@ impl Store {
             new_metas.push(TimeSeriesMetadata {
                 time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
                 horizon: Some(horizon),
-                interval: Some(stored_interval),
+                interval: Some(interval),
                 count: Some(count),
                 ..src.clone()
             });
