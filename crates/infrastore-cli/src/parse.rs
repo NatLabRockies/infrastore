@@ -2,7 +2,7 @@
 //! owner categories, time-series-type names, and `key=value` features.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use infrastore_core::{Dtype, FeatureValue, OwnerCategory, Period, TimeSeriesType};
+use infrastore_core::{Dtype, FeatureValue, OwnerCategory, Period, RequestedType, TimeSeriesType};
 
 /// Parse a period: an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`) for calendar or
 /// fixed periods, or the legacy human form (`1h`, `15min`, `7d`) which is always
@@ -90,6 +90,12 @@ pub fn parse_dtype(s: &str) -> Result<Dtype, String> {
         .ok_or_else(|| format!("invalid dtype '{s}' (use f64|f32|i64|i32|u64|bool)"))
 }
 
+/// Every accepted `--type` spelling, in the order the help and error text list
+/// them. Kept in one place so the flag help, the error message, and
+/// [`parse_requested_type`] cannot drift apart.
+pub const TS_TYPE_NAMES: &str = "single|non_sequential|deterministic|deterministic_single|\
+                                 probabilistic|scenarios|any_deterministic";
+
 /// Parse a time-series-type, accepting both short (`single`, `non_sequential`)
 /// and full (`SingleTimeSeries`) spellings.
 pub fn parse_ts_type(s: &str) -> Result<TimeSeriesType, String> {
@@ -104,10 +110,48 @@ pub fn parse_ts_type(s: &str) -> Result<TimeSeriesType, String> {
         "scenarios" => TimeSeriesType::Scenarios,
         _ => {
             return Err(format!(
-                "invalid time series type '{s}' (use single|non_sequential|deterministic|probabilistic|scenarios)"
+                "invalid time series type '{s}' (use {TS_TYPE_NAMES})"
             ));
         }
     })
+}
+
+/// Parse a *requested* type: any concrete type [`parse_ts_type`] accepts, plus
+/// `any_deterministic` for the abstract family that matches both a stored
+/// `Deterministic` and a `DeterministicSingleTimeSeries`.
+///
+/// The family matters because `transform` derives DST rows that `--type
+/// deterministic` does not match, so without this there was no single flag that
+/// selected "every deterministic forecast".
+pub fn parse_requested_type(s: &str) -> Result<RequestedType, String> {
+    match s.to_ascii_lowercase().replace('_', "").as_str() {
+        "anydeterministic" | "abstractdeterministic" | "deterministicany" => {
+            Ok(RequestedType::AbstractDeterministic)
+        }
+        _ => parse_ts_type(s).map(RequestedType::Concrete),
+    }
+}
+
+/// Validate and normalize a content-hash prefix for `--data-hash`.
+///
+/// Accepts 1-64 hex characters in either case and returns them lowercased, so a
+/// hash pasted from SQLite's `hex()` (which returns uppercase) matches one
+/// printed by the CLI or stored in the `time_series_readable` view (both
+/// lowercase). A prefix is enough — full 64-character hashes are unwieldy to
+/// type and the short form the tables print is the natural thing to copy.
+pub fn parse_hash_prefix(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 64 {
+        return Err(format!(
+            "invalid --data-hash '{s}' (expected 1-64 hex characters)"
+        ));
+    }
+    if let Some(bad) = s.chars().find(|c| !c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "invalid --data-hash '{s}': '{bad}' is not a hex character"
+        ));
+    }
+    Ok(s.to_ascii_lowercase())
 }
 
 /// Parse a `key=value` feature pair, inferring the value type as int, float,

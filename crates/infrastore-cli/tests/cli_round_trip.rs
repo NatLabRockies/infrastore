@@ -32,9 +32,25 @@ fn data_lines(csv: &str) -> Vec<String> {
         .collect()
 }
 
-/// Flatten every CSV value cell (skipping the header) into one list.
-fn flat_values(csv: &str) -> Vec<String> {
+/// Data rows with the leading `timestamp` column dropped.
+///
+/// Every sequential CSV the CLI writes carries a timestamp column, a
+/// SingleTimeSeries included: its grid lives in metadata that a piped file does
+/// not carry, so emitting values alone silently dropped the time axis.
+fn value_lines(csv: &str) -> Vec<String> {
     data_lines(csv)
+        .iter()
+        .map(|line| match line.split_once(',') {
+            Some((_ts, rest)) => rest.to_string(),
+            None => line.clone(),
+        })
+        .collect()
+}
+
+/// Flatten every CSV value cell (skipping the header and the timestamp column)
+/// into one list.
+fn flat_values(csv: &str) -> Vec<String> {
+    value_lines(csv)
         .iter()
         .flat_map(|line| line.split(',').map(str::to_string).collect::<Vec<_>>())
         .collect()
@@ -93,7 +109,7 @@ fn single_round_trip_all_dtypes() {
                 "load",
             ],
         );
-        assert_eq!(data_lines(&out), *expected, "dtype {dtype} round-trip");
+        assert_eq!(value_lines(&out), *expected, "dtype {dtype} round-trip");
     }
 }
 
@@ -317,12 +333,12 @@ fn list_info_and_json_succeed() {
     // list in all three formats
     let table = run(&store, &["list"]);
     assert!(
-        table.contains("Owner Category"),
-        "list table includes owner category column"
+        table.contains("Category"),
+        "list table includes the owner category column"
     );
     let csv = run(&store, &["-f", "csv", "list"]);
     assert!(
-        csv.contains("owner_category") || csv.contains("Owner Category"),
+        csv.contains("owner_category") || csv.contains("Category"),
         "list csv includes owner category header"
     );
     let json = run(&store, &["-f", "json", "list"]);
@@ -407,13 +423,13 @@ fn batch_json_array_adds_multiple() {
         &store,
         &["-f", "csv", "get", "--owner-id", "10", "--name", "series_a"],
     );
-    assert_eq!(data_lines(&out_a), ["1", "2", "3"]);
+    assert_eq!(value_lines(&out_a), ["1", "2", "3"]);
 
     let out_b = run(
         &store,
         &["-f", "csv", "get", "--owner-id", "10", "--name", "series_b"],
     );
-    assert_eq!(data_lines(&out_b), ["4", "5", "6"]);
+    assert_eq!(value_lines(&out_b), ["4", "5", "6"]);
 }
 
 /// Seed a store with two SingleTimeSeries (owners 1 and 2, name "load").
@@ -449,10 +465,10 @@ fn admin_commands_json() {
 
     let stats = run(&store, &["-f", "json", "stats"]);
     assert!(
-        stats.contains("\"static_time_series\": 2"),
+        stats.contains("\"associations.static\": 2"),
         "stats: {stats}"
     );
-    assert!(stats.contains("num_distinct_arrays"), "stats: {stats}");
+    assert!(stats.contains("arrays.distinct_total"), "stats: {stats}");
 
     let res = run(&store, &["-f", "json", "resolutions"]);
     assert!(res.contains("PT1H"), "resolutions: {res}");

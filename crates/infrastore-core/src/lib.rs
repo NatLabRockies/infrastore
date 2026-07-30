@@ -26,10 +26,10 @@ pub use metadata::{
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
 };
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
-pub use storage::{CompactionReport, Compression, IntegrityReport};
+pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
-    TimeSeriesCounts, TimeSeriesCountsDetailed,
+    TimeSeriesCounts, TimeSeriesCountsDetailed, catalog_sqlite_path,
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},

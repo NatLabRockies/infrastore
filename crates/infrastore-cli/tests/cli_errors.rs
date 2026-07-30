@@ -111,6 +111,22 @@ fn data_lines(csv: &str) -> Vec<String> {
         .collect()
 }
 
+/// Data rows with the leading `timestamp` column dropped, for the assertions
+/// that care only about values.
+///
+/// Every sequential CSV the CLI writes carries a timestamp column — a
+/// SingleTimeSeries included, since its grid lives in metadata that a piped file
+/// does not carry.
+fn value_lines(csv: &str) -> Vec<String> {
+    data_lines(csv)
+        .iter()
+        .map(|line| match line.split_once(',') {
+            Some((_ts, rest)) => rest.to_string(),
+            None => line.clone(),
+        })
+        .collect()
+}
+
 /// A minimal single-series descriptor with `overrides` merged in as raw JSON
 /// members, so a test can add or replace one field without restating the rest.
 fn descriptor_json(overrides: &[(&str, &str)]) -> String {
@@ -264,7 +280,7 @@ fn accepted_boolean_spellings_round_trip() {
         &store,
         &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
     );
-    assert_eq!(data_lines(&out), vec!["true", "false", "false", "true"]);
+    assert_eq!(value_lines(&out), vec!["true", "false", "false", "true"]);
 }
 
 #[test]
@@ -393,7 +409,7 @@ fn has_header_true_skips_the_first_row() {
         &store,
         &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
     );
-    assert_eq!(data_lines(&out), vec!["1.5", "2.5", "3.5"]);
+    assert_eq!(value_lines(&out), vec!["1.5", "2.5", "3.5"]);
 
     // With `has_header: false` the same file fails, because "value" is not an f64
     // — which is what makes the assertion above meaningful.
@@ -422,7 +438,7 @@ fn adding_the_same_series_twice_is_a_duplicate_with_a_nonzero_exit() {
         &store,
         &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
     );
-    assert_eq!(data_lines(&out), vec!["1", "2", "3"]);
+    assert_eq!(value_lines(&out), vec!["1", "2", "3"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -690,23 +706,44 @@ fn a_features_map_in_a_descriptor_round_trips() {
     );
     add_ok(&store, &descriptor);
 
-    // `list` rows do not carry features; `info` does, one `feature.<key>` field
-    // each.
+    // `info -f json` nests the whole feature map under `features`, with each
+    // value in its own JSON type.
     let out = run(
         &store,
         &["-f", "json", "info", "--owner-id", "42", "--name", "load"],
     );
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let features = parsed.get("features").expect("info must carry features");
+    assert_eq!(
+        features.get("model_year").and_then(|v| v.as_i64()),
+        Some(2030)
+    );
+    assert_eq!(
+        features.get("scenario").and_then(|v| v.as_str()),
+        Some("base")
+    );
+    assert_eq!(features.get("flag").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(features.get("scale").and_then(|v| v.as_f64()), Some(1.5));
+
+    // The table view expands the same map into one `feature.<key>` line each,
+    // which is the form that greps well.
+    let table = run(&store, &["info", "--owner-id", "42", "--name", "load"]);
     for expect in [
         "feature.model_year",
-        "2030",
         "feature.scenario",
-        "base",
         "feature.flag",
         "feature.scale",
-        "1.5",
     ] {
-        assert!(out.contains(expect), "{expect} missing from: {out}");
+        assert!(table.contains(expect), "{expect} missing from: {table}");
     }
+
+    // `list` carries features too, so two series differing only by feature
+    // never render as identical rows.
+    let listed = run(&store, &["-f", "json", "list"]);
+    assert!(
+        listed.contains("model_year"),
+        "list must carry features: {listed}"
+    );
 
     // The features are part of the identity: selecting by one of them matches.
     let out = run(
@@ -723,7 +760,7 @@ fn a_features_map_in_a_descriptor_round_trips() {
             "model_year=2030",
         ],
     );
-    assert_eq!(data_lines(&out), vec!["1", "2", "3"]);
+    assert_eq!(value_lines(&out), vec!["1", "2", "3"]);
 
     // A feature value that is neither scalar nor string is rejected.
     let (_dir, store2, descriptor2) = fixture(
@@ -765,7 +802,7 @@ fn an_attribute_owned_series_can_be_added_and_listed() {
             "load",
         ],
     );
-    assert_eq!(data_lines(&out), vec!["1", "2", "3"]);
+    assert_eq!(value_lines(&out), vec!["1", "2", "3"]);
     run_err(
         &store,
         &[
@@ -895,18 +932,18 @@ fn copy_shares_the_array_and_dry_run_changes_nothing() {
             "load_copy",
         ],
     );
-    assert_eq!(data_lines(&out), vec!["10", "11", "12", "13"]);
+    assert_eq!(value_lines(&out), vec!["10", "11", "12", "13"]);
 
     // No array was duplicated.
     let stats = run(&store, &["-f", "json", "stats"]);
     let parsed: serde_json::Value = serde_json::from_str(&stats).unwrap();
     assert_eq!(
-        parsed.get("num_distinct_arrays").and_then(|v| v.as_i64()),
+        parsed.get("arrays.distinct_total").and_then(|v| v.as_i64()),
         Some(1),
         "the copy must share the source array, got: {stats}"
     );
     assert_eq!(
-        parsed.get("static_time_series").and_then(|v| v.as_i64()),
+        parsed.get("associations.static").and_then(|v| v.as_i64()),
         Some(2),
         "but there are two associations, got: {stats}"
     );
@@ -951,7 +988,7 @@ fn persist_writes_a_readable_copy() {
         &dest,
         &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
     );
-    assert_eq!(data_lines(&out), vec!["10", "11", "12", "13"]);
+    assert_eq!(value_lines(&out), vec!["10", "11", "12", "13"]);
     assert_eq!(exit_code(&dest, &["verify"]), 0);
 }
 
@@ -981,7 +1018,7 @@ fn compact_runs_and_reports() {
         &store,
         &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
     );
-    assert_eq!(data_lines(&out), vec!["10", "11", "12", "13"]);
+    assert_eq!(value_lines(&out), vec!["10", "11", "12", "13"]);
     assert_eq!(exit_code(&store, &["verify"]), 0);
 }
 
@@ -1151,7 +1188,7 @@ fn replace_owner_moves_series_and_dry_run_changes_nothing() {
         &store,
         &["-f", "csv", "get", "--owner-id", "99", "--name", "load"],
     );
-    assert_eq!(data_lines(&out), vec!["10", "11", "12", "13"]);
+    assert_eq!(value_lines(&out), vec!["10", "11", "12", "13"]);
     run_err(&store, &["get", "--owner-id", "42", "--name", "load"]);
 
     // A bad owner category is rejected.
@@ -1361,7 +1398,7 @@ fn export_then_add_reproduces_a_non_f64_dtype() {
     );
     // And the extremes really are the extremes, not a lossy f64 detour.
     assert_eq!(
-        data_lines(&original),
+        value_lines(&original),
         vec!["-9223372036854775808", "0", "9223372036854775807"]
     );
 }
@@ -1472,7 +1509,7 @@ fn get_time_range_slices_the_series() {
             "2024-01-01T02:00:00Z..2024-01-01T05:00:00Z",
         ],
     );
-    assert_eq!(data_lines(&out), vec!["12", "13", "14"]);
+    assert_eq!(value_lines(&out), vec!["12", "13", "14"]);
 
     // Epoch-ms bounds select the same window.
     let start_ms = 1_704_067_200_000i64 + 2 * 3_600_000;
@@ -1492,7 +1529,7 @@ fn get_time_range_slices_the_series() {
             &range,
         ],
     );
-    assert_eq!(data_lines(&out), vec!["12", "13", "14"]);
+    assert_eq!(value_lines(&out), vec!["12", "13", "14"]);
 
     // A malformed range is rejected.
     for bad in [
@@ -1635,7 +1672,7 @@ fn glob_selector_edges() {
     assert_eq!(count(&["-f", "json", "list", "--name-glob", "xyz*"]), 0);
     // A glob resolving to one series works with `get`.
     let out = run(&store, &["-f", "csv", "get", "--name-glob", "wind_[a]"]);
-    assert_eq!(data_lines(&out), vec!["1", "2", "3", "4"]);
+    assert_eq!(value_lines(&out), vec!["1", "2", "3", "4"]);
     // A glob resolving to several is a multi-match error.
     run_err(&store, &["get", "--name-glob", "wind_*"]);
 }
@@ -1661,7 +1698,7 @@ fn the_infrastore_store_env_var_is_used_when_no_flag_is_given() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        data_lines(&String::from_utf8_lossy(&output.stdout)),
+        value_lines(&String::from_utf8_lossy(&output.stdout)),
         vec!["10", "11", "12", "13"]
     );
 }
@@ -1691,7 +1728,7 @@ fn the_store_flag_beats_the_env_var() {
         .unwrap();
     assert!(output.status.success());
     assert_eq!(
-        data_lines(&String::from_utf8_lossy(&output.stdout)),
+        value_lines(&String::from_utf8_lossy(&output.stdout)),
         vec!["10", "11", "12", "13"],
         "--store must win over INFRASTORE_STORE"
     );
@@ -1809,4 +1846,724 @@ fn verify_of_a_store_whose_catalog_was_corrupted_still_exits_zero() {
     );
     // But the read genuinely fails, which is what verify failed to surface.
     run_err(&store, &["get", "--owner-id", "42", "--name", "load"]);
+}
+
+// ---------------------------------------------------------------------------
+// Content addressing: hash, HDF5 location, and array sharing
+// ---------------------------------------------------------------------------
+
+/// Add a second series with the same values as `seed`'s but a different owner,
+/// so both associations share one stored array.
+fn seed_sharing_pair(dir: &Path, store: &Path) {
+    seed(dir, store);
+    let d = write(
+        dir,
+        "share.json",
+        &descriptor_json(&[("csv", "\"seed.csv\""), ("owner_id", "43")]),
+    );
+    add_ok(store, &d);
+}
+
+#[test]
+fn info_reports_the_content_hash_and_its_hdf5_location() {
+    // The whole point of surfacing these: a user holding `info` output can go
+    // and look at the same bytes with h5dump. The hash alone cannot do that —
+    // a packed array is one column of a shared dataset.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let out = run(
+        &store,
+        &["-f", "json", "info", "--owner-id", "42", "--name", "load"],
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+    let hash = parsed["data_hash"]
+        .as_str()
+        .expect("info carries data_hash");
+    assert_eq!(hash.len(), 64, "a full hex hash, not a prefix: {hash}");
+    assert!(
+        hash.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+        "lowercase hex, matching hash_hex and the SQLite view: {hash}"
+    );
+
+    let dataset = parsed["hdf5_dataset"].as_str().expect("hdf5_dataset");
+    assert!(
+        dataset.starts_with("/time_series/single/sts_"),
+        "a packed SingleTimeSeries dataset, got {dataset}"
+    );
+    assert!(
+        parsed["hdf5_column"].as_u64().is_some(),
+        "a packed array needs its column index to be locatable: {out}"
+    );
+    assert!(
+        parsed["location"].as_str().unwrap().contains("[:, "),
+        "location spells the column selection: {out}"
+    );
+}
+
+#[test]
+fn info_no_stats_skips_the_array_read_but_keeps_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let out = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "info",
+            "--owner-id",
+            "42",
+            "--name",
+            "load",
+            "--no-stats",
+        ],
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed.get("min").is_none(), "--no-stats drops the stats");
+    assert!(parsed.get("shape").is_none(), "shape comes from the array");
+    assert!(
+        parsed.get("data_hash").is_some() && parsed.get("length").is_some(),
+        "but every catalog-side field stays: {out}"
+    );
+}
+
+#[test]
+fn arrays_groups_the_series_that_share_one_stored_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed_sharing_pair(dir.path(), &store);
+
+    let out = run(&store, &["-f", "json", "arrays"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let items = parsed["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "identical values dedupe to one array: {out}"
+    );
+    assert_eq!(
+        items[0]["refs"].as_u64(),
+        Some(2),
+        "both associations reference it: {out}"
+    );
+    assert_eq!(items[0]["keys"].as_array().unwrap().len(), 2);
+    assert!(
+        items[0]["location"]
+            .as_str()
+            .unwrap()
+            .starts_with("/time_series/"),
+        "each group names where its array lives: {out}"
+    );
+}
+
+#[test]
+fn arrays_data_hash_accepts_a_prefix_in_either_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let info = run(
+        &store,
+        &["-f", "json", "info", "--owner-id", "42", "--name", "load"],
+    );
+    let hash = serde_json::from_str::<serde_json::Value>(&info).unwrap()["data_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for probe in [&hash[..8], &hash[..]] {
+        let out = run(&store, &["-f", "json", "arrays", "--data-hash", probe]);
+        let items = serde_json::from_str::<serde_json::Value>(&out).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(items, 1, "prefix {probe} must match its array");
+    }
+
+    // SQLite's `hex()` returns uppercase, so a hash pasted from a hand-run
+    // catalog query has to work too.
+    let out = run(
+        &store,
+        &["-f", "json", "arrays", "--data-hash", &hash.to_uppercase()],
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "an uppercase hash must match: {out}"
+    );
+
+    // A well-formed but absent hash is an error, not an empty success.
+    run_err(&store, &["arrays", "--data-hash", "abcdef0123"]);
+    // A non-hex argument names the offending character.
+    let stderr = run_err(&store, &["arrays", "--data-hash", "zz"]);
+    assert!(stderr.contains("hex"), "got: {stderr}");
+}
+
+#[test]
+fn the_sqlite_catalog_exposes_a_readable_hash_view() {
+    // BLOB hashes render as raw bytes in sqlite3's default and box modes, which
+    // corrupts the terminal. The view is what makes a hand-run catalog query
+    // legible, and its lowercase hex must match what the CLI prints.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let info = run(
+        &store,
+        &["-f", "json", "info", "--owner-id", "42", "--name", "load"],
+    );
+    let expected = serde_json::from_str::<serde_json::Value>(&info).unwrap()["data_hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut sqlite = store.clone().into_os_string();
+    sqlite.push(".sqlite");
+    let conn = rusqlite::Connection::open(PathBuf::from(sqlite)).unwrap();
+    let (name, data_hash, features_hash): (String, String, String) = conn
+        .query_row(
+            "SELECT name, data_hash, features_hash FROM time_series_readable",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("the view exists and is queryable");
+
+    assert_eq!(name, "load");
+    assert_eq!(
+        data_hash, expected,
+        "the view must agree with what the CLI prints"
+    );
+    assert_eq!(features_hash.len(), 64);
+    assert!(
+        features_hash.chars().all(|c| !c.is_uppercase()),
+        "lowercase, so a copied value matches CLI output: {features_hash}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Identity is never ambiguous in the output
+// ---------------------------------------------------------------------------
+
+/// Two series identical except for a `model_year` feature.
+fn seed_feature_pair(dir: &Path, store: &Path) {
+    for year in ["2030", "2040"] {
+        let d = write(
+            dir,
+            &format!("f{year}.json"),
+            &descriptor_json(&[
+                ("csv", "\"seed.csv\""),
+                ("features", &format!("{{\"model_year\": {year}}}")),
+            ]),
+        );
+        write(dir, "seed.csv", "10\n11\n12\n13\n");
+        add_ok(store, &d);
+    }
+}
+
+#[test]
+fn list_distinguishes_series_that_differ_only_by_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed_feature_pair(dir.path(), &store);
+
+    let rows = data_lines(&run(&store, &["-f", "csv", "list"]));
+    assert_eq!(rows.len(), 2);
+    assert_ne!(
+        rows[0], rows[1],
+        "two distinct series must never render as identical rows: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("model_year=2030"))
+            && rows.iter().any(|r| r.contains("model_year=2040")),
+        "the distinguishing feature must be visible: {rows:?}"
+    );
+}
+
+#[test]
+fn an_ambiguous_selector_names_the_flag_that_would_narrow_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed_feature_pair(dir.path(), &store);
+
+    let stderr = run_err(&store, &["info", "--name", "load"]);
+    assert!(
+        stderr.contains("model_year=2030") && stderr.contains("model_year=2040"),
+        "the candidates must differ visibly, or the advice to use --feature is a \
+         dead end: {stderr}"
+    );
+
+    // And that advice actually resolves it.
+    run(
+        &store,
+        &["info", "--name", "load", "--feature", "model_year=2030"],
+    );
+}
+
+#[test]
+fn an_ambiguous_selector_truncates_a_long_candidate_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    write(dir.path(), "seed.csv", "10\n11\n12\n13\n");
+    for owner in 0..30 {
+        let d = write(
+            dir.path(),
+            &format!("o{owner}.json"),
+            &descriptor_json(&[("csv", "\"seed.csv\""), ("owner_id", &owner.to_string())]),
+        );
+        add_ok(&store, &d);
+    }
+
+    let stderr = run_err(&store, &["info", "--name", "load"]);
+    assert!(stderr.contains("30 time series matched"), "got: {stderr}");
+    assert!(
+        stderr.contains("and 20 more"),
+        "an unbounded list buries the message: {stderr}"
+    );
+    assert!(
+        stderr.lines().count() < 20,
+        "the diagnostic must stay readable: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// export: no silent overwrite, and a real round trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn export_does_not_overwrite_series_that_share_a_plain_filename() {
+    // The plain stem omits features, so two feature-distinguished series used to
+    // land on one path and the second silently replaced the first.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed_feature_pair(dir.path(), &store);
+
+    let out_dir = dir.path().join("exported");
+    let stdout = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--name",
+            "load",
+            "--dir",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    assert!(stdout.contains("Exported 2"), "got: {stdout}");
+
+    let files: Vec<_> = fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        files.len(),
+        2,
+        "reporting 2 exports while writing 1 file loses data: {files:?}"
+    );
+    assert!(
+        files.iter().any(|f| f.contains("model_year-2030"))
+            && files.iter().any(|f| f.contains("model_year-2040")),
+        "the suffix should say which series each file is: {files:?}"
+    );
+}
+
+#[test]
+fn export_json_carries_the_features_that_identify_the_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed_feature_pair(dir.path(), &store);
+
+    let out = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "export",
+            "--name",
+            "load",
+            "--feature",
+            "model_year=2030",
+        ],
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        parsed["features"]["model_year"].as_i64(),
+        Some(2030),
+        "without features an export cannot say which series it holds: {out}"
+    );
+    // Values are numbers, not strings a consumer has to re-parse.
+    assert!(
+        parsed["values"][0].is_number(),
+        "JSON values must keep their type: {out}"
+    );
+}
+
+#[test]
+fn an_exported_single_time_series_csv_can_be_added_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let exported = run(
+        &store,
+        &["-f", "csv", "export", "--owner-id", "42", "--name", "load"],
+    );
+    write(dir.path(), "exported.csv", &exported);
+
+    // Fed straight back in, with no hand-editing of the columns: `export` is
+    // documented as the inverse of `add`, so the timestamp column it writes has
+    // to be understood on the way in.
+    let fresh = dir.path().join("fresh.h5");
+    let d = write(
+        dir.path(),
+        "back.json",
+        &descriptor_json(&[("csv", "\"exported.csv\""), ("has_header", "true")]),
+    );
+    add_ok(&fresh, &d);
+
+    assert_eq!(
+        value_lines(&run(
+            &fresh,
+            &["-f", "csv", "get", "--owner-id", "42", "--name", "load"]
+        )),
+        vec!["10", "11", "12", "13"]
+    );
+}
+
+#[test]
+fn an_exported_forecast_csv_round_trips_through_its_transpose() {
+    // The CSV runs window-major with the scenarios spread across columns; the
+    // array is [scenario, horizon, window]. Concatenating the cells instead of
+    // transposing them would scramble the forecast silently, so this asserts the
+    // values come back in the same order they went in.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+
+    // 2 scenarios x H=3 x 4 windows, every value distinct.
+    let mut cells = Vec::new();
+    for s in 0..2 {
+        for h in 0..3 {
+            for c in 0..4 {
+                cells.push(format!("{}", s * 100 + h * 10 + c));
+            }
+        }
+    }
+    write(dir.path(), "scen.csv", &format!("{}\n", cells.join("\n")));
+    let d = write(
+        dir.path(),
+        "scen.json",
+        &descriptor_json(&[
+            ("name", "\"scen\""),
+            ("type", "\"scenarios\""),
+            ("csv", "\"scen.csv\""),
+            ("has_header", "false"),
+            ("horizon", "\"3h\""),
+            ("interval", "\"1h\""),
+            ("count", "4"),
+            ("scenario_count", "2"),
+        ]),
+    );
+    add_ok(&store, &d);
+
+    let original = run(&store, &["-f", "json", "get", "--name", "scen", "--full"]);
+    let exported = run(&store, &["-f", "csv", "export", "--name", "scen"]);
+    assert!(
+        exported.starts_with("issue_time,target_time"),
+        "the exported header is what `add` detects: {exported}"
+    );
+    write(dir.path(), "scen_back.csv", &exported);
+
+    let fresh = dir.path().join("fresh.h5");
+    let back = write(
+        dir.path(),
+        "scen_back.json",
+        &descriptor_json(&[
+            ("name", "\"scen\""),
+            ("type", "\"scenarios\""),
+            ("csv", "\"scen_back.csv\""),
+            ("has_header", "true"),
+            ("horizon", "\"3h\""),
+            ("interval", "\"1h\""),
+            ("count", "4"),
+            ("scenario_count", "2"),
+        ]),
+    );
+    add_ok(&fresh, &back);
+
+    let round_tripped = run(&fresh, &["-f", "json", "get", "--name", "scen", "--full"]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&original).unwrap()["values"],
+        serde_json::from_str::<serde_json::Value>(&round_tripped).unwrap()["values"],
+        "a forecast must survive export -> add unscrambled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Type selection and the association catalogs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn any_deterministic_matches_the_whole_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+    run(
+        &store,
+        &["transform", "--horizon", "2h", "--interval", "1h"],
+    );
+
+    // `transform` writes DeterministicSingleTimeSeries, which `--type
+    // deterministic` does not match; without the family spelling there was no
+    // single flag that selected every deterministic forecast.
+    assert!(
+        data_lines(&run(
+            &store,
+            &["-f", "csv", "list", "--type", "deterministic"]
+        ))
+        .is_empty()
+    );
+    assert_eq!(
+        data_lines(&run(
+            &store,
+            &["-f", "csv", "list", "--type", "deterministic_single"]
+        ))
+        .len(),
+        1
+    );
+    assert_eq!(
+        data_lines(&run(
+            &store,
+            &["-f", "csv", "list", "--type", "any_deterministic"]
+        ))
+        .len(),
+        1,
+        "the family must match the stored DST"
+    );
+
+    // The error text lists every accepted spelling.
+    let stderr = run_err(&store, &["list", "--type", "nonsense"]);
+    for name in ["deterministic_single", "any_deterministic"] {
+        assert!(stderr.contains(name), "{name} missing from: {stderr}");
+    }
+}
+
+#[test]
+fn list_limit_bounds_the_output_and_reports_the_remainder() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    write(dir.path(), "seed.csv", "10\n11\n12\n13\n");
+    for owner in 0..5 {
+        let d = write(
+            dir.path(),
+            &format!("o{owner}.json"),
+            &descriptor_json(&[("csv", "\"seed.csv\""), ("owner_id", &owner.to_string())]),
+        );
+        add_ok(&store, &d);
+    }
+
+    assert_eq!(
+        data_lines(&run(&store, &["-f", "csv", "list", "--limit", "2"])).len(),
+        2
+    );
+    let table = run(&store, &["list", "--limit", "2"]);
+    assert!(
+        table.contains("3 more series"),
+        "a truncated list must say so: {table}"
+    );
+}
+
+#[test]
+fn the_association_catalogs_are_readable_from_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    // The CLI has no write path for associations (that belongs with the
+    // consumer's object graph), so seed the catalog directly.
+    let mut sqlite = store.clone().into_os_string();
+    sqlite.push(".sqlite");
+    let conn = rusqlite::Connection::open(PathBuf::from(sqlite)).unwrap();
+    conn.execute(
+        "INSERT INTO supplemental_attribute_associations
+             (component_id, component_type, attribute_id, attribute_type)
+         VALUES (42, 'Generator', 900, 'GeographicInfo')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO parent_child_associations
+             (parent_id, parent_type, child_id, child_type)
+         VALUES (42, 'Generator', 43, 'Bus')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let attrs: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "attributes"])).unwrap();
+    assert_eq!(attrs["items"][0]["attribute_id"].as_i64(), Some(900));
+    assert_eq!(
+        attrs["items"][0]["attribute_type"].as_str(),
+        Some("GeographicInfo")
+    );
+
+    // Filters narrow, and a non-matching filter yields nothing rather than
+    // everything.
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&run(
+            &store,
+            &["-f", "json", "attributes", "--component-id", "999"]
+        ))
+        .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+
+    let summary = run(&store, &["-f", "json", "attributes", "--summary"]);
+    assert!(summary.contains("GeographicInfo"), "got: {summary}");
+
+    let links: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "links"])).unwrap();
+    assert_eq!(links["items"][0]["parent_id"].as_i64(), Some(42));
+    assert_eq!(links["items"][0]["child_id"].as_i64(), Some(43));
+}
+
+#[test]
+fn store_info_reports_both_halves_of_the_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let out = run(&store, &["-f", "json", "store-info"]);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed["hdf5_path"].as_str().unwrap().ends_with("store.h5"));
+    assert!(
+        parsed["sqlite_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("store.h5.sqlite"),
+        "the catalog is half the artifact and must be named: {out}"
+    );
+    assert!(parsed["hdf5_bytes"].as_u64().unwrap() > 0);
+    assert!(parsed["sqlite_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(parsed["storage_backend"].as_str(), Some("hdf5"));
+    assert!(
+        parsed["data_format_version"].as_str().is_some(),
+        "the on-disk compatibility contract belongs here: {out}"
+    );
+}
+
+#[test]
+fn stats_separates_association_counts_from_distinct_array_counts() {
+    // Content addressing makes these diverge, and they used to sit next to each
+    // other under near-identical names.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed_sharing_pair(dir.path(), &store);
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "stats"])).unwrap();
+    assert_eq!(parsed["associations.static"].as_i64(), Some(2));
+    assert_eq!(parsed["associations.total"].as_i64(), Some(2));
+    assert_eq!(
+        parsed["arrays.distinct_total"].as_i64(),
+        Some(1),
+        "two series, one shared array"
+    );
+    assert_eq!(parsed["owners.components"].as_i64(), Some(2));
+}
+
+// ---------------------------------------------------------------------------
+// Grouped `--help`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn top_level_help_groups_the_commands_without_renaming_them() {
+    let output = Command::new(BIN).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+
+    // The grouping is a display change only: it replaces clap's single
+    // `Commands:` block, and every command keeps its flat name.
+    assert!(
+        !help.contains("Commands:"),
+        "the ungrouped block should be gone:\n{help}"
+    );
+    for heading in [
+        "Read data:",
+        "Write data:",
+        "Inspect the store:",
+        "Associations:",
+        "Integrity & maintenance:",
+        "Scaffolding:",
+        "Options:",
+    ] {
+        assert!(help.contains(heading), "{heading} missing from:\n{help}");
+    }
+
+    // Every command is still invoked flat, exactly as documented.
+    let store_line = help
+        .lines()
+        .find(|l| l.trim_start().starts_with("store-info"))
+        .expect("store-info is listed");
+    assert!(
+        store_line.contains("HDF5 + SQLite paths"),
+        "descriptions come from each command's own `about`: {store_line}"
+    );
+}
+
+#[test]
+fn grouping_the_help_did_not_change_how_commands_are_invoked() {
+    // The regression this guards: switching the root command's help template
+    // means `main` parses through a hand-built `Command` rather than
+    // `Cli::parse`. Global flags, env fallback, and subcommand dispatch all have
+    // to survive that.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    assert_eq!(
+        value_lines(&run(
+            &store,
+            &["-f", "csv", "get", "--owner-id", "42", "--name", "load"]
+        )),
+        vec!["10", "11", "12", "13"]
+    );
+    assert!(run(&store, &["store-info"]).contains("data_format_version"));
+
+    // A usage error still exits 2, not 1.
+    let code = Command::new(BIN)
+        .args(["--store", store.to_str().unwrap(), "list", "--nonsense"])
+        .output()
+        .unwrap()
+        .status
+        .code()
+        .unwrap();
+    assert_eq!(code, 2, "argument-parse failures keep clap's exit code");
+}
+
+#[test]
+fn shell_completions_cover_the_grouped_commands() {
+    // Completions are generated from the same `Command` the binary parses with,
+    // so a command missing from one would be missing from the other.
+    let output = Command::new(BIN)
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let script = String::from_utf8_lossy(&output.stdout);
+    for name in ["arrays", "store-info", "attributes", "links", "list", "get"] {
+        assert!(script.contains(name), "{name} missing from completions");
+    }
 }

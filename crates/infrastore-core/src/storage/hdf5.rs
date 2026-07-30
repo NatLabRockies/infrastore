@@ -47,7 +47,7 @@ use super::common::{
     element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
     standalone_chunks,
 };
-use super::{CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayLocation, CompactionReport, IntegrityReport, StorageBackend};
 
 /// Root attribute naming the backend that wrote the file; `Store::open` checks
 /// it (absent on stores written by the removed netcdf backend, which are
@@ -1222,6 +1222,22 @@ impl StorageBackend for Hdf5Backend {
     fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
         let inner = self.inner.lock().expect("mutex poisoned");
         Ok(inner.by_hash.contains_key(hash))
+    }
+
+    fn locate(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        // Both layouts live in the same group; `path` makes the name absolute
+        // so it can be pasted straight into h5dump/h5py.
+        let path = |name: &str| format!("/{ROOT_GROUP}/{SINGLE_GROUP}/{name}");
+        Ok(
+            match inner.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => ArrayLocation::Packed {
+                    dataset: path(dataset),
+                    column: *col,
+                },
+                Location::Standalone { var } => ArrayLocation::Standalone { dataset: path(var) },
+            },
+        )
     }
 
     fn compact(&mut self) -> Result<CompactionReport> {

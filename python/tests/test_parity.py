@@ -608,6 +608,97 @@ def test_resolve_forecast_key_finds_a_transformed_dst():
     assert resolved.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
 
 
+def _both_forecast_types() -> Store:
+    """One explicitly stored ``Deterministic`` (owner 1) and one derived
+    ``DeterministicSingleTimeSeries`` (owner 2), both at PT1H/PT1H."""
+    store = Store.create(in_memory=True)
+    data = np.arange(2 * 3, dtype=np.float64).reshape(2, 3)
+    _add(
+        store,
+        1,
+        Deterministic(T0, RES_1H, timedelta(hours=2), timedelta(hours=1), 3, data, "det"),
+    )
+    _add(store, 2, _sts("load", np.arange(8, dtype=np.float64)))
+    assert store.transform_single_time_series(timedelta(hours=2), timedelta(hours=1)) == 1
+    return store
+
+
+def test_the_abstract_deterministic_filter_matches_both_stored_types():
+    """The family selects both concrete members in one catalog query, while each
+    concrete member still selects only itself."""
+    store = _both_forecast_types()
+
+    rows = store.list_time_series(time_series_type="abstract_deterministic")
+    assert {(r["owner_id"], r["time_series_type"]) for r in rows} == {
+        (1, "Deterministic"),
+        (2, "DeterministicSingleTimeSeries"),
+    }
+    assert [
+        r["owner_id"] for r in store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    ] == [1]
+    assert [
+        r["owner_id"]
+        for r in store.list_time_series(
+            time_series_type=TimeSeriesType.DeterministicSingleTimeSeries
+        )
+    ] == [2]
+
+    # The same value threads through every other filter-taking surface.
+    assert len(store.list_keys(time_series_type="abstract_deterministic")) == 2
+    assert len(store.list_array_groups(time_series_type="abstract_deterministic")) == 2
+    assert store.list_names(time_series_type="abstract_deterministic") == ["det", "load"]
+    assert store.list_owner_types(time_series_type="abstract_deterministic") == [OWNER_TYPE]
+    assert sorted(store.list_owner_ids(OWNER_CAT, time_series_type="abstract_deterministic")) == [
+        1,
+        2,
+    ]
+    assert store.get_resolutions("abstract_deterministic") == ["PT1H"]
+    assert store.get_intervals("abstract_deterministic") == ["PT1H"]
+
+
+def test_has_any_time_series_accepts_the_family():
+    """The probe a per-owner hot loop makes: one call instead of one per member."""
+    store = _both_forecast_types()
+
+    for owner in (1, 2):
+        assert store.has_any_time_series(owner_id=owner, time_series_type="abstract_deterministic")
+    # The derived view is not a `Deterministic` row, so the concrete filter misses it.
+    assert not store.has_any_time_series(
+        owner_id=2, time_series_type=TimeSeriesType.Deterministic
+    )
+    assert not store.has_any_time_series(owner_id=3, time_series_type="abstract_deterministic")
+
+
+def test_the_family_builds_a_forecast_reader():
+    store = _both_forecast_types()
+    reader = store.build_forecast_reader("abstract_deterministic", RES_1H, owner_id=2)
+    assert len(reader.entries()) == 1
+
+    store.forecast_read(reader, T0 + timedelta(hours=1))
+    # The DST's window at T0+1h is two steps of the underlying series.
+    np.testing.assert_array_equal(reader.entry_values(0), np.array([1.0, 2.0]))
+
+
+def test_remove_by_filter_accepts_the_family():
+    store = _both_forecast_types()
+    assert store.remove_by_filter(time_series_type="abstract_deterministic") == 2
+    assert not store.list_time_series(time_series_type="abstract_deterministic")
+    # Removing the derived view leaves the SingleTimeSeries it viewed in place.
+    assert len(store.list_time_series(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
+
+
+def test_an_unusable_requested_type_is_rejected():
+    store = _both_forecast_types()
+    # A string that is not the family sentinel is a bad value, not a bad type.
+    with pytest.raises(InvalidParameterError):
+        store.list_time_series(time_series_type="Deterministic")
+    with pytest.raises(InvalidParameterError):
+        store.resolve_forecast_key(1, OWNER_CAT, "det", "deterministic", resolution=RES_1H)
+    # Something that is neither a TimeSeriesType nor a string is a TypeError.
+    with pytest.raises(TypeError):
+        store.has_any_time_series(time_series_type=5)
+
+
 def test_copy_time_series():
     store = Store.create(in_memory=True)
     values = np.arange(4, dtype=np.float64) + 7

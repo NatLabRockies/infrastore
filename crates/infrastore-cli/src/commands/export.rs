@@ -3,6 +3,7 @@
 //! file per series under `--dir`, or to stdout when exactly one series
 //! matches.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use infrastore_core::{TimeSeriesData, TimeSeriesMetadata};
@@ -10,6 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::color;
 use crate::csv_io;
+use crate::fields;
 use crate::output::Format;
 use crate::select::{self, SelectorArgs};
 use crate::store_access;
@@ -57,8 +59,9 @@ pub fn run(
         }
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-            for (meta, data) in metas.iter().zip(&datas) {
-                let path = dir.join(format!("{}.{ext}", file_stem(meta)));
+            let stems = unique_file_stems(&metas);
+            for ((meta, data), stem) in metas.iter().zip(&datas).zip(&stems) {
+                let path = dir.join(format!("{stem}.{ext}"));
                 let content = render(meta, data, format)?;
                 std::fs::write(&path, content)
                     .map_err(|e| format!("writing {}: {e}", path.display()))?;
@@ -78,7 +81,13 @@ pub fn run(
 }
 
 /// `<owner_id>_<owner_type>_<name>_<type>` with path-hostile characters mapped
-/// to `-`.
+/// to `-`, plus a short identity digest when one stem would otherwise be shared.
+///
+/// The plain stem omits resolution, interval, and features — all part of a
+/// series' identity — so two distinct series could land on one path and the
+/// second would silently overwrite the first. `unique_file_stems` resolves that
+/// by suffixing a short hash of the full identity, and only for the stems that
+/// actually collide, so the common case keeps its readable filename.
 fn file_stem(meta: &TimeSeriesMetadata) -> String {
     let raw = format!(
         "{}_{}_{}_{}",
@@ -87,6 +96,10 @@ fn file_stem(meta: &TimeSeriesMetadata) -> String {
         meta.name,
         meta.time_series_type.as_str()
     );
+    sanitize(&raw)
+}
+
+fn sanitize(raw: &str) -> String {
     raw.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '_' || c == '-' || c == '.' {
@@ -96,6 +109,73 @@ fn file_stem(meta: &TimeSeriesMetadata) -> String {
             }
         })
         .collect()
+}
+
+/// One filename stem per input metadata, guaranteed distinct.
+///
+/// Colliding stems gain a suffix built from the identity fields the plain stem
+/// drops — resolution, interval, features — which is more use in a directory
+/// listing than an opaque digest (`..._model_year-2030.csv` says what it is). A
+/// trailing ordinal is the backstop for the pathological case where even that
+/// is not enough, so the result is unique by construction rather than by
+/// assumption.
+///
+/// Collision detection is case-insensitive: macOS and Windows filesystems treat
+/// `Load` and `load` as one path, so two series differing only in the case of a
+/// name would overwrite each other there but not on Linux. Disambiguating both
+/// keeps an export identical across platforms.
+fn unique_file_stems(metas: &[TimeSeriesMetadata]) -> Vec<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for m in metas {
+        *counts.entry(file_stem(m).to_lowercase()).or_default() += 1;
+    }
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(metas.len());
+    for m in metas {
+        let base = file_stem(m);
+        let mut stem = if counts.get(&base.to_lowercase()).copied().unwrap_or(0) > 1 {
+            match identity_suffix(m) {
+                Some(suffix) => format!("{base}_{suffix}"),
+                None => base.clone(),
+            }
+        } else {
+            base.clone()
+        };
+        if taken.contains(&stem.to_lowercase()) {
+            let mut n = 2;
+            while taken.contains(&format!("{stem}_{n}").to_lowercase()) {
+                n += 1;
+            }
+            stem = format!("{stem}_{n}");
+        }
+        taken.insert(stem.to_lowercase());
+        out.push(stem);
+    }
+    out
+}
+
+/// The identity fields a plain stem omits, rendered for a filename. `None` when
+/// the series carries none of them.
+fn identity_suffix(meta: &TimeSeriesMetadata) -> Option<String> {
+    /// Long feature maps would otherwise push past filesystem name limits.
+    const MAX: usize = 60;
+
+    let mut parts = Vec::new();
+    if let Some(r) = meta.resolution {
+        parts.push(r.to_iso8601());
+    }
+    if let Some(i) = meta.interval {
+        parts.push(i.to_iso8601());
+    }
+    for (k, v) in &meta.features {
+        parts.push(format!("{k}-{}", crate::fields::feature_value_str(v)));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut s = sanitize(&parts.join("_"));
+    s.truncate(MAX);
+    Some(s)
 }
 
 fn render(
@@ -172,6 +252,12 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
     obj.insert("name".into(), json!(meta.name));
     obj.insert("units".into(), json!(meta.units));
     obj.insert("ext".into(), json!(meta.ext));
+    obj.insert("dtype".into(), json!(meta.dtype.as_str()));
+    // Features are part of identity: an export that drops them cannot describe
+    // which of several same-named series it holds, and cannot be turned back
+    // into a descriptor that would recreate it.
+    obj.insert("features".into(), fields::features_json(&meta.features));
+    obj.insert("data_hash".into(), json!(fields::hash_hex(&meta.data_hash)));
     match data {
         TimeSeriesData::SingleTimeSeries(s) => {
             obj.insert(
@@ -180,13 +266,19 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
             );
             obj.insert("resolution".into(), json!(s.resolution.to_iso8601()));
             obj.insert("shape".into(), json!(s.data.shape));
-            obj.insert("values".into(), json!(csv_io::array_to_strings(&s.data)));
+            obj.insert(
+                "values".into(),
+                json!(csv_io::array_to_json_values(&s.data)),
+            );
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
             let timestamps: Vec<String> = ns.timestamps.iter().map(|t| t.to_rfc3339()).collect();
             obj.insert("timestamps".into(), json!(timestamps));
             obj.insert("shape".into(), json!(ns.data.shape));
-            obj.insert("values".into(), json!(csv_io::array_to_strings(&ns.data)));
+            obj.insert(
+                "values".into(),
+                json!(csv_io::array_to_json_values(&ns.data)),
+            );
         }
         _ => {
             let arr = match data {
@@ -217,7 +309,7 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
                 obj.insert("scenario_count".into(), json!(s.scenario_count));
             }
             obj.insert("shape".into(), json!(arr.shape));
-            obj.insert("values".into(), json!(csv_io::array_to_strings(arr)));
+            obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
         }
     }
     serde_json::to_string_pretty(&Value::Object(obj))

@@ -35,26 +35,28 @@ name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_f
 `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
 preserving `ext`, and serde on the core types) is available in the Rust core and threaded through
 the C ABI/Julia and Python bindings. Two **association catalogs** are available in the Rust core, C
-ABI, Julia, and Python, but not over gRPC or the CLI: `supplemental_attribute_associations`
-(component ↔ supplemental attribute, the wider surface — counts, counts-by-type, grouped summary)
-and `parent_child_associations` (directed component ↔ component edges, e.g. a generator connected to
-a bus, deliberately narrower until a consumer needs more). Both are independent of time series in
-both directions, and of each other. Metadata getters surface `element_shape` and `features` in every
-binding. Python ships type stubs (`infrastore.pyi` + a pytest drift guard), a full exception
-hierarchy, and keyword-only optional arguments; Julia returns its catalog/metadata/summary query
-results as structs (`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
-`docs/src/reference/julia-api.md#result-types`), overloads `Base`
+ABI, Julia, and Python, and read-only in the CLI (`attributes` / `links`), but not over gRPC:
+`supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
+counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
+component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
+more). Both are independent of time series in both directions, and of each other. Metadata getters
+surface `element_shape` and `features` in every binding. Python ships type stubs (`infrastore.pyi` +
+a pytest drift guard), a full exception hierarchy, and keyword-only optional arguments; Julia
+returns its catalog/metadata/summary query results as structs (`TimeSeriesMetadata`, `KeyRow`,
+`StaticGrid`, … — see `docs/src/reference/julia-api.md#result-types`), overloads `Base`
 (`==`/`hash`/`show`/`length`/`iterate`), and offers do-block `Store`/`open_store` forms. A stored
 `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
 design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI
-additionally has `export` (bulk read-direction inverse of `add`, timestamped forecast CSV),
-`--name-glob` selectors, `--dry-run` on destructive commands, store-creation `--compression` flags,
-shell `completions`, and a `INFRASTORE_STORE` env fallback. The read-only gRPC server carries the
-full read surface too: full `TimeSeriesKey`s over the wire plus `ListKeys`, `GetMetadata`,
-`BulkRead`, detailed/per-type counts, `ListOwnerIds`, `GetIntervals`, static/forecast summaries,
-`CheckStaticConsistency`, and `ResolveForecastKey`. Auth is `none` (default) or `api_key` via the
-`x-api-key` header. See `README.md` and `docs/src/explanation/data-model.md` for the authoritative
-feature matrix.
+additionally has `export` (bulk read-direction inverse of `add`; its timestamped CSV is re-readable
+by `add`, which detects the layout from the header), `arrays` / `store-info` and the `data_hash` +
+resolved HDF5 dataset/column on `list`/`info`, `--name-glob` selectors, `--dry-run` on destructive
+commands, store-creation `--compression` flags, shell `completions`, and a `INFRASTORE_STORE` env
+fallback. The SQLite catalog carries a `time_series_readable` view that hex-encodes both hashes for
+hand inspection. The read-only gRPC server carries the full read surface too: full `TimeSeriesKey`s
+over the wire plus `ListKeys`, `GetMetadata`, `BulkRead`, detailed/per-type counts, `ListOwnerIds`,
+`GetIntervals`, static/forecast summaries, `CheckStaticConsistency`, and `ResolveForecastKey`. Auth
+is `none` (default) or `api_key` via the `x-api-key` header. See `README.md` and
+`docs/src/explanation/data-model.md` for the authoritative feature matrix.
 
 ## Code Quality Requirements
 

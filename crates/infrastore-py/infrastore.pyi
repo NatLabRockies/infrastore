@@ -7,7 +7,7 @@ appears here; keep the two in sync.
 
 from datetime import datetime, timedelta
 from types import TracebackType
-from typing import Any, final
+from typing import Any, Literal, final
 
 import numpy as np
 from numpy.typing import NDArray
@@ -15,6 +15,10 @@ from numpy.typing import NDArray
 # A period is passed as an ISO-8601 duration string (e.g. "PT1H", "P1M") or a
 # datetime.timedelta; it is always returned as an ISO-8601 string.
 Period = str | timedelta
+# The time series type a query asks for: one concrete stored type, or the string
+# "abstract_deterministic" for the family matching both Deterministic and
+# DeterministicSingleTimeSeries.
+RequestedType = TimeSeriesType | Literal["abstract_deterministic"]
 TimeSeriesData = (
     SingleTimeSeries | NonSequentialTimeSeries | Deterministic | Probabilistic | Scenarios
 )
@@ -346,7 +350,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -407,7 +411,7 @@ class Store:
         owner_id: int,
         owner_category: OwnerCategory,
         name: str,
-        requested_type: TimeSeriesType | str,
+        requested_type: RequestedType,
         *,
         resolution: Period | None = None,
         interval: Period | None = None,
@@ -429,7 +433,7 @@ class Store:
     def static_read(self, reader: StaticReader, when: datetime) -> None: ...
     def build_forecast_reader(
         self,
-        time_series_type: TimeSeriesType,
+        time_series_type: RequestedType,
         resolution: Period,
         *,
         owner_id: int | None = None,
@@ -448,7 +452,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -461,7 +465,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -474,7 +478,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -487,7 +491,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -500,7 +504,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -519,7 +523,7 @@ class Store:
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
         resolution: Period | None = None,
@@ -527,16 +531,16 @@ class Store:
         features: dict[str, int | float | bool | str] | None = None,
     ) -> bool: ...
     def get_resolutions(
-        self, time_series_type: TimeSeriesType | None = None
+        self, time_series_type: RequestedType | None = None
     ) -> list[str]: ...
     def get_intervals(
-        self, time_series_type: TimeSeriesType | None = None
+        self, time_series_type: RequestedType | None = None
     ) -> list[str]: ...
     def list_owner_ids(
         self,
         owner_category: OwnerCategory,
         *,
-        time_series_type: TimeSeriesType | None = None,
+        time_series_type: RequestedType | None = None,
         resolution: Period | None = None,
     ) -> list[int]: ...
     def get_forecast_parameters(

@@ -137,8 +137,9 @@ abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
 
 # Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
 # Pass it as the requested type to get_time_series to read whichever of the two
-# is stored (see Reading forecast values). It is NOT a valid build_forecast_reader
-# type — that call takes a concrete forecast type.
+# is stored (see Reading forecast values), as a catalog filter to match both, or
+# to build_forecast_reader, where it reads like a Deterministic reader. No row is
+# ever stored under it.
 abstract type AbstractDeterministic end
 
 mutable struct Store
@@ -605,9 +606,9 @@ includes `DeterministicSingleTimeSeries` (read into identical `[H, *E]` windows)
 forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
 
 `time_series_type` must be one of the four concrete forecast types — `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios`. Any other type (including
-`AbstractDeterministic`, which is a `get_time_series` request type only) raises
-`InvalidParameterError`; a `Deterministic` reader already covers the family.
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios` — or `AbstractDeterministic`, which
+reads exactly like a `Deterministic` reader (already abstract over the pair). Any other type raises
+`InvalidParameterError`.
 
 ```julia
 build_forecast_reader(store, time_series_type::Type; resolution::Period,
@@ -709,8 +710,9 @@ and independent, and combine as a conjunction; with none set the whole store is 
 
 - `owner_id`, `owner_category` — scope to one owner.
 - `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, …), the same value the
-  `time_series_type` field of a returned row carries. A filter selects stored rows, so
-  `AbstractDeterministic` is rejected: filter on `Deterministic` or `DeterministicSingleTimeSeries`.
+  `time_series_type` field of a returned row carries, or `AbstractDeterministic` to match both
+  `Deterministic` and `DeterministicSingleTimeSeries` (no row is ever _stored_ under the family, so
+  it never appears in a returned row).
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval

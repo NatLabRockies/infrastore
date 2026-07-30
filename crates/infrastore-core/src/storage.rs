@@ -157,6 +157,37 @@ impl IntegrityReport {
     }
 }
 
+/// Where an array physically lives in the backing store, as returned by
+/// [`crate::Store::locate_array`].
+///
+/// This exists so a caller holding a series' `data_hash` can go and look at the
+/// bytes with an outside tool (`h5ls`, `h5dump`, `h5py`). The hash alone is not
+/// enough: a packed array is one *column* of a shared dataset, and the column
+/// index is only recoverable by scanning that dataset's companion `_h` hash
+/// dataset. The dataset name is not derivable either, because a packed pool
+/// that fills up spills into `{base}__1`, `{base}__2`, ....
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayLocation {
+    /// One column of a packed dataset shared with other same-shaped arrays.
+    /// `dataset` is the full path from the file root; `column` indexes axis 1.
+    Packed { dataset: String, column: usize },
+    /// A self-contained dataset holding exactly this array. `dataset` is the
+    /// full path from the file root.
+    Standalone { dataset: String },
+    /// The store is in-memory, so the array has no on-disk location.
+    InMemory,
+}
+
+impl std::fmt::Display for ArrayLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArrayLocation::Packed { dataset, column } => write!(f, "{dataset}[:, {column}]"),
+            ArrayLocation::Standalone { dataset } => write!(f, "{dataset}"),
+            ArrayLocation::InMemory => f.write_str("(in-memory)"),
+        }
+    }
+}
+
 /// Pluggable array-storage backend.
 ///
 /// Each array is identified by its 32-byte content hash. Implementations are
@@ -301,6 +332,18 @@ pub(crate) trait StorageBackend: Send + Sync {
 
     /// True iff the backend currently stores `hash`.
     fn contains(&self, hash: &[u8; 32]) -> Result<bool>;
+
+    /// Where `hash`'s array physically lives, for outside inspection of the
+    /// backing file. The default reports [`ArrayLocation::InMemory`], which is
+    /// correct for a backend with no on-disk representation; it still errors on
+    /// an unknown hash so callers can tell "not stored" from "not on disk".
+    fn locate(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+        if self.contains(hash)? {
+            Ok(ArrayLocation::InMemory)
+        } else {
+            Err(TimeSeriesError::NotFound)
+        }
+    }
 
     /// Reclaim space from removed arrays.
     fn compact(&mut self) -> Result<CompactionReport>;

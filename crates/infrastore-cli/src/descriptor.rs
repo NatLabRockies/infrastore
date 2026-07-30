@@ -57,6 +57,92 @@ fn default_owner_category() -> String {
     "component".to_string()
 }
 
+/// The physical shape of a companion CSV, decided by [`Descriptor::csv_layout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsvLayout {
+    /// Every column is a value, flattened row-major into the array. The
+    /// hand-authored form, and what `template` documents.
+    Values,
+    /// A leading `timestamp` column, then values.
+    Timestamped,
+    /// Leading `issue_time` and `target_time` columns, then one value column per
+    /// (leading series x element) — the form `export -f csv` writes for a dense
+    /// forecast. Rows run window-major; see [`forecast_values_from_rows`].
+    ForecastTimestamped,
+}
+
+impl CsvLayout {
+    /// How many leading columns to strip before the value block.
+    fn leading_cols(self) -> usize {
+        match self {
+            CsvLayout::Values => 0,
+            CsvLayout::Timestamped => 1,
+            CsvLayout::ForecastTimestamped => 2,
+        }
+    }
+}
+
+/// The forecast value cells in stored-array order, whichever layout the CSV is
+/// in. A value-only CSV is already in array order and passes straight through.
+fn forecast_values(
+    csv: &CsvData,
+    layout: CsvLayout,
+    num_series: usize,
+    horizon_len: usize,
+    count: usize,
+    per_step: usize,
+) -> Result<Vec<String>, String> {
+    match layout {
+        CsvLayout::ForecastTimestamped => {
+            forecast_values_from_rows(csv, num_series, horizon_len, count, per_step)
+        }
+        _ => Ok(csv.values.clone()),
+    }
+}
+
+/// Re-order a timestamped forecast CSV's value cells into the stored array's
+/// layout.
+///
+/// `export` emits one row per `(window, horizon step)` with the leading series
+/// (percentiles / scenarios) spread across columns, because that is what reads
+/// well next to an `issue_time`/`target_time` pair. The array is stored
+/// `[series, horizon, count, element]`. Those two orders differ by a transpose,
+/// so the cells cannot simply be concatenated — doing that silently scrambles
+/// the forecast rather than failing.
+///
+/// Row `r` is window `c = r / horizon_len`, step `h = r % horizon_len`; column
+/// `k` within a row is series `s = k / per_step`, element `j = k % per_step`.
+fn forecast_values_from_rows(
+    csv: &CsvData,
+    num_series: usize,
+    horizon_len: usize,
+    count: usize,
+    per_step: usize,
+) -> Result<Vec<String>, String> {
+    let expected_rows = count * horizon_len;
+    let expected_width = num_series * per_step;
+    if csv.rows != expected_rows || csv.row_width != expected_width {
+        return Err(format!(
+            "timestamped forecast CSV has {} rows x {} value columns, expected \
+             {expected_rows} x {expected_width} (count {count} x horizon steps \
+             {horizon_len}, series {num_series} x element {per_step})",
+            csv.rows, csv.row_width
+        ));
+    }
+    let mut out = vec![String::new(); expected_rows * expected_width];
+    for r in 0..expected_rows {
+        let c = r / horizon_len;
+        let h = r % horizon_len;
+        for k in 0..expected_width {
+            let s = k / per_step;
+            let j = k % per_step;
+            let dst = (((s * horizon_len + h) * count) + c) * per_step + j;
+            out[dst] = csv.values[r * expected_width + k].clone();
+        }
+    }
+    Ok(out)
+}
+
 /// Load one or more descriptors from a JSON file.
 ///
 /// A root JSON object is a single series; a root JSON array is a batch add.
@@ -135,10 +221,10 @@ impl Descriptor {
         let owner_category = parse::parse_owner_category(&self.owner_category)?;
         let per_step: usize = self.element_shape.iter().product::<usize>().max(1);
         let csv_path = self.csv_path(base_dir, override_csv)?;
-        let needs_timestamps = ts_type == TimeSeriesType::NonSequentialTimeSeries;
-        let csv = csv_io::read_csv(&csv_path, self.has_header, needs_timestamps)?;
+        let layout = self.csv_layout(&csv_path, ts_type)?;
+        let csv = csv_io::read_csv(&csv_path, self.has_header, layout.leading_cols())?;
 
-        let data = self.build_data(ts_type, dtype, per_step, &csv)?;
+        let data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
 
         Ok(AddRequest {
             owner_id: self.owner_id,
@@ -151,12 +237,49 @@ impl Descriptor {
         })
     }
 
+    /// Which physical layout the companion CSV is in.
+    ///
+    /// `add` originally required each type's rawest form: bare values for a
+    /// SingleTimeSeries or a forecast, `timestamp,value...` for a
+    /// NonSequentialTimeSeries. But `export` writes timestamps for every type —
+    /// they are the useful part of the output — so an exported file could not be
+    /// fed back in, even though `export` is meant to be `add`'s inverse.
+    /// Detecting the shape from the header closes that loop without a new flag
+    /// and without changing what a hand-written value-only CSV means.
+    fn csv_layout(&self, csv_path: &Path, ts_type: TimeSeriesType) -> Result<CsvLayout, String> {
+        // Without a header there is nothing to detect, so the historical
+        // per-type default stands.
+        let header = csv_io::read_header(csv_path, self.has_header)?;
+        let col = |i: usize| header.get(i).map(|s| s.trim().to_ascii_lowercase());
+        let first_is = |name: &str| col(0).as_deref() == Some(name);
+
+        Ok(match ts_type {
+            TimeSeriesType::NonSequentialTimeSeries => CsvLayout::Timestamped,
+            TimeSeriesType::SingleTimeSeries => {
+                if first_is("timestamp") {
+                    CsvLayout::Timestamped
+                } else {
+                    CsvLayout::Values
+                }
+            }
+            // Deterministic / Probabilistic / Scenarios.
+            _ => {
+                if first_is("issue_time") && col(1).as_deref() == Some("target_time") {
+                    CsvLayout::ForecastTimestamped
+                } else {
+                    CsvLayout::Values
+                }
+            }
+        })
+    }
+
     fn build_data(
         &self,
         ts_type: TimeSeriesType,
         dtype: infrastore_core::Dtype,
         per_step: usize,
         csv: &CsvData,
+        layout: CsvLayout,
     ) -> Result<TimeSeriesData, String> {
         let elem = &self.element_shape;
         match ts_type {
@@ -171,7 +294,7 @@ impl Descriptor {
             }
             TimeSeriesType::NonSequentialTimeSeries => {
                 let timestamps = csv
-                    .timestamps
+                    .timestamps()
                     .iter()
                     .map(|s| parse::parse_timestamp(s))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -188,7 +311,8 @@ impl Descriptor {
                 let count = self.usize_field("count", self.count)?;
                 let h = parse::period_horizon_steps(horizon, resolution)?;
                 let shape = with_elem(vec![h, count], elem);
-                let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
+                let values = forecast_values(csv, layout, 1, h, count, per_step)?;
+                let arr = csv_io::build_typed_array(dtype, shape, &values)?;
                 let det = Deterministic::new(
                     initial, resolution, horizon, interval, count, arr, &self.name,
                 )?;
@@ -205,7 +329,8 @@ impl Descriptor {
                     .ok_or_else(|| "Probabilistic requires `percentiles`".to_string())?;
                 let h = parse::period_horizon_steps(horizon, resolution)?;
                 let shape = with_elem(vec![percentiles.len(), h, count], elem);
-                let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
+                let values = forecast_values(csv, layout, percentiles.len(), h, count, per_step)?;
+                let arr = csv_io::build_typed_array(dtype, shape, &values)?;
                 let prob = Probabilistic::new(
                     initial,
                     resolution,
@@ -238,7 +363,8 @@ impl Descriptor {
                     }
                 };
                 let shape = with_elem(vec![scenario_count, h, count], elem);
-                let arr = csv_io::build_typed_array(dtype, shape, &csv.values)?;
+                let values = forecast_values(csv, layout, scenario_count, h, count, per_step)?;
+                let arr = csv_io::build_typed_array(dtype, shape, &values)?;
                 let scen = Scenarios::new(
                     initial,
                     resolution,

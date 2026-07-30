@@ -12,8 +12,8 @@ use crate::metadata::{
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
-    ArrayLayout, CompactionReport, Compression, Hdf5Backend, IntegrityReport, MemoryBackend,
-    StorageBackend,
+    ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
+    MemoryBackend, StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::key::{
@@ -1592,6 +1592,21 @@ impl Store {
         self.backend.get_array(hash)
     }
 
+    /// Where a content hash's array physically lives in the backing file.
+    ///
+    /// Complements [`Self::get_array_by_hash`] for the case where the caller
+    /// wants to inspect the bytes with an outside HDF5 tool rather than read
+    /// them through this crate. The hash on its own does not locate an array: a
+    /// packed array is one column of a shared dataset, and a full packed pool
+    /// spills into suffixed datasets, so neither the dataset name nor the column
+    /// index is derivable from metadata.
+    ///
+    /// Errors with [`TimeSeriesError::NotFound`] if no array with that hash is
+    /// stored.
+    pub fn locate_array(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+        self.backend.locate(hash)
+    }
+
     pub fn get_time_series_keys(
         &self,
         owner_id: i64,
@@ -2876,7 +2891,13 @@ fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>>
     Ok(Box::new(Hdf5Backend::open(path, read_only)?))
 }
 
-fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
+/// The SQLite catalog path paired with an HDF5 data path: `<path>.sqlite`.
+///
+/// Public because the two files are one logical artifact that must be moved,
+/// copied, and deleted together, so a tool that reports or manipulates store
+/// paths needs the same derivation the store itself uses rather than its own
+/// copy of the rule.
+pub fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
     let mut p = data_path.to_path_buf();
     let new_name = match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => format!("{name}.sqlite"),

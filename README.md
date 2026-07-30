@@ -192,9 +192,11 @@ first column is the timestamp. All six dtypes and all five writable types (`sing
 flat row-major values whose count equals the product of the type's shape (see
 `infrastore template <type>`).
 
-Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, `summary`, `verify`,
-`check-consistency`, `resolutions`, `params`), bulk export (`export`, one timestamped CSV or JSON
-file per series), and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
+Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, `store-info`,
+`summary`, `verify`, `check-consistency`, `resolutions`, `params`), content addressing (`arrays`,
+and the `data_hash` + HDF5 location on `list`/`info`), the association catalogs (`attributes`,
+`links`, read-only), bulk export (`export`, one timestamped CSV or JSON file per series, re-readable
+by `add`), and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
 `remove --all`). Destructive commands take `--dry-run`. `infrastore completions <shell>` emits shell
 completions. Full reference:
 [CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).

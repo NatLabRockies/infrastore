@@ -2233,13 +2233,18 @@ pub fn forecast_family_conflict(
     conflicting_type: TimeSeriesType,
 ) -> Result<bool> {
     let resolution_iso = resolution.map(period_to_iso);
+    // `prepare_cached`: this runs once per Deterministic row in a bulk add, and
+    // an uncached prepare (SQL parse + query plan) costs more than executing
+    // the point query itself.
     let exists: Option<i64> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT 1 FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
                AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
                AND features_hash = ?6
              LIMIT 1",
+        )?
+        .query_row(
             params![
                 owner_id,
                 owner_category.as_str(),

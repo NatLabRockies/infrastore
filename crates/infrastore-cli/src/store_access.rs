@@ -4,9 +4,15 @@
 //! `--endpoint` flag for the read-only gRPC server would be wired in here
 //! without touching the command handlers.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use infrastore_core::{Compression, Store, create_store, open_store};
+
+/// The SQLite catalog paired with an HDF5 store path. Delegates to the core so
+/// the CLI cannot drift from the store's own derivation.
+pub fn catalog_path(data_path: &Path) -> PathBuf {
+    infrastore_core::catalog_sqlite_path(data_path)
+}
 
 /// Open an existing store read-only. Errors if the file is missing.
 pub fn open_readonly(path: &Path) -> Result<Store, String> {

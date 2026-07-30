@@ -387,6 +387,23 @@ store written by an earlier build is renamed in place on its first writable open
 accumulating two equivalent index pairs. Index names are not part of the on-disk contract, so this
 carries no `data_format_version` change.
 
+### `time_series_readable` (view)
+
+```sql
+CREATE VIEW time_series_readable AS
+SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, dtype, element_shape, ext,
+       lower(hex(data_hash))     AS data_hash,
+       lower(hex(features_hash)) AS features_hash
+FROM time_series_associations;
+```
+
+A projection of the association table with both hashes hex-encoded, for humans opening the catalog
+in `sqlite3` — see [Reading the catalog by hand](#reading-the-catalog-by-hand). Nothing in the
+library reads it. It costs no storage, is created by the same idempotent DDL as the tables above,
+and so lands on an existing store's first writable open without a `data_format_version` change.
+
 ## Field Encoding Notes
 
 - **Timestamps** are RFC 3339 strings in UTC.
@@ -394,11 +411,25 @@ carries no `data_format_version` change.
   SQLite (`PT1H`, `P1M`, `P1Y`), and the packed dataset name's `{res}` field uses the same encoding.
   Calendar periods (`Month`/`Quarter`/`Year`) are stored distinctly from fixed spans.
 - **Hashes** are raw 32-byte `BLOB`s in SQLite, lowercase hex in HDF5 (the `…_h` dataset for packed
-  arrays, the `arr_` dataset name for standalone arrays).
+  arrays, the `arr_` dataset name for standalone arrays). `BLOB` rather than hex `TEXT` in SQLite
+  because the two hash columns sit in the association table, in `idx_hash`, and in both unique
+  indexes — hex would cost roughly 32% more catalog space — and because a `BLOB` literal (`X'…'`)
+  compares case-insensitively while a hex `TEXT` column would not. The
+  [`time_series_readable` view](#reading-the-catalog-by-hand) supplies the readable form.
 - **`element_shape`** is the per-step shape only (the trailing axes); the time `length` is a
   separate column.
 
 ## Inspecting a Store by Hand
+
+The quickest route is the CLI, which resolves the hash-to-location step for you:
+
+```sh
+infrastore --store system.h5 store-info          # both file paths, format version, compression
+infrastore --store system.h5 arrays              # every distinct array, its location and sharers
+infrastore --store system.h5 info --name load    # one series: data_hash, hdf5_dataset, hdf5_column
+```
+
+To go straight at the files:
 
 ```sh
 h5ls -r system.h5                        # groups, datasets, dtypes, shapes
@@ -411,6 +442,29 @@ sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
 ```
 
-To map an association to its values: read its `data_hash`. For a packed array, hex-encode it and
-find the matching column in the relevant `sts_…_h` variable; for a standalone array, read the
-variable named `arr_<hex_hash>` directly.
+### Reading the catalog by hand
+
+`sqlite3` renders a `BLOB` as raw bytes in its default `list` mode and in `.mode box` / `.mode
+json`,
+which corrupts the terminal (and, in box mode, the table borders). Use the
+**`time_series_readable`** view, which is the association table with both hashes hex-encoded:
+
+```sh
+sqlite3 system.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
+```
+
+The view spells hashes in lowercase, matching `hash_hex` in the core, every binding, and the CLI, so
+a value copied from it compares equal to one printed anywhere else. Against the base table, use
+`hex(data_hash)` or `.mode quote`; `hex()` returns uppercase.
+
+The view is created by the same idempotent DDL as the tables, on a store's first writable open, so
+an older store gains it without a format bump. Nothing in the library reads it.
+
+### Mapping an association to its bytes
+
+Read the association's `data_hash`. For a **standalone** array, read the dataset named
+`arr_<hex_hash>` directly. For a **packed** array, hex-encode the hash and find the matching row in
+the relevant `sts_…_h` dataset; that row index is the column index into the `sts_…` dataset. Note
+that a packed pool which fills up spills into `{name}__1`, `{name}__2`, so the dataset holding a
+given array is not derivable from its metadata — scan the `_h` datasets, or let `infrastore info` /
+`infrastore arrays` report the resolved `dataset` and `column`.

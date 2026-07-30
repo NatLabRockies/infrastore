@@ -2,13 +2,12 @@
 
 use std::path::Path;
 
-use infrastore_core::{
-    Dtype, FeatureValue, Features, TimeSeriesData, TimeSeriesMetadata, TypedArray,
-};
+use infrastore_core::{Dtype, TimeSeriesData, TimeSeriesMetadata, TypedArray};
 use serde_json::{Map, Value, json};
 
 use crate::color;
 use crate::csv_io;
+use crate::fields;
 use crate::output::{self, Format};
 use crate::parse;
 use crate::select::SelectorArgs;
@@ -19,31 +18,47 @@ const DEFAULT_LIMIT: usize = 50;
 type TimeRange = (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>);
 
 /// `list`: enumerate stored series matching the selector filters.
-pub fn list(store_path: &Path, selector: &SelectorArgs, format: Format) -> Result<(), String> {
+///
+/// The table's default columns cover every field that is part of a series'
+/// identity — owner, category, type, name, resolution, interval, and features —
+/// so two distinct rows can never render identically. `wide` adds the remaining
+/// metadata; `-f json` always emits everything.
+pub fn list(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    limit: Option<usize>,
+    wide: bool,
+    format: Format,
+) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
-    let metas = store
+    let all = store
         .list_time_series(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
-    let headers: Vec<String> = [
-        "Owner",
-        "Owner Type",
-        "Owner Category",
-        "Type",
-        "Name",
-        "Dtype",
-        "Resolution",
-        "Length",
-        "Units",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let total = all.len();
+    let metas: &[TimeSeriesMetadata] = match limit {
+        Some(n) if n < total => &all[..n],
+        _ => &all,
+    };
+
     match format {
         Format::Table => {
-            output::display_table_dyn(&headers, &metas.iter().map(list_row).collect::<Vec<_>>())
+            let headers = list_headers(wide);
+            let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
+            output::display_table_dyn(&headers, &rows);
+            if metas.len() < total {
+                println!(
+                    "{}",
+                    color::dim(&format!(
+                        "... {} more series (use --limit or -f csv)",
+                        total - metas.len()
+                    ))
+                );
+            }
         }
         Format::Csv => {
-            output::display_csv_rows(&headers, &metas.iter().map(list_row).collect::<Vec<_>>())?
+            let headers = list_headers(wide);
+            let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
+            output::display_csv_rows(&headers, &rows)?;
         }
         Format::Json => {
             let items: Vec<Value> = metas.iter().map(list_json).collect();
@@ -53,24 +68,71 @@ pub fn list(store_path: &Path, selector: &SelectorArgs, format: Format) -> Resul
     Ok(())
 }
 
-fn list_row(m: &TimeSeriesMetadata) -> Vec<String> {
-    vec![
+/// Columns that pin down identity, plus the physical facts a reader needs.
+/// `Hash` is the leading [`fields::SHORT_HASH_LEN`] characters of the array's
+/// content hash: it is what ties a catalog row to the bytes in the HDF5 file,
+/// and it makes array sharing (two series with one hash) visible at a glance.
+const LIST_HEADERS: &[&str] = &[
+    "Owner",
+    "Owner Type",
+    "Category",
+    "Type",
+    "Name",
+    "Features",
+    "Dtype",
+    "Resolution",
+    "Interval",
+    "Length",
+    "Units",
+    "Hash",
+];
+
+const LIST_HEADERS_WIDE: &[&str] = &[
+    "Initial Timestamp",
+    "Horizon",
+    "Count",
+    "Element Shape",
+    "Ext",
+];
+
+fn list_headers(wide: bool) -> Vec<String> {
+    let mut h: Vec<String> = LIST_HEADERS.iter().map(|s| s.to_string()).collect();
+    if wide {
+        h.extend(LIST_HEADERS_WIDE.iter().map(|s| s.to_string()));
+    }
+    h
+}
+
+fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
+    let mut row = vec![
         m.owner_id.to_string(),
         m.owner_type.clone(),
         m.owner_category.as_str().to_string(),
         m.time_series_type.as_str().to_string(),
         m.name.clone(),
+        fields::features_str(&m.features),
         m.dtype.as_str().to_string(),
-        m.resolution
-            .map(parse::format_period)
-            .unwrap_or_else(|| "-".to_string()),
-        m.length
-            .map(|l| l.to_string())
-            .unwrap_or_else(|| "-".to_string()),
+        fields::opt_period(m.resolution),
+        fields::opt_period(m.interval),
+        fields::opt(m.length),
         m.units.clone().unwrap_or_else(|| "-".to_string()),
-    ]
+        fields::short_hash(&m.data_hash),
+    ];
+    if wide {
+        row.extend([
+            fields::opt(m.initial_timestamp.map(|t| t.to_rfc3339())),
+            fields::opt_period(m.horizon),
+            fields::opt(m.count),
+            format!("{:?}", m.element_shape),
+            m.ext.clone().unwrap_or_else(|| "-".to_string()),
+        ]);
+    }
+    row
 }
 
+/// The full metadata row as JSON. Unlike the table this holds nothing back —
+/// it is the scripting entry point, so omitting features or the hash here just
+/// forces callers back to `info` one series at a time.
 fn list_json(m: &TimeSeriesMetadata) -> Value {
     let mut obj = Map::new();
     obj.insert("owner_id".into(), json!(m.owner_id));
@@ -78,12 +140,26 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert("owner_category".into(), json!(m.owner_category.as_str()));
     obj.insert("type".into(), json!(m.time_series_type.as_str()));
     obj.insert("name".into(), json!(m.name));
+    obj.insert("features".into(), fields::features_json(&m.features));
+    obj.insert("data_hash".into(), json!(fields::hash_hex(&m.data_hash)));
     obj.insert("dtype".into(), json!(m.dtype.as_str()));
+    obj.insert("element_shape".into(), json!(m.element_shape));
     obj.insert(
         "resolution".into(),
         json!(m.resolution.map(parse::format_period)),
     );
+    obj.insert(
+        "initial_timestamp".into(),
+        json!(m.initial_timestamp.map(|t| t.to_rfc3339())),
+    );
     obj.insert("length".into(), json!(m.length));
+    obj.insert("horizon".into(), json!(m.horizon.map(parse::format_period)));
+    obj.insert(
+        "interval".into(),
+        json!(m.interval.map(parse::format_period)),
+    );
+    obj.insert("count".into(), json!(m.count));
+    obj.insert("percentiles".into(), json!(m.percentiles));
     obj.insert("units".into(), json!(m.units));
     obj.insert("ext".into(), json!(m.ext));
     Value::Object(obj)
@@ -121,88 +197,164 @@ pub fn get(
                         })
                 })
                 .collect::<Result<_, String>>()?;
-            render_sequential(&meta, &ts, &s.data, format, limit, full, false)
+            render_sequential(&meta, &ts, &s.data, format, limit, full)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
             let ts: Vec<String> = ns.timestamps.iter().map(|t| t.to_rfc3339()).collect();
-            render_sequential(&meta, &ts, &ns.data, format, limit, full, true)
+            render_sequential(&meta, &ts, &ns.data, format, limit, full)
         }
         _ => render_forecast(&meta, &data, format, limit, full),
     }
 }
 
 /// `info`: metadata plus numeric stats for a single series.
-pub fn info(store_path: &Path, selector: &SelectorArgs, format: Format) -> Result<(), String> {
+///
+/// `no_stats` skips reading the array, which is the only part of this command
+/// that touches the HDF5 file at all.
+pub fn info(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    no_stats: bool,
+    format: Format,
+) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
-    let (meta, key) = selector.resolve(&store)?;
-    let data = store
-        .get_time_series(&key, None)
-        .map_err(|e| e.to_string())?;
-    let arr = data_array(&data);
+    let (meta, _key) = selector.resolve(&store)?;
 
-    let mut fields: Vec<(String, String)> = Vec::new();
-    fields.push(("name".into(), meta.name.clone()));
-    fields.push(("owner_id".into(), meta.owner_id.to_string()));
-    fields.push(("owner_type".into(), meta.owner_type.clone()));
-    fields.push(("owner_category".into(), meta.owner_category.as_str().into()));
-    fields.push(("type".into(), meta.time_series_type.as_str().into()));
-    fields.push(("dtype".into(), arr.dtype.as_str().into()));
-    fields.push(("shape".into(), format!("{:?}", arr.shape)));
+    // Always-present fields first, then the optional ones in the order a reader
+    // scans for them.
+    let mut rows: Vec<(String, Value)> = vec![
+        ("name".into(), json!(meta.name)),
+        ("owner_id".into(), json!(meta.owner_id)),
+        ("owner_type".into(), json!(meta.owner_type)),
+        ("owner_category".into(), json!(meta.owner_category.as_str())),
+        ("type".into(), json!(meta.time_series_type.as_str())),
+        ("dtype".into(), json!(meta.dtype.as_str())),
+        ("element_shape".into(), json!(meta.element_shape)),
+    ];
     if let Some(r) = meta.resolution {
-        fields.push(("resolution".into(), parse::format_period(r)));
+        rows.push(("resolution".into(), json!(parse::format_period(r))));
     }
     if let Some(t) = meta.initial_timestamp {
-        fields.push(("initial_timestamp".into(), t.to_rfc3339()));
+        rows.push(("initial_timestamp".into(), json!(t.to_rfc3339())));
     }
     if let Some(l) = meta.length {
-        fields.push(("length".into(), l.to_string()));
+        rows.push(("length".into(), json!(l)));
     }
     if let Some(h) = meta.horizon {
-        fields.push(("horizon".into(), parse::format_period(h)));
+        rows.push(("horizon".into(), json!(parse::format_period(h))));
     }
     if let Some(iv) = meta.interval {
-        fields.push(("interval".into(), parse::format_period(iv)));
+        rows.push(("interval".into(), json!(parse::format_period(iv))));
     }
     if let Some(c) = meta.count {
-        fields.push(("count".into(), c.to_string()));
+        rows.push(("count".into(), json!(c)));
     }
     if let Some(p) = &meta.percentiles {
-        fields.push(("percentiles".into(), format!("{p:?}")));
+        rows.push(("percentiles".into(), json!(p)));
     }
     if let Some(u) = &meta.units {
-        fields.push(("units".into(), u.clone()));
+        rows.push(("units".into(), json!(u)));
     }
     if let Some(lt) = &meta.ext {
-        fields.push(("ext".into(), lt.clone()));
+        rows.push(("ext".into(), json!(lt)));
     }
-    for (k, v) in &meta.features {
-        fields.push((format!("feature.{k}"), feature_to_string(v)));
+    rows.push(("features".into(), fields::features_json(&meta.features)));
+
+    // The content hash and its physical location: everything needed to go and
+    // look at the same bytes with h5dump/h5py, which the hash alone cannot do
+    // because a packed array is one column of a shared, possibly spilled
+    // dataset.
+    rows.push(("data_hash".into(), json!(fields::hash_hex(&meta.data_hash))));
+    match store.locate_array(&meta.data_hash) {
+        Ok(loc) => {
+            rows.push(("location".into(), json!(loc.to_string())));
+            if let infrastore_core::ArrayLocation::Packed { dataset, column } = &loc {
+                rows.push(("hdf5_dataset".into(), json!(dataset)));
+                rows.push(("hdf5_column".into(), json!(column)));
+            } else if let infrastore_core::ArrayLocation::Standalone { dataset } = &loc {
+                rows.push(("hdf5_dataset".into(), json!(dataset)));
+            }
+        }
+        // A catalog row whose array is missing is a real (and interesting)
+        // state; report it rather than failing the whole command.
+        Err(e) => rows.push(("location".into(), json!(format!("unavailable: {e}")))),
     }
-    append_stats(arr, &mut fields);
+    let (sts_refs, dst_refs) = store
+        .count_array_references(&meta.data_hash)
+        .map_err(|e| e.to_string())?;
+    rows.push(("array_refs_single".into(), json!(sts_refs)));
+    rows.push(("array_refs_dst".into(), json!(dst_refs)));
+
+    if !no_stats {
+        let data = store
+            .get_time_series(&meta_key(&meta), None)
+            .map_err(|e| e.to_string())?;
+        let arr = data_array(&data);
+        rows.push(("shape".into(), json!(arr.shape)));
+        append_stats(arr, &mut rows);
+    }
 
     match format {
         Format::Table => {
-            let rows: Vec<Vec<String>> = fields
-                .iter()
-                .map(|(k, v)| vec![color::label(k), v.clone()])
-                .collect();
-            output::display_table_dyn(&field_value_header(), &rows);
+            let table = flat_rows(&rows, true);
+            output::display_table_dyn(&field_value_header(), &table);
         }
-        Format::Csv => output::display_csv_rows(&field_value_header(), &as_rows(&fields))?,
+        Format::Csv => {
+            let table = flat_rows(&rows, false);
+            output::display_csv_rows(&field_value_header(), &table)?;
+        }
         Format::Json => {
-            let mut obj = Map::new();
-            for (k, v) in &fields {
-                obj.insert(k.clone(), json!(v));
-            }
+            let obj: Map<String, Value> = rows.into_iter().collect();
             output::print_json(&Value::Object(obj))?;
         }
     }
     Ok(())
 }
 
+/// The field/value rows for the two-column views.
+///
+/// `features` is expanded into one `feature.<key>` row per entry rather than
+/// printed as a JSON blob: this view is line-oriented and routinely grepped, and
+/// one feature per line is what that wants. The JSON view keeps the nested
+/// object, which is what a parser wants.
+fn flat_rows(rows: &[(String, Value)], colorize: bool) -> Vec<Vec<String>> {
+    let label = |k: &str| {
+        if colorize {
+            color::label(k)
+        } else {
+            k.to_string()
+        }
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for (k, v) in rows {
+        match (k.as_str(), v) {
+            ("features", Value::Object(map)) => {
+                for (fk, fv) in map {
+                    out.push(vec![label(&format!("feature.{fk}")), value_cell(fv)]);
+                }
+            }
+            _ => out.push(vec![label(k), value_cell(v)]),
+        }
+    }
+    out
+}
+
+/// Flatten a JSON value for a two-column table/CSV cell: strings unquoted,
+/// everything else in its JSON spelling.
+fn value_cell(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => "-".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn meta_key(meta: &TimeSeriesMetadata) -> infrastore_core::KeyIdentity {
+    crate::select::key_of(meta)
+}
+
 // --- rendering helpers -----------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn render_sequential(
     meta: &TimeSeriesMetadata,
     timestamps: &[String],
@@ -210,7 +362,6 @@ fn render_sequential(
     format: Format,
     limit: Option<usize>,
     full: bool,
-    timestamp_in_csv: bool,
 ) -> Result<(), String> {
     let per_step = arr.element_shape().iter().product::<usize>().max(1);
     let decoded = csv_io::array_to_strings(arr);
@@ -245,17 +396,17 @@ fn render_sequential(
             }
         }
         Format::Csv => {
-            let mut header = Vec::new();
-            if timestamp_in_csv {
-                header.push("timestamp".to_string());
-            }
+            // Every sequential CSV carries its timestamp column. A
+            // SingleTimeSeries used to emit values only, on the grounds that its
+            // grid is reconstructible from initial_timestamp + resolution — but
+            // those live in the metadata, not in the file being piped, so
+            // `get -f csv > out.csv` silently dropped the time axis.
+            let mut header = vec!["timestamp".to_string()];
             header.extend(value_headers(per_step));
             let mut rows = Vec::with_capacity(length);
             for i in 0..length {
-                let mut row = Vec::new();
-                if timestamp_in_csv {
-                    row.push(timestamps.get(i).cloned().unwrap_or_default());
-                }
+                let mut row = Vec::with_capacity(1 + per_step);
+                row.push(timestamps.get(i).cloned().unwrap_or_default());
                 for j in 0..per_step {
                     row.push(decoded[i * per_step + j].clone());
                 }
@@ -267,7 +418,7 @@ fn render_sequential(
             let mut obj = Map::new();
             meta_fields(meta, arr, &mut obj);
             obj.insert("timestamps".into(), json!(timestamps));
-            obj.insert("values".into(), json!(decoded));
+            obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
             output::print_json(&Value::Object(obj))?;
         }
     }
@@ -326,7 +477,7 @@ fn render_forecast(
             if let TimeSeriesData::Scenarios(s) = data {
                 obj.insert("scenario_count".into(), json!(s.scenario_count));
             }
-            obj.insert("values".into(), json!(decoded));
+            obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
             output::print_json(&Value::Object(obj))?;
         }
     }
@@ -467,63 +618,32 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     if let Some(p) = &meta.percentiles {
         obj.insert("percentiles".into(), json!(p));
     }
-    if !meta.features.is_empty() {
-        obj.insert("features".into(), features_json(&meta.features));
-    }
+    obj.insert("features".into(), fields::features_json(&meta.features));
+    obj.insert("data_hash".into(), json!(fields::hash_hex(&meta.data_hash)));
 }
 
-fn append_stats(arr: &TypedArray, fields: &mut Vec<(String, String)>) {
+fn append_stats(arr: &TypedArray, rows: &mut Vec<(String, Value)>) {
     let vals = csv_io::array_to_f64_lossy(arr);
     if vals.is_empty() {
         return;
     }
     if arr.dtype == Dtype::Bool {
         let t = vals.iter().filter(|x| **x != 0.0).count();
-        fields.push(("true_count".into(), t.to_string()));
-        fields.push(("false_count".into(), (vals.len() - t).to_string()));
+        rows.push(("true_count".into(), json!(t)));
+        rows.push(("false_count".into(), json!(vals.len() - t)));
     } else {
         let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
         let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-        fields.push(("min".into(), min.to_string()));
-        fields.push(("max".into(), max.to_string()));
-        fields.push(("mean".into(), mean.to_string()));
+        rows.push(("min".into(), json!(min)));
+        rows.push(("max".into(), json!(max)));
+        rows.push(("mean".into(), json!(mean)));
     }
-    fields.push(("num_elements".into(), vals.len().to_string()));
-}
-
-fn features_json(features: &Features) -> Value {
-    let mut obj = Map::new();
-    for (k, v) in features {
-        let value = match v {
-            FeatureValue::Int(i) => json!(i),
-            FeatureValue::Float(f) => json!(f),
-            FeatureValue::Bool(b) => json!(b),
-            FeatureValue::Str(s) => json!(s),
-        };
-        obj.insert(k.clone(), value);
-    }
-    Value::Object(obj)
-}
-
-fn feature_to_string(v: &FeatureValue) -> String {
-    match v {
-        FeatureValue::Int(i) => i.to_string(),
-        FeatureValue::Float(f) => f.to_string(),
-        FeatureValue::Bool(b) => b.to_string(),
-        FeatureValue::Str(s) => s.clone(),
-    }
+    rows.push(("num_elements".into(), json!(vals.len())));
 }
 
 fn field_value_header() -> Vec<String> {
     vec!["field".to_string(), "value".to_string()]
-}
-
-fn as_rows(fields: &[(String, String)]) -> Vec<Vec<String>> {
-    fields
-        .iter()
-        .map(|(k, v)| vec![k.clone(), v.clone()])
-        .collect()
 }
 
 fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String> {

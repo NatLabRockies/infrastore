@@ -10,16 +10,53 @@ use infrastore_core::{Dtype, TypedArray};
 
 /// Cells read from a data CSV.
 pub struct CsvData {
-    /// Raw timestamp strings from the first column (only when requested).
-    pub timestamps: Vec<String>,
+    /// Raw strings from the stripped leading columns, one row at a time. For a
+    /// timestamped file this is the timestamp column; for a forecast exported by
+    /// `export` it is `issue_time` and `target_time`.
+    pub leading: Vec<Vec<String>>,
     /// Value cells flattened row-major (left-to-right, top-to-bottom).
     pub values: Vec<String>,
+    /// Value cells per row, i.e. the width of the value block.
+    pub row_width: usize,
+    /// Number of data rows read.
+    pub rows: usize,
 }
 
-/// Read a data CSV. When `timestamp_col` is true the first column is treated as
-/// timestamps and the remaining columns as values; otherwise every column is a
-/// value.
-pub fn read_csv(path: &Path, has_header: bool, timestamp_col: bool) -> Result<CsvData, String> {
+impl CsvData {
+    /// The first stripped leading column — the timestamps, for the callers that
+    /// strip exactly one.
+    pub fn timestamps(&self) -> Vec<String> {
+        self.leading
+            .iter()
+            .filter_map(|row| row.first().cloned())
+            .collect()
+    }
+}
+
+/// Peek at a CSV's header row without reading its data, so a caller can decide
+/// how many leading columns to strip. Returns an empty vec when `has_header` is
+/// false or the file is empty.
+pub fn read_header(path: &Path, has_header: bool) -> Result<Vec<String>, String> {
+    if !has_header {
+        return Ok(Vec::new());
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(false)
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    match reader.headers() {
+        Ok(h) => Ok(h.iter().map(|s| s.to_string()).collect()),
+        // An empty file has no header row; that is not an error here — the
+        // value-count check downstream gives a better message.
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+/// Read a data CSV, stripping `leading_cols` non-value columns from the left of
+/// every row and flattening the rest row-major.
+pub fn read_csv(path: &Path, has_header: bool, leading_cols: usize) -> Result<CsvData, String> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(has_header)
         .flexible(false)
@@ -27,23 +64,45 @@ pub fn read_csv(path: &Path, has_header: bool, timestamp_col: bool) -> Result<Cs
         .from_path(path)
         .map_err(|e| format!("opening {}: {e}", path.display()))?;
 
-    let mut timestamps = Vec::new();
+    let mut leading = Vec::new();
     let mut values = Vec::new();
+    let mut row_width = 0usize;
+    let mut rows = 0usize;
     for (row, record) in reader.records().enumerate() {
         let record =
             record.map_err(|e| format!("reading {} row {}: {e}", path.display(), row + 1))?;
-        let mut iter = record.iter();
-        if timestamp_col {
-            let ts = iter.next().ok_or_else(|| {
-                format!("{} row {} has no timestamp column", path.display(), row + 1)
-            })?;
-            timestamps.push(ts.to_string());
+        if record.len() < leading_cols {
+            return Err(format!(
+                "{} row {} has {} columns, fewer than the {leading_cols} leading \
+                 column(s) expected",
+                path.display(),
+                row + 1,
+                record.len()
+            ));
         }
+        let mut iter = record.iter();
+        let mut lead = Vec::with_capacity(leading_cols);
+        for _ in 0..leading_cols {
+            lead.push(iter.next().unwrap_or_default().to_string());
+        }
+        leading.push(lead);
+        let before = values.len();
         for cell in iter {
             values.push(cell.to_string());
         }
+        // `flexible(false)` guarantees a constant width, so the first row's
+        // width is the file's width.
+        if rows == 0 {
+            row_width = values.len() - before;
+        }
+        rows += 1;
     }
-    Ok(CsvData { timestamps, values })
+    Ok(CsvData {
+        leading,
+        values,
+        row_width,
+        rows,
+    })
 }
 
 /// Build a [`TypedArray`] of the given dtype/shape from row-major value cells.
@@ -107,6 +166,40 @@ pub fn array_to_strings(arr: &TypedArray) -> Vec<String> {
             Dtype::Bool => (c[0] != 0).to_string(),
         })
         .collect()
+}
+
+/// Decode every element to a JSON scalar of its own type.
+///
+/// Distinct from [`array_to_strings`], which is for text output. JSON consumers
+/// get numbers as numbers and booleans as booleans, so nothing downstream has to
+/// re-parse `"101.5"` back into a float.
+///
+/// `f64`/`f32` values that JSON cannot represent (NaN, ±inf) become `null`:
+/// JSON has no spelling for them, and `null` is the one encoding every parser
+/// accepts. `u64` values above 2^53 stay exact — `serde_json` carries them as
+/// integers, not floats.
+pub fn array_to_json_values(arr: &TypedArray) -> Vec<serde_json::Value> {
+    use serde_json::{Value, json};
+    let size = arr.dtype.size();
+    arr.bytes
+        .chunks_exact(size)
+        .map(|c| match arr.dtype {
+            Dtype::F64 => finite_json(f64::from_le_bytes(c.try_into().unwrap())),
+            Dtype::F32 => finite_json(f32::from_le_bytes(c.try_into().unwrap()) as f64),
+            Dtype::I64 => json!(i64::from_le_bytes(c.try_into().unwrap())),
+            Dtype::I32 => json!(i32::from_le_bytes(c.try_into().unwrap())),
+            Dtype::U64 => json!(u64::from_le_bytes(c.try_into().unwrap())),
+            Dtype::Bool => json!(c[0] != 0),
+        })
+        .collect::<Vec<Value>>()
+}
+
+fn finite_json(v: f64) -> serde_json::Value {
+    if v.is_finite() {
+        serde_json::json!(v)
+    } else {
+        serde_json::Value::Null
+    }
 }
 
 /// Decode every element to `f64` (lossy for wide integer types), for stats.
