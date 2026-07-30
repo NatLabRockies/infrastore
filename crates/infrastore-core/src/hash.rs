@@ -52,7 +52,15 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
                 hasher.update(bits.to_le_bytes());
             }
         }
-        Dtype::I64 | Dtype::I32 | Dtype::U64 | Dtype::Bool => {
+        Dtype::I64
+        | Dtype::I32
+        | Dtype::I16
+        | Dtype::I8
+        | Dtype::U64
+        | Dtype::U32
+        | Dtype::U16
+        | Dtype::U8
+        | Dtype::Bool => {
             hasher.update(&data.bytes);
         }
     }

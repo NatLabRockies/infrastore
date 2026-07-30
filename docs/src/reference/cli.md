@@ -225,25 +225,25 @@ but string-comparing rendered output against the short form will not match.
 A descriptor JSON file is either a single object (one series) or an array of objects (batch add).
 The CSV holds only numbers (plus a leading timestamp column for `non_sequential`).
 
-| Key                            | Required for                | Notes                                                      |
-| ------------------------------ | --------------------------- | ---------------------------------------------------------- |
-| `owner_id`                     | all                         | Integer component identifier (`i64`).                      |
-| `owner_type`                   | all                         |                                                            |
-| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.         |
-| `name`                         | all                         |                                                            |
-| `type`                         | all                         | One of the five writable types.                            |
-| `dtype`                        | all                         | `f64`, `f32`, `i64`, `i32`, `u64`, `bool`.                 |
-| `csv`                          | unless `--csv` is passed    | Path relative to the descriptor; `--csv` overrides it.     |
-| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                    |
-| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).             |
-| `units`                        | optional                    | Free-form label.                                           |
-| `ext`                          | optional                    | Opaque package-owned payload (e.g. JSON), stored verbatim. |
-| `features`                     | optional                    | JSON object; int/float/bool/string values. See below.      |
-| `initial_timestamp`            | all except `non_sequential` |                                                            |
-| `resolution`                   | all except `non_sequential` |                                                            |
-| `horizon`, `interval`, `count` | forecasts                   |                                                            |
-| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                        |
-| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.                  |
+| Key                            | Required for                | Notes                                                         |
+| ------------------------------ | --------------------------- | ------------------------------------------------------------- |
+| `owner_id`                     | all                         | Integer component identifier (`i64`).                         |
+| `owner_type`                   | all                         |                                                               |
+| `owner_category`               | optional                    | `component` (default) or `supplemental_attribute`.            |
+| `name`                         | all                         |                                                               |
+| `type`                         | all                         | One of the five writable types.                               |
+| `element_type`                 | all                         | `f64`/`f32`/`i64`/…, `tuple(N,f64)`, or a function-data kind. |
+| `csv`                          | unless `--csv` is passed    | Path relative to the descriptor; `--csv` overrides it.        |
+| `has_header`                   | optional                    | Skip the first CSV row. Default `true`.                       |
+| `element_shape`                | optional                    | Trailing per-step dims; default scalar (`[]`).                |
+| `units`                        | optional                    | Free-form label.                                              |
+| `ext`                          | optional                    | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
+| `features`                     | optional                    | JSON object; int/float/bool/string values. See below.         |
+| `initial_timestamp`            | all except `non_sequential` |                                                               |
+| `resolution`                   | all except `non_sequential` |                                                               |
+| `horizon`, `interval`, `count` | forecasts                   |                                                               |
+| `percentiles`                  | `probabilistic`             | Strictly increasing list of floats.                           |
+| `scenario_count`               | `scenarios` (optional)      | Inferred from the data length if omitted.                     |
 
 Unknown keys are rejected. Any key not in the table above — including a typo like `resolutionn` — is
 a hard parse error listing the accepted fields, so hand-edited templates fail loudly rather than

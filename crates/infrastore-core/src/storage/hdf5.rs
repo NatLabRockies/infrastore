@@ -32,7 +32,7 @@ use std::sync::Mutex;
 
 use hdf5_metno as h5;
 
-use h5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
+use h5::types::VarLenUnicode;
 use h5::{Group, Hyperslab, Selection, SliceOrIndex};
 
 use crate::error::{Result, TimeSeriesError};
@@ -140,7 +140,12 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
         Dtype::F32 => rd!(f32),
         Dtype::I64 => rd!(i64),
         Dtype::I32 => rd!(i32),
+        Dtype::I16 => rd!(i16),
+        Dtype::I8 => rd!(i8),
         Dtype::U64 => rd!(u64),
+        Dtype::U32 => rd!(u32),
+        Dtype::U16 => rd!(u16),
+        Dtype::U8 => rd!(u8),
         Dtype::Bool => {
             let a = ds.read_slice::<u8, _, ndarray::IxDyn>(s).map_err(map_h5)?;
             a.iter().copied().collect()
@@ -164,7 +169,12 @@ fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
         Dtype::F32 => rd!(f32),
         Dtype::I64 => rd!(i64),
         Dtype::I32 => rd!(i32),
+        Dtype::I16 => rd!(i16),
+        Dtype::I8 => rd!(i8),
         Dtype::U64 => rd!(u64),
+        Dtype::U32 => rd!(u32),
+        Dtype::U16 => rd!(u16),
+        Dtype::U8 => rd!(u8),
         Dtype::Bool => ds.read_raw::<u8>().map_err(map_h5)?,
     })
 }
@@ -193,7 +203,12 @@ fn write_sel(
         Dtype::F32 => wr!(f32, 4),
         Dtype::I64 => wr!(i64, 8),
         Dtype::I32 => wr!(i32, 4),
+        Dtype::I16 => wr!(i16, 2),
+        Dtype::I8 => wr!(i8, 1),
         Dtype::U64 => wr!(u64, 8),
+        Dtype::U32 => wr!(u32, 4),
+        Dtype::U16 => wr!(u16, 2),
+        Dtype::U8 => wr!(u8, 1),
         Dtype::Bool => {
             let view = ndarray::ArrayViewD::from_shape(dyn_shape, bytes)
                 .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
@@ -215,7 +230,12 @@ fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
         Dtype::F32 => wr!(f32, 4),
         Dtype::I64 => wr!(i64, 8),
         Dtype::I32 => wr!(i32, 4),
+        Dtype::I16 => wr!(i16, 2),
+        Dtype::I8 => wr!(i8, 1),
         Dtype::U64 => wr!(u64, 8),
+        Dtype::U32 => wr!(u32, 4),
+        Dtype::U16 => wr!(u16, 2),
+        Dtype::U8 => wr!(u8, 1),
         Dtype::Bool => ds.write_raw(bytes).map_err(map_h5),
     }
 }
@@ -261,31 +281,14 @@ fn create_ds(
         Dtype::F32 => mk!(f32),
         Dtype::I64 => mk!(i64),
         Dtype::I32 => mk!(i32),
+        Dtype::I16 => mk!(i16),
+        Dtype::I8 => mk!(i8),
         Dtype::U64 => mk!(u64),
+        Dtype::U32 => mk!(u32),
+        Dtype::U16 => mk!(u16),
+        Dtype::U8 => mk!(u8),
         Dtype::Bool => mk!(u8),
     }
-}
-
-/// Map an HDF5 dataset's element type back to a [`Dtype`].
-fn dtype_of_dataset(ds: &h5::Dataset) -> Result<Dtype> {
-    let desc = ds
-        .dtype()
-        .map_err(map_h5)?
-        .to_descriptor()
-        .map_err(map_h5)?;
-    Ok(match desc {
-        TypeDescriptor::Float(FloatSize::U8) => Dtype::F64,
-        TypeDescriptor::Float(FloatSize::U4) => Dtype::F32,
-        TypeDescriptor::Integer(IntSize::U8) => Dtype::I64,
-        TypeDescriptor::Integer(IntSize::U4) => Dtype::I32,
-        TypeDescriptor::Unsigned(IntSize::U8) => Dtype::U64,
-        TypeDescriptor::Unsigned(IntSize::U1) => Dtype::Bool,
-        other => {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "unsupported hdf5 dataset type {other:?}"
-            )));
-        }
-    })
 }
 
 fn write_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
@@ -798,7 +801,12 @@ impl Inner {
     }
 
     #[tracing::instrument(skip(self, hash, range))]
-    fn read_locked(&self, hash: &[u8; 32], range: Option<Range<usize>>) -> Result<TypedArray> {
+    fn read_locked(
+        &self,
+        hash: &[u8; 32],
+        dtype: Dtype,
+        range: Option<Range<usize>>,
+    ) -> Result<TypedArray> {
         let loc = self
             .by_hash
             .get(hash)
@@ -809,6 +817,9 @@ impl Inner {
                 let state = self.datasets.get(&dataset).ok_or_else(|| {
                     TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
                 })?;
+                // A packed dataset's name carries its dtype, so here the
+                // caller's value is an assertion the two artifacts agree.
+                super::check_dtype(hash, state.dtype, dtype)?;
                 let total = state.length;
                 let range = range.unwrap_or(0..total);
                 if range.start > range.end || range.end > total {
@@ -831,7 +842,6 @@ impl Inner {
             Location::Standalone { var } => {
                 let ds = self.dataset(&var)?;
                 let full_shape = ds.shape();
-                let dtype = dtype_of_dataset(&ds)?;
                 let total = full_shape.first().copied().unwrap_or(0);
                 match range {
                     None => {
@@ -862,6 +872,7 @@ impl Inner {
     fn read_index_locked(
         &self,
         hashes: &[[u8; 32]],
+        dtype: Dtype,
         index: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
@@ -880,6 +891,7 @@ impl Inner {
         for hash in hashes {
             match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
                 Location::Packed { dataset, col } => {
+                    self.check_packed_dtype(hash, dataset, dtype)?;
                     max_col
                         .entry(dataset.clone())
                         .and_modify(|m| *m = (*m).max(*col))
@@ -931,7 +943,7 @@ impl Inner {
                     out.extend_from_slice(block);
                 }
                 Placement::Standalone { hash } => {
-                    let arr = self.read_locked(hash, Some(index..index + 1))?;
+                    let arr = self.read_locked(hash, dtype, Some(index..index + 1))?;
                     out.extend_from_slice(&arr.bytes);
                 }
             }
@@ -939,21 +951,29 @@ impl Inner {
         Ok(())
     }
 
-    fn read_arrays_locked(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+    fn read_arrays_locked(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
         if hashes.is_empty() {
             return Ok(Vec::new());
         }
 
         enum Placement {
             Packed { dataset: String, col: usize },
-            Standalone { hash: [u8; 32] },
+            Standalone { hash: [u8; 32], dtype: Dtype },
         }
 
+        if dtypes.len() != hashes.len() {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "read_arrays: {} dtypes for {} hashes",
+                dtypes.len(),
+                hashes.len()
+            )));
+        }
         let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
         let mut max_col: HashMap<String, usize> = HashMap::new();
-        for hash in hashes {
+        for (hash, &dtype) in hashes.iter().zip(dtypes) {
             match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
                 Location::Packed { dataset, col } => {
+                    self.check_packed_dtype(hash, dataset, dtype)?;
                     max_col
                         .entry(dataset.clone())
                         .and_modify(|m| *m = (*m).max(*col))
@@ -964,7 +984,7 @@ impl Inner {
                     });
                 }
                 Location::Standalone { .. } => {
-                    placements.push(Placement::Standalone { hash: *hash });
+                    placements.push(Placement::Standalone { hash: *hash, dtype });
                 }
             }
         }
@@ -1026,32 +1046,40 @@ impl Inner {
                             .map_err(TimeSeriesError::IntegrityError)?,
                     );
                 }
-                Placement::Standalone { hash } => {
-                    out.push(self.read_locked(hash, None)?);
+                Placement::Standalone { hash, dtype } => {
+                    out.push(self.read_locked(hash, *dtype, None)?);
                 }
             }
         }
         Ok(out)
     }
 
-    fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+    /// Assert that a packed dataset's own dtype (recovered from its name) is the
+    /// one the catalog says the array has. Only reachable if the two artifacts
+    /// have drifted.
+    fn check_packed_dtype(&self, hash: &[u8; 32], dataset: &str, dtype: Dtype) -> Result<()> {
+        let state = self
+            .datasets
+            .get(dataset)
+            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("dataset {dataset} missing")))?;
+        super::check_dtype(hash, state.dtype, dtype)
+    }
+
+    fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
         let loc = self
             .by_hash
             .get(hash)
             .ok_or(TimeSeriesError::NotFound)?
             .clone();
         match loc {
-            Location::Standalone { var } => {
-                let ds = self.dataset(&var)?;
-                Ok((dtype_of_dataset(&ds)?, ds.shape()))
-            }
+            Location::Standalone { var } => Ok(self.dataset(&var)?.shape()),
             Location::Packed { dataset, .. } => {
                 let state = self.datasets.get(&dataset).ok_or_else(|| {
                     TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
                 })?;
                 let mut shape = vec![state.length];
                 shape.extend_from_slice(&state.element_shape);
-                Ok((state.dtype, shape))
+                Ok(shape)
             }
         }
     }
@@ -1059,6 +1087,7 @@ impl Inner {
     fn read_window_block_locked(
         &self,
         hash: &[u8; 32],
+        dtype: Dtype,
         count_axis: usize,
         start: usize,
         len: usize,
@@ -1086,7 +1115,6 @@ impl Inner {
                         dims[count_axis]
                     )));
                 }
-                let dtype = dtype_of_dataset(&ds)?;
                 let ranges: Vec<Range<usize>> = dims
                     .iter()
                     .enumerate()
@@ -1146,30 +1174,36 @@ impl StorageBackend for Hdf5Backend {
     }
 
     #[tracing::instrument(skip(self, hash))]
-    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
+    fn get_array(&self, hash: &[u8; 32], dtype: Dtype) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_locked(hash, None)
+        inner.read_locked(hash, dtype, None)
     }
 
     #[tracing::instrument(skip(self, hash), fields(start = range.start, end = range.end))]
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
+    fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_locked(hash, Some(range))
+        inner.read_locked(hash, dtype, Some(range))
     }
 
     #[tracing::instrument(skip(self, hashes, out), fields(n = hashes.len(), index))]
-    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+    fn read_index_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_index_locked(hashes, index, out)
+        inner.read_index_locked(hashes, dtype, index, out)
     }
 
     #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]
-    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+    fn read_arrays(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_arrays_locked(hashes)
+        inner.read_arrays_locked(hashes, dtypes)
     }
 
-    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.array_shape_locked(hash)
     }
@@ -1178,13 +1212,14 @@ impl StorageBackend for Hdf5Backend {
     fn read_window_block_into(
         &self,
         hash: &[u8; 32],
+        dtype: Dtype,
         count_axis: usize,
         window_start: usize,
         len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_window_block_locked(hash, count_axis, window_start, len, out)
+        inner.read_window_block_locked(hash, dtype, count_axis, window_start, len, out)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
@@ -1254,12 +1289,11 @@ impl StorageBackend for Hdf5Backend {
         })
     }
 
-    fn verify(&self) -> Result<IntegrityReport> {
+    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
         let inner = self.inner.lock().expect("mutex poisoned");
         let mut errors = Vec::new();
-        let hashes: Vec<[u8; 32]> = inner.by_hash.keys().copied().collect();
-        for hash in hashes {
-            match inner.read_locked(&hash, None) {
+        for &(hash, dtype) in arrays {
+            match inner.read_locked(&hash, dtype, None) {
                 Ok(arr) => {
                     let recomputed = array_hash(&arr);
                     if recomputed != hash {
@@ -1270,7 +1304,12 @@ impl StorageBackend for Hdf5Backend {
                         ));
                     }
                 }
-                Err(e) => errors.push(format!("read error: {e}")),
+                Err(TimeSeriesError::NotFound) => errors.push(format!(
+                    "dangling reference: the catalog references array {} but the array \
+                     file does not hold it",
+                    hash_hex(&hash),
+                )),
+                Err(e) => errors.push(format!("read error for array {}: {e}", hash_hex(&hash))),
             }
         }
         Ok(IntegrityReport { errors })
@@ -1327,18 +1366,22 @@ mod tests {
             assert!(be.put_array(&hb, &b, res(), ArrayLayout::Packed).unwrap());
             // Duplicate put is a no-op.
             assert!(!be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
-            assert_eq!(be.get_array(&ha).unwrap(), a);
-            assert_eq!(be.get_array(&hb).unwrap(), b);
-            let slice = be.get_slice(&ha, 6..18).unwrap();
+            assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+            assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), b);
+            let slice = be.get_slice(&ha, Dtype::F64, 6..18).unwrap();
             assert_eq!(slice.shape, vec![12]);
             assert_eq!(slice.bytes, a.bytes[6 * 8..18 * 8]);
             be.flush().unwrap();
         }
         // Reopen: index rebuilt from the hash companions.
         let be = Hdf5Backend::open(&path, true).unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.get_array(&hb).unwrap(), b);
-        assert!(be.verify().unwrap().ok());
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), b);
+        assert!(
+            be.verify(&[(ha, Dtype::F64), (hb, Dtype::F64)])
+                .unwrap()
+                .ok()
+        );
     }
 
     #[test]
@@ -1352,15 +1395,76 @@ mod tests {
         let written = be.put_packed_block(&hashes, &refs, res()).unwrap();
         assert!(written.iter().all(|&w| w));
         // read_arrays gathers all columns from one hyperslab per dataset.
-        let out = be.read_arrays(&hashes).unwrap();
+        let out = be
+            .read_arrays(&hashes, &vec![Dtype::F64; hashes.len()])
+            .unwrap();
         assert_eq!(out, arrays);
         // read_index_into returns each column's element block at one timestep.
         let mut buf = Vec::new();
-        be.read_index_into(&hashes, 5, &mut buf).unwrap();
+        be.read_index_into(&hashes, Dtype::F64, 5, &mut buf)
+            .unwrap();
         let elem = 3 * 8;
         for (i, a) in arrays.iter().enumerate() {
             assert_eq!(buf[i * elem..(i + 1) * elem], a.bytes[5 * elem..6 * elem]);
         }
+    }
+
+    /// `bool` and `u8` are the same byte on disk and the HDF5 type descriptor
+    /// cannot tell them apart — which is exactly why the dtype comes from the
+    /// caller (the catalog) rather than from the file. Each reads back as what
+    /// it was written as, and the content hash that addresses it survives.
+    #[test]
+    fn standalone_bool_and_u8_are_distinguished_by_the_caller_dtype() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let bools = TypedArray::from_slice(vec![4], &[true, false, true, true]).unwrap();
+        let bytes = TypedArray::from_slice(vec![4], &[1u8, 0, 1, 1]).unwrap();
+        // Byte-identical, yet distinct arrays: `array_hash` mixes in the dtype,
+        // so they content-address to different datasets rather than colliding.
+        assert_eq!(bools.bytes, bytes.bytes);
+        let (hb, hu) = (array_hash(&bools), array_hash(&bytes));
+        assert_ne!(hb, hu);
+
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(&hb, &bools, res(), ArrayLayout::Standalone)
+            .unwrap();
+        be.put_array(&hu, &bytes, res(), ArrayLayout::Standalone)
+            .unwrap();
+        assert_eq!(be.get_array(&hb, Dtype::Bool).unwrap(), bools);
+        assert_eq!(be.get_array(&hu, Dtype::U8).unwrap(), bytes);
+        assert_eq!(be.array_shape(&hb).unwrap(), vec![4]);
+        drop(be);
+
+        // And across a reopen, where the in-memory index is rebuilt from the file.
+        let be = Hdf5Backend::open(&path, false).unwrap();
+        assert_eq!(be.get_array(&hb, Dtype::Bool).unwrap(), bools);
+        let read = be.get_array(&hu, Dtype::U8).unwrap();
+        assert_eq!(read, bytes);
+        assert_eq!(array_hash(&read), hu, "content address must round-trip");
+        assert!(
+            be.verify(&[(hb, Dtype::Bool), (hu, Dtype::U8)])
+                .unwrap()
+                .ok()
+        );
+    }
+
+    /// A packed dataset knows its own dtype (it is in the dataset name), so a
+    /// caller whose catalog disagrees is told, rather than handed misread bytes.
+    #[test]
+    fn a_packed_read_rejects_a_dtype_the_dataset_contradicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![4], 0.0);
+        let ha = array_hash(&a);
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
+
+        let err = be.get_array(&ha, Dtype::I64).unwrap_err();
+        assert!(
+            matches!(&err, TimeSeriesError::IntegrityError(m)
+                if m.contains("stored as f64") && m.contains("catalog says i64")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1378,11 +1482,12 @@ mod tests {
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
         )
         .unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.array_shape(&ha).unwrap(), (Dtype::F64, vec![6, 4]));
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.array_shape(&ha).unwrap(), vec![6, 4]);
         // Window block: windows 1..3 along axis 1.
         let mut buf = Vec::new();
-        be.read_window_block_into(&ha, 1, 1, 2, &mut buf).unwrap();
+        be.read_window_block_into(&ha, Dtype::F64, 1, 1, 2, &mut buf)
+            .unwrap();
         let mut expect = Vec::new();
         for h in 0..6 {
             expect.extend_from_slice(&a.bytes[(h * 4 + 1) * 8..(h * 4 + 3) * 8]);
@@ -1406,7 +1511,7 @@ mod tests {
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
         )
         .unwrap();
-        assert_eq!(be.get_array(&hb).unwrap(), big);
+        assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), big);
         {
             let inner = be.inner.lock().unwrap();
             let ds = inner
@@ -1417,9 +1522,13 @@ mod tests {
         // Reopen keeps both readable.
         drop(be);
         let be = Hdf5Backend::open(&path, false).unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.get_array(&hb).unwrap(), big);
-        assert!(be.verify().unwrap().ok());
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), big);
+        assert!(
+            be.verify(&[(ha, Dtype::F64), (hb, Dtype::F64)])
+                .unwrap()
+                .ok()
+        );
     }
 
     #[test]
@@ -1443,7 +1552,10 @@ mod tests {
         be.remove_array(&hf).unwrap();
         assert!(!be.contains(&ha).unwrap());
         assert!(!be.contains(&hf).unwrap());
-        assert!(matches!(be.get_array(&ha), Err(TimeSeriesError::NotFound)));
+        assert!(matches!(
+            be.get_array(&ha, Dtype::F64),
+            Err(TimeSeriesError::NotFound)
+        ));
         // Re-adding reuses the freed packed slot / tombstoned standalone var.
         assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
         assert!(
@@ -1455,8 +1567,8 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.get_array(&hf).unwrap(), f);
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.get_array(&hf, Dtype::F64).unwrap(), f);
     }
 
     #[test]
@@ -1470,7 +1582,7 @@ mod tests {
             be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
         }
         let mut be = Hdf5Backend::open(&path, true).unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
         let b = f64_array(vec![4], 5.0);
         let hb = array_hash(&b);
         assert!(matches!(

@@ -85,6 +85,21 @@ impl TimeSeriesType {
         })
     }
 
+    /// How many leading array dims come *before* the per-step element shape.
+    ///
+    /// Static series are `[length, *E]`; a `Deterministic` stacks windows as
+    /// `[H, count, *E]`; `Probabilistic` and `Scenarios` add a percentile /
+    /// scenario axis in front, giving `[P, H, count, *E]`. Anything that has to
+    /// find the per-step element dims in a raw shape — element-type validation,
+    /// the codecs — asks here rather than re-deriving the layout.
+    pub fn leading_dims(self) -> usize {
+        match self {
+            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => 1,
+            TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => 2,
+            TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => 3,
+        }
+    }
+
     /// The inclusive `(low, high)` code range a *request* for `self` matches.
     ///
     /// Every type spans only itself, with one deliberate exception: requesting

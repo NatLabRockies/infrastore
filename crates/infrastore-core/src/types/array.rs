@@ -9,8 +9,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Supported physical element types. Codes are part of the public contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Supported physical element types. Codes are part of the public contract:
+/// 0-5 were the original set and never move; new widths are appended.
+///
+/// `Ord` follows declaration order, which is also code order. It carries no
+/// meaning beyond giving layout-grouping code a stable, allocation-free sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Dtype {
     F64,
     F32,
@@ -18,9 +22,30 @@ pub enum Dtype {
     I32,
     U64,
     Bool,
+    I16,
+    I8,
+    U32,
+    U16,
+    U8,
 }
 
 impl Dtype {
+    /// Every supported dtype, in code order. Handy for exhaustive tests and for
+    /// rendering the accepted vocabulary in an error message.
+    pub const ALL: &'static [Dtype] = &[
+        Dtype::F64,
+        Dtype::F32,
+        Dtype::I64,
+        Dtype::I32,
+        Dtype::U64,
+        Dtype::Bool,
+        Dtype::I16,
+        Dtype::I8,
+        Dtype::U32,
+        Dtype::U16,
+        Dtype::U8,
+    ];
+
     pub fn code(self) -> i32 {
         match self {
             Dtype::F64 => 0,
@@ -29,6 +54,11 @@ impl Dtype {
             Dtype::I32 => 3,
             Dtype::U64 => 4,
             Dtype::Bool => 5,
+            Dtype::I16 => 6,
+            Dtype::I8 => 7,
+            Dtype::U32 => 8,
+            Dtype::U16 => 9,
+            Dtype::U8 => 10,
         }
     }
 
@@ -40,6 +70,11 @@ impl Dtype {
             3 => Dtype::I32,
             4 => Dtype::U64,
             5 => Dtype::Bool,
+            6 => Dtype::I16,
+            7 => Dtype::I8,
+            8 => Dtype::U32,
+            9 => Dtype::U16,
+            10 => Dtype::U8,
             _ => return None,
         })
     }
@@ -52,6 +87,11 @@ impl Dtype {
             Dtype::I32 => "i32",
             Dtype::U64 => "u64",
             Dtype::Bool => "bool",
+            Dtype::I16 => "i16",
+            Dtype::I8 => "i8",
+            Dtype::U32 => "u32",
+            Dtype::U16 => "u16",
+            Dtype::U8 => "u8",
         }
     }
 
@@ -63,6 +103,11 @@ impl Dtype {
             "i32" => Dtype::I32,
             "u64" => Dtype::U64,
             "bool" => Dtype::Bool,
+            "i16" => Dtype::I16,
+            "i8" => Dtype::I8,
+            "u32" => Dtype::U32,
+            "u16" => Dtype::U16,
+            "u8" => Dtype::U8,
             _ => return None,
         })
     }
@@ -71,8 +116,9 @@ impl Dtype {
     pub fn size(self) -> usize {
         match self {
             Dtype::F64 | Dtype::I64 | Dtype::U64 => 8,
-            Dtype::F32 | Dtype::I32 => 4,
-            Dtype::Bool => 1,
+            Dtype::F32 | Dtype::I32 | Dtype::U32 => 4,
+            Dtype::I16 | Dtype::U16 => 2,
+            Dtype::Bool | Dtype::I8 | Dtype::U8 => 1,
         }
     }
 
@@ -199,9 +245,9 @@ mod sealed {
 }
 
 /// A physical element type a [`TypedArray`] can hold, carrying its [`Dtype`] and
-/// little-endian codec. Sealed: only the six supported types
-/// (`f64`, `f32`, `i64`, `i32`, `u64`, `bool`) implement it, so the mapping to
-/// [`Dtype`] stays exhaustive and closed.
+/// little-endian codec. Sealed: only the supported types (`f64`, `f32`, the
+/// signed and unsigned integer widths, and `bool`) implement it, so the mapping
+/// to [`Dtype`] stays exhaustive and closed.
 pub trait Element: sealed::Sealed + Copy {
     /// The [`Dtype`] a `TypedArray` built from this element carries.
     const DTYPE: Dtype;
@@ -231,7 +277,12 @@ impl_numeric_element!(f64, Dtype::F64);
 impl_numeric_element!(f32, Dtype::F32);
 impl_numeric_element!(i64, Dtype::I64);
 impl_numeric_element!(i32, Dtype::I32);
+impl_numeric_element!(i16, Dtype::I16);
+impl_numeric_element!(i8, Dtype::I8);
 impl_numeric_element!(u64, Dtype::U64);
+impl_numeric_element!(u32, Dtype::U32);
+impl_numeric_element!(u16, Dtype::U16);
+impl_numeric_element!(u8, Dtype::U8);
 
 impl sealed::Sealed for bool {}
 impl Element for bool {

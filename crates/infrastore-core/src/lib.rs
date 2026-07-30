@@ -2,6 +2,7 @@
 //!
 //! Static time-series types are available through [`TimeSeriesData`].
 
+pub mod codec;
 pub mod error;
 pub mod reader;
 pub mod storage;
@@ -17,6 +18,9 @@ pub mod version;
 pub(crate) mod hash;
 pub(crate) mod metadata;
 
+pub use codec::{
+    DecodedValues, LinearFunction, QuadraticFunction, StepFunction, XyPoint, decode, encode,
+};
 pub use error::{Result, TimeSeriesError};
 // The two hashing utilities a binding genuinely needs: `array_hash` to
 // content-address an array and `hash_hex` to render a 32-byte hash as hex.
@@ -33,6 +37,7 @@ pub use store::{
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},
+    element_type::ElementType,
     key::{
         ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
         TimeSeriesKey,

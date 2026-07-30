@@ -1077,14 +1077,13 @@ fn verify_integrity_reports_a_hash_mismatch_when_stored_bytes_are_corrupted() {
 }
 
 #[test]
-fn verify_integrity_does_not_inspect_the_sqlite_catalog() {
-    // FINDING F3 (TEST_COVERAGE_PLAN.md §9): `Store::verify_integrity`
-    // delegates straight to the storage backend, which walks only its own
-    // hash index. A `data_hash` corrupted in the SQLite catalog — the half that
-    // maps a key to an array — is therefore NOT reported, even though every
-    // read of that key now fails or returns the wrong array. Pinned as-is; the
-    // fix (cross-checking catalog hashes against the backend index) is a
-    // behavior change and out of scope here.
+fn verify_integrity_reports_a_catalog_hash_that_names_no_stored_array() {
+    // This was FINDING F3 (TEST_COVERAGE_PLAN.md §9): `verify_integrity` used to
+    // delegate straight to the storage backend, which walked only its own hash
+    // index, so a `data_hash` corrupted in the SQLite catalog went unreported
+    // even though every read of that key failed. The sweep is now driven from
+    // the catalog — the only half that records what an array's bytes mean — so
+    // the two artifacts are checked against each other.
     let (_dir, path, key) = store_on_disk();
 
     {
@@ -1092,7 +1091,7 @@ fn verify_integrity_does_not_inspect_the_sqlite_catalog() {
         let n = conn
             .execute(
                 "UPDATE time_series_associations SET data_hash = ?1",
-                [&"0".repeat(64)],
+                rusqlite::params![[0u8; 32].as_slice()],
             )
             .unwrap();
         assert_eq!(n, 1, "one association to corrupt");
@@ -1100,17 +1099,48 @@ fn verify_integrity_does_not_inspect_the_sqlite_catalog() {
 
     let store = open_store(path.as_path(), true).unwrap();
     let report = store.verify_integrity().unwrap();
+    assert!(!report.ok(), "a dangling catalog reference is corruption");
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
-        report.ok(),
-        "PIN: a catalog-side hash corruption is invisible to verify_integrity; \
-         got errors {:?}",
+        report.errors[0].contains("dangling reference")
+            && report.errors[0].contains(&"0".repeat(64)),
+        "the diagnostic must name the array: {:?}",
         report.errors
     );
-    // But the key genuinely no longer resolves to its array, which is what the
-    // report failed to surface.
+    // And the key genuinely no longer resolves, which is what the report used
+    // to leave unsurfaced.
     assert!(
         store.get_time_series(key.identity(), None).is_err(),
         "the corrupted association must not still read successfully"
+    );
+}
+
+#[test]
+fn verify_integrity_keeps_going_past_a_catalog_row_it_cannot_use() {
+    // A `data_hash` that is not a 32-byte blob names no array at all, so the
+    // array-side sweep cannot look for it. It must be reported and skipped: one
+    // unusable row must not abort the sweep and hide the rest of the store.
+    let (_dir, path, _key) = store_on_disk();
+
+    {
+        let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+        conn.execute(
+            "UPDATE time_series_associations SET data_hash = ?1",
+            [&"0".repeat(64)],
+        )
+        .unwrap();
+    }
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let report = store.verify_integrity().unwrap();
+    assert!(!report.ok());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("malformed catalog row")),
+        "{:?}",
+        report.errors
     );
 }
 

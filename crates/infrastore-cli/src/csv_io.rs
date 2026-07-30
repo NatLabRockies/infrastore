@@ -133,7 +133,12 @@ fn encode_cell(dtype: Dtype, raw: &str, out: &mut Vec<u8>) -> Result<(), String>
         Dtype::F32 => out.extend_from_slice(&parse_num::<f32>(s)?.to_le_bytes()),
         Dtype::I64 => out.extend_from_slice(&parse_num::<i64>(s)?.to_le_bytes()),
         Dtype::I32 => out.extend_from_slice(&parse_num::<i32>(s)?.to_le_bytes()),
+        Dtype::I16 => out.extend_from_slice(&parse_num::<i16>(s)?.to_le_bytes()),
+        Dtype::I8 => out.extend_from_slice(&parse_num::<i8>(s)?.to_le_bytes()),
         Dtype::U64 => out.extend_from_slice(&parse_num::<u64>(s)?.to_le_bytes()),
+        Dtype::U32 => out.extend_from_slice(&parse_num::<u32>(s)?.to_le_bytes()),
+        Dtype::U16 => out.extend_from_slice(&parse_num::<u16>(s)?.to_le_bytes()),
+        Dtype::U8 => out.extend_from_slice(&parse_num::<u8>(s)?.to_le_bytes()),
         Dtype::Bool => out.push(parse_bool(s)? as u8),
     }
     Ok(())
@@ -162,7 +167,12 @@ pub fn array_to_strings(arr: &TypedArray) -> Vec<String> {
             Dtype::F32 => f32::from_le_bytes(c.try_into().unwrap()).to_string(),
             Dtype::I64 => i64::from_le_bytes(c.try_into().unwrap()).to_string(),
             Dtype::I32 => i32::from_le_bytes(c.try_into().unwrap()).to_string(),
+            Dtype::I16 => i16::from_le_bytes(c.try_into().unwrap()).to_string(),
+            Dtype::I8 => i8::from_le_bytes(c.try_into().unwrap()).to_string(),
             Dtype::U64 => u64::from_le_bytes(c.try_into().unwrap()).to_string(),
+            Dtype::U32 => u32::from_le_bytes(c.try_into().unwrap()).to_string(),
+            Dtype::U16 => u16::from_le_bytes(c.try_into().unwrap()).to_string(),
+            Dtype::U8 => u8::from_le_bytes(c.try_into().unwrap()).to_string(),
             Dtype::Bool => (c[0] != 0).to_string(),
         })
         .collect()
@@ -188,7 +198,12 @@ pub fn array_to_json_values(arr: &TypedArray) -> Vec<serde_json::Value> {
             Dtype::F32 => finite_json(f32::from_le_bytes(c.try_into().unwrap()) as f64),
             Dtype::I64 => json!(i64::from_le_bytes(c.try_into().unwrap())),
             Dtype::I32 => json!(i32::from_le_bytes(c.try_into().unwrap())),
+            Dtype::I16 => json!(i16::from_le_bytes(c.try_into().unwrap())),
+            Dtype::I8 => json!(i8::from_le_bytes(c.try_into().unwrap())),
             Dtype::U64 => json!(u64::from_le_bytes(c.try_into().unwrap())),
+            Dtype::U32 => json!(u32::from_le_bytes(c.try_into().unwrap())),
+            Dtype::U16 => json!(u16::from_le_bytes(c.try_into().unwrap())),
+            Dtype::U8 => json!(u8::from_le_bytes(c.try_into().unwrap())),
             Dtype::Bool => json!(c[0] != 0),
         })
         .collect::<Vec<Value>>()
@@ -212,7 +227,12 @@ pub fn array_to_f64_lossy(arr: &TypedArray) -> Vec<f64> {
             Dtype::F32 => f32::from_le_bytes(c.try_into().unwrap()) as f64,
             Dtype::I64 => i64::from_le_bytes(c.try_into().unwrap()) as f64,
             Dtype::I32 => i32::from_le_bytes(c.try_into().unwrap()) as f64,
+            Dtype::I16 => i16::from_le_bytes(c.try_into().unwrap()) as f64,
+            Dtype::I8 => i8::from_le_bytes(c.try_into().unwrap()) as f64,
             Dtype::U64 => u64::from_le_bytes(c.try_into().unwrap()) as f64,
+            Dtype::U32 => u32::from_le_bytes(c.try_into().unwrap()) as f64,
+            Dtype::U16 => u16::from_le_bytes(c.try_into().unwrap()) as f64,
+            Dtype::U8 => u8::from_le_bytes(c.try_into().unwrap()) as f64,
             Dtype::Bool => (c[0] != 0) as u8 as f64,
         })
         .collect()

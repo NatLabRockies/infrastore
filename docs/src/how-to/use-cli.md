@@ -16,9 +16,9 @@ The examples below assume `infrastore` is on your `PATH` (or use `./target/debug
 
 ## 2. Describe the Data
 
-Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type, dtype,
-resolution, initial timestamp, units, features) lives in a **descriptor JSON**. Print a starting
-point for any type with `template`:
+Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
+element_type, resolution, initial timestamp, units, features) lives in a **descriptor JSON**. Print
+a starting point for any type with `template`:
 
 ```sh
 infrastore template single > load.json       # print an example descriptor to edit
@@ -33,7 +33,7 @@ Edit it to point at your data and metadata:
   "owner_category": "component",
   "name": "load",
   "type": "single",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
   "has_header": true,
@@ -92,7 +92,7 @@ to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches
 `clear`, `replace-owner`, `rename`, `copy`) accept `--dry-run` to preview their effect.
 
 `info` reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
-over the values: `min`/`max`/`mean` for numeric dtypes, or `true_count`/`false_count` when `dtype`
+over the values: `min`/`max`/`mean` for numeric dtypes, or `true_count`/`false_count` when the dtype
 is `bool`, and always `num_elements`. The stats are the only part that reads the array —
 `--no-stats` skips it for a purely catalog-side query.
 

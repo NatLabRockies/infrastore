@@ -6,6 +6,8 @@ the [Developer Guides](../guides/index.md); for concepts, the [Explanation](../e
 section.
 
 - [On-Disk File Format](./file-format.md) — The HDF5 layout and SQLite schema, byte for byte.
+- [Element Types](./element-types.md) — What `element_type` means, the row layouts it names, and the
+  conformance corpus every binding's codec is tested against.
 - [Rust API](./rust-api.md) — `infrastore-core` public types and `Store` methods.
 - [Python API](./python-api.md) — The `infrastore` module.
 - [Julia API](./julia-api.md) — The `InfraStore.jl` package.

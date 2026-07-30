@@ -1,33 +1,52 @@
 # ---- Element dtypes -------------------------------------------------------
 # Codes must match `Dtype` in the Rust core / FFI.
 
-_dtype_code(::Type{Float64}) = Int32(0)
-_dtype_code(::Type{Float32}) = Int32(1)
-_dtype_code(::Type{Int64}) = Int32(2)
-_dtype_code(::Type{Int32}) = Int32(3)
-_dtype_code(::Type{UInt64}) = Int32(4)
-_dtype_code(::Type{Bool}) = Int32(5)
-function _dtype_code(::Type{T}) where {T}
-    return throw(InvalidParameterError("unsupported element dtype $T"))
-end
-
-const _DTYPE_JULIA = (Float64, Float32, Int64, Int32, UInt64, Bool)
+const _DTYPE_JULIA = (
+    Float64, Float32, Int64, Int32, UInt64, Bool, Int16, Int8, UInt32, UInt16, UInt8
+)
 _julia_dtype(code::Integer) = _DTYPE_JULIA[Int(code) + 1]
 
-# The Julia element type for a catalog row's dtype name (the Rust `as_str` form).
+# The Julia element type for a dtype's canonical name (the Rust `as_str` form).
 const _DTYPE_BY_NAME = Dict{String, Type}(
     "f64" => Float64,
     "f32" => Float32,
     "i64" => Int64,
     "i32" => Int32,
+    "i16" => Int16,
+    "i8" => Int8,
     "u64" => UInt64,
+    "u32" => UInt32,
+    "u16" => UInt16,
+    "u8" => UInt8,
     "bool" => Bool,
 )
+
+const _NAME_BY_DTYPE = Dict{Type, String}(v => k for (k, v) in _DTYPE_BY_NAME)
 
 function _dtype_for_name(name::AbstractString)
     dtype = get(_DTYPE_BY_NAME, String(name), nothing)
     dtype === nothing && throw(InvalidParameterError("unknown dtype $name"))
     return dtype
+end
+
+# ---- Element types --------------------------------------------------------
+# `element_type` is the store's own vocabulary for what the elements mean: a
+# dtype spelling for plain numbers, else `tuple(N,dtype)` or one of the
+# function-data kinds (`linear_function`, `quadratic_function`,
+# `piecewise_linear`, `piecewise_step`). It supersedes the dtype code on the
+# write ABI — the physical dtype is derived from it.
+
+function _element_type_name(::Type{T}) where {T}
+    name = get(_NAME_BY_DTYPE, T, nothing)
+    name === nothing && throw(InvalidParameterError("unsupported element dtype $T"))
+    return name
+end
+
+# The `element_type` string a write sends: the caller's declaration when it made
+# one, else plain scalars of the array's own element type.
+function _element_type_arg(element_type, data::AbstractArray)
+    element_type === nothing && return _element_type_name(eltype(data))
+    return String(element_type)
 end
 
 # Row-major little-endian bytes for a (possibly multi-dimensional) array. Julia
@@ -72,6 +91,8 @@ struct SingleTimeSeries{T, N}
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
     ext::Union{Nothing, String}
+    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
+    element_type::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -82,6 +103,7 @@ function SingleTimeSeries(
     data::AbstractArray,
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
         initial,
@@ -89,6 +111,7 @@ function SingleTimeSeries(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(ext),
+        _maybe_string(element_type),
     )
 end
 
@@ -102,6 +125,8 @@ struct NonSequentialTimeSeries{T, N}
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
     ext::Union{Nothing, String}
+    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
+    element_type::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -112,6 +137,7 @@ function NonSequentialTimeSeries(
     data::AbstractArray,
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
@@ -119,7 +145,11 @@ function NonSequentialTimeSeries(
         throw(InvalidParameterError("timestamps must be strictly increasing"))
     arr = data isa Array ? data : Array(data)
     return NonSequentialTimeSeries{eltype(arr), ndims(arr)}(
-        Vector{DateTime}(timestamps), arr, String(name), _maybe_string(ext)
+        Vector{DateTime}(timestamps),
+        arr,
+        String(name),
+        _maybe_string(ext),
+        _maybe_string(element_type),
     )
 end
 
@@ -145,6 +175,8 @@ struct Deterministic{T, N}
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
     ext::Union{Nothing, String}
+    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
+    element_type::Union{Nothing, String}
 end
 
 function Deterministic(
@@ -156,6 +188,7 @@ function Deterministic(
     data::AbstractArray,
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
 )
     return Deterministic{eltype(data), ndims(data)}(
         initial,
@@ -166,6 +199,7 @@ function Deterministic(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(ext),
+        _maybe_string(element_type),
     )
 end
 
@@ -182,6 +216,8 @@ struct Probabilistic{T, N}
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
     ext::Union{Nothing, String}
+    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
+    element_type::Union{Nothing, String}
 end
 
 function Probabilistic(
@@ -194,6 +230,7 @@ function Probabilistic(
     data::AbstractArray,
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
 )
     return Probabilistic{eltype(data), ndims(data)}(
         initial,
@@ -205,6 +242,7 @@ function Probabilistic(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(ext),
+        _maybe_string(element_type),
     )
 end
 
@@ -221,6 +259,8 @@ struct Scenarios{T, N}
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
     ext::Union{Nothing, String}
+    "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
+    element_type::Union{Nothing, String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -233,6 +273,7 @@ function Scenarios(
     data::AbstractArray,
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
 )
     return Scenarios{eltype(data), ndims(data)}(
         initial,
@@ -244,6 +285,7 @@ function Scenarios(
         data isa Array ? data : Array(data),
         String(name),
         _maybe_string(ext),
+        _maybe_string(element_type),
     )
 end
 

@@ -16,9 +16,12 @@ from infrastore import (
 
 `infrastore.__version__` reports the wheel version.
 
-> **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, `int64`,
-> `int32`, `uint64`, or `bool`; whatever dtype is given round-trips unchanged. Multi-dimensional
-> arrays (a per-step element shape) are supported via the NumPy array's shape.
+> **Array dtypes.** The binding accepts and returns NumPy arrays of `float64`, `float32`, the signed
+> and unsigned integer widths (`int64`/`int32`/`int16`/`int8`/`uint64`/`uint32`/`uint16`/`uint8`),
+> or `bool`; whatever dtype is given round-trips unchanged. What those elements _mean_ is the
+> association's `element_type` (see [Element types](./element-types.md)), declared with the
+> `element_type=` keyword on `add_time_series` and decoded with `decode_element_values`.
+> Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.
 
 ## `Store`
 
@@ -240,8 +243,7 @@ Read-only properties: `initial_timestamp -> datetime`, `resolution -> str` (ISO 
 `timedelta` or an ISO 8601 duration string for `resolution`; the getter always returns the ISO
 string. `name` is a required association attribute (the same array may be stored under different
 names). It is read off the object by `add_time_series` and populated on `get_time_series`. The
-array's dtype (one of `float64`, `float32`, `int64`, `int32`, `uint64`, `bool`) and per-step element
-shape are preserved through a round-trip.
+array's `element_type` and per-step element shape are preserved through a round-trip.
 
 ## `NonSequentialTimeSeries`
 
@@ -445,7 +447,7 @@ one dense `(num_columns, *element_shape)` numpy array.
 ```python
 class StaticReader:
     def grid(self) -> dict: ...     # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "length": int}
-    def groups(self) -> list[dict]: ...  # each: {"dtype": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
+    def groups(self) -> list[dict]: ...  # each: {"dtype": str, "element_type": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
     def timestamps(self) -> list[datetime]: ...   # every timestamp on the grid, in order
     def group_values(self, index: int) -> numpy.ndarray: ...  # last read of group `index`
 ```

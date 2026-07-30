@@ -16,6 +16,7 @@ use crate::storage::{
     MemoryBackend, StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
+use crate::types::element_type::ElementType;
 use crate::types::key::{
     ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
     TimeSeriesKey,
@@ -116,17 +117,23 @@ pub struct AddRequest {
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
+    /// What the array's elements mean. `None` means plain scalars of the
+    /// array's own dtype, which is what an ordinary numeric series is; a
+    /// binding storing function data (piecewise curves, cost coefficients)
+    /// sets it so any consumer can decode the rows without private knowledge.
+    pub element_type: Option<ElementType>,
     /// Opaque, package-owned extension payload (typically JSON) stored verbatim
     /// for a binding to reconstruct its domain objects; the store never interprets it.
     pub ext: Option<String>,
 }
 
 impl AddRequest {
-    /// Start a request with empty features and no units or extension payload. Chain
-    /// [`Self::with_features`], [`Self::with_units`], and
-    /// [`Self::with_ext`] to set the optional fields. This is the
-    /// ergonomic constructor for [`Store::add`] and [`BulkAdd::push`]; unlike the
-    /// wide [`Store::add_time_series`] signature it preserves `ext`.
+    /// Start a request with empty features, scalar elements, and no units or
+    /// extension payload. Chain [`Self::with_features`], [`Self::with_units`],
+    /// [`Self::with_element_type`], and [`Self::with_ext`] to set the optional
+    /// fields. This is the ergonomic constructor for [`Store::add`] and
+    /// [`BulkAdd::push`]; unlike the wide [`Store::add_time_series`] signature
+    /// it preserves `element_type` and `ext`.
     pub fn new(
         owner_id: i64,
         owner_type: impl Into<String>,
@@ -140,8 +147,16 @@ impl AddRequest {
             data,
             features: Features::new(),
             units: None,
+            element_type: None,
             ext: None,
         }
+    }
+
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = Some(element_type);
+        self
     }
 
     /// Set the feature set.
@@ -504,6 +519,7 @@ impl Store {
             data,
             features,
             units,
+            element_type: None,
             ext: None,
         }])
         .map(|mut keys| keys.remove(0))
@@ -970,7 +986,9 @@ impl Store {
 
                 let (data, sliced_initial, sliced_length) = match time_range {
                     None => {
-                        let data = self.backend.get_array(&meta.data_hash)?;
+                        let data = self
+                            .backend
+                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                         (data, initial, length)
                     }
                     Some((start, end)) => {
@@ -990,9 +1008,11 @@ impl Store {
                             .ceil_steps(initial, end)
                             .min(length)
                             .max(start_idx);
-                        let data = self
-                            .backend
-                            .get_slice(&meta.data_hash, start_idx..end_idx)?;
+                        let data = self.backend.get_slice(
+                            &meta.data_hash,
+                            meta.element_type.physical_dtype(),
+                            start_idx..end_idx,
+                        )?;
                         let new_initial =
                             resolution
                                 .add_to(initial, start_idx as i64)
@@ -1030,16 +1050,22 @@ impl Store {
                 }
 
                 let (data, timestamps) = match time_range {
-                    None => (self.backend.get_array(&meta.data_hash)?, timestamps),
+                    None => (
+                        self.backend
+                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        timestamps,
+                    ),
                     Some((start, end)) => {
                         if end < start {
                             return Err(TimeSeriesError::InvalidParameter("end < start".into()));
                         }
                         let start_idx = timestamps.partition_point(|t| *t < start);
                         let end_idx = timestamps.partition_point(|t| *t < end);
-                        let data = self
-                            .backend
-                            .get_slice(&meta.data_hash, start_idx..end_idx)?;
+                        let data = self.backend.get_slice(
+                            &meta.data_hash,
+                            meta.element_type.physical_dtype(),
+                            start_idx..end_idx,
+                        )?;
                         (data, timestamps[start_idx..end_idx].to_vec())
                     }
                 };
@@ -1048,7 +1074,9 @@ impl Store {
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
             TimeSeriesType::Deterministic => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Deterministic")?;
                 let resolution = required_resolution(meta, "Deterministic")?;
                 let horizon = required_horizon(meta, "Deterministic")?;
@@ -1078,7 +1106,9 @@ impl Store {
             }
 
             TimeSeriesType::Probabilistic => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Probabilistic")?;
                 let resolution = required_resolution(meta, "Probabilistic")?;
                 let horizon = required_horizon(meta, "Probabilistic")?;
@@ -1113,7 +1143,9 @@ impl Store {
             }
 
             TimeSeriesType::Scenarios => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Scenarios")?;
                 let resolution = required_resolution(meta, "Scenarios")?;
                 let horizon = required_horizon(meta, "Scenarios")?;
@@ -1154,7 +1186,9 @@ impl Store {
                 // The stored array is the underlying STS 1-D-like array, shape
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "DeterministicSingleTimeSeries")?;
                 let resolution = required_resolution(meta, "DeterministicSingleTimeSeries")?;
                 let horizon = required_horizon(meta, "DeterministicSingleTimeSeries")?;
@@ -1312,7 +1346,9 @@ impl Store {
     ) -> Result<()> {
         let index = reader.index_at(at)?;
         for group in reader.groups_mut() {
-            group.fill(|hashes, out| self.backend.read_index_into(hashes, index, out))?;
+            group.fill(|hashes, dtype, out| {
+                self.backend.read_index_into(hashes, dtype, index, out)
+            })?;
         }
         reader.mark_read(at);
         Ok(())
@@ -1361,7 +1397,7 @@ impl Store {
         filter.time_series_type = Some(reported);
         let mut items = Vec::new();
         for m in self.list_time_series(filter)? {
-            let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
+            let shape = self.backend.array_shape(&m.data_hash)?;
             items.push((m, shape));
         }
         crate::reader::build_forecast_entries(reported, items)
@@ -1386,10 +1422,12 @@ impl Store {
         for slot in reader.slots_mut() {
             slot.read_window(
                 window,
-                |hash, count_axis, start, len, out| {
-                    backend.read_window_block_into(hash, count_axis, start, len, out)
+                |hash, dtype, count_axis, start, len, out| {
+                    backend.read_window_block_into(hash, dtype, count_axis, start, len, out)
                 },
-                |hash, start, len, out| backend.read_range_into(hash, start, len, out),
+                |hash, dtype, start, len, out| {
+                    backend.read_range_into(hash, dtype, start, len, out)
+                },
             )?;
         }
         reader.mark_read(at);
@@ -1415,12 +1453,15 @@ impl Store {
 
         // Batch the packed SingleTimeSeries reads; everything else is standalone
         // and reuses the per-key reconstruction.
-        let single_hashes: Vec<[u8; 32]> = metas
+        let (single_hashes, single_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas
             .iter()
             .filter(|m| m.time_series_type == TimeSeriesType::SingleTimeSeries)
-            .map(|m| m.data_hash)
-            .collect();
-        let mut single_arrays = self.backend.read_arrays(&single_hashes)?.into_iter();
+            .map(|m| (m.data_hash, m.element_type.physical_dtype()))
+            .unzip();
+        let mut single_arrays = self
+            .backend
+            .read_arrays(&single_hashes, &single_dtypes)?
+            .into_iter();
 
         let mut out = Vec::with_capacity(keys.len());
         for (meta, key) in metas.iter().zip(keys) {
@@ -1480,6 +1521,13 @@ impl Store {
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
     pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         self.metadata.get_by_key(key)
+    }
+
+    /// [`Self::get_metadata`] for many keys, in order. Errors with `NotFound` if
+    /// any key is missing. The companion to [`Self::bulk_read`] for callers that
+    /// need each series' metadata (its `element_type`, say) alongside the values.
+    pub fn get_metadata_bulk(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesMetadata>> {
+        keys.iter().map(|k| self.metadata.get_by_key(k)).collect()
     }
 
     /// Resolve a forecast addressed by attributes plus a requested
@@ -1581,8 +1629,14 @@ impl Store {
     /// Fetch the full stored array for a content hash. The metadata-owning
     /// binding resolves a key to its `data_hash`, then calls this to read the
     /// underlying values.
+    ///
+    /// How to decode the bytes comes from the catalog, not the array file: the
+    /// `element_type` of some association referencing `hash`. `NotFound` if no
+    /// association does — an array nothing points at cannot be typed, and so
+    /// cannot be read.
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray> {
-        self.backend.get_array(hash)
+        let element_type = self.metadata.element_type_for_hash(hash)?;
+        self.backend.get_array(hash, element_type.physical_dtype())
     }
 
     /// Where a content hash's array physically lives in the backing file.
@@ -2367,7 +2421,16 @@ impl Store {
     /// are expected states, not corruption — see
     /// `docs/src/reference/file-format.md`).
     pub fn verify_integrity(&self) -> Result<IntegrityReport> {
-        self.backend.verify()
+        let (referenced, mut errors) = self.metadata.referenced_arrays()?;
+        let arrays: Vec<([u8; 32], Dtype)> = referenced
+            .into_iter()
+            .map(|(hash, element_type)| (hash, element_type.physical_dtype()))
+            .collect();
+        let mut report = self.backend.verify(&arrays)?;
+        // Catalog-side problems lead: a row too malformed to name an array is
+        // why the array-side sweep skipped it.
+        errors.append(&mut report.errors);
+        Ok(IntegrityReport { errors })
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -2448,7 +2511,10 @@ impl Store {
                     .or_insert((layout, resolution));
             }
             for (hash, (layout, resolution)) in &plans {
-                let array = self.backend.get_array(hash)?;
+                let element_type = self.metadata.element_type_for_hash(hash)?;
+                let array = self
+                    .backend
+                    .get_array(hash, element_type.physical_dtype())?;
                 backend.put_array(hash, &array, *resolution, *layout)?;
             }
             backend.flush()?;
@@ -2495,6 +2561,7 @@ impl BulkAdd<'_> {
             data,
             features,
             units,
+            element_type: None,
             ext: None,
         })
     }
@@ -2569,6 +2636,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     // alike), which makes it the one place the reserved-feature-name rule has
     // to hold.
     validate_features(&item.features)?;
+    let element_type = resolve_element_type(item)?;
     let (hash, resolution, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
             let hash = array_hash(&single.data);
@@ -2593,7 +2661,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     features: item.features.clone(),
                     units: item.units.clone(),
                     percentiles: None,
-                    dtype: single.data.dtype,
+                    element_type,
                     element_shape: single.data.element_shape().to_vec(),
                     ext: item.ext.clone(),
                 },
@@ -2634,7 +2702,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     features: item.features.clone(),
                     units: item.units.clone(),
                     percentiles: None,
-                    dtype: non_sequential.data.dtype,
+                    element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
                     ext: item.ext.clone(),
                 },
@@ -2665,6 +2733,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 det.interval,
                 det.count,
                 &det.data,
+                element_type,
                 None,
             ),
             forecast_key(
@@ -2692,6 +2761,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 prob.interval,
                 prob.count,
                 &prob.data,
+                element_type,
                 Some(prob.percentiles.clone()),
             ),
             forecast_key(
@@ -2719,6 +2789,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 scen.interval,
                 scen.count,
                 &scen.data,
+                element_type,
                 None,
             ),
             forecast_key(
@@ -2816,6 +2887,7 @@ fn forecast_metadata(
     interval: Period,
     count: usize,
     data: &TypedArray,
+    element_type: ElementType,
     percentiles: Option<Vec<f64>>,
 ) -> TimeSeriesMetadata {
     TimeSeriesMetadata {
@@ -2835,10 +2907,22 @@ fn forecast_metadata(
         features: item.features.clone(),
         units: item.units.clone(),
         percentiles,
-        dtype: data.dtype,
+        element_type,
         element_shape: data.element_shape().to_vec(),
         ext: item.ext.clone(),
     }
+}
+
+/// The element type a request writes: the caller's declaration if it made one,
+/// else plain scalars of the array's own dtype. Validated against the array
+/// here so the store never persists a row that misdescribes its own bytes.
+fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
+    let array = request_array(item);
+    let Some(declared) = item.element_type else {
+        return Ok(ElementType::Scalar(array.dtype));
+    };
+    declared.validate_array(array, item.data.time_series_type().leading_dims())?;
+    Ok(declared)
 }
 
 /// Build the key returned for a dense forecast added via

@@ -475,6 +475,7 @@ function get_time_series(
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_single(
         store.handle::Ptr{Cvoid},
@@ -490,6 +491,7 @@ function get_time_series(
         out_data::Ref{Ptr{UInt8}},
         out_data_len::Ref{UInt64},
         out_ext::Ref{Ptr{Cchar}},
+        out_element_type::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
@@ -507,7 +509,10 @@ function get_time_series(
     initial = _from_unix_ms(out_initial[])
     resolution = _take_period(out_resolution[])
     ext = _take_cstr(out_ext[])
-    return SingleTimeSeries(initial, resolution, data, _key_name(key); ext=ext)
+    element_type = _take_cstr(out_element_type[])
+    return SingleTimeSeries(
+        initial, resolution, data, _key_name(key); ext=ext, element_type=element_type
+    )
 end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot.
@@ -728,6 +733,7 @@ function get_time_series(
     out_data_len = Ref{UInt64}(0)
     lt_buf = Vector{UInt8}(undef, 256)
     out_lt_len = Ref{UInt64}(0)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_non_sequential(
         store.handle::Ptr{Cvoid},
@@ -745,6 +751,7 @@ function get_time_series(
         lt_buf::Ptr{UInt8},
         UInt64(length(lt_buf))::UInt64,
         out_lt_len::Ref{UInt64},
+        out_element_type::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
@@ -766,6 +773,9 @@ function get_time_series(
     data = _decode_array(bytes, out_dtype[], dims)
     n = min(Int(out_lt_len[]), length(lt_buf))
     ext = n == 0 ? nothing : String(lt_buf[1:n])
+    element_type = _take_cstr(out_element_type[])
     name = _key_name(key)
-    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), data, name; ext=ext)
+    return NonSequentialTimeSeries(
+        _from_unix_ms.(timestamp_ms), data, name; ext=ext, element_type=element_type
+    )
 end

@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries three global attributes:
 
 ```text
-data_format_version = "0.12.0"
+data_format_version = "0.13.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 ```
@@ -47,8 +47,10 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.12.0` changed `owner_category` and `time_series_type` from TEXT names to small INTEGER codes —
-see [Discriminant encoding](#discriminant-encoding) below; `0.11.0` renamed the metadata column
+(`0.13.0` replaced the `dtype` column with `element_type`, which names the _logical_ element type
+and derives the physical dtype from it — see [Element types](./element-types.md); `0.12.0` changed
+`owner_category` and `time_series_type` from TEXT names to small INTEGER codes — see
+[Discriminant encoding](#discriminant-encoding) below; `0.11.0` renamed the metadata column
 `logical_type` to `ext` — an opaque, package-owned extension payload (typically JSON) the store
 stores verbatim and never interprets; `0.10.0` replaced the per-association `features` table with
 the content-addressed `feature_sets` table below, so a feature map is stored once and shared by
@@ -77,16 +79,32 @@ seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode arr
 Every stored array is a **`TypedArray`**: an element `dtype`, a `shape` `[length, k1, k2, …]` whose
 first axis is time and whose trailing axes are a fixed per-step element shape, and the raw
 row-major, little-endian element bytes. The supported dtypes and their stable integer codes (shared
-with the bindings and the C ABI):
+with the bindings and the C ABI). Codes 0–5 are the original set and never move; new widths are
+appended:
 
-| Code | dtype | Width | Code | dtype  | Width |
-| ---- | ----- | ----- | ---- | ------ | ----- |
-| 0    | `f64` | 8     | 3    | `i32`  | 4     |
-| 1    | `f32` | 4     | 4    | `u64`  | 8     |
-| 2    | `i64` | 8     | 5    | `bool` | 1     |
+| Code | dtype  | Width | Code | dtype | Width |
+| ---- | ------ | ----- | ---- | ----- | ----- |
+| 0    | `f64`  | 8     | 6    | `i16` | 2     |
+| 1    | `f32`  | 4     | 7    | `i8`  | 1     |
+| 2    | `i64`  | 8     | 8    | `u32` | 4     |
+| 3    | `i32`  | 4     | 9    | `u16` | 2     |
+| 4    | `u64`  | 8     | 10   | `u8`  | 1     |
+| 5    | `bool` | 1     |      |       |       |
 
 A scalar-per-step series has an empty element shape; a per-step tuple (e.g. the 3 coefficients of a
 quadratic cost curve) has element shape `[3]`.
+
+The _dtype_ says how wide an element is. What those elements **mean** — and how a ragged piecewise
+curve is packed into a fixed-width row — is the association's `element_type`; see
+[Element types](./element-types.md). The dtype above is derived from it.
+
+The HDF5 file does **not** describe its own element typing, and is not meant to: `bool` and `u8` are
+the same byte on disk, and nothing in a dataspace says whether three `f64`s are a quadratic curve or
+three independent samples. Every read takes the dtype from the catalog's `element_type` instead. The
+two artifacts are one logical store — an `.h5` without its `.sqlite` is not readable in any case —
+so this removes a second, weaker source of truth rather than adding a dependency. Where a backend
+does know a dtype independently (a packed dataset's name encodes it), the catalog's value is checked
+against it and a mismatch is an integrity error.
 
 ## HDF5 Layout
 
@@ -94,7 +112,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.12.0"
+├── attribute  data_format_version = "0.13.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -228,7 +246,7 @@ One row per association between an owner and a stored array.
 | `timestamps_json`   | TEXT    | JSON array of RFC 3339 timestamps (`NonSequentialTimeSeries`)            |
 | `units`             | TEXT    | Free-form units label                                                    |
 | `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else               |
-| `dtype`             | TEXT    | Element dtype string (`NOT NULL DEFAULT 'f64'`)                          |
+| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)                 |
 | `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                              |
 | `ext`               | TEXT    | Opaque package-owned extension payload (JSON), verbatim; `NULL` if unset |
 | `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable           |
@@ -405,7 +423,7 @@ SELECT id, owner_id, owner_type,
                              WHEN 5 THEN 'Scenarios'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name, initial_timestamp, resolution, length, horizon, interval, count,
-       units, dtype, element_shape, ext,
+       units, element_type, element_shape, ext,
        lower(hex(data_hash))     AS data_hash,
        lower(hex(features_hash)) AS features_hash
 FROM time_series_associations;
@@ -485,7 +503,7 @@ h5dump -A -n system.h5                   # root attributes and the object list
 sqlite3 system.h5.sqlite '.schema'
 # Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
-  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_readable;'
+  'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
 # Both association tables are absent in stores written before they existed.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'

@@ -163,7 +163,14 @@ impl CatalogStoreSvc for CatalogStoreService {
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339)?;
         let store = self.store.lock().await;
         let data = store.get_time_series(&key, time_range).map_err(map_err)?;
-        Ok(Response::new(time_series_data_to_get_resp(&data)))
+        // The element type lives on the association row, not in the values, so
+        // a second catalog lookup is what lets the response describe what its
+        // bytes mean.
+        let meta = store.get_metadata(&key).map_err(map_err)?;
+        Ok(Response::new(time_series_data_to_get_resp(
+            &data,
+            meta.element_type,
+        )))
     }
 
     async fn get_time_series_keys(
@@ -322,8 +329,13 @@ impl CatalogStoreSvc for CatalogStoreService {
         let refs: Vec<&KeyIdentity> = keys.iter().collect();
         let store = self.store.lock().await;
         let datas = store.bulk_read_range(&refs, time_range).map_err(map_err)?;
+        let metas = store.get_metadata_bulk(&refs).map_err(map_err)?;
         Ok(Response::new(BulkReadResp {
-            items: datas.iter().map(time_series_data_to_get_resp).collect(),
+            items: datas
+                .iter()
+                .zip(&metas)
+                .map(|(data, meta)| time_series_data_to_get_resp(data, meta.element_type))
+                .collect(),
         }))
     }
 

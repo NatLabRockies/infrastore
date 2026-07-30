@@ -117,7 +117,7 @@ series must share one grid (`initial_timestamp` + `length`), validated at build.
 ```python
 reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
-groups = reader.groups()           # each: {"dtype", "element_shape", "keys"}
+groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):

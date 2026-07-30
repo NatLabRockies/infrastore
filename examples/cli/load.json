@@ -4,7 +4,7 @@
   "owner_category": "component",
   "name": "load",
   "type": "single",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
   "has_header": true,

@@ -368,23 +368,36 @@ pub unsafe extern "C" fn infrastore_store_free(handle: *mut InfraStoreHandle) {
 
 // ---- add_single -----------------------------------------------------------
 
-/// Build a [`TypedArray`] from a dtype code, shape (`ndims` × `dims_ptr`), and
+/// Parse a null-terminated `element_type` string into an [`core_lib::ElementType`].
+/// Required on every write: it says both what the elements mean and, through
+/// [`core_lib::ElementType::physical_dtype`], how the bytes are encoded.
+unsafe fn cstr_to_element_type(
+    p: *const c_char,
+) -> std::result::Result<core_lib::ElementType, i32> {
+    let s = match unsafe { cstr_to_str(p) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("element_type is null or invalid UTF-8");
+            return Err(c);
+        }
+    };
+    s.parse::<core_lib::ElementType>().map_err(|e| {
+        set_error(e.to_string());
+        INFRASTORE_ERR_INVALID_PARAMETER
+    })
+}
+
+/// Build a [`TypedArray`] from an element type, shape (`ndims` × `dims_ptr`), and
 /// raw little-endian bytes. Returns an FFI error code on failure (and sets the
 /// thread-local error). The buffers are borrowed for the duration of the call.
 unsafe fn build_typed_array(
-    dtype_code: i32,
+    element_type: core_lib::ElementType,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
 ) -> std::result::Result<core_lib::TypedArray, i32> {
-    let dtype = match core_lib::Dtype::from_code(dtype_code) {
-        Some(d) => d,
-        None => {
-            set_error(format!("invalid dtype code {dtype_code}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
+    let dtype = element_type.physical_dtype();
     let dims: Vec<usize> = if ndims == 0 || dims_ptr.is_null() {
         Vec::new()
     } else {
@@ -415,7 +428,7 @@ unsafe fn build_single_request(
     name: *const c_char,
     initial_ts_unix_ms: i64,
     resolution: *const c_char,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -462,7 +475,9 @@ unsafe fn build_single_request(
         }
     };
     let resolution = unsafe { cstr_to_period(resolution)? };
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
 
     Ok(core_lib::AddRequest {
@@ -472,7 +487,7 @@ unsafe fn build_single_request(
         data: core_lib::TimeSeriesData::SingleTimeSeries(single),
         features,
         units,
-
+        element_type: Some(element_type),
         ext,
     })
 }
@@ -499,7 +514,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     name: *const c_char,
     initial_ts_unix_ms: i64,
     resolution: *const c_char,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -529,7 +544,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             name,
             initial_ts_unix_ms,
             resolution,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -566,7 +581,7 @@ unsafe fn build_non_sequential_request(
     name: *const c_char,
     timestamps_unix_ms: *const i64,
     timestamps_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -601,7 +616,9 @@ unsafe fn build_non_sequential_request(
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
         }
     };
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
     let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array, name) {
         Ok(series) => series,
         Err(error) => {
@@ -619,7 +636,7 @@ unsafe fn build_non_sequential_request(
         data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
         features,
         units,
-
+        element_type: Some(element_type),
         ext,
     })
 }
@@ -643,7 +660,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     name: *const c_char,
     timestamps_unix_ms: *const i64,
     timestamps_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -673,7 +690,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             name,
             timestamps_unix_ms,
             timestamps_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -718,15 +735,21 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 ///
 /// `out_ext`, when non-null, receives the association's opaque extension payload
 /// from the metadata row: null when the series carries no `ext`, otherwise an
-/// owned C string the caller must free with `infrastore_string_free`. Pass a
-/// null `out_ext` to skip the metadata lookup entirely.
+/// owned C string the caller must free with `infrastore_string_free`.
+///
+/// `out_element_type`, when non-null, receives the canonical `element_type`
+/// string (`"f64"`, `"tuple(3,f64)"`, `"piecewise_linear"`, ...) as an owned C
+/// string the caller must free the same way. It is what tells a caller how to
+/// read the returned bytes as domain values; `out_dtype` is only their physical
+/// width.
 ///
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_ext` must be valid for writing its indicated value; `out_ext` may be null. The returned
-/// shape and data buffers must each be released exactly once with the matching free function and
-/// returned length, and a non-null `*out_ext` exactly once with `infrastore_string_free`.
+/// `out_ext` and `out_element_type` must be valid for writing its indicated value; those two may
+/// be null. The returned shape and data buffers must each be released exactly once with the
+/// matching free function and returned length, and a non-null `*out_ext` / `*out_element_type`
+/// exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_single(
@@ -743,6 +766,7 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
     out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -810,6 +834,11 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     } else {
         meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
@@ -833,6 +862,9 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         if !out_ext.is_null() {
             *out_ext = ext_cstr;
         }
+        if !out_element_type.is_null() {
+            *out_element_type = element_type_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -845,10 +877,13 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 ///
 /// `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
 /// N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
-/// and `out_data` carry the row-major element bytes. `out_ext` is an optional opaque
-/// element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
-/// `ext_cap` bytes; the full length is reported in `out_ext_len` so the caller can
-/// probe with a null/zero-capacity buffer first.
+/// and `out_data` carry the row-major element bytes. `out_ext` is the association's opaque
+/// extension payload, copied into a caller-allocated buffer of `ext_cap` bytes; the full length is
+/// reported in `out_ext_len` so the caller can probe with a null/zero-capacity buffer first.
+///
+/// `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
+/// string the caller must free with `infrastore_string_free`. It is what says how to read the
+/// bytes as domain values.
 ///
 /// The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
 /// with `infrastore_buffer_free_i64`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8` respectively.
@@ -876,6 +911,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     out_ext: *mut c_char,
     ext_cap: u64,
     out_ext_len: *mut u64,
+    out_element_type: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
@@ -920,6 +956,11 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     // The extension payload lives on the metadata row, not on the reconstructed
     // series; the row came back with the data from the single catalog lookup.
     let ext = meta.ext.unwrap_or_default();
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
     let mut timestamps = match series
         .timestamps
         .iter()
@@ -956,6 +997,9 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
         write_str_out(&ext, out_ext, ext_cap, out_ext_len);
+        if !out_element_type.is_null() {
+            *out_element_type = element_type_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -2371,7 +2415,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     horizon: *const c_char,
     interval: *const c_char,
     count: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2399,7 +2443,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             horizon,
             interval,
             count,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2438,7 +2482,7 @@ unsafe fn build_forecast_request(
     horizon: *const c_char,
     interval: *const c_char,
     count: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2478,7 +2522,9 @@ unsafe fn build_forecast_request(
         }
     };
     let ext = unsafe { cstr_to_optional_string(ext) }?;
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let resolution = unsafe { cstr_to_period(resolution)? };
     let horizon = unsafe { cstr_to_period(horizon)? };
@@ -2535,7 +2581,7 @@ unsafe fn build_forecast_request(
         data,
         features,
         units,
-
+        element_type: Some(element_type),
         ext,
     })
 }
@@ -2565,7 +2611,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2594,7 +2640,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             count,
             percentiles_ptr,
             percentiles_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2634,7 +2680,7 @@ unsafe fn build_probabilistic_request(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2669,7 +2715,9 @@ unsafe fn build_probabilistic_request(
     let percentiles =
         unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
     let ext = unsafe { cstr_to_optional_string(ext) }?;
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let prob = match core_lib::Probabilistic::new(
         initial_timestamp,
@@ -2694,7 +2742,7 @@ unsafe fn build_probabilistic_request(
         data: core_lib::TimeSeriesData::Probabilistic(prob),
         features,
         units,
-
+        element_type: Some(element_type),
         ext,
     })
 }
@@ -2751,7 +2799,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     name: *const c_char,
     initial_ts_unix_ms: i64,
     resolution: *const c_char,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2776,7 +2824,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             name,
             initial_ts_unix_ms,
             resolution,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2814,7 +2862,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     name: *const c_char,
     timestamps_unix_ms: *const i64,
     timestamps_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2839,7 +2887,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             name,
             timestamps_unix_ms,
             timestamps_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2881,7 +2929,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     horizon: *const c_char,
     interval: *const c_char,
     count: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2910,7 +2958,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             horizon,
             interval,
             count,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2953,7 +3001,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2983,7 +3031,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             count,
             percentiles_ptr,
             percentiles_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -3682,6 +3730,9 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 /// - `out_ext` may be null (the metadata lookup is skipped); when non-null it
 ///   must be valid for writing one pointer, and a non-null `*out_ext` must be
 ///   freed exactly once with `infrastore_string_free`.
+/// - `out_element_type` follows the same rules and receives the canonical
+///   `element_type` string, which is how a caller reads the returned bytes as
+///   domain values (`out_dtype` gives only their physical width).
 /// - All returned heap buffers are invalidated after their matching free call
 ///   and must not be used afterwards.
 #[unsafe(no_mangle)]
@@ -3722,6 +3773,9 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     // with `infrastore_string_free`; null when unset). Pass null to skip the
     // metadata lookup.
     out_ext: *mut *mut c_char,
+    // optional: the canonical `element_type` string (owned C string, freed the
+    // same way).
+    out_element_type: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -3817,6 +3871,11 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     } else {
         meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
     let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
@@ -3840,9 +3899,16 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         if !out_ext.is_null() {
             unsafe { *out_ext = ext_cstr };
         }
-    } else if !ext_cstr.is_null() {
-        // Don't leak the ext string when the emit fails after the metadata fetch.
-        unsafe { drop(std::ffi::CString::from_raw(ext_cstr)) };
+        if !out_element_type.is_null() {
+            unsafe { *out_element_type = element_type_cstr };
+        }
+    } else {
+        // Don't leak the metadata strings when the emit fails after the fetch.
+        for owned in [ext_cstr, element_type_cstr] {
+            if !owned.is_null() {
+                unsafe { drop(std::ffi::CString::from_raw(owned)) };
+            }
+        }
     }
     code
 }
@@ -4027,6 +4093,9 @@ unsafe fn emit_forecast_data(
 /// - `out_ext` may be null (the metadata lookup is skipped); when non-null it
 ///   must be valid for writing one pointer, and a non-null `*out_ext` must be
 ///   freed exactly once with `infrastore_string_free`.
+/// - `out_element_type` follows the same rules and receives the canonical
+///   `element_type` string, which is how a caller reads the returned bytes as
+///   domain values (`out_dtype` gives only their physical width).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
@@ -4055,6 +4124,9 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     // with `infrastore_string_free`; null when unset). Pass null to skip the
     // metadata lookup.
     out_ext: *mut *mut c_char,
+    // optional: the canonical `element_type` string (owned C string, freed the
+    // same way).
+    out_element_type: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -4125,6 +4197,11 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     } else {
         meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
     let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
@@ -4148,9 +4225,16 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
         if !out_ext.is_null() {
             unsafe { *out_ext = ext_cstr };
         }
-    } else if !ext_cstr.is_null() {
-        // Don't leak the ext string when the emit fails after the metadata fetch.
-        unsafe { drop(std::ffi::CString::from_raw(ext_cstr)) };
+        if !out_element_type.is_null() {
+            unsafe { *out_element_type = element_type_cstr };
+        }
+    } else {
+        // Don't leak the metadata strings when the emit fails after the fetch.
+        for owned in [ext_cstr, element_type_cstr] {
+            if !owned.is_null() {
+                unsafe { drop(std::ffi::CString::from_raw(owned)) };
+            }
+        }
     }
     code
 }
@@ -4385,8 +4469,8 @@ fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> Strin
 }
 
 /// Full-metadata JSON object for one association row: the identity/descriptive
-/// key fields plus the physical-storage columns a key row omits (`data_hash`
-/// hex, `dtype`, `element_shape`, `percentiles`, `units`, `ext`).
+/// key fields plus the storage columns a key row omits (`data_hash` hex,
+/// `element_type`, `element_shape`, `percentiles`, `units`, `ext`).
 /// Periods are ISO-8601 strings; `initial_timestamp_ms` is Unix milliseconds.
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
     let iso = |p: Option<core_lib::Period>| -> Value {
@@ -4435,7 +4519,10 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
             None => Value::Null,
         },
     );
-    o.insert("dtype".into(), Value::from(m.dtype.as_str()));
+    o.insert(
+        "element_type".into(),
+        Value::from(m.element_type.to_string()),
+    );
     o.insert(
         "element_shape".into(),
         Value::Array(
@@ -7497,6 +7584,7 @@ mod reader_ffi_tests {
                     &mut data_ptr,
                     &mut data_len,
                     ptr::null_mut(),
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -7541,6 +7629,8 @@ mod abi_tests {
 
     const T0_MS: i64 = 1_700_000_000_000;
     const HOUR: &str = "PT1H";
+    /// The `element_type` a plain `f64` series is written with.
+    const F64_ET: &std::ffi::CStr = c"f64";
 
     /// `infrastore_last_error_message`'s current value.
     fn last_error() -> String {
@@ -7579,7 +7669,7 @@ mod abi_tests {
             store,
             owner,
             name,
-            core_lib::Dtype::F64.code(),
+            F64_ET.as_ptr(),
             &to_le(vals),
             vals.len(),
         );
@@ -7596,7 +7686,7 @@ mod abi_tests {
         store: *mut InfraStoreHandle,
         owner: i64,
         name: &str,
-        dtype: i32,
+        element_type: *const c_char,
         bytes: &[u8],
         length: usize,
     ) -> (i32, *mut InfraStoreKeyHandle) {
@@ -7614,7 +7704,7 @@ mod abi_tests {
                 name_c.as_ptr(),
                 T0_MS,
                 res.as_ptr(),
-                dtype,
+                element_type,
                 1,
                 dims.as_ptr(),
                 bytes.as_ptr(),
@@ -7787,6 +7877,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
                 ptr::null_mut(),
             )
         };
@@ -8083,7 +8174,7 @@ mod abi_tests {
                 bad_name.as_ptr() as *const c_char,
                 T0_MS,
                 res.as_ptr(),
-                core_lib::Dtype::F64.code(),
+                F64_ET.as_ptr(),
                 1,
                 dims.as_ptr(),
                 bytes.as_ptr(),
@@ -8141,7 +8232,7 @@ mod abi_tests {
                 name.as_ptr(),
                 T0_MS,
                 bad_res.as_ptr(),
-                core_lib::Dtype::F64.code(),
+                F64_ET.as_ptr(),
                 1,
                 dims.as_ptr(),
                 bytes.as_ptr(),
@@ -8158,9 +8249,16 @@ mod abi_tests {
     }
 
     #[test]
-    fn an_unknown_dtype_code_is_an_invalid_parameter() {
+    fn an_unknown_element_type_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
-        let (rc, key) = abi_try_add(store, 1, "load", 99, &to_le(&[1.0, 2.0]), 2);
+        let (rc, key) = abi_try_add(
+            store,
+            1,
+            "load",
+            c"float64".as_ptr(),
+            &to_le(&[1.0, 2.0]),
+            2,
+        );
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
         assert!(key.is_null());
         assert!(!last_error().is_empty());
@@ -8171,14 +8269,7 @@ mod abi_tests {
     fn a_byte_length_that_contradicts_the_shape_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
         // Shape says 4 elements, only 2 f64s of bytes are supplied.
-        let (rc, key) = abi_try_add(
-            store,
-            1,
-            "load",
-            core_lib::Dtype::F64.code(),
-            &to_le(&[1.0, 2.0]),
-            4,
-        );
+        let (rc, key) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 4);
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
         assert!(key.is_null());
         unsafe { infrastore_store_free(store) };
@@ -8235,14 +8326,7 @@ mod abi_tests {
         assert!(!last_error().is_empty());
 
         // DUPLICATE: add the same identity twice.
-        let (rc, dup) = abi_try_add(
-            store,
-            1,
-            "load",
-            core_lib::Dtype::F64.code(),
-            &to_le(&[1.0, 2.0]),
-            2,
-        );
+        let (rc, dup) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_ERR_DUPLICATE);
         assert!(dup.is_null());
 
@@ -8258,14 +8342,7 @@ mod abi_tests {
             unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut ro) },
             INFRASTORE_OK
         );
-        let (rc, k) = abi_try_add(
-            ro,
-            2,
-            "new",
-            core_lib::Dtype::F64.code(),
-            &to_le(&[1.0, 2.0]),
-            2,
-        );
+        let (rc, k) = abi_try_add(ro, 2, "new", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_ERR_READ_ONLY);
         assert!(k.is_null());
         assert_eq!(
@@ -8325,6 +8402,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
                 ptr::null_mut(),
             )
         };
@@ -8468,7 +8546,7 @@ mod abi_tests {
                     name.as_ptr(),
                     T0_MS,
                     res.as_ptr(),
-                    core_lib::Dtype::F64.code(),
+                    F64_ET.as_ptr(),
                     3,
                     dims.as_ptr(),
                     bytes.as_ptr(),
@@ -8698,12 +8776,13 @@ mod abi_tests {
             .unwrap();
     }
 
-    // ---- Dtype codes -------------------------------------------------------
+    // ---- Element types -----------------------------------------------------
 
     #[test]
-    fn every_dtype_code_round_trips_through_get_single() {
-        // Only F64 (0) and I64 (2) were asserted before. The codes are the ABI
-        // contract each binding maps to its own element type.
+    fn every_scalar_element_type_round_trips_through_get_single() {
+        // The write side names the element type; the read side still reports the
+        // physical dtype code, and both are the ABI contract each binding maps to
+        // its own element type.
         assert_eq!(
             [
                 core_lib::Dtype::F64.code(),
@@ -8739,17 +8818,19 @@ mod abi_tests {
             .collect();
         let f64_bytes = to_le(&[1.0, 2.0, 3.0]);
 
-        let cases: Vec<(&str, i32, Vec<u8>)> = vec![
-            ("f64", 0, f64_bytes),
-            ("f32", 1, f32_bytes),
-            ("i64", 2, i64_bytes),
-            ("i32", 3, i32_bytes),
-            ("u64", 4, u64_bytes),
-            ("bool", 5, bool_bytes),
+        // (element_type name, expected dtype code on read, raw little-endian bytes)
+        let cases: Vec<(&std::ffi::CStr, i32, Vec<u8>)> = vec![
+            (c"f64", 0, f64_bytes),
+            (c"f32", 1, f32_bytes),
+            (c"i64", 2, i64_bytes),
+            (c"i32", 3, i32_bytes),
+            (c"u64", 4, u64_bytes),
+            (c"bool", 5, bool_bytes),
         ];
 
-        for (i, (name, code, bytes)) in cases.iter().enumerate() {
-            let (rc, key) = abi_try_add(store, i as i64 + 1, name, *code, bytes, 3);
+        for (i, (element_type, code, bytes)) in cases.iter().enumerate() {
+            let name = element_type.to_str().unwrap();
+            let (rc, key) = abi_try_add(store, i as i64 + 1, name, element_type.as_ptr(), bytes, 3);
             assert_eq!(rc, INFRASTORE_OK, "adding {name}: {}", last_error());
             unsafe { infrastore_key_free(key) };
 

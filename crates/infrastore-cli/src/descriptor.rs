@@ -27,7 +27,10 @@ pub struct Descriptor {
     pub name: String,
     #[serde(rename = "type")]
     pub ts_type: String,
-    pub dtype: String,
+    /// Canonical `element_type` string: a dtype spelling (`f64`, `i64`, ...)
+    /// for plain numbers, else `tuple(N,dtype)` or a function-data kind. The
+    /// physical dtype the CSV cells are parsed as is derived from it.
+    pub element_type: String,
     pub units: Option<String>,
     /// Opaque, package-owned extension payload stored verbatim on the metadata row.
     pub ext: Option<String>,
@@ -216,7 +219,8 @@ impl Descriptor {
         base_dir: Option<&Path>,
         override_csv: Option<&Path>,
     ) -> Result<AddRequest, String> {
-        let dtype = parse::parse_dtype(&self.dtype)?;
+        let element_type = parse::parse_element_type(&self.element_type)?;
+        let dtype = element_type.physical_dtype();
         let ts_type = parse::parse_ts_type(&self.ts_type)?;
         let owner_category = parse::parse_owner_category(&self.owner_category)?;
         let per_step: usize = self.element_shape.iter().product::<usize>().max(1);
@@ -233,6 +237,7 @@ impl Descriptor {
             data,
             features: self.features()?,
             units: self.units.clone(),
+            element_type: Some(element_type),
             ext: self.ext.clone(),
         })
     }

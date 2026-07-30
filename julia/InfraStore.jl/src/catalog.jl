@@ -203,7 +203,7 @@ function _decode_metadata(r::AbstractDict)
         _row_int(r["count"]),
         _row_int(r["length"]),
         percentiles === nothing ? nothing : Vector{Float64}(percentiles),
-        _dtype_for_name(r["dtype"]),
+        String(r["element_type"]),
         Tuple(Int(d) for d in r["element_shape"]),
         Dict{String, Any}(r["features"]),
         r["units"] === nothing ? nothing : String(r["units"]),

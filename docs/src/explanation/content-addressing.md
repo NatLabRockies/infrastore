@@ -9,8 +9,8 @@ the mechanism that lets many [keys](./data-model.md#keys) share one underlying a
 `array_hash` produces a deterministic 32-byte digest from a
 [`TypedArray`](./data-model.md#typed-n-dimensional-arrays). The hashed byte stream is, in order:
 
-1. A **dtype tag**: the dtype name (`f64`, `f32`, `i64`, `i32`, `u64`, `bool`) followed by a NUL
-   byte.
+1. A **dtype tag**: the dtype name (`f64`, `f32`, `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u16`,
+   `u8`, `bool`) followed by a NUL byte.
 2. The **shape**: the rank as a little-endian `u64`, then each dimension as a little-endian `u64`.
 3. The **elements** in row-major order. Float dtypes canonicalize `NaN` to a single quiet-`NaN` bit
    pattern before hashing; integer and `bool` bytes are hashed verbatim.

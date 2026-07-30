@@ -43,7 +43,7 @@ def test_add_ext_and_get_metadata():
     meta = store.get_metadata(key)
     assert meta["units"] == "MW"
     assert meta["ext"] == "Profile"
-    assert meta["dtype"] == "f64"
+    assert meta["element_type"] == "f64"
     assert meta["element_shape"] == []
     assert meta["initial_timestamp"] is not None
 
@@ -126,6 +126,7 @@ def test_static_reader():
     groups = reader.groups()
     assert len(groups) == 1
     assert groups[0]["dtype"] == "f64"
+    assert groups[0]["element_type"] == "f64"
 
     stamps = reader.timestamps()
     assert len(stamps) == 4
@@ -190,7 +191,7 @@ def test_list_time_series_new_fields_and_interval_filter():
     assert len(rows) == 1
     row = rows[0]
     for field in ("initial_timestamp", "horizon", "interval", "count",
-                  "percentiles", "dtype", "element_shape", "ext"):
+                  "percentiles", "element_type", "element_shape", "ext"):
         assert field in row
     assert row["interval"] == "PT1H"
     # No forecast at a different interval.

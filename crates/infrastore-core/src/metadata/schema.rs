@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     timestamps_json   TEXT,
     units             TEXT,
     percentiles_json  TEXT,
-    dtype             TEXT    NOT NULL DEFAULT 'f64',
+    -- The logical element type in its canonical string form (`ElementType`):
+    -- a dtype spelling for plain scalars, else `tuple(N,dtype)` or one of the
+    -- function-data kinds. It supersedes the physical `dtype` column: the dtype
+    -- of the stored bytes is derived from it.
+    element_type      TEXT    NOT NULL DEFAULT 'f64',
     element_shape     TEXT,
     ext      TEXT,
     -- Content-address hashes are grouped at the end of the row. Column order is
@@ -272,7 +276,7 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, dtype, element_shape, ext,
+       units, element_type, element_shape, ext,
        lower(hex(data_hash))     AS data_hash,
        lower(hex(features_hash)) AS features_hash
 FROM time_series_associations;

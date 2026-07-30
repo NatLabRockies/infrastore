@@ -135,7 +135,7 @@ fn descriptor_json(overrides: &[(&str, &str)]) -> String {
         ("owner_type".into(), "\"Generator\"".into()),
         ("name".into(), "\"load\"".into()),
         ("type".into(), "\"single\"".into()),
-        ("dtype".into(), "\"f64\"".into()),
+        ("element_type".into(), "\"f64\"".into()),
         ("csv".into(), "\"data.csv\"".into()),
         ("has_header".into(), "false".into()),
         (
@@ -229,7 +229,8 @@ fn a_non_integer_cell_in_an_i64_column_is_rejected() {
     // An empty line is skipped by the CSV reader before it reaches the parser,
     // so it is not in this list — it shortens the series instead.
     for bad in ["abc", "1.5", "0x10", "1e3", "２"] {
-        let (_dir, store, descriptor) = fixture(&format!("1\n{bad}\n3\n"), &[("dtype", "\"i64\"")]);
+        let (_dir, store, descriptor) =
+            fixture(&format!("1\n{bad}\n3\n"), &[("element_type", "\"i64\"")]);
         let stderr = add_err(&store, &descriptor);
         assert!(
             stderr.contains("i64"),
@@ -240,7 +241,7 @@ fn a_non_integer_cell_in_an_i64_column_is_rejected() {
 
 #[test]
 fn a_negative_value_in_a_u64_column_is_rejected() {
-    let (_dir, store, descriptor) = fixture("1\n-2\n3\n", &[("dtype", "\"u64\"")]);
+    let (_dir, store, descriptor) = fixture("1\n-2\n3\n", &[("element_type", "\"u64\"")]);
     let stderr = add_err(&store, &descriptor);
     assert!(
         stderr.contains("u64") && stderr.contains("-2"),
@@ -251,14 +252,15 @@ fn a_negative_value_in_a_u64_column_is_rejected() {
 #[test]
 fn an_out_of_range_integer_is_rejected() {
     // i32 cannot hold 3_000_000_000.
-    let (_dir, store, descriptor) = fixture("1\n3000000000\n3\n", &[("dtype", "\"i32\"")]);
+    let (_dir, store, descriptor) = fixture("1\n3000000000\n3\n", &[("element_type", "\"i32\"")]);
     let stderr = add_err(&store, &descriptor);
     assert!(stderr.contains("i32"), "got: {stderr}");
 }
 
 #[test]
 fn a_non_boolean_cell_in_a_bool_column_is_rejected() {
-    let (_dir, store, descriptor) = fixture("true\nmaybe\nfalse\n", &[("dtype", "\"bool\"")]);
+    let (_dir, store, descriptor) =
+        fixture("true\nmaybe\nfalse\n", &[("element_type", "\"bool\"")]);
     let stderr = add_err(&store, &descriptor);
     assert!(
         stderr.contains("true/false") || stderr.contains("maybe"),
@@ -269,11 +271,11 @@ fn a_non_boolean_cell_in_a_bool_column_is_rejected() {
 #[test]
 fn accepted_boolean_spellings_round_trip() {
     // The complement of the case above: `1`/`0` and mixed case are accepted.
-    let (dir, store, _) = fixture("TRUE\n0\nFalse\n1\n", &[("dtype", "\"bool\"")]);
+    let (dir, store, _) = fixture("TRUE\n0\nFalse\n1\n", &[("element_type", "\"bool\"")]);
     let descriptor = write(
         dir.path(),
         "d.json",
-        &descriptor_json(&[("dtype", "\"bool\"")]),
+        &descriptor_json(&[("element_type", "\"bool\"")]),
     );
     add_ok(&store, &descriptor);
     let out = run(
@@ -680,7 +682,7 @@ fn an_unknown_type_or_dtype_is_rejected() {
     let stderr = add_err(&store, &descriptor);
     assert!(stderr.contains("quantum"), "got: {stderr}");
 
-    let (_dir, store, descriptor) = fixture("1.0\n2.0\n", &[("dtype", "\"f16\"")]);
+    let (_dir, store, descriptor) = fixture("1.0\n2.0\n", &[("element_type", "\"f16\"")]);
     let stderr = add_err(&store, &descriptor);
     assert!(stderr.contains("f16"), "got: {stderr}");
 
@@ -1090,7 +1092,10 @@ fn template_prints_a_usable_descriptor_for_every_type() {
             Some(ts_type),
             "{ts_type}: template's type field"
         );
-        assert!(value.get("dtype").is_some(), "{ts_type}: dtype");
+        assert!(
+            value.get("element_type").is_some(),
+            "{ts_type}: element_type"
+        );
     }
 
     // DST has no descriptor form.
@@ -1362,7 +1367,7 @@ fn export_then_add_reproduces_a_non_f64_dtype() {
     let descriptor = write(
         dir.path(),
         "i.json",
-        &descriptor_json(&[("csv", "\"i.csv\""), ("dtype", "\"i64\"")]),
+        &descriptor_json(&[("csv", "\"i.csv\""), ("element_type", "\"i64\"")]),
     );
     add_ok(&store, &descriptor);
 
@@ -1382,7 +1387,7 @@ fn export_then_add_reproduces_a_non_f64_dtype() {
         "re.json",
         &descriptor_json(&[
             ("csv", "\"values.csv\""),
-            ("dtype", "\"i64\""),
+            ("element_type", "\"i64\""),
             ("has_header", "true"),
         ]),
     );
@@ -1818,11 +1823,13 @@ fn verify_exits_one_on_a_corrupt_store() {
 }
 
 #[test]
-fn verify_of_a_store_whose_catalog_was_corrupted_still_exits_zero() {
-    // FINDING F3 (TEST_COVERAGE_PLAN.md §9): `verify_integrity` inspects only the
-    // HDF5 half, so a `data_hash` corrupted in the SQLite catalog is invisible
-    // to `infrastore verify` even though every read of that key now fails. Pinned here
-    // at the CLI level because that is where a user would look.
+fn verify_catches_a_catalog_that_points_at_a_missing_array() {
+    // This was FINDING F3 (TEST_COVERAGE_PLAN.md §9): `verify_integrity` used to
+    // inspect only the HDF5 half, so a `data_hash` corrupted in the SQLite
+    // catalog was invisible even though every read of that key failed. Verify is
+    // now driven from the catalog — the only place an array's element typing is
+    // recorded — so the dangling reference is reported. Pinned at the CLI level
+    // because that is where a user would look.
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
@@ -1830,10 +1837,12 @@ fn verify_of_a_store_whose_catalog_was_corrupted_still_exits_zero() {
     let mut sqlite = store.clone().into_os_string();
     sqlite.push(".sqlite");
     let conn = rusqlite::Connection::open(PathBuf::from(sqlite)).unwrap();
+    // A well-formed hash that names no stored array: the catalog points into
+    // the void.
     let n = conn
         .execute(
             "UPDATE time_series_associations SET data_hash = ?1",
-            [&"0".repeat(64)],
+            rusqlite::params![[0u8; 32].as_slice()],
         )
         .unwrap();
     assert_eq!(n, 1);
@@ -1841,11 +1850,51 @@ fn verify_of_a_store_whose_catalog_was_corrupted_still_exits_zero() {
 
     assert_eq!(
         exit_code(&store, &["verify"]),
-        0,
-        "PIN: a catalog-side corruption is invisible to `infrastore verify`"
+        1,
+        "a catalog pointing at an array the file does not hold is corruption"
     );
-    // But the read genuinely fails, which is what verify failed to surface.
+    let (stdout, _) = run_fail(&store, &["-f", "json", "verify"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = parsed.get("errors").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(errors.len(), 1, "got: {stdout}");
+    let message = errors[0].as_str().unwrap();
+    assert!(message.contains("dangling reference"), "got: {stdout}");
+    // The diagnostic names the array, so a reader can go and look for it.
+    assert!(message.contains(&"0".repeat(64)), "got: {stdout}");
+
+    // The read fails too, which is what verify used to leave unsurfaced.
     run_err(&store, &["get", "--owner-id", "42", "--name", "load"]);
+}
+
+#[test]
+fn verify_reports_a_catalog_row_too_malformed_to_name_an_array() {
+    // A `data_hash` that is not 32 bytes names nothing, so the array-side sweep
+    // cannot even look for it. Verify must say so rather than abort — one
+    // unusable row must not hide the rest of the store's problems.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    seed(dir.path(), &store);
+
+    let mut sqlite = store.clone().into_os_string();
+    sqlite.push(".sqlite");
+    let conn = rusqlite::Connection::open(PathBuf::from(sqlite)).unwrap();
+    conn.execute(
+        "UPDATE time_series_associations SET data_hash = ?1",
+        [&"0".repeat(64)],
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(exit_code(&store, &["verify"]), 1);
+    let (stdout, _) = run_fail(&store, &["-f", "json", "verify"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = parsed.get("errors").and_then(|v| v.as_array()).unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("malformed catalog row")),
+        "got: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------

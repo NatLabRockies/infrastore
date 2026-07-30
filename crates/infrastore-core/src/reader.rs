@@ -38,6 +38,7 @@ use chrono::{DateTime, Utc};
 use crate::error::{Result, TimeSeriesError};
 use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
+use crate::types::element_type::ElementType;
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
 use crate::types::period::Period;
@@ -63,7 +64,7 @@ pub struct StaticReader {
 /// `j` corresponds to `keys()[j]`.
 #[derive(Debug)]
 pub struct StaticGroup {
-    dtype: Dtype,
+    element_type: ElementType,
     element_shape: Vec<usize>,
     /// Identity of each column, in buffer order. Returned once; stable for the
     /// reader's lifetime.
@@ -77,8 +78,15 @@ pub struct StaticGroup {
 }
 
 impl StaticGroup {
+    /// Physical dtype of the group's bytes, derived from [`Self::element_type`].
     pub fn dtype(&self) -> Dtype {
-        self.dtype
+        self.element_type.physical_dtype()
+    }
+
+    /// What the group's elements mean. Columns are grouped by this *and*
+    /// [`Self::element_shape`], so one group is uniform in both.
+    pub fn element_type(&self) -> ElementType {
+        self.element_type
     }
 
     /// Per-step element shape (trailing dims after the column axis); empty =
@@ -108,10 +116,10 @@ impl StaticGroup {
     /// buffer alignment; use [`Self::values`] for the zero-copy byte view. Empty
     /// until [`Store::static_read`] has run at least once.
     pub fn values_to_vec<T: Element>(&self) -> Result<Vec<T>> {
-        if self.dtype != T::DTYPE {
+        if self.dtype() != T::DTYPE {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "group dtype is {}, requested {}",
-                self.dtype.as_str(),
+                self.dtype().as_str(),
                 T::DTYPE.as_str()
             )));
         }
@@ -128,14 +136,17 @@ impl StaticGroup {
     }
 
     /// Drive a backend read into this group's reusable buffer. The closure
-    /// receives the column hashes (in key order) and the output buffer to fill;
-    /// splitting the borrow across the two fields lets the backend read hashes
-    /// and write the buffer of the *same* group without aliasing.
+    /// receives the column hashes (in key order), the dtype they share, and the
+    /// output buffer to fill; splitting the borrow across the fields lets the
+    /// backend read hashes and write the buffer of the *same* group without
+    /// aliasing. The group carries the dtype because a backend no longer infers
+    /// one — it comes from the catalog, via the group's `element_type`.
     pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
     where
-        F: FnOnce(&[[u8; 32]], &mut Vec<u8>) -> Result<()>,
+        F: FnOnce(&[[u8; 32]], Dtype, &mut Vec<u8>) -> Result<()>,
     {
-        read(&self.hashes, &mut self.buf)?;
+        let dtype = self.element_type.physical_dtype();
+        read(&self.hashes, dtype, &mut self.buf)?;
         self.filled = true;
         Ok(())
     }
@@ -306,26 +317,28 @@ pub(crate) fn build_groups(
     }
     let (initial, resolution, length) = grid;
 
-    // Deterministic layout: order by dtype, then element shape, then key
-    // identity, so column positions are stable across processes.
+    // Deterministic layout: order by element type, then element shape, then key
+    // identity, so column positions are stable across processes. Grouping on the
+    // logical element type rather than the physical dtype keeps a group uniform
+    // in meaning as well as in bytes — a quadratic-cost column never shares a
+    // group with a plain 3-tuple column that happens to have the same layout.
     rows.sort_by(|a, b| {
-        a.dtype
-            .code()
-            .cmp(&b.dtype.code())
+        a.element_type
+            .cmp(&b.element_type)
             .then_with(|| a.element_shape.cmp(&b.element_shape))
             .then_with(|| identity_sort_key(a).cmp(&identity_sort_key(b)))
     });
 
     let mut groups: Vec<StaticGroup> = Vec::new();
     for r in rows {
-        let want = (r.dtype, r.element_shape.as_slice());
+        let want = (r.element_type, r.element_shape.as_slice());
         let push_new = groups
             .last()
-            .map(|g| (g.dtype, g.element_shape.as_slice()) != want)
+            .map(|g| (g.element_type, g.element_shape.as_slice()) != want)
             .unwrap_or(true);
         if push_new {
             groups.push(StaticGroup {
-                dtype: r.dtype,
+                element_type: r.element_type,
                 element_shape: r.element_shape.clone(),
                 keys: Vec::new(),
                 hashes: Vec::new(),
@@ -340,7 +353,7 @@ pub(crate) fn build_groups(
 
     // Pre-size each reuse buffer so the read loop never reallocates.
     for g in &mut groups {
-        let bytes = g.num_columns() * g.elements_per_column() * g.dtype.size();
+        let bytes = g.num_columns() * g.elements_per_column() * g.dtype().size();
         g.buf = vec![0u8; bytes];
         g.buf.clear();
     }
@@ -436,7 +449,7 @@ pub(crate) enum WindowRead {
 #[derive(Debug)]
 pub struct WindowSlot {
     hash: [u8; 32],
-    dtype: Dtype,
+    element_type: ElementType,
     /// Shape of a single window.
     window_shape: Vec<usize>,
     /// How to read this slot's window from storage.
@@ -458,8 +471,14 @@ pub struct WindowSlot {
 }
 
 impl WindowSlot {
+    /// Physical dtype of the window bytes, derived from [`Self::element_type`].
     pub fn dtype(&self) -> Dtype {
-        self.dtype
+        self.element_type.physical_dtype()
+    }
+
+    /// What the window's elements mean.
+    pub fn element_type(&self) -> ElementType {
+        self.element_type
     }
 
     pub fn window_shape(&self) -> &[usize] {
@@ -477,10 +496,10 @@ impl WindowSlot {
     /// slot's dtype). Copy-based, so alignment-safe; use [`Self::window`] for the
     /// zero-copy byte view. Empty until [`Store::forecast_read`] has run.
     pub fn window_to_vec<T: Element>(&self) -> Result<Vec<T>> {
-        if self.dtype != T::DTYPE {
+        if self.dtype() != T::DTYPE {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "slot dtype is {}, requested {}",
-                self.dtype.as_str(),
+                self.dtype().as_str(),
                 T::DTYPE.as_str()
             )));
         }
@@ -505,16 +524,26 @@ impl WindowSlot {
         read_range: FRange,
     ) -> Result<()>
     where
-        FBlock: FnOnce(&[u8; 32], usize, usize, usize, &mut Vec<u8>) -> Result<()>,
-        FRange: FnOnce(&[u8; 32], usize, usize, &mut Vec<u8>) -> Result<()>,
+        FBlock: FnOnce(&[u8; 32], Dtype, usize, usize, usize, &mut Vec<u8>) -> Result<()>,
+        FRange: FnOnce(&[u8; 32], Dtype, usize, usize, &mut Vec<u8>) -> Result<()>,
     {
+        // The slot's element type comes from the catalog; the backend is told
+        // the dtype rather than inferring one from what it stored.
+        let dtype = self.element_type.physical_dtype();
         match self.read {
             WindowRead::Dense { count_axis } => {
                 let cols = self.block_cols.max(1);
                 let start = (window / cols) * cols;
                 let end = (start + cols).min(self.count);
                 if self.cached.as_ref() != Some(&(start..end)) {
-                    read_block(&self.hash, count_axis, start, end - start, &mut self.block)?;
+                    read_block(
+                        &self.hash,
+                        dtype,
+                        count_axis,
+                        start,
+                        end - start,
+                        &mut self.block,
+                    )?;
                     self.cached = Some(start..end);
                 }
                 gather_window(
@@ -523,7 +552,7 @@ impl WindowSlot {
                     count_axis,
                     end - start,
                     window - start,
-                    self.dtype.size(),
+                    self.dtype().size(),
                     &mut self.buf,
                 );
             }
@@ -532,7 +561,7 @@ impl WindowSlot {
                 horizon_steps,
             } => {
                 let start = window * interval_steps;
-                read_range(&self.hash, start, horizon_steps, &mut self.buf)?;
+                read_range(&self.hash, dtype, start, horizon_steps, &mut self.buf)?;
             }
         }
         self.filled = true;
@@ -847,19 +876,22 @@ pub(crate) fn build_forecast_entries(
         // Validate every row's layout, even ones that land on an existing slot.
         let (window_shape, read) = entry_layout(&m, &shape, count)?;
         let slot = *slot_of.entry((m.data_hash, read)).or_insert_with(|| {
-            let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
+            let bytes = window_shape.iter().product::<usize>().max(1)
+                * m.element_type.physical_dtype().size();
             let mut buf = vec![0u8; bytes];
             buf.clear();
             // Block-cache the dense path at the storage chunk width so a window
             // sweep decompresses each chunk once; the derived path reads a
             // contiguous run per window and is not block-cached.
             let block_cols = match read {
-                WindowRead::Dense { count_axis } => window_block_cols(m.dtype, &shape, count_axis),
+                WindowRead::Dense { count_axis } => {
+                    window_block_cols(m.element_type.physical_dtype(), &shape, count_axis)
+                }
                 WindowRead::Derived { .. } => 1,
             };
             slots.push(WindowSlot {
                 hash: m.data_hash,
-                dtype: m.dtype,
+                element_type: m.element_type,
                 window_shape: window_shape.clone(),
                 read,
                 count,
@@ -1284,7 +1316,7 @@ mod tests {
         // Model array value[hi][k] = k*10 + hi (native `[H, count]` row-major).
         let mut slot = WindowSlot {
             hash: [0u8; 32],
-            dtype: Dtype::F64,
+            element_type: ElementType::Scalar(Dtype::F64),
             window_shape: vec![h], // count axis removed
             read: WindowRead::Dense { count_axis: 1 },
             count,
@@ -1296,12 +1328,14 @@ mod tests {
         };
         let reads = Cell::new(0usize);
         let range_unused =
-            |_: &[u8; 32], _: usize, _: usize, _: &mut Vec<u8>| -> Result<()> { unreachable!() };
+            |_: &[u8; 32], _: Dtype, _: usize, _: usize, _: &mut Vec<u8>| -> Result<()> {
+                unreachable!()
+            };
 
         for k in 0..count {
             slot.read_window(
                 k,
-                |_hash, _axis, start, len, out| {
+                |_hash, _dtype, _axis, start, len, out| {
                     reads.set(reads.get() + 1);
                     out.clear();
                     // Emit the `[H, len]` block in native row-major order.
@@ -1326,7 +1360,7 @@ mod tests {
         // Re-reading a window inside the currently cached block does no I/O.
         slot.read_window(
             count - 1,
-            |_, _, _, _, _| -> Result<()> { panic!("cached block must not re-read") },
+            |_, _, _, _, _, _| -> Result<()> { panic!("cached block must not re-read") },
             range_unused,
         )
         .unwrap();
@@ -1513,7 +1547,12 @@ mod tests {
                 Dtype::F32 => bytes.extend_from_slice(&(v as f32).to_le_bytes()),
                 Dtype::I64 => bytes.extend_from_slice(&(v as i64).to_le_bytes()),
                 Dtype::I32 => bytes.extend_from_slice(&(v as i32).to_le_bytes()),
+                Dtype::I16 => bytes.extend_from_slice(&(v as i16).to_le_bytes()),
+                Dtype::I8 => bytes.extend_from_slice(&(v as i8).to_le_bytes()),
                 Dtype::U64 => bytes.extend_from_slice(&(v as u64).to_le_bytes()),
+                Dtype::U32 => bytes.extend_from_slice(&(v as u32).to_le_bytes()),
+                Dtype::U16 => bytes.extend_from_slice(&(v as u16).to_le_bytes()),
+                Dtype::U8 => bytes.extend_from_slice(&(v as u8).to_le_bytes()),
                 Dtype::Bool => bytes.push(if v != 0.0 { 1 } else { 0 }),
             }
         }

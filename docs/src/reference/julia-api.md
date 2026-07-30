@@ -155,8 +155,11 @@ end
 domain object on read; the store stores it verbatim and never interprets it. `add_time_series!`
 reads `name` off the object (it is not a call argument), so the same array can be stored under
 different names; its `ext=` keyword defaults to the object's `ext`. `data` keeps its Julia element
-type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, `Int64`, `Int32`, `UInt64`,
-`Bool`) and converts to row-major bytes on the way down.
+type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, the signed and unsigned integer
+widths, `Bool`) and converts to row-major bytes on the way down. An `element_type=` keyword declares
+what the elements _mean_ when they are not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, …
+— see [Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
+`nothing` for plain scalars.
 
 ## Result Types
 
@@ -166,9 +169,10 @@ immutable, compares and hashes by value (so results can go straight into a `Set`
 series type are `nothing`.
 
 Two conventions hold across every one of them: a `time_series_type` field holds the **Julia type**
-(`SingleTimeSeries`, `Deterministic`, …), ready to pass to `get_time_series`, and a `dtype` field
-holds the **Julia element type** (`Float64`, `Bool`, …). An `owner_category` field is an
-`OwnerCategory`, never a string.
+(`SingleTimeSeries`, `Deterministic`, …), ready to pass to `get_time_series`, and a reader group's
+`dtype` field holds the **Julia element type** (`Float64`, `Bool`, …). Metadata instead carries the
+store's canonical `element_type` **string**, which names both the meaning and (through it) the
+dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
 ```julia
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
@@ -185,7 +189,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     count             :: Union{Nothing,Int}        # forecasts
     length            :: Union{Nothing,Int}        # static series
     percentiles       :: Union{Nothing,Vector{Float64}}   # Probabilistic
-    dtype             :: Type
+    element_type      :: String              # "f64", "tuple(3,f64)", "piecewise_linear", …
     element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
     features          :: Dict{String,Any}
     units             :: Union{Nothing,String}
@@ -325,9 +329,9 @@ as its first argument exactly like `get_time_series`: `SingleTimeSeries`, `NonSe
 `time_series_type` reports which form was found. `interval` is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a `SingleTimeSeries`, the same shorthand
 `has_time_series` and `remove_time_series!` use. Since every form returns the same struct, `ext`,
-`dtype`, `owner_type`, and `percentiles` are available whichever type was asked for and whichever
-way the record was reached (for a forecast, `element_shape` is the stored array's trailing dims
-after its first axis).
+`element_type`, `owner_type`, and `percentiles` are available whichever type was asked for and
+whichever way the record was reached (for a forecast, `element_shape` is the stored array's trailing
+dims after its first axis).
 
 ```julia
 get_metadata(store, 42, Component, "load"; resolution = Hour(1))
@@ -339,9 +343,9 @@ get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -> Vector{
 ```
 
 Fetches the flattened array for a 32-byte content hash, decoded as element type `T`. Combine with
-`get_metadata` (for the dtype and shape) to read values without holding a `TimeSeriesKey`. Every
-`data_hash` in this API is these same 32 bytes, so any metadata record or `ArrayGroupRow` feeds it
-directly; `bytes2hex` gives the display form.
+`get_metadata` (for the element type and shape) to read values without holding a `TimeSeriesKey`.
+Every `data_hash` in this API is these same 32 bytes, so any metadata record or `ArrayGroupRow`
+feeds it directly; `bytes2hex` gives the display form.
 
 ### Key-based variants
 
@@ -400,8 +404,8 @@ the type has no materialized form.
 
 Dense forecasts are constructed as `Deterministic`, `Probabilistic`, or `Scenarios` structs (see
 [Types](#types)) and added through the generic `add_time_series!`. Each struct wraps a native
-`AbstractArray` of any element type and dimensionality — the binding derives the stored dtype and
-dims and converts to row-major bytes, just like the static `add_time_series!` (see the
+`AbstractArray` of any supported element type and dimensionality — the binding derives the stored
+dtype and dims and converts to row-major bytes, just like the static `add_time_series!` (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes).
 
 The forecast `name` comes from the struct, e.g.
@@ -712,8 +716,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
   filter).
 - `features` — match keys whose features include all the given entries (subset match).
 
-Physical storage detail (`data_hash`, `dtype`, `ext`, `percentiles`) is not on a key — read it via
-`get_metadata` / `list_time_series`.
+Physical storage detail (`data_hash`, `element_type`, `ext`, `percentiles`) is not on a key — read
+it via `get_metadata` / `list_time_series`.
 
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,

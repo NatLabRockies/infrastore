@@ -16,18 +16,20 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   buffers (`uint8_t **`) with `infrastore_buffer_free_u8`, timestamp and shape buffers
   (`int64_t **`) with `infrastore_buffer_free_i64`, and the `u64` dims buffer from
   `infrastore_store_get_forecast` (`uint64_t **`) with `infrastore_buffer_free_u64`.
-- **Typed arrays.** Add functions take the element `dtype` code
-  (`0=f64, 1=f32, 2=i64, 3=i32,
-  4=u64, 5=bool`), `ndims` plus a `dims_ptr` shape array
-  (`[length, k1, …]`), and the raw little-endian `data_ptr` of `data_byte_len` bytes. Reads return
-  the dtype code and a raw byte buffer for the caller to decode; `infrastore_store_get_single`
-  follows the same dtype-generic convention, returning the dtype, shape, and raw element bytes.
+- **Typed arrays.** Add functions take an `element_type` string (a dtype spelling such as `"f64"`,
+  or a composite kind such as `"tuple(3,f64)"` / `"piecewise_linear"` — see
+  [Element types](./element-types.md)), `ndims` plus a `dims_ptr` shape array (`[length, k1, …]`),
+  and the raw little-endian `data_ptr` of `data_byte_len` bytes. The physical dtype the bytes are
+  encoded in is derived from the element type. Reads return the dtype code
+  (`0=f64, 1=f32, 2=i64, 3=i32, 4=u64, 5=bool, 6=i16, 7=i8, 8=u32, 9=u16, 10=u8`) and a raw byte
+  buffer for the caller to decode, plus an optional `out_element_type` string saying what those
+  bytes mean; `infrastore_store_get_single` follows the same dtype-generic convention.
 - **`owner_category`** is an `int32_t` (`0 = Component`, `1 = SupplementalAttribute`) passed to the
   add functions. The owner identity is the pair `(owner_id, owner_category)` — a component and a
   supplemental attribute may share a numeric `owner_id` and stay distinct — and the category is
   recorded with the association at add time.
 - **`ext`** is an optional opaque, package-owned payload (typically JSON) passed verbatim to the add
-  functions and stored uninterpreted.
+  functions and stored uninterpreted. Element typing does not go here — that is `element_type`.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`ext`, `features_json`, `units`)
   accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string. An
@@ -81,7 +83,8 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                             int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
                             const char *name,
                             int64_t initial_ts_unix_ms, const char *resolution,  /* ISO-8601 */
-                            int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                            const char *element_type, /* e.g. "f64", "piecewise_linear" */
+                            uint64_t ndims, const uint64_t *dims_ptr,
                             const uint8_t *data_ptr, uint64_t data_byte_len,
                             const char *ext,         /* optional */
                             const char *features_json,        /* optional */
@@ -94,7 +97,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             int32_t *out_dtype,
                             int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                             uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
-                            char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
+                            char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                            char **out_element_type);  /* optional (NULL skips); owned, same free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
 /* All-or-nothing batched remove: on any error (including one missing key)
@@ -115,19 +119,21 @@ int32_t infrastore_key_identity_hash(const struct InfraStoreKey *key, uint64_t *
 `infrastore_store_add_non_sequential` takes an explicit `int64_t` Unix-millisecond timestamp array
 alongside the typed data buffer. `infrastore_store_get_non_sequential` returns owned timestamp,
 shape, and raw-byte buffers (free with `infrastore_buffer_free_i64`, `infrastore_buffer_free_i64`,
-and `infrastore_buffer_free_u8`) plus the dtype code. The shape is the full
-`[length, *element_shape]` array shape (the first dim is time, so callers can recover an
-N-dimensional per-step element shape). `out_ext` is the optional opaque package-owned payload copied
-into a caller-allocated buffer of `ext_cap` bytes, with the full length reported in `out_ext_len` —
-probe with a NULL/zero-capacity buffer first, then call again with a buffer of that length (as
-`infrastore_store_get_single` documents for its shape and `ext` outputs).
+and `infrastore_buffer_free_u8`) plus the dtype code and, in `out_element_type`, the canonical
+element-type string. The shape is the full `[length, *element_shape]` array shape (the first dim is
+time, so callers can recover an N-dimensional per-step element shape). `out_ext` is the optional
+opaque package-owned payload copied into a caller-allocated buffer of `ext_cap` bytes, with the full
+length reported in `out_ext_len` — probe with a NULL/zero-capacity buffer first, then call again
+with a buffer of that length (as `infrastore_store_get_single` documents for its shape and `ext`
+outputs).
 
 ```c
 int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     int64_t owner_id, const char *owner_type,
                                     int32_t owner_category, const char *name,
                                     const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
-                                    int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                                    const char *element_type,
+                                    uint64_t ndims, const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr, uint64_t data_byte_len,
                                     const char *ext, const char *features_json,
                                     const char *units,
@@ -139,7 +145,8 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                                     uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
                                     char *out_ext, uint64_t ext_cap,
-                                    uint64_t *out_ext_len);
+                                    uint64_t *out_ext_len,
+                                    char **out_element_type);  /* optional; infrastore_string_free */
 ```
 
 ## Attribute-Based Access
@@ -221,7 +228,7 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
 /* The whole metadata record for a key, as a JSON object with the shape of one
    infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
    time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
-   horizon, interval, count, length, percentiles, dtype, element_shape, features,
+   horizon, interval, count, length, percentiles, element_type, element_shape, features,
    units, ext — fields that do not apply to the key's type are null. One export
    covers every time series type, static and forecast alike. Probe-then-fetch:
    call with buf = NULL, cap = 0 to learn *out_len, then again with an
@@ -264,7 +271,7 @@ The forecast types are created and read through the C ABI. `ts_type` is the `Tim
 discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
 `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. As a _request_ it is read
 per [the matching rule](#requested-forecast-types) below. Forecast values are dtype-generic raw
-little-endian byte buffers with explicit dimensions — the same `dtype`, `ndims`, `dims_ptr`,
+little-endian byte buffers with explicit dimensions — the same `element_type`, `ndims`, `dims_ptr`,
 `data_ptr`, `data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
@@ -288,7 +295,8 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                               int64_t initial_ts_unix_ms,
                               const char *resolution, const char *horizon, const char *interval,  /* ISO-8601 */
                               uint64_t count,
-                              int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                              const char *element_type,
+                              uint64_t ndims, const uint64_t *dims_ptr,
                               const uint8_t *data_ptr, uint64_t data_byte_len,
                               const char *ext,          /* optional */
                               const char *features_json, const char *units,
@@ -301,7 +309,8 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *resolution, const char *horizon, const char *interval,  /* ISO-8601 */
                                    uint64_t count,
                                    const double *percentiles_ptr, uint64_t percentiles_len,
-                                   int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                                   const char *element_type,
+                              uint64_t ndims, const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
                                    const char *ext,     /* optional */
                                    const char *features_json, const char *units,
@@ -362,7 +371,8 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                               double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
                               int32_t *out_matched_type,  /* concrete matched TimeSeriesType */
-                              char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
+                              char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                              char **out_element_type);  /* optional (NULL skips); owned, same free */
 ```
 
 `infrastore_store_get_forecast_by_key` is the key-based counterpart: it takes a `InfraStoreKey`
@@ -386,7 +396,8 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, co
                                      uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                                      double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
                                      int32_t *out_matched_type,
-                                     char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
+                                     char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                                     char **out_element_type);  /* optional (NULL skips); owned, same free */
 ```
 
 Forecast metadata is read with the same `infrastore_store_get_metadata_by_key` as everything else —

@@ -2,7 +2,7 @@
 //! owner categories, time-series-type names, and `key=value` features.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use infrastore_core::{Dtype, FeatureValue, OwnerCategory, Period, TimeSeriesType};
+use infrastore_core::{ElementType, FeatureValue, OwnerCategory, Period, TimeSeriesType};
 
 /// Parse a period: an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`) for calendar or
 /// fixed periods, or the legacy human form (`1h`, `15min`, `7d`) which is always
@@ -84,10 +84,11 @@ pub fn parse_owner_category(s: &str) -> Result<OwnerCategory, String> {
     }
 }
 
-/// Parse a dtype name (`f64|f32|i64|i32|u64|bool`).
-pub fn parse_dtype(s: &str) -> Result<Dtype, String> {
-    Dtype::parse(s.trim())
-        .ok_or_else(|| format!("invalid dtype '{s}' (use f64|f32|i64|i32|u64|bool)"))
+/// Parse an `element_type` in its canonical string form. This is the only
+/// element-typing input the descriptor takes: the physical dtype the CSV cells
+/// are parsed as is `ElementType::physical_dtype`.
+pub fn parse_element_type(s: &str) -> Result<ElementType, String> {
+    s.trim().parse::<ElementType>().map_err(|e| e.to_string())
 }
 
 /// Every accepted `--type` spelling, in the order the help and error text list

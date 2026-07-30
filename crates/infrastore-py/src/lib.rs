@@ -22,7 +22,7 @@ use infrastore_core as core_lib;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyString};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 
 // ---- Exceptions -----------------------------------------------------------
 
@@ -221,17 +221,29 @@ fn features_to_dict<'py>(
 
 // ---- numpy dtype mapping --------------------------------------------------
 
+/// Parse an `element_type` in its canonical string form.
+fn parse_element_type(s: &str) -> PyResult<core_lib::ElementType> {
+    s.parse::<core_lib::ElementType>()
+        .map_err(|e| InvalidParameterError::new_err(e.to_string()))
+}
+
 fn dtype_from_numpy_name(name: &str) -> PyResult<core_lib::Dtype> {
     Ok(match name {
         "float64" => core_lib::Dtype::F64,
         "float32" => core_lib::Dtype::F32,
         "int64" => core_lib::Dtype::I64,
         "int32" => core_lib::Dtype::I32,
+        "int16" => core_lib::Dtype::I16,
+        "int8" => core_lib::Dtype::I8,
         "uint64" => core_lib::Dtype::U64,
+        "uint32" => core_lib::Dtype::U32,
+        "uint16" => core_lib::Dtype::U16,
+        "uint8" => core_lib::Dtype::U8,
         "bool" => core_lib::Dtype::Bool,
         other => {
             return Err(InvalidParameterError::new_err(format!(
-                "unsupported numpy dtype '{other}' (expected float64/float32/int64/int32/uint64/bool)"
+                "unsupported numpy dtype '{other}' (expected float64/float32/\
+                 int64/int32/int16/int8/uint64/uint32/uint16/uint8/bool)"
             )));
         }
     })
@@ -243,7 +255,12 @@ fn numpy_name(dtype: core_lib::Dtype) -> &'static str {
         core_lib::Dtype::F32 => "float32",
         core_lib::Dtype::I64 => "int64",
         core_lib::Dtype::I32 => "int32",
+        core_lib::Dtype::I16 => "int16",
+        core_lib::Dtype::I8 => "int8",
         core_lib::Dtype::U64 => "uint64",
+        core_lib::Dtype::U32 => "uint32",
+        core_lib::Dtype::U16 => "uint16",
+        core_lib::Dtype::U8 => "uint8",
         core_lib::Dtype::Bool => "bool",
     }
 }
@@ -1074,7 +1091,7 @@ impl PyStaticReader {
         Ok(d)
     }
 
-    /// One dict per columnar group: `{"dtype": str, "element_shape": list[int],
+    /// One dict per columnar group: `{"dtype": str, "element_type": str, "element_shape": list[int],
     /// "keys": list[TimeSeriesKey]}` (column order matches `group_values`).
     fn groups<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         self.inner
@@ -1083,6 +1100,7 @@ impl PyStaticReader {
             .map(|g| {
                 let d = PyDict::new(py);
                 d.set_item("dtype", g.dtype().as_str())?;
+                d.set_item("element_type", g.element_type().to_string())?;
                 d.set_item("element_shape", g.element_shape().to_vec())?;
                 let keys: Vec<PyTimeSeriesKey> = g
                     .keys()
@@ -1394,7 +1412,11 @@ impl PyStore {
     /// …) is rejected with `InvalidParameterError`. `units` and `ext` are
     /// optional strings (`ext` is an opaque, package-owned payload — typically
     /// JSON — stored verbatim on the association).
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, ext=None))]
+    ///
+    /// `element_type` declares what the array's elements mean in the store's own
+    /// vocabulary (`"tuple(3,f64)"`, `"piecewise_linear"`, …). Omit it for plain
+    /// numbers, where it defaults to the array's own dtype spelling.
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, ext=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -1404,6 +1426,7 @@ impl PyStore {
         time_series: &Bound<'_, PyAny>,
         features: Option<&Bound<'_, PyDict>>,
         units: Option<String>,
+        element_type: Option<String>,
         ext: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
@@ -1413,6 +1436,9 @@ impl PyStore {
                 .with_features(features);
         if let Some(u) = units {
             request = request.with_units(u);
+        }
+        if let Some(et) = element_type {
+            request = request.with_element_type(parse_element_type(&et)?);
         }
         if let Some(lt) = ext {
             request = request.with_ext(lt);
@@ -1430,7 +1456,8 @@ impl PyStore {
     ///
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
     /// parameters: `owner_id`, `owner_type`, `owner_category`,
-    /// `time_series`, and optionally `features` and `units`.
+    /// `time_series`, and optionally `features`, `units`, `element_type`, and
+    /// `ext`.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
     /// Returns the new keys in input order.
@@ -1463,6 +1490,10 @@ impl PyStore {
                 Some(l) if !l.is_none() => Some(l.extract()?),
                 _ => None,
             };
+            let element_type = match item.get_item("element_type")? {
+                Some(e) if !e.is_none() => Some(parse_element_type(&e.extract::<String>()?)?),
+                _ => None,
+            };
             let data = extract_time_series_data(&time_series)?;
             requests.push(core_lib::AddRequest {
                 owner_id,
@@ -1471,6 +1502,7 @@ impl PyStore {
                 data,
                 features,
                 units,
+                element_type,
                 ext,
             });
         }
@@ -3004,7 +3036,7 @@ fn metadata_to_dict<'py>(
     d.set_item("interval", iso(m.interval))?;
     d.set_item("count", m.count)?;
     d.set_item("percentiles", m.percentiles.clone())?;
-    d.set_item("dtype", m.dtype.as_str())?;
+    d.set_item("element_type", m.element_type.to_string())?;
     d.set_item("element_shape", m.element_shape.clone())?;
     d.set_item(
         "timestamps",
@@ -3045,6 +3077,98 @@ fn init_tracing(filter: &str) -> PyResult<()> {
         .with_env_filter(env_filter)
         .try_init();
     Ok(())
+}
+
+// ---- Element-type codec ---------------------------------------------------
+
+/// Decode a stored array into its per-timestep logical values.
+///
+/// `data` is the array as stored (row-major, first dims the leading axes),
+/// `element_type` its canonical string, and `leading_dims` how many leading axes
+/// precede the per-step element shape: 1 for a static series, 2 for a
+/// `Deterministic`, 3 for a `Probabilistic` or `Scenarios`.
+///
+/// Returns one entry per timestep, in row-major order over the leading axes:
+///
+/// - `linear_function` -> `{"proportional": float, "constant": float}`
+/// - `quadratic_function` -> `{"quadratic": float, "proportional": float, "constant": float}`
+/// - `piecewise_linear` -> `list[{"x": float, "y": float}]`
+/// - `piecewise_step` -> `{"x": list[float], "y": list[float]}`
+/// - `tuple(N,dtype)` -> `list[float]` of length `N`
+///
+/// Returns `None` for a scalar element type and for any array whose physical
+/// dtype is not `float64`: there the stored elements already are the values, so
+/// the numpy array itself is the answer.
+#[pyfunction]
+#[pyo3(signature = (data, element_type, leading_dims=1))]
+fn decode_element_values<'py>(
+    py: Python<'py>,
+    data: &Bound<'py, PyAny>,
+    element_type: &str,
+    leading_dims: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let array = typed_array_from_numpy(data)?;
+    let element_type = parse_element_type(element_type)?;
+    let decoded = core_lib::decode(&array, element_type, leading_dims).map_err(map_err)?;
+    Ok(match decoded {
+        core_lib::DecodedValues::Raw => None,
+        other => Some(decoded_to_py(py, &other)?),
+    })
+}
+
+fn decoded_to_py<'py>(
+    py: Python<'py>,
+    values: &core_lib::DecodedValues,
+) -> PyResult<Bound<'py, PyAny>> {
+    use core_lib::DecodedValues;
+    let out = PyList::empty(py);
+    match values {
+        // `Raw` never reaches here: the caller returns `None` for it.
+        DecodedValues::Raw => {}
+        DecodedValues::Tuple(rows) => {
+            for row in rows {
+                out.append(row.clone())?;
+            }
+        }
+        DecodedValues::LinearFunction(rows) => {
+            for f in rows {
+                let d = PyDict::new(py);
+                d.set_item("proportional", f.proportional)?;
+                d.set_item("constant", f.constant)?;
+                out.append(d)?;
+            }
+        }
+        DecodedValues::QuadraticFunction(rows) => {
+            for f in rows {
+                let d = PyDict::new(py);
+                d.set_item("quadratic", f.quadratic)?;
+                d.set_item("proportional", f.proportional)?;
+                d.set_item("constant", f.constant)?;
+                out.append(d)?;
+            }
+        }
+        DecodedValues::PiecewiseLinear(rows) => {
+            for points in rows {
+                let step = PyList::empty(py);
+                for p in points {
+                    let d = PyDict::new(py);
+                    d.set_item("x", p.x)?;
+                    d.set_item("y", p.y)?;
+                    step.append(d)?;
+                }
+                out.append(step)?;
+            }
+        }
+        DecodedValues::PiecewiseStep(rows) => {
+            for s in rows {
+                let d = PyDict::new(py);
+                d.set_item("x", s.x.clone())?;
+                d.set_item("y", s.y.clone())?;
+                out.append(d)?;
+            }
+        }
+    }
+    Ok(out.into_any())
 }
 
 // ---- Module init ----------------------------------------------------------
@@ -3102,5 +3226,6 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(init_tracing, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_element_values, m)?)?;
     Ok(())
 }

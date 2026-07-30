@@ -29,7 +29,7 @@ flowchart TB
 importable as `infrastore`. The binding:
 
 - Converts Python `datetime`/`timedelta` to `chrono` types and NumPy arrays (any shape) to
-  `TypedArray`s at the boundary, supporting the full dtype set (`f64`, `f32`, `i64`, `i32`, `u64`,
+  `TypedArray`s at the boundary, supporting the full dtype set (`f64`, `f32`, the integer widths,
   `bool`).
 - Translates the typed `TimeSeriesError` variants into a Python exception hierarchy rooted at
   `TimeSeriesError` (`NotFoundError`, `DuplicateTimeSeriesError`, `InvalidParameterError`,

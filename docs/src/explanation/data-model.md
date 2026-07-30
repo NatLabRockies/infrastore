@@ -108,12 +108,13 @@ ISO-8601 string for either kind, and return the ISO-8601 string).
 
 ### Typed, N-dimensional arrays
 
-Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, `i64`, `i32`, `u64`,
+Every series' values are a **`TypedArray`**: an element `dtype` (`f64`, `f32`, the integer widths,
 or `bool`) and a shape `[length, k1, k2, …]`. The first axis is time; the trailing axes are a fixed
 **per-step element shape**, so a step can hold a scalar (empty element shape) or a small tuple — for
-example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The optional `ext`
-payload travels with the metadata so a binding can reconstruct its domain object on read; the store
-itself never interprets it.
+example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The association's
+`element_type` says what those elements mean and how a ragged value (a piecewise curve, say) is
+packed into a fixed-width row — see [Element types](../reference/element-types.md). The optional
+`ext` payload travels alongside for a binding's own use; the store never interprets it.
 
 ### Forecasts
 
@@ -225,11 +226,19 @@ Each association can also carry:
 
 - **`units`** — a free-form, end-user-facing label such as `"MW"`. No dimensional analysis is
   performed.
-- **`ext`** — an opaque, **package-owned** extension payload stored verbatim (typically JSON, e.g.
-  `{"function_type":"QuadraticFunctionData"}`) that a binding writes and reads to reconstruct a
-  domain object. The store never parses or interprets it, and end users are not expected to set it.
+- **`ext`** — an opaque, **package-owned** extension payload stored verbatim (typically JSON) that a
+  binding writes and reads for its own purposes. The store never parses or interprets it, and end
+  users are not expected to set it. Element typing does _not_ live here: that is `element_type`
+  below, a first-class column the store owns and validates.
+- **`element_type`** — what the array's elements _mean_, in the store's own language-neutral
+  vocabulary: a dtype spelling (`f64`, `i64`, …) for plain numbers, else `tuple(N,dtype)` or one of
+  the function-data kinds (`linear_function`, `quadratic_function`, `piecewise_linear`,
+  `piecewise_step`). It supersedes a separate physical `dtype`: the dtype of the stored bytes is
+  derived from it. Unlike `units` and `ext` it is _not_ inert — the write path validates the array's
+  dtype and per-step shape against it. See [Element types](../reference/element-types.md).
 
-These are recorded in metadata and returned on read, but they do not affect identity or storage.
+`units` and `ext` are recorded in metadata and returned on read, but they do not affect identity or
+storage.
 
 ## Associations Between Entities
 

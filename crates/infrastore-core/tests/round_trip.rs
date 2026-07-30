@@ -314,7 +314,7 @@ fn bulk_add_atomic_rollback() {
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             features: Features::new(),
             units: None,
-
+            element_type: None,
             ext: None,
         },
         AddRequest {
@@ -324,7 +324,7 @@ fn bulk_add_atomic_rollback() {
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
             features: Features::new(),
             units: None,
-
+            element_type: None,
             ext: None,
         },
     ];

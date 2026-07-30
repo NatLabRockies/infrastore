@@ -1,0 +1,19 @@
+{
+  "name": "@infrastore/codec",
+  "version": "0.1.0",
+  "description": "Decode infrastore time-series arrays into per-timestep values",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test 'test/*.test.ts'"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

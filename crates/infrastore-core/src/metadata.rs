@@ -16,9 +16,26 @@ use crate::types::period::Period;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
+use crate::types::element_type::ElementType;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
 use crate::types::time_series::TimeSeriesType;
+
+/// The arrays the catalog references, paired with one diagnostic per row too
+/// malformed to name one. Returned by [`MetadataStore::referenced_arrays`].
+pub type ReferencedArrays = (Vec<([u8; 32], ElementType)>, Vec<String>);
+
+/// A SQLite value's storage class, for a diagnostic that has to describe a
+/// column holding the wrong kind of thing.
+fn value_kind(value: &rusqlite::types::Value) -> &'static str {
+    match value {
+        rusqlite::types::Value::Null => "NULL",
+        rusqlite::types::Value::Integer(_) => "an integer",
+        rusqlite::types::Value::Real(_) => "a real",
+        rusqlite::types::Value::Text(_) => "text",
+        rusqlite::types::Value::Blob(_) => "a blob",
+    }
+}
 
 pub struct MetadataStore {
     conn: Connection,
@@ -761,7 +778,7 @@ impl MetadataStore {
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
               timestamps_json, units, percentiles_json,
-              dtype, element_shape, ext, features_hash)
+              element_type, element_shape, ext, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                      ?16, ?17, ?18, ?19)",
         )?;
@@ -781,7 +798,7 @@ impl MetadataStore {
             timestamps_json,
             meta.units,
             percentiles_json,
-            meta.dtype.as_str(),
+            meta.element_type.to_string(),
             element_shape_json,
             meta.ext,
             f_hash.as_slice(),
@@ -1014,7 +1031,7 @@ impl MetadataStore {
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution, length, horizon,
                     interval, count, timestamps_json, units, percentiles_json,
-                    dtype, element_shape, ext
+                    element_type, element_shape, ext
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1335,6 +1352,86 @@ impl MetadataStore {
             }
         }
         Ok((sts, dst))
+    }
+
+    /// The `element_type` of the array content-addressed by `data_hash`.
+    ///
+    /// The catalog is the authority on element typing: the HDF5 file records
+    /// only how wide an element is, not what it means, and `bool` and `u8` are
+    /// not even distinguishable there. Every read therefore resolves the type
+    /// here first. `NotFound` if no association references the hash — an array
+    /// nothing points at cannot be typed, and cannot be read.
+    pub fn element_type_for_hash(&self, data_hash: &[u8; 32]) -> Result<ElementType> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT element_type FROM time_series_associations WHERE data_hash = ?1 LIMIT 1",
+        )?;
+        let spelling: String = stmt
+            .query_row(params![data_hash.as_slice()], |r| r.get(0))
+            .optional()?
+            .ok_or(TimeSeriesError::NotFound)?;
+        ElementType::parse(&spelling).ok_or_else(|| {
+            TimeSeriesError::IntegrityError(format!(
+                "catalog holds an invalid element_type {spelling:?} for array {}",
+                crate::hash::hash_hex(data_hash)
+            ))
+        })
+    }
+
+    /// Every distinct `(data_hash, element_type)` the catalog references, for
+    /// the integrity sweep, plus one diagnostic per row too malformed to use.
+    ///
+    /// Arrays in the file that no association references are absent: they are
+    /// unreachable, so nothing can read them and nothing records what their
+    /// bytes mean.
+    ///
+    /// A malformed row is reported rather than returned as an error, because
+    /// aborting here would stop the sweep at the first bad row and hide every
+    /// other problem in the store — the opposite of what an integrity check is
+    /// for.
+    pub fn referenced_arrays(&self) -> Result<ReferencedArrays> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT data_hash, element_type FROM time_series_associations")?;
+        // `data_hash` is read as a dynamic value, not a `Vec<u8>`: SQLite is
+        // dynamically typed, so a corrupted row can hold TEXT (or anything else)
+        // in a BLOB column, and a typed getter would fail the whole query
+        // instead of letting the sweep report that one row and carry on.
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, rusqlite::types::Value>(0)?,
+                r.get::<_, String>(1)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        let mut problems = Vec::new();
+        for row in rows {
+            let (hash, spelling) = row?;
+            let hash = match hash {
+                rusqlite::types::Value::Blob(bytes) => bytes,
+                other => {
+                    problems.push(format!(
+                        "malformed catalog row: data_hash is {}, expected a 32-byte blob",
+                        value_kind(&other)
+                    ));
+                    continue;
+                }
+            };
+            let Ok(hash) = <[u8; 32]>::try_from(hash.as_slice()) else {
+                problems.push(format!(
+                    "malformed catalog row: data_hash is {} bytes, expected 32",
+                    hash.len()
+                ));
+                continue;
+            };
+            match ElementType::parse(&spelling) {
+                Some(element_type) => out.push((hash, element_type)),
+                None => problems.push(format!(
+                    "malformed catalog row: array {} has an invalid element_type {spelling:?}",
+                    crate::hash::hash_hex(&hash)
+                )),
+            }
+        }
+        Ok((out, problems))
     }
 
     pub fn count_distinct_owners(&self) -> Result<i64> {
@@ -2114,7 +2211,7 @@ struct MetaRow {
     timestamps: Option<Vec<DateTime<Utc>>>,
     units: Option<String>,
     percentiles: Option<Vec<f64>>,
-    dtype: crate::types::array::Dtype,
+    element_type: crate::types::element_type::ElementType,
     element_shape: Vec<usize>,
     ext: Option<String>,
 }
@@ -2138,7 +2235,7 @@ impl MetaRow {
             features,
             units: self.units,
             percentiles: self.percentiles,
-            dtype: self.dtype,
+            element_type: self.element_type,
             element_shape: self.element_shape,
             ext: self.ext,
         }
@@ -2165,7 +2262,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let timestamps_json: Option<String> = row.get(13)?;
     let units: Option<String> = row.get(14)?;
     let percentiles_json: Option<String> = row.get(15)?;
-    let dtype_str: String = row.get(16)?;
+    let element_type_str: String = row.get(16)?;
     let element_shape_json: Option<String> = row.get(17)?;
     let ext: Option<String> = row.get(18)?;
 
@@ -2223,16 +2320,17 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
-    let dtype = crate::types::array::Dtype::parse(&dtype_str).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            16,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid dtype: {dtype_str}"),
-            )),
-        )
-    })?;
+    let element_type = crate::types::element_type::ElementType::parse(&element_type_str)
+        .ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                16,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid element_type: {element_type_str}"),
+                )),
+            )
+        })?;
     let element_shape: Vec<usize> = element_shape_json
         .map(|s| serde_json::from_str::<Vec<usize>>(&s))
         .transpose()
@@ -2289,7 +2387,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             timestamps,
             units,
             percentiles,
-            dtype,
+            element_type,
             element_shape,
             ext,
         },

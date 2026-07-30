@@ -31,6 +31,7 @@
   - [Use the `infrastore` CLI](./how-to/use-cli.md)
 - [Reference](./reference/index.md)
   - [On-Disk File Format](./reference/file-format.md)
+  - [Element Types](./reference/element-types.md)
   - [Rust API](./reference/rust-api.md)
   - [Python API](./reference/python-api.md)
   - [Julia API](./reference/julia-api.md)

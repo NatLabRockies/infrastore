@@ -221,6 +221,7 @@ function _get_forecast_raw(
     out_pct_len = Ref{UInt64}(0)
     out_matched = Ref{Int32}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast(
@@ -250,6 +251,7 @@ function _get_forecast_raw(
             out_pct_len::Ref{UInt64},
             out_matched::Ref{Int32},
             out_ext::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
         )::Int32
     )
 
@@ -269,6 +271,7 @@ function _get_forecast_raw(
         out_pct_len,
         out_matched,
         out_ext,
+        out_element_type,
     )
 end
 
@@ -291,6 +294,7 @@ function _decode_forecast_outputs(
     out_pct_len,
     out_matched,
     out_ext,
+    out_element_type,
 )
     # Copy dims and free FFI buffer.
     nd = Int(out_ndims[])
@@ -333,6 +337,7 @@ function _decode_forecast_outputs(
         percentiles=percentiles,
         matched_type=Int(out_matched[]),
         ext=_take_cstr(out_ext[]),
+        element_type=_take_cstr(out_element_type[]),
     )
 end
 
@@ -362,6 +367,7 @@ function _get_forecast_raw(
     out_pct_len = Ref{UInt64}(0)
     out_matched = Ref{Int32}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast_by_key(
@@ -385,6 +391,7 @@ function _get_forecast_raw(
             out_pct_len::Ref{UInt64},
             out_matched::Ref{Int32},
             out_ext::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
         )::Int32
     )
 
@@ -404,6 +411,7 @@ function _get_forecast_raw(
         out_pct_len,
         out_matched,
         out_ext,
+        out_element_type,
     )
 end
 
@@ -427,6 +435,7 @@ function _forecast_from_raw(::Type{Deterministic}, r, name::AbstractString)
         _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
         ext=r.ext,
+        element_type=r.element_type,
     )
 end
 
@@ -441,6 +450,7 @@ function _forecast_from_raw(::Type{Probabilistic}, r, name::AbstractString)
         _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
         ext=r.ext,
+        element_type=r.element_type,
     )
 end
 
@@ -455,6 +465,7 @@ function _forecast_from_raw(::Type{Scenarios}, r, name::AbstractString)
         _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
         ext=r.ext,
+        element_type=r.element_type,
     )
 end
 

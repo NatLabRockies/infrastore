@@ -183,21 +183,22 @@ end
     end
 end
 
-@testset "dtype-parameterized arrays" begin
+@testset "element-type-parameterized arrays" begin
     store = Store(in_memory=true)
     res = Hour(1)
     t0 = DateTime(2024, 1, 1)
 
-    # Int64 scalar series round-trips with its dtype.
+    # Int64 scalar series round-trips with its element type, which for a plain
+    # numeric series is just the dtype spelling.
     add_time_series!(
         store,
         1001,
         "Generator",
         Component,
-        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; ext="Int64"),
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"),
     )
     m = get_metadata(store, 1001, Component, "load"; resolution=res)
-    @test m.dtype == Int64
+    @test m.element_type == "i64"
     @test get_array_by_hash(store, m.data_hash, Int64) == Int64[10, 20, 30]
 
     # Multi-dim element tuple (4 steps × 3 coeffs) round-trips, row-major correct.
@@ -207,10 +208,15 @@ end
         1002,
         "Generator",
         Component,
-        SingleTimeSeries(t0, res, A, "cost"; ext="QuadraticFunctionData"),
+        SingleTimeSeries(t0, res, A, "cost"; element_type="quadratic_function"),
     )
     mq = get_metadata(store, 1002, Component, "cost"; resolution=res)
-    @test mq.dtype == Float64
+    @test mq.element_type == "quadratic_function"
+    # A value read carries the element type back too, so a caller can decode the
+    # rows without a second metadata lookup.
+    @test get_time_series(
+        SingleTimeSeries, store, 1002, Component, "cost"; resolution=res
+    ).element_type == "quadratic_function"
     flat = get_array_by_hash(store, mq.data_hash, Float64)
     @test permutedims(reshape(flat, (3, 4)), (2, 1)) == A
 end
@@ -1606,7 +1612,7 @@ end
     @test length(rows) == 1
     @test rows[1].units == "MW"
     @test rows[1].ext == "Profile"
-    @test rows[1].dtype == Float64
+    @test rows[1].element_type == "f64"
 
     # Probabilistic metadata exposes percentiles + units without a data fetch.
     prob = Probabilistic(
@@ -1970,7 +1976,7 @@ end
         store, 2001, "Generator", Component, SingleTimeSeries(t0, res, u, "u64")
     )
     mu = get_metadata(store, 2001, Component, "u64"; resolution=res)
-    @test mu.dtype == UInt64
+    @test mu.element_type == "u64"
     @test get_array_by_hash(store, mu.data_hash, UInt64) == u
     @test get_time_series(SingleTimeSeries, store, 2001, Component, "u64").data == u
 
@@ -1979,7 +1985,7 @@ end
         store, 2002, "Generator", Component, SingleTimeSeries(t0, res, i, "i32")
     )
     mi = get_metadata(store, 2002, Component, "i32"; resolution=res)
-    @test mi.dtype == Int32
+    @test mi.element_type == "i32"
     @test get_array_by_hash(store, mi.data_hash, Int32) == i
     got = get_time_series(SingleTimeSeries, store, 2002, Component, "i32")
     @test eltype(got.data) == Int32
@@ -1990,7 +1996,7 @@ end
         store, 2003, "Generator", Component, SingleTimeSeries(t0, res, b, "bools")
     )
     mb = get_metadata(store, 2003, Component, "bools"; resolution=res)
-    @test mb.dtype == Bool
+    @test mb.element_type == "bool"
     @test get_array_by_hash(store, mb.data_hash, Bool) == b
 
     f = Float32[1.5, -2.25, 3.125]
@@ -1998,7 +2004,7 @@ end
         store, 2004, "Generator", Component, SingleTimeSeries(t0, res, f, "f32")
     )
     mf = get_metadata(store, 2004, Component, "f32"; resolution=res)
-    @test mf.dtype == Float32
+    @test mf.element_type == "f32"
     @test get_array_by_hash(store, mf.data_hash, Float32) == f
 end
 
@@ -2719,7 +2725,7 @@ end
     @test md.time_series_type == SingleTimeSeries
     # Fields that do not apply to a static series are `nothing`, not zero.
     @test md.horizon === nothing && md.count === nothing && md.percentiles === nothing
-    @test md.dtype == Float64
+    @test md.element_type == "f64"
     @test md.element_shape == ()
     @test md.ext == "Profile"
     @test md.units == "MW"
@@ -2737,7 +2743,7 @@ end
     @test fmd.count == 2
     # A forecast record carries `dtype` and `owner_type` too — one export, one
     # struct, so no field is dropped by the type or addressing path taken.
-    @test fmd.dtype == Float64
+    @test fmd.element_type == "f64"
     @test fmd.owner_type == "Generator"
     # The family sentinel resolves to whichever concrete type is stored.
     @test get_metadata(Deterministic, store, 1, Component, "fc") == fmd
@@ -2770,7 +2776,7 @@ end
     @test mrow isa TimeSeriesMetadata
     @test mrow.owner_type == "Generator"
     @test mrow.owner_category == Component
-    @test mrow.dtype == Float64
+    @test mrow.element_type == "f64"
     @test mrow.element_shape == ()
     @test mrow.percentiles === nothing
     @test mrow.units == "MW"
@@ -2845,7 +2851,7 @@ end
     # `ext` reaches a Probabilistic: the metadata surface no longer drops fields
     # depending on which getter was called.
     @test pmd.ext == "percentile-ext"
-    @test pmd.dtype == Float64
+    @test pmd.element_type == "f64"
     @test pmd == only(list_time_series(store))
 
     row = only(list_time_series(store))
@@ -2910,7 +2916,7 @@ end
         @test md.time_series_type == T
         @test md.name == name
         @test md.owner_type == "Generator"
-        @test md.dtype == Float64
+        @test md.element_type == "f64"
     end
 
     # A transform-derived DST is addressable by its own type, and through the

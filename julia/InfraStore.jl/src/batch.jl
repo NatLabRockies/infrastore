@@ -45,8 +45,9 @@ function add_time_series!(
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
     ext::Union{Nothing, AbstractString}=ts.ext,
+    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
-    dtype = _dtype_code(eltype(ts.data))
+    element_type_arg = _element_type_arg(element_type, ts.data)
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = @ccall lib_path().infrastore_batch_add_single(
@@ -57,7 +58,7 @@ function add_time_series!(
         ts.name::Cstring,
         _to_unix_ms(ts.initial_timestamp)::Int64,
         _period_to_iso(ts.resolution)::Cstring,
-        dtype::Int32,
+        element_type_arg::Cstring,
         UInt64(length(dims))::UInt64,
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
@@ -80,9 +81,10 @@ function add_time_series!(
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
     ext::Union{Nothing, AbstractString}=ts.ext,
+    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
-    dtype = _dtype_code(eltype(ts.data))
+    element_type_arg = _element_type_arg(element_type, ts.data)
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = @ccall lib_path().infrastore_batch_add_non_sequential(
@@ -93,7 +95,7 @@ function add_time_series!(
         ts.name::Cstring,
         timestamps::Ptr{Int64},
         UInt64(length(timestamps))::UInt64,
-        dtype::Int32,
+        element_type_arg::Cstring,
         UInt64(length(dims))::UInt64,
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
@@ -116,6 +118,7 @@ function add_time_series!(
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
     ext::Union{Nothing, AbstractString}=ts.ext,
+    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -133,6 +136,7 @@ function add_time_series!(
         features=features,
         units=units,
         ext=ext,
+        element_type=element_type,
     )
 end
 
@@ -145,6 +149,7 @@ function add_time_series!(
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
     ext::Union{Nothing, AbstractString}=ts.ext,
+    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     return _batch_add_dense_forecast!(
         batch,
@@ -162,6 +167,7 @@ function add_time_series!(
         features=features,
         units=units,
         ext=ext,
+        element_type=element_type,
     )
 end
 
@@ -181,8 +187,9 @@ function _batch_add_dense_forecast!(
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
     ext::Union{Nothing, AbstractString}=nothing,
+    element_type::Union{Nothing, AbstractString}=nothing,
 )
-    dtype = _dtype_code(eltype(data))
+    element_type_arg = _element_type_arg(element_type, data)
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
     code = @ccall lib_path().infrastore_batch_add_forecast(
@@ -197,7 +204,7 @@ function _batch_add_dense_forecast!(
         _period_to_iso(horizon)::Cstring,
         _period_to_iso(interval)::Cstring,
         UInt64(count)::UInt64,
-        dtype::Int32,
+        element_type_arg::Cstring,
         UInt64(length(dims))::UInt64,
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
@@ -220,8 +227,9 @@ function add_time_series!(
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
     ext::Union{Nothing, AbstractString}=ts.ext,
+    element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
-    dtype = _dtype_code(eltype(ts.data))
+    element_type_arg = _element_type_arg(element_type, ts.data)
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = @ccall lib_path().infrastore_batch_add_probabilistic(
@@ -237,7 +245,7 @@ function add_time_series!(
         UInt64(ts.count)::UInt64,
         ts.percentiles::Ptr{Float64},
         UInt64(length(ts.percentiles))::UInt64,
-        dtype::Int32,
+        element_type_arg::Cstring,
         UInt64(length(dims))::UInt64,
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
