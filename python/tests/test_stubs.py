@@ -45,7 +45,7 @@ def load_stub():
 
 STUB_CLASSES, STUB_FUNCTIONS, STUB_ASSIGNS = load_stub()
 # Type aliases in the stub with no runtime counterpart.
-STUB_ONLY = {"Period", "RequestedType", "TimeSeriesData"}
+STUB_ONLY = {"Period", "TimeSeriesData"}
 
 
 def public_runtime_names():

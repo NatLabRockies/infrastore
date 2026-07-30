@@ -328,14 +328,10 @@ message ConsistencyResp {
   repeated Row rows = 1;
 }
 
-// ResolveForecastKey: the requested type is a concrete forecast type OR the
-// abstract-deterministic family (matching a Deterministic or DST).
-message RequestedType {
-  oneof kind {
-    TimeSeriesType concrete               = 1;
-    bool           abstract_deterministic = 2;   // set true
-  }
-}
+// ResolveForecastKey: `requested` names a stored type. DETERMINISTIC also
+// matches a DETERMINISTIC_SINGLE_TIME_SERIES (a transformed view reads back as
+// a Deterministic); every other type matches only itself. The response key
+// carries the concrete stored type that matched.
 message ResolveForecastKeyReq {
   int64          owner_id       = 1;
   OwnerCategory  owner_category = 2;
@@ -343,7 +339,9 @@ message ResolveForecastKeyReq {
   optional string resolution    = 4;   // ISO-8601 duration
   optional string interval      = 5;   // ISO-8601 duration
   Features       features       = 6;
-  RequestedType  requested      = 7;
+  // `optional` so an omitted type stays distinguishable from the zero enum
+  // value (SINGLE_TIME_SERIES) and is rejected rather than silently honored.
+  optional TimeSeriesType requested = 7;
 }
 message ResolveForecastKeyResp {
   TimeSeriesKey key = 1;

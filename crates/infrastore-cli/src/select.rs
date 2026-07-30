@@ -26,16 +26,17 @@ pub struct SelectorArgs {
     /// with --name when both are given.
     #[arg(long)]
     pub name_glob: Option<String>,
-    /// Time series type. `any_deterministic` matches both a stored
-    /// Deterministic and a DeterministicSingleTimeSeries.
+    /// Time series type. `deterministic` also matches the
+    /// DeterministicSingleTimeSeries rows that `transform` produces.
     #[arg(
         long = "type",
         value_name = "TYPE",
         long_help = "Time series type. One of:\n  \
                      single, non_sequential, deterministic, deterministic_single,\n  \
                      probabilistic, scenarios\n\
-                     plus `any_deterministic`, which matches both a stored Deterministic\n\
-                     and a DeterministicSingleTimeSeries (what `transform` produces)."
+                     `deterministic` also matches the DeterministicSingleTimeSeries rows\n\
+                     that `transform` produces (they list with their own type); use\n\
+                     `deterministic_single` to select only those."
     )]
     pub ts_type: Option<String>,
     /// Resolution, e.g. 1h or 15min.
@@ -63,7 +64,7 @@ impl SelectorArgs {
             filter = filter.name_glob(g.clone());
         }
         if let Some(t) = &self.ts_type {
-            filter = filter.time_series_type(parse::parse_requested_type(t)?);
+            filter = filter.time_series_type(parse::parse_ts_type(t)?);
         }
         if let Some(r) = &self.resolution {
             filter = filter.resolution(parse::parse_period(r)?);

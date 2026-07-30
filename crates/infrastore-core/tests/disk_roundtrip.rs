@@ -1287,3 +1287,110 @@ fn the_catalog_half_is_opened_before_the_format_check() {
         Err(TimeSeriesError::IncompatibleFormat { .. })
     ));
 }
+
+/// The discriminant columns must be stored as SQLite INTEGERs carrying the
+/// canonical codes — not as type names, and not as text that merely looks
+/// numeric.
+///
+/// SQLite columns have type *affinity*, not enforced types: binding a `&str`
+/// into an INTEGER column stores TEXT, and every read path that decoded it as a
+/// string would keep working. That failure mode is invisible to a round-trip
+/// test, so this asserts the on-disk storage class directly.
+#[test]
+fn discriminant_columns_are_stored_as_integer_codes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, 0.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        // A supplemental-attribute owner exercises the other category code.
+        store
+            .add_time_series(
+                2,
+                "Outage",
+                OwnerCategory::SupplementalAttribute,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        store
+            .transform_single_time_series(Duration::hours(4), Duration::hours(2), None, None)
+            .unwrap();
+    }
+
+    let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT typeof(owner_category), owner_category,
+                    typeof(time_series_type), time_series_type
+             FROM time_series_associations",
+        )
+        .unwrap();
+    let rows: Vec<(String, i64, String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!rows.is_empty(), "expected associations to inspect");
+
+    for (cat_type, cat, ts_type, ts) in &rows {
+        assert_eq!(cat_type, "integer", "owner_category stored as {cat_type}");
+        assert_eq!(ts_type, "integer", "time_series_type stored as {ts_type}");
+        assert!(
+            OwnerCategory::from_code(*cat).is_some(),
+            "unknown owner_category code {cat}"
+        );
+        assert!(
+            TimeSeriesType::from_code(*ts).is_some(),
+            "unknown time_series_type code {ts}"
+        );
+    }
+
+    // The specific codes are the on-disk contract, so pin the ones written.
+    let categories: std::collections::BTreeSet<i64> = rows.iter().map(|r| r.1).collect();
+    assert_eq!(
+        categories,
+        [
+            OwnerCategory::Component.code(),
+            OwnerCategory::SupplementalAttribute.code()
+        ]
+        .into_iter()
+        .collect()
+    );
+    let types: std::collections::BTreeSet<i64> = rows.iter().map(|r| r.3).collect();
+    assert_eq!(
+        types,
+        [
+            TimeSeriesType::SingleTimeSeries.code(),
+            TimeSeriesType::DeterministicSingleTimeSeries.code()
+        ]
+        .into_iter()
+        .collect()
+    );
+
+    // And the hand-inspection view still decodes them back to names.
+    let decoded: Vec<String> = conn
+        .prepare("SELECT DISTINCT time_series_type FROM time_series_readable ORDER BY 1")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        decoded,
+        vec![
+            "DeterministicSingleTimeSeries".to_string(),
+            "SingleTimeSeries".to_string()
+        ]
+    );
+}

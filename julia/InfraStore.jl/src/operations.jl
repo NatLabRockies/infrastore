@@ -153,11 +153,11 @@ either by a `TimeSeriesKey` or by attributes.
 
 The attribute form takes the time series type as its first argument, exactly like
 [`get_time_series`](@ref): `SingleTimeSeries`, `NonSequentialTimeSeries`,
-`Deterministic`, `DeterministicSingleTimeSeries`, `Probabilistic`, `Scenarios`,
-or `AbstractDeterministic` to resolve whichever of the `Deterministic` /
-`DeterministicSingleTimeSeries` pair is stored. `owner_category` is the owner's
-`OwnerCategory` (`Component` or `SupplementalAttribute`); `interval` is only
-needed to disambiguate forecasts that differ solely by interval.
+`Deterministic`, `Probabilistic`, or `Scenarios` — where `Deterministic`
+resolves a stored `DeterministicSingleTimeSeries` too, and the returned
+metadata's `time_series_type` reports which form was found. `owner_category` is
+the owner's `OwnerCategory` (`Component` or `SupplementalAttribute`); `interval`
+is only needed to disambiguate forecasts that differ solely by interval.
 
 Omitting the type reads a `SingleTimeSeries`, matching the same shorthand on
 [`has_time_series`](@ref) and [`remove_time_series!`](@ref).
@@ -193,9 +193,10 @@ function get_metadata(
     features::AbstractDict=Dict{String, Any}(),
 ) where {T}
     code = _type_code(T)
-    # The family sentinel is not a stored type, so the core resolves it to the
-    # concrete key first; every other type addresses its key directly.
-    key = if code == INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC
+    # A `Deterministic` request may be satisfied by a stored
+    # `DeterministicSingleTimeSeries`, so its key is not knowable up front: let
+    # the core resolve it. Every other type addresses its key directly.
+    key = if code == INFRASTORE_TYPE_DETERMINISTIC
         get_time_series_key(
             T,
             store,
@@ -264,14 +265,14 @@ The [`TimeSeriesKey`](@ref) of the stored time series of type `T` with the given
 attributes — the attribute-addressed counterpart of
 [`get_time_series_keys`](@ref), which enumerates one owner's keys.
 
-`T` is any stored type, or `AbstractDeterministic` to match whichever of
-`Deterministic` / `DeterministicSingleTimeSeries` is stored (the returned key
-names the concrete one). `resolution` and `interval` narrow the identity.
+`T` is any stored type. `Deterministic` matches a stored
+`DeterministicSingleTimeSeries` too, and the returned key names the concrete
+stored type either way. `resolution` and `interval` narrow the identity.
 
 The key is resolved against the catalog, so it always names something stored:
 a miss throws `NotFoundError`, and a request matching several series throws
-`InvalidParameterError` listing the candidates — narrow it with a concrete type,
-a `resolution`, and/or an `interval`.
+`InvalidParameterError` listing the candidates — narrow it with a `resolution`
+and/or an `interval`.
 
 Use the returned handle with the key-based readers, [`bulk_read`](@ref),
 [`get_metadata`](@ref), [`rename_time_series!`](@ref), or

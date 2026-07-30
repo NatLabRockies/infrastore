@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    ForecastSummaryRow, KeyIdentity, OwnerCategory, Period, RequestedType, Result as CoreResult,
+    ForecastSummaryRow, KeyIdentity, OwnerCategory, Period, Result as CoreResult,
     StaticConsistency, StaticSummaryRow, TimeSeriesCountsDetailed, TimeSeriesData, TimeSeriesError,
     TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType,
 };
@@ -503,7 +503,7 @@ impl RemoteClient {
         resolution: Option<Period>,
         interval: Option<Period>,
         features: infrastore_core::Features,
-        requested: RequestedType,
+        requested: TimeSeriesType,
     ) -> CoreResult<TimeSeriesKey> {
         let mut inner = self.inner.lock().await;
         let resp = inner

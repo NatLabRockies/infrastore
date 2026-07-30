@@ -130,22 +130,10 @@ end
 # through `add_time_series!` / `get_time_series`. `DeterministicSingleTimeSeries`
 # is a marker type with no materialized form: it is derived from a stored
 # `SingleTimeSeries` via `transform_single_time_series!` and read back as a
-# `Deterministic` (see the type below).
+# `Deterministic` (see the type below). Requesting `Deterministic` matches it
+# too, so which of the two a store holds stays an internal detail.
 
-"""
-    AbstractDeterministic
-
-Supertype of [`Deterministic`] and [`DeterministicSingleTimeSeries`], mirroring
-InfrastructureSystems.jl. Use it as the requested type to read whichever of the
-two concrete forecasts is stored under an identity:
-`get_time_series(AbstractDeterministic, store, owner_id, owner_category, name)`.
-The concrete types match only themselves; the family is resolved authoritatively
-by the Rust core (no guess-and-retry), which errors if both concrete types share
-the identity.
-"""
-abstract type AbstractDeterministic end
-
-struct Deterministic{T, N} <: AbstractDeterministic
+struct Deterministic{T, N}
     initial_timestamp::DateTime
     resolution::Period
     horizon::Period
@@ -264,9 +252,23 @@ end
 
 Marker type naming a forecast derived from a `SingleTimeSeries` via
 `transform_single_time_series!` (mirrors the InfrastructureSystems.jl type). It
-is never constructed or added directly and has no materialized struct: reading
-one — e.g. `get_time_series(DeterministicSingleTimeSeries, store, key)` — returns
-a [`Deterministic`]. It surfaces as the `time_series_type` of keys returned by
-`get_time_series_keys` / `key_info`.
+is never constructed or added directly and has no materialized struct.
+
+**You do not normally ask for this type.** Whether a forecast is stored densely
+or derived from a `SingleTimeSeries` is a storage detail:
+`get_time_series(Deterministic, …)` matches either and returns a
+[`Deterministic`] both ways. This type exists so the detail is *inspectable* —
+it surfaces as the `time_series_type` of keys and metadata from
+`get_time_series_keys` / `key_info` / `list_keys`, and passing it as a requested
+type narrows a query to the derived forecasts alone (e.g. to audit which of a
+store's forecasts are synthetic).
 """
-abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
+abstract type DeterministicSingleTimeSeries end
+
+# Every type accepted as a *requested* forecast type. Internal: it exists for
+# method bounds only, is not exported, and is not part of the public surface —
+# callers name a concrete type, and `Deterministic` already spans both
+# deterministic storage forms (see `_forecast_result_type`).
+const _ForecastRequest = Union{
+    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios
+}

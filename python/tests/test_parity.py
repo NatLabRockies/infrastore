@@ -579,20 +579,13 @@ def test_resolve_forecast_key():
     )
     assert resolved == key
 
-    # The abstract family resolves to the same concrete key.
-    resolved = store.resolve_forecast_key(
-        1, OwnerCategory.Component, "det", "abstract_deterministic", resolution=RES_1H
-    )
-    assert resolved == key
-    assert resolved.time_series_type == TimeSeriesType.Deterministic
-
     # A name that matches nothing is a miss, not a silent None.
     with pytest.raises(NotFoundError):
         store.resolve_forecast_key(
             1,
             OwnerCategory.Component,
             "absent",
-            "abstract_deterministic",
+            TimeSeriesType.Deterministic,
             resolution=RES_1H,
         )
 
@@ -602,8 +595,10 @@ def test_resolve_forecast_key_finds_a_transformed_dst():
     _add(store, 1, _sts("load", np.arange(8, dtype=np.float64)))
     assert store.transform_single_time_series(timedelta(hours=2), timedelta(hours=1)) == 1
 
+    # Asking for `Deterministic` finds the derived forecast: the transform is a
+    # storage detail. The key still reports the concrete stored type.
     resolved = store.resolve_forecast_key(
-        1, OwnerCategory.Component, "load", "abstract_deterministic", resolution=RES_1H
+        1, OwnerCategory.Component, "load", TimeSeriesType.Deterministic, resolution=RES_1H
     )
     assert resolved.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
 
@@ -623,19 +618,18 @@ def _both_forecast_types() -> Store:
     return store
 
 
-def test_the_abstract_deterministic_filter_matches_both_stored_types():
-    """The family selects both concrete members in one catalog query, while each
-    concrete member still selects only itself."""
+def test_the_deterministic_filter_matches_both_stored_forms():
+    """A `Deterministic` filter selects both storage forms in one catalog query,
+    while `DeterministicSingleTimeSeries` narrows to the derived ones."""
     store = _both_forecast_types()
 
-    rows = store.list_time_series(time_series_type="abstract_deterministic")
+    rows = store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    # Both forms match, and each row still reports the type it is stored as, so
+    # a caller auditing which forecasts are synthetic can still tell.
     assert {(r["owner_id"], r["time_series_type"]) for r in rows} == {
         (1, "Deterministic"),
         (2, "DeterministicSingleTimeSeries"),
     }
-    assert [
-        r["owner_id"] for r in store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
-    ] == [1]
     assert [
         r["owner_id"]
         for r in store.list_time_series(
@@ -644,34 +638,36 @@ def test_the_abstract_deterministic_filter_matches_both_stored_types():
     ] == [2]
 
     # The same value threads through every other filter-taking surface.
-    assert len(store.list_keys(time_series_type="abstract_deterministic")) == 2
-    assert len(store.list_array_groups(time_series_type="abstract_deterministic")) == 2
-    assert store.list_names(time_series_type="abstract_deterministic") == ["det", "load"]
-    assert store.list_owner_types(time_series_type="abstract_deterministic") == [OWNER_TYPE]
-    assert sorted(store.list_owner_ids(OWNER_CAT, time_series_type="abstract_deterministic")) == [
-        1,
-        2,
-    ]
-    assert store.get_resolutions("abstract_deterministic") == ["PT1H"]
-    assert store.get_intervals("abstract_deterministic") == ["PT1H"]
+    det = TimeSeriesType.Deterministic
+    assert len(store.list_keys(time_series_type=det)) == 2
+    assert len(store.list_array_groups(time_series_type=det)) == 2
+    assert store.list_names(time_series_type=det) == ["det", "load"]
+    assert store.list_owner_types(time_series_type=det) == [OWNER_TYPE]
+    assert sorted(store.list_owner_ids(OWNER_CAT, time_series_type=det)) == [1, 2]
+    assert store.get_resolutions(det) == ["PT1H"]
+    assert store.get_intervals(det) == ["PT1H"]
 
 
-def test_has_any_time_series_accepts_the_family():
-    """The probe a per-owner hot loop makes: one call instead of one per member."""
+def test_has_any_time_series_spans_both_deterministic_forms():
+    """The probe a per-owner hot loop makes: one call covers both storage forms."""
     store = _both_forecast_types()
 
     for owner in (1, 2):
-        assert store.has_any_time_series(owner_id=owner, time_series_type="abstract_deterministic")
-    # The derived view is not a `Deterministic` row, so the concrete filter misses it.
+        assert store.has_any_time_series(
+            owner_id=owner, time_series_type=TimeSeriesType.Deterministic
+        )
+    # Narrowing to the derived form excludes the densely stored one.
     assert not store.has_any_time_series(
-        owner_id=2, time_series_type=TimeSeriesType.Deterministic
+        owner_id=1, time_series_type=TimeSeriesType.DeterministicSingleTimeSeries
     )
-    assert not store.has_any_time_series(owner_id=3, time_series_type="abstract_deterministic")
+    assert not store.has_any_time_series(
+        owner_id=3, time_series_type=TimeSeriesType.Deterministic
+    )
 
 
-def test_the_family_builds_a_forecast_reader():
+def test_a_deterministic_reader_covers_a_derived_forecast():
     store = _both_forecast_types()
-    reader = store.build_forecast_reader("abstract_deterministic", RES_1H, owner_id=2)
+    reader = store.build_forecast_reader(TimeSeriesType.Deterministic, RES_1H, owner_id=2)
     assert len(reader.entries()) == 1
 
     store.forecast_read(reader, T0 + timedelta(hours=1))
@@ -679,22 +675,25 @@ def test_the_family_builds_a_forecast_reader():
     np.testing.assert_array_equal(reader.entry_values(0), np.array([1.0, 2.0]))
 
 
-def test_remove_by_filter_accepts_the_family():
+def test_remove_by_filter_spans_both_deterministic_forms():
     store = _both_forecast_types()
-    assert store.remove_by_filter(time_series_type="abstract_deterministic") == 2
-    assert not store.list_time_series(time_series_type="abstract_deterministic")
+    det = TimeSeriesType.Deterministic
+    assert store.remove_by_filter(time_series_type=det) == 2
+    assert not store.list_time_series(time_series_type=det)
     # Removing the derived view leaves the SingleTimeSeries it viewed in place.
     assert len(store.list_time_series(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
 
 
 def test_an_unusable_requested_type_is_rejected():
     store = _both_forecast_types()
-    # A string that is not the family sentinel is a bad value, not a bad type.
-    with pytest.raises(InvalidParameterError):
+    # Only a `TimeSeriesType` is accepted: there is no string spelling, and in
+    # particular no family sentinel to reach for.
+    with pytest.raises(TypeError):
         store.list_time_series(time_series_type="Deterministic")
-    with pytest.raises(InvalidParameterError):
-        store.resolve_forecast_key(1, OWNER_CAT, "det", "deterministic", resolution=RES_1H)
-    # Something that is neither a TimeSeriesType nor a string is a TypeError.
+    with pytest.raises(TypeError):
+        store.resolve_forecast_key(
+            1, OWNER_CAT, "det", "abstract_deterministic", resolution=RES_1H
+        )
     with pytest.raises(TypeError):
         store.has_any_time_series(time_series_type=5)
 

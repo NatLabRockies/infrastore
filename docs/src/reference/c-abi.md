@@ -231,9 +231,9 @@ int32_t infrastore_store_get_metadata_by_key(const struct InfraStore *handle,
                                      char *buf, uint64_t cap, uint64_t *out_len);
 
 /* Resolve attributes plus a requested type to the key of the one matching stored
-   series. requested_type is any stored type code (0..5) or
-   INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100), which matches a stored Deterministic or
-   DeterministicSingleTimeSeries and yields the concrete one. Unlike
+   series. requested_type is any stored type code (0..5); 2 = Deterministic also
+   matches a stored DeterministicSingleTimeSeries, and the key names the concrete
+   stored type either way. Unlike
    infrastore_make_key_from_attrs, which builds an identity without consulting the
    catalog, this validates: INFRASTORE_ERR_NOT_FOUND on a miss and
    INFRASTORE_ERR_INVALID_PARAMETER when several series match (narrow with a concrete
@@ -262,10 +262,10 @@ reader.
 
 The forecast types are created and read through the C ABI. `ts_type` is the `TimeSeriesType`
 discriminant — `0 = SingleTimeSeries`, `1 = NonSequentialTimeSeries`, `2 = Deterministic`,
-`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios` — plus one request-only
-sentinel, `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`), described below. Forecast values are
-dtype-generic raw little-endian byte buffers with explicit dimensions — the same `dtype`, `ndims`,
-`dims_ptr`, `data_ptr`, `data_byte_len` convention as the static add functions (see the
+`3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`, `5 = Scenarios`. As a _request_ it is read
+per [the matching rule](#requested-forecast-types) below. Forecast values are dtype-generic raw
+little-endian byte buffers with explicit dimensions — the same `dtype`, `ndims`, `dims_ptr`,
+`data_ptr`, `data_byte_len` convention as the static add functions (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
 `DeterministicSingleTimeSeries` (`3`) is read like any other forecast but cannot be written through
@@ -320,19 +320,20 @@ the percentile vector. A stored `DeterministicSingleTimeSeries` is synthesized i
 _values_ (its dense windows are materialized from the backing `SingleTimeSeries`), but it remains a
 distinct stored type for addressing purposes.
 
+#### Requested forecast types
+
 Its `ts_type` argument is a **read request**, not merely a stored-type filter:
 
-- A concrete code (`2 = Deterministic`, `3 = DeterministicSingleTimeSeries`, `4 = Probabilistic`,
-  `5 = Scenarios`) matches **only** that exact stored type. Passing `2` does _not_ find a stored
-  `DeterministicSingleTimeSeries`, and passing `3` does not find a stored `Deterministic`. The
-  non-forecast codes `0` and `1` are rejected with `INFRASTORE_ERR_INVALID_PARAMETER`.
-- `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC` (`100`) is a request-only sentinel — never a stored type
-  — for the `AbstractDeterministic` family: it matches a stored `Deterministic` **or** a
-  `DeterministicSingleTimeSeries`. This is the only way to address a deterministic forecast whose
-  concrete type the caller does not know in advance. The catalog resolves the family authoritatively
-  (no client-side guess-and-retry) and reports the concrete type that matched through
-  `*out_matched_type`. If both concrete types share the identity the request is ambiguous and
-  returns `INFRASTORE_ERR_INVALID_PARAMETER`; a genuine miss returns the usual not-found error.
+- `2 = Deterministic` matches a stored `Deterministic` **or** a stored
+  `DeterministicSingleTimeSeries`. A DST is a synthetic view that reads back as a `Deterministic`,
+  so a caller addresses a deterministic forecast without knowing which form the store holds. The
+  catalog resolves this authoritatively (no client-side guess-and-retry) and reports the concrete
+  stored type through `*out_matched_type`. An ambiguous request returns
+  `INFRASTORE_ERR_INVALID_PARAMETER`; a genuine miss returns the usual not-found error.
+- `3 = DeterministicSingleTimeSeries` narrows to the derived form alone — for callers auditing which
+  forecasts are synthetic rather than reading values.
+- `4 = Probabilistic` and `5 = Scenarios` match only themselves. The non-forecast codes `0` and `1`
+  are rejected with `INFRASTORE_ERR_INVALID_PARAMETER`.
 
 `*out_matched_type` always receives the **concrete** `TimeSeriesType` that was matched — so a stored
 `DeterministicSingleTimeSeries` reports `3`, never `2`, and the `100` sentinel is never returned.
@@ -348,7 +349,7 @@ ISO-8601 strings with `infrastore_string_free`.
 int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               int64_t owner_id, int32_t owner_category,
                               const char *name,
-                              int32_t ts_type,  /* 2..5, or INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC (100) */
+                              int32_t ts_type,  /* 2..5; 2 also matches a stored DST */
                               const char *resolution, const char *interval,  /* ISO-8601 filters; NULL = none */
                               const char *features_json,
                               bool time_range_present,
@@ -485,12 +486,11 @@ and errors on divergence, so every column has a value at every valid timestamp (
 ### ForecastReader
 
 Reads the forecast window at one timestamp for every matching forecast of one type. The build
-`ts_type` names the forecast type; a `Deterministic` reader (`2`) is abstract and also includes
-`DeterministicSingleTimeSeries` (`3`), read into identical `[H, *E]` windows. (Note the asymmetry
-with `infrastore_store_get_forecast`, where `2` matches only a stored `Deterministic` and the family
-request must be spelled `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC`; the reader build takes no such
-sentinel.) All matched forecasts must share one window timeline (`initial_timestamp` + `interval` +
-`count`). Each entry's window is a little-endian buffer of its `*_entry_info` shape.
+`ts_type` names the forecast type; a `Deterministic` reader (`2`) also includes
+`DeterministicSingleTimeSeries` (`3`), read into identical `[H, *E]` windows — the same rule
+`infrastore_store_get_forecast` applies. All matched forecasts must share one window timeline
+(`initial_timestamp` + `interval` + `count`). Each entry's window is a little-endian buffer of its
+`*_entry_info` shape.
 
 ```c
 int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,

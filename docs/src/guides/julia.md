@@ -170,17 +170,17 @@ n = transform_single_time_series!(store, Hour(24), Hour(24);
                                   owner_category = Component, resolution = Hour(1))
 ```
 
-Requesting the concrete `Deterministic` type does **not** match a transformed
-`DeterministicSingleTimeSeries` — that read throws `NotFoundError`. To read whichever of the two is
-stored under an identity, request the family type `AbstractDeterministic` (it returns a
-`Deterministic`, since a DST has no materialized struct):
+Requesting `Deterministic` also matches a transformed `DeterministicSingleTimeSeries`, so you read a
+forecast the same way whether it was added densely or derived (either returns a `Deterministic`,
+since a DST has no materialized struct):
 
 ```julia
-fc = get_time_series(AbstractDeterministic, store, 42, Component, "load")
+fc = get_time_series(Deterministic, store, 42, Component, "load")
 ```
 
-A genuine miss still throws `NotFoundError`, and an identity that holds both concrete types is
-ambiguous and errors — request a concrete type then.
+A genuine miss throws `NotFoundError`. To check which form you actually have, inspect the
+`time_series_type` on the key or metadata — or pass `DeterministicSingleTimeSeries` to select only
+the derived ones.
 
 `transform_single_time_series!` returns no keys, so to read a derived forecast by key, enumerate the
 owner's keys with `get_time_series_keys(store, owner_id, owner_category)` (the owner is the

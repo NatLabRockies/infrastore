@@ -8,7 +8,7 @@ use crate::hash::array_hash;
 use crate::metadata::{
     AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, ParentChildAssociation,
     ParentChildFilter, SeriesFamily, SupplementalAttributeAssociation, SupplementalAttributeFilter,
-    SupplementalAttributeSummaryRow, references_to_in_tx, typed_references_to_in_tx,
+    SupplementalAttributeSummaryRow, TypeMatch, references_to_in_tx, typed_references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
@@ -23,8 +23,8 @@ use crate::types::key::{
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
 use crate::types::time_series::{
-    Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
+    Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
+    TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -32,9 +32,13 @@ pub struct ListFilter {
     pub owner_id: Option<i64>,
     pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
-    /// Type filter: a concrete stored type, or `RequestedType::AbstractDeterministic`
-    /// to match both `Deterministic` and `DeterministicSingleTimeSeries`.
-    pub time_series_type: Option<RequestedType>,
+    /// Type filter, interpreted by [`TimeSeriesType::accepts`]: `Deterministic`
+    /// spans both of its concrete storage forms (so a transformed
+    /// `DeterministicSingleTimeSeries` is included), every other type matches
+    /// only itself. Rows keep their stored type in
+    /// [`TimeSeriesMetadata::time_series_type`], so a caller that cares which
+    /// form it got can still tell.
+    pub time_series_type: Option<TimeSeriesType>,
     pub name: Option<String>,
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
     /// wildcards). Applied in addition to `name` when both are set.
@@ -60,8 +64,8 @@ impl ListFilter {
         self.owner_type = Some(t.into());
         self
     }
-    pub fn time_series_type(mut self, t: impl Into<RequestedType>) -> Self {
-        self.time_series_type = Some(t.into());
+    pub fn time_series_type(mut self, t: TimeSeriesType) -> Self {
+        self.time_series_type = Some(t);
         self
     }
     pub fn name(mut self, n: impl Into<String>) -> Self {
@@ -92,7 +96,7 @@ impl From<ListFilter> for MetadataFilter {
             owner_id: value.owner_id,
             owner_category: value.owner_category,
             owner_type: value.owner_type,
-            time_series_type: value.time_series_type,
+            time_series_type: value.time_series_type.map(TypeMatch::Requested),
             name: value.name,
             name_glob: value.name_glob,
             resolution: value.resolution,
@@ -1280,8 +1284,8 @@ impl Store {
         }
         // SingleTimeSeries-only; accept an explicit matching type, reject others.
         match filter.time_series_type {
-            None | Some(RequestedType::Concrete(TimeSeriesType::SingleTimeSeries)) => {
-                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries.into());
+            None | Some(TimeSeriesType::SingleTimeSeries) => {
+                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
             }
             Some(other) => {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -1317,24 +1321,21 @@ impl Store {
     /// Build a [`ForecastReader`] over the forecasts matching `filter`.
     ///
     /// The filter must name a forecast type and pin a resolution. A
-    /// `Deterministic` reader is **abstract**: it also includes
-    /// `DeterministicSingleTimeSeries`, read into identical `[H, *E]` windows
-    /// (mirroring core's `AbstractDeterministic`). `Probabilistic` and
-    /// `Scenarios` are exact. All matched forecasts must share one window
-    /// timeline (`initial_timestamp` + `interval` + `count`); this is validated
-    /// and errors on divergence. Drive with [`Self::forecast_read`]. See
+    /// `Deterministic` reader spans both concrete storage forms — a transformed
+    /// `DeterministicSingleTimeSeries` is read into identical `[H, *E]` windows
+    /// — per [`TimeSeriesType::accepts`]; `Probabilistic` and `Scenarios` are
+    /// exact. All matched forecasts must share one window timeline
+    /// (`initial_timestamp` + `interval` + `count`); this is validated and
+    /// errors on divergence. Drive with [`Self::forecast_read`]. See
     /// [`crate::reader`].
-    pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader> {
+    pub fn build_forecast_reader(&self, mut filter: ListFilter) -> Result<ForecastReader> {
         let reported = match filter.time_series_type {
-            // The family reads exactly like a Deterministic reader, which is
-            // already abstract over its two concrete storage types.
-            Some(RequestedType::AbstractDeterministic) => TimeSeriesType::Deterministic,
-            Some(RequestedType::Concrete(
+            Some(
                 t @ (TimeSeriesType::Deterministic
                 | TimeSeriesType::DeterministicSingleTimeSeries
                 | TimeSeriesType::Probabilistic
                 | TimeSeriesType::Scenarios),
-            )) => t,
+            ) => t,
             Some(other) => {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "build_forecast_reader handles forecast types (Deterministic/\
@@ -1355,22 +1356,13 @@ impl Store {
                     .into(),
             ));
         }
-        // A Deterministic reader is abstract over its concrete storage types.
-        let concrete: Vec<TimeSeriesType> = match reported {
-            TimeSeriesType::Deterministic => vec![
-                TimeSeriesType::Deterministic,
-                TimeSeriesType::DeterministicSingleTimeSeries,
-            ],
-            other => vec![other],
-        };
+        // No per-type expansion here: the catalog filter already widens a
+        // `Deterministic` request to both storage forms.
+        filter.time_series_type = Some(reported);
         let mut items = Vec::new();
-        for t in concrete {
-            let mut f = filter.clone();
-            f.time_series_type = Some(t.into());
-            for m in self.list_time_series(f)? {
-                let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
-                items.push((m, shape));
-            }
+        for m in self.list_time_series(filter)? {
+            let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
+            items.push((m, shape));
         }
         crate::reader::build_forecast_entries(reported, items)
     }
@@ -1490,16 +1482,17 @@ impl Store {
         self.metadata.get_by_key(key)
     }
 
-    /// Resolve a forecast addressed by attributes plus a [`RequestedType`] to the
-    /// concrete [`TimeSeriesKey`] of the single matching association. The returned
-    /// key's `time_series_type` is the concrete type that matched.
+    /// Resolve a forecast addressed by attributes plus a requested
+    /// [`TimeSeriesType`] to the [`TimeSeriesKey`] of the single matching
+    /// association. The returned key's `time_series_type` is the concrete
+    /// stored type that matched, which is how a caller inspects whether it got
+    /// a real or a synthetic forecast.
     ///
-    /// For a [`RequestedType::Concrete`] request the concrete type must match;
-    /// for [`RequestedType::AbstractDeterministic`] a stored `Deterministic` or
-    /// `DeterministicSingleTimeSeries` matches (the two cannot coexist for one
-    /// family, so at most one ever does). This is the authoritative replacement
-    /// for the bindings' former guess-and-retry fallback: the catalog — not the
-    /// caller — decides which concrete type satisfies the request.
+    /// Matching follows [`TimeSeriesType::accepts`], so requesting
+    /// `Deterministic` also resolves a stored `DeterministicSingleTimeSeries`.
+    /// The two cannot coexist for one identity (see `insert_association`), so
+    /// this never introduces ambiguity. The catalog — not the caller — decides
+    /// which stored form satisfies the request.
     ///
     /// `resolution` and `interval` are optional filters on the identity. Leave
     /// either unset to match across it; supply it to disambiguate when several
@@ -1520,7 +1513,7 @@ impl Store {
         resolution: Option<Period>,
         interval: Option<Period>,
         features: Features,
-        requested: crate::types::time_series::RequestedType,
+        requested: TimeSeriesType,
     ) -> Result<TimeSeriesKey> {
         // List candidates sharing (owner, name, resolution, interval, features),
         // then keep those whose concrete type satisfies the request. A concrete
@@ -1537,7 +1530,7 @@ impl Store {
             features_hash: Some(f_hash),
             ..Default::default()
         })?;
-        matches.retain(|m| m.features == features && requested.matches(m.time_series_type));
+        matches.retain(|m| m.features == features && requested.accepts(m.time_series_type));
         match matches.len() {
             0 => Err(TimeSeriesError::NotFound),
             1 => TimeSeriesKey::from_metadata(&matches.pop().unwrap()),
@@ -1645,7 +1638,7 @@ impl Store {
         // whose components are transformed one resolution at a time should not
         // pay to hydrate the other resolutions' features on every call.
         let sources = self.metadata.list(&MetadataFilter {
-            time_series_type: Some(TimeSeriesType::SingleTimeSeries.into()),
+            time_series_type: Some(TypeMatch::Exact(TimeSeriesType::SingleTimeSeries)),
             owner_category,
             resolution,
             ..Default::default()
@@ -1818,7 +1811,7 @@ impl Store {
         self.metadata.exists(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
-            time_series_type: Some(key.time_series_type.into()),
+            time_series_type: Some(TypeMatch::Exact(key.time_series_type)),
             name: Some(key.name.clone()),
             resolution: key.resolution,
             interval: key.interval,
@@ -1842,7 +1835,7 @@ impl Store {
         self.metadata.exists(&filter.into())
     }
 
-    pub fn get_resolutions(&self, time_series_type: Option<RequestedType>) -> Result<Vec<Period>> {
+    pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
@@ -1850,7 +1843,7 @@ impl Store {
     /// The interval analog of [`Self::get_resolutions`]; ordered lexically by
     /// ISO-8601 text (mixed period kinds have no numeric order). Non-forecast
     /// types have no interval, so they return an empty list.
-    pub fn get_intervals(&self, time_series_type: Option<RequestedType>) -> Result<Vec<Period>> {
+    pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
         self.metadata.distinct_intervals(time_series_type)
     }
 
@@ -1935,7 +1928,7 @@ impl Store {
             TimeSeriesType::Scenarios,
         ] {
             let rows = self.metadata.list(&MetadataFilter {
-                time_series_type: Some(ts_type.into()),
+                time_series_type: Some(TypeMatch::Exact(ts_type)),
                 resolution,
                 interval,
                 ..Default::default()
@@ -2057,7 +2050,7 @@ impl Store {
     pub fn list_owner_ids(
         &self,
         category: OwnerCategory,
-        time_series_type: Option<RequestedType>,
+        time_series_type: Option<TimeSeriesType>,
         resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         self.metadata

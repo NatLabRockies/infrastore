@@ -847,15 +847,14 @@ fn dst_synthesis_multidim_element_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// AbstractDeterministic resolution + matched_type
+// Deterministic resolution + matched type
 //
-// These replace the bindings' former guess-and-retry fallback: the catalog
-// resolves the family to one concrete key (whose `time_series_type` is the
-// matched type), errors explicitly on ambiguity, and reports a genuine miss as
-// `NotFound` rather than masking it.
+// A `Deterministic` request resolves to one concrete key (whose
+// `time_series_type` is the stored form that matched), errors explicitly on
+// ambiguity, and reports a genuine miss as `NotFound` rather than masking it.
 // ---------------------------------------------------------------------------
 
-use infrastore_core::{RequestedType, TimeSeriesError};
+use infrastore_core::TimeSeriesError;
 
 // Underlying STS values long enough to derive a DST under (H=2, interval=1).
 fn dst_source_vals() -> Vec<f64> {
@@ -863,7 +862,7 @@ fn dst_source_vals() -> Vec<f64> {
 }
 
 #[test]
-fn resolve_abstract_deterministic_matches_real_deterministic() {
+fn resolve_deterministic_matches_real_deterministic() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(4);
@@ -899,7 +898,7 @@ fn resolve_abstract_deterministic_matches_real_deterministic() {
                     Some(Period::Fixed(resolution)),
                     None,
                     Features::new(),
-                    RequestedType::AbstractDeterministic,
+                    TimeSeriesType::Deterministic,
                 )
                 .unwrap();
             assert_eq!(
@@ -920,7 +919,7 @@ fn resolve_abstract_deterministic_matches_real_deterministic() {
 }
 
 #[test]
-fn resolve_abstract_deterministic_matches_dst() {
+fn resolve_deterministic_matches_dst() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(2);
@@ -955,7 +954,7 @@ fn resolve_abstract_deterministic_matches_dst() {
                     Some(Period::Fixed(resolution)),
                     None,
                     Features::new(),
-                    RequestedType::AbstractDeterministic,
+                    TimeSeriesType::Deterministic,
                 )
                 .unwrap();
             assert_eq!(
@@ -976,7 +975,7 @@ fn resolve_abstract_deterministic_matches_dst() {
 }
 
 #[test]
-fn resolve_abstract_deterministic_not_found_is_not_masked() {
+fn resolve_deterministic_not_found_is_not_masked() {
     let store = create_store(None, true).unwrap();
     let err = store
         .resolve_forecast_key(
@@ -986,7 +985,7 @@ fn resolve_abstract_deterministic_not_found_is_not_masked() {
             Some(Period::Fixed(Duration::hours(1))),
             None,
             Features::new(),
-            RequestedType::AbstractDeterministic,
+            TimeSeriesType::Deterministic,
         )
         .unwrap_err();
     assert!(
@@ -1042,7 +1041,7 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
             Some(Period::Fixed(resolution)),
             None,
             Features::new(),
-            RequestedType::Concrete(TimeSeriesType::Deterministic),
+            TimeSeriesType::Deterministic,
         )
         .unwrap_err();
     assert!(
@@ -1059,7 +1058,7 @@ fn resolve_deterministic_ambiguous_by_interval_errors() {
             Some(Period::Fixed(resolution)),
             Some(Period::Fixed(Duration::hours(6))),
             Features::new(),
-            RequestedType::Concrete(TimeSeriesType::Deterministic),
+            TimeSeriesType::Deterministic,
         )
         .unwrap();
     assert_eq!(d.time_series_type(), TimeSeriesType::Deterministic);
@@ -1763,15 +1762,15 @@ fn non_positive_forecast_periods_are_rejected_through_the_add_path() {
 }
 
 // ---------------------------------------------------------------------------
-// AbstractDeterministic as a catalog *filter* (list/has/aggregate queries),
-// and zero-interval single-window forecasts.
+// A `Deterministic` catalog *filter* (list/has/aggregate queries) spanning both
+// storage forms, and zero-interval single-window forecasts.
 // ---------------------------------------------------------------------------
 
-/// The family sentinel in `ListFilter` matches a stored `Deterministic` and a
-/// stored `DeterministicSingleTimeSeries`, and nothing else — across the
-/// listing, existence, distinct-interval, and owner-id query paths.
+/// A `Deterministic` `ListFilter` matches a stored `Deterministic` and a stored
+/// `DeterministicSingleTimeSeries`, and nothing else — across the listing,
+/// existence, distinct-interval, and owner-id query paths.
 #[test]
-fn abstract_deterministic_filters_match_both_family_members() {
+fn deterministic_filter_matches_both_storage_forms() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
     let horizon = Duration::hours(2);
@@ -1825,7 +1824,7 @@ fn abstract_deterministic_filters_match_both_family_members() {
             );
         },
         |store, _, backend| {
-            let family = ListFilter::new().time_series_type(RequestedType::AbstractDeterministic);
+            let family = ListFilter::new().time_series_type(TimeSeriesType::Deterministic);
             let keys = store.list_keys(family.clone()).unwrap();
             assert_eq!(keys.len(), 2, "{backend}: family list matches Det + DST");
             assert!(
@@ -1835,14 +1834,14 @@ fn abstract_deterministic_filters_match_both_family_members() {
             let mut ids = store
                 .list_owner_ids(
                     OwnerCategory::Component,
-                    Some(RequestedType::AbstractDeterministic),
+                    Some(TimeSeriesType::Deterministic),
                     None,
                 )
                 .unwrap();
             ids.sort();
             assert_eq!(ids, vec![1, 2], "{backend}: family owner ids");
             let intervals = store
-                .get_intervals(Some(RequestedType::AbstractDeterministic))
+                .get_intervals(Some(TimeSeriesType::Deterministic))
                 .unwrap();
             assert_eq!(
                 intervals,

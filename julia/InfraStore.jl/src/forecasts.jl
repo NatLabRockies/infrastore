@@ -10,11 +10,6 @@ const INFRASTORE_TYPE_DETERMINISTIC = 2
 const INFRASTORE_TYPE_DETERMINISTIC_SINGLE = 3
 const INFRASTORE_TYPE_PROBABILISTIC = 4
 const INFRASTORE_TYPE_SCENARIOS = 5
-# Request-only family sentinel (never a stored type): matches a stored
-# `Deterministic` or `DeterministicSingleTimeSeries`. The Rust core resolves it
-# and reports the concrete type that matched. Must match `INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC`
-# in the C ABI.
-const INFRASTORE_TYPE_ABSTRACT_DETERMINISTIC = 100
 
 _features_arg(features) = isempty(features) ? C_NULL : JSON.json(features)
 _category_int(c::OwnerCategory) = Int32(Int(c))
@@ -412,10 +407,11 @@ function _get_forecast_raw(
     )
 end
 
-# Result struct for a requested forecast type: the deterministic family
-# (including a stored `DeterministicSingleTimeSeries`, which has no materialized
-# form) reads back as `Deterministic`.
-_forecast_result_type(::Type{<:AbstractDeterministic}) = Deterministic
+# Result struct for a requested forecast type: both deterministic forms read
+# back as `Deterministic` — a `DeterministicSingleTimeSeries` has no
+# materialized form, so requesting it still yields the synthesized windows.
+_forecast_result_type(::Type{Deterministic}) = Deterministic
+_forecast_result_type(::Type{DeterministicSingleTimeSeries}) = Deterministic
 _forecast_result_type(::Type{Probabilistic}) = Probabilistic
 _forecast_result_type(::Type{Scenarios}) = Scenarios
 
@@ -466,15 +462,19 @@ end
     get_time_series(T, store, owner_id, owner_category, name;
                     resolution, interval, features=Dict(), time_range)
 
-Fetch a stored forecast of type `T`: `Deterministic`, `DeterministicSingleTimeSeries`,
-`Probabilistic`, `Scenarios`, or `AbstractDeterministic` to match whichever of
-the deterministic pair is stored. `owner_category` is the owner's
-`OwnerCategory` (`Component` or `SupplementalAttribute`).
+Fetch a stored forecast of type `T`: `Deterministic`, `Probabilistic`, or
+`Scenarios`. `owner_category` is the owner's `OwnerCategory` (`Component` or
+`SupplementalAttribute`).
 
-The Rust core resolves the identity (and, for `AbstractDeterministic`, the
-family) in a single call — no guess-and-retry. A genuine miss raises
-`NotFoundError`; an ambiguous request raises an error naming the candidates
-(narrow it with a concrete type, `resolution`, and/or `interval`).
+Ask for `Deterministic` whether the forecast was added densely or derived by
+`transform_single_time_series!` — it matches both, so how the store holds it
+stays an internal detail. (`DeterministicSingleTimeSeries` is also accepted, and
+narrows to the derived form; you need it only when auditing which forecasts are
+synthetic.)
+
+The Rust core resolves the identity in a single call — no guess-and-retry. A
+genuine miss raises `NotFoundError`; an ambiguous request raises an error naming
+the candidates (narrow it with `resolution` and/or `interval`).
 
 A stored `DeterministicSingleTimeSeries` has no materialized form and is
 returned as a [`Deterministic`]. `data` has the canonical shape
@@ -494,7 +494,7 @@ function get_time_series(
     interval::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
     time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
-) where {T <: Union{AbstractDeterministic, Probabilistic, Scenarios}}
+) where {T <: _ForecastRequest}
     r = _get_forecast_raw(
         store,
         owner_id,
@@ -522,7 +522,7 @@ function get_time_series(
     store::Store,
     key::TimeSeriesKey;
     time_range::Union{Nothing, Tuple{DateTime, DateTime}}=nothing,
-) where {T <: Union{AbstractDeterministic, Probabilistic, Scenarios}}
+) where {T <: _ForecastRequest}
     r = _get_forecast_raw(store, key; time_range=time_range)
     return _forecast_from_raw(_forecast_result_type(T), r, _key_name(key))
 end

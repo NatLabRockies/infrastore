@@ -2312,7 +2312,7 @@ fn an_exported_forecast_csv_round_trips_through_its_transpose() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn any_deterministic_matches_the_whole_family() {
+fn deterministic_selects_transformed_rows_and_dst_narrows_to_them() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
@@ -2321,16 +2321,23 @@ fn any_deterministic_matches_the_whole_family() {
         &["transform", "--horizon", "2h", "--interval", "1h"],
     );
 
-    // `transform` writes DeterministicSingleTimeSeries, which `--type
-    // deterministic` does not match; without the family spelling there was no
-    // single flag that selected every deterministic forecast.
+    // `transform` writes a DeterministicSingleTimeSeries. Asking for
+    // `deterministic` must find it: whether a forecast is stored densely or
+    // derived from a SingleTimeSeries is not something a caller should have to
+    // know to select it.
+    let listed = data_lines(&run(
+        &store,
+        &["-f", "csv", "list", "--type", "deterministic"],
+    ));
+    assert_eq!(listed.len(), 1, "--type deterministic must match the DST");
+    // The row still reports the stored type, so the detail stays inspectable.
     assert!(
-        data_lines(&run(
-            &store,
-            &["-f", "csv", "list", "--type", "deterministic"]
-        ))
-        .is_empty()
+        listed[0].contains("DeterministicSingleTimeSeries"),
+        "the listed row must name its stored type: {:?}",
+        listed[0]
     );
+
+    // And the narrow spelling still selects only the derived forecasts.
     assert_eq!(
         data_lines(&run(
             &store,
@@ -2339,21 +2346,18 @@ fn any_deterministic_matches_the_whole_family() {
         .len(),
         1
     );
-    assert_eq!(
-        data_lines(&run(
-            &store,
-            &["-f", "csv", "list", "--type", "any_deterministic"]
-        ))
-        .len(),
-        1,
-        "the family must match the stored DST"
-    );
 
-    // The error text lists every accepted spelling.
+    // The error text lists every accepted spelling, and no longer offers a
+    // family alias.
     let stderr = run_err(&store, &["list", "--type", "nonsense"]);
-    for name in ["deterministic_single", "any_deterministic"] {
-        assert!(stderr.contains(name), "{name} missing from: {stderr}");
-    }
+    assert!(
+        stderr.contains("deterministic_single"),
+        "deterministic_single missing from: {stderr}"
+    );
+    assert!(
+        !stderr.contains("any_deterministic"),
+        "the family alias must be gone from: {stderr}"
+    );
 }
 
 #[test]
