@@ -15,7 +15,7 @@ categories = ["network-programming", "science"]
 name = "infrastore-server"
 path = "src/bin/server.rs"
 
-# Statically link netcdf-c/HDF5 so the server binary is self-contained; see
+# Statically link HDF5 so the server binary is self-contained; see
 # `infrastore-core`'s manifest for the full tradeoff.
 [features]
 default = ["vendored"]

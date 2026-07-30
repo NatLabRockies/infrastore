@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/NatLabRockies/infrastore/branch/main/graph/badge.svg)](https://codecov.io/gh/NatLabRockies/infrastore)
 
 Rust library for managing time-series data in power-systems and energy simulations. Numerical arrays
-are persisted in NetCDF4, and the metadata associating each array with its owning component lives in
+are persisted in HDF5, and the metadata associating each array with its owning component lives in
 SQLite. Identical arrays are stored once and shared through content addressing.
 
 It ships native Rust, Python (PyO3), and Julia (C ABI) interfaces, the `infrastore` command-line
@@ -58,10 +58,10 @@ authoritative.
 | Julia    | `Pkg.add("InfraStore")`        |
 | CLI      | `cargo install infrastore-cli` |
 
-Every channel statically links NetCDF, HDF5, and zlib, so there are no system libraries to install.
-Building the crates from source needs `cmake` and a C compiler; the Python wheels and the Julia
-binary (`InfraStore_jll`) are prebuilt — see [Releasing](docs/src/releasing.md) for why the Julia
-package vendors its own HDF5 rather than linking `NetCDF_jll` / `HDF5_jll`.
+Every channel statically links HDF5 and zlib, so there are no system libraries to install. Building
+the crates from source needs `cmake` and a C compiler; the Python wheels and the Julia binary
+(`InfraStore_jll`) are prebuilt — see [Releasing](docs/src/releasing.md) for why the Julia package
+vendors its own HDF5 rather than linking `HDF5_jll`.
 
 To work against a checkout instead:
 
@@ -168,7 +168,7 @@ The package overloads `Base` (`==` / `hash` on keys via the core identity, `show
 
 ## CLI
 
-`infrastore` loads time series from CSV and inspects a store, talking directly to the on-disk NetCDF
+`infrastore` loads time series from CSV and inspects a store, talking directly to the on-disk HDF5
 and SQLite artifact (no gRPC). A global `-f/--format` selects `table` (default), `json`, or `csv`,
 and `--store` falls back to the `INFRASTORE_STORE` environment variable.
 
@@ -178,11 +178,11 @@ IS=target/debug/infrastore
 
 # Numeric values live in a CSV; everything else is described in a descriptor JSON.
 $IS template single > load.json                              # example descriptor to edit
-$IS --store demo.nc add --descriptor load.json               # creates the store on first add
-$IS --store demo.nc list
-$IS --store demo.nc get  --owner-id 42 --name load           # pretty table
-$IS --store demo.nc -f csv  get  --owner-id 42 --name load   # round-trippable CSV
-$IS --store demo.nc -f json info --owner-id 42 --name load   # metadata + stats
+$IS --store demo.h5 add --descriptor load.json               # creates the store on first add
+$IS --store demo.h5 list
+$IS --store demo.h5 get  --owner-id 42 --name load           # pretty table
+$IS --store demo.h5 -f csv  get  --owner-id 42 --name load   # round-trippable CSV
+$IS --store demo.h5 -f json info --owner-id 42 --name load   # metadata + stats
 ```
 
 The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,
@@ -192,9 +192,11 @@ first column is the timestamp. All six dtypes and all five writable types (`sing
 flat row-major values whose count equals the product of the type's shape (see
 `infrastore template <type>`).
 
-Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, `summary`, `verify`,
-`check-consistency`, `resolutions`, `params`), bulk export (`export`, one timestamped CSV or JSON
-file per series), and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
+Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, `store-info`,
+`summary`, `verify`, `check-consistency`, `resolutions`, `params`), content addressing (`arrays`,
+and the `data_hash` + HDF5 location on `list`/`info`), the association catalogs (`attributes`,
+`links`, read-only), bulk export (`export`, one timestamped CSV or JSON file per series, re-readable
+by `add`), and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
 `remove --all`). Destructive commands take `--dry-run`. `infrastore completions <shell>` emits shell
 completions. Full reference:
 [CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
@@ -203,7 +205,7 @@ completions. Full reference:
 
 ```sh
 cp examples/server.toml my_server.toml
-# edit my_server.toml: point [data].files at your .nc, set [authentication]
+# edit my_server.toml: point [data].files at your .h5, set [authentication]
 cargo run -p infrastore-server -- --config my_server.toml
 ```
 
@@ -212,24 +214,25 @@ entry in `keys`, and clients must send the chosen key in the `x-api-key` header.
 
 ## Storage format
 
-A persisted store is **two files that travel together**: a NetCDF file and a SQLite catalog at
-`<netcdf-path>.sqlite`. Copying, moving, or deleting one without the other corrupts the store.
+A persisted store is **two files that travel together**: an HDF5 file and a SQLite catalog at
+`<store-path>.sqlite`. Copying, moving, or deleting one without the other corrupts the store.
 
-The NetCDF file carries the attribute `data_format_version = "0.11.0"`. Packed datasets are named
+The HDF5 file carries the attributes `data_format_version = "0.11.0"` and
+`storage_backend = "hdf5"`; a file without the latter is not opened. Packed datasets are named
 `sts_{dtype}_{shape}_{length}_{resolution}`, chunked `(1, num_arrays)` so per-timestep reads across
-all components are contiguous; a sibling string variable `<dataset>_h` holds each column's SHA-256
-hex hash, with an empty string marking a free slot. Standalone arrays are stored as
+all components are contiguous; a sibling `u8` dataset `<dataset>_h` holds each column's SHA-256 hex
+hash as raw bytes, with an all-zero row marking a free slot. Standalone arrays are stored as
 `arr_{hex_hash}`.
 
-Deletion frees packed slots for reuse rather than shrinking the file — NetCDF cannot shrink in
-place, so reclaiming space is an explicit `Store::compact()`. The exact bytes are specified in the
+Deletion frees packed slots for reuse rather than shrinking the file — HDF5 cannot reclaim the space
+in place, so reclaiming it is an explicit `Store::compact()`. The exact bytes are specified in the
 [On-Disk File Format](https://natlabrockies.github.io/infrastore/latest/reference/file-format.html).
 
 ## Repo layout
 
 ```
 crates/
-  infrastore-core/     # Types, NetCDF + SQLite storage, hashing, public Rust API
+  infrastore-core/     # Types, HDF5 + SQLite storage, hashing, public Rust API
   infrastore-proto/    # Protobuf service definition (proto/) + tonic codegen
   infrastore-server/   # gRPC server binary + Rust client
   infrastore-py/       # PyO3 bindings, abi3-py311 wheel
@@ -246,8 +249,8 @@ examples/              # Sample server config and cli/ sample CSV + descriptor
 
 ### Prerequisites
 
-NetCDF, HDF5, and zlib are **built from vendored sources and linked statically by default**, so you
-do not need to install them. The build needs `cmake` and a C compiler, plus `protobuf` for the gRPC
+HDF5 and zlib are **built from vendored sources and linked statically by default**, so you do not
+need to install them. The build needs `cmake` and a C compiler, plus `protobuf` for the gRPC
 codegen:
 
 ```sh
@@ -255,9 +258,8 @@ brew install cmake protobuf maturin              # macOS
 sudo apt-get install cmake protobuf-compiler     # Linux (Debian/Ubuntu)
 ```
 
-The first build compiles netcdf-c and HDF5 from source, which takes a few minutes; the result is
-cached and later builds are unaffected. The cdylib tests additionally need Python 3.11+ and Julia
-1.10+.
+The first build compiles HDF5 from source, which takes a few minutes; the result is cached and later
+builds are unaffected. The cdylib tests additionally need Python 3.11+ and Julia 1.10+.
 
 ### Build and test
 
@@ -271,7 +273,7 @@ The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
 `cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux and Windows those
 flags are inert.
 
-### Linking against system NetCDF instead
+### Linking against system HDF5 instead
 
 Every crate enables a `vendored` feature by default. Turn it off to link the system libraries:
 
@@ -279,19 +281,18 @@ Every crate enables a `vendored` feature by default. Turn it off to link the sys
 cargo build --workspace --no-default-features
 ```
 
-That path needs the development packages — `brew install hdf5 netcdf` or
-`sudo apt-get install libhdf5-dev libnetcdf-dev` — and the `hdf5-metno-sys` build script does not
-always locate HDF5 on its own. If the build fails with
-`Unable to locate HDF5 root directory and/or headers`, point it at the install explicitly:
+That path needs the development package — `brew install hdf5` or `sudo apt-get install libhdf5-dev`
+— and the `hdf5-metno-sys` build script does not always locate HDF5 on its own. If the build fails
+with `Unable to locate HDF5 root directory and/or headers`, point it at the install explicitly:
 
 ```sh
 export HDF5_DIR="$(brew --prefix hdf5)"                  # macOS
 export HDF5_DIR=/usr/lib/x86_64-linux-gnu/hdf5/serial    # Debian/Ubuntu
 ```
 
-Because `netcdf-sys` declares `links = "netcdf"`, there is exactly one copy of it in any dependency
-graph and Cargo unifies features across the whole graph. Vendored-versus-system is therefore an
-all-or-nothing choice for a given build, not something an individual crate can pick.
+Because `hdf5-metno-sys` declares `links = "hdf5"`, there is exactly one copy of it in any
+dependency graph and Cargo unifies features across the whole graph. Vendored-versus-system is
+therefore an all-or-nothing choice for a given build, not something an individual crate can pick.
 
 ## Contributing
 

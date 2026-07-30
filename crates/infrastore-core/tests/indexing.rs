@@ -3,14 +3,14 @@
 //! These tests target the three layers of index arithmetic a returned slice
 //! depends on, all of which must agree:
 //!   1. `store.rs` — turning a `time_range` into `start_idx..end_idx`;
-//!   2. `netcdf.rs` `packed_extents` — `(time_range, col, element_shape)` -> extents;
+//!   2. `hdf5.rs` `packed_ranges` — `(time_range, col, element_shape)` -> ranges;
 //!   3. `memory.rs::get_slice` — `row_bytes` byte arithmetic.
 //!
 //! Every battery runs against BOTH backends via [`for_each_backend`]: the
-//! in-memory store, and a NetCDF store that is flushed, closed, and reopened
+//! in-memory store, and an HDF5 store that is flushed, closed, and reopened
 //! read-only so the on-disk packed layout (not just in-memory state) is read
 //! back. Because both backends are checked against the same expected values,
-//! these tests also assert memory/NetCDF parity.
+//! these tests also assert memory/HDF5 parity.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{

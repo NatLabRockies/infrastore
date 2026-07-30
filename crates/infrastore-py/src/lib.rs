@@ -113,6 +113,14 @@ impl From<PyTimeSeriesType> for core_lib::TimeSeriesType {
     }
 }
 
+// The catalog filters take a `RequestedType`; every Python-exposed type is a
+// concrete stored type, so the conversion goes through `TimeSeriesType`.
+impl From<PyTimeSeriesType> for core_lib::RequestedType {
+    fn from(v: PyTimeSeriesType) -> Self {
+        core_lib::TimeSeriesType::from(v).into()
+    }
+}
+
 impl From<core_lib::TimeSeriesType> for PyTimeSeriesType {
     fn from(v: core_lib::TimeSeriesType) -> Self {
         match v {
@@ -1302,10 +1310,10 @@ impl PyStore {
 #[pymethods]
 impl PyStore {
     /// Create a new store. With `in_memory=True`, no filesystem I/O occurs;
-    /// otherwise a NetCDF file is created at `path` and a catalog SQLite file
+    /// otherwise an HDF5 file is created at `path` and a catalog SQLite file
     /// at `<path>.sqlite` holds metadata.
     ///
-    /// `compression` selects the NetCDF data-variable filter: `"deflate"`
+    /// `compression` selects the HDF5 data-variable filter: `"deflate"`
     /// (default) applies DEFLATE at `compression_level` (0–9) with optional
     /// byte `shuffle`; `"none"` disables compression. The setting is ignored
     /// for in-memory stores and is persisted so later appends reuse it.
@@ -1629,6 +1637,11 @@ impl PyStore {
     /// `name_glob` filters names by a SQLite `GLOB` pattern (case-sensitive,
     /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
     /// must match. All filter arguments are keyword-only.
+    ///
+    /// `time_series_type` is a `TimeSeriesType` or the string
+    /// `"abstract_deterministic"`, which matches both `Deterministic` and
+    /// `DeterministicSingleTimeSeries` in one query. Every method taking these
+    /// filter kwargs accepts the family the same way.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, resolution=None, interval=None, features=None
@@ -1640,7 +1653,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -1651,7 +1664,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -1682,7 +1695,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -1693,7 +1706,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -1743,10 +1756,10 @@ impl PyStore {
 
     /// Return True if at least one time series matches the filters — e.g.
     /// "does this owner have any time series (of type T)?" — without listing
-    /// them. Accepts the same keyword-only filters as `list_time_series` and
-    /// answers from a covering index probe, so it is safe to call in hot
-    /// loops (except with a `features` filter, which falls back to a full
-    /// listing internally).
+    /// them. Accepts the same keyword-only filters as `list_time_series`,
+    /// including `"abstract_deterministic"` for `time_series_type`, and answers
+    /// from index probes that hydrate no rows — a `features` filter included —
+    /// so it is safe to call in hot loops.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
         name=None, name_glob=None, resolution=None, interval=None, features=None
@@ -1757,7 +1770,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -1768,7 +1781,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -1782,12 +1795,13 @@ impl PyStore {
     fn get_resolutions(
         &self,
         py: Python<'_>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Vec<String>> {
         let _ = py;
+        let requested = pyany_to_requested_type_opt(time_series_type.as_ref(), "time_series_type")?;
         Ok(self
             .store()?
-            .get_resolutions(time_series_type.map(Into::into))
+            .get_resolutions(requested)
             .map_err(map_err)?
             .into_iter()
             .map(|p| p.to_iso8601())
@@ -1876,9 +1890,9 @@ impl PyStore {
     /// disagree with the hash recorded alongside them, as a dict
     /// `{"ok": bool, "errors": list[str]}`.
     ///
-    /// Checks the NetCDF half of the store only — the SQLite catalog is not
+    /// Checks the HDF5 half of the store only — the SQLite catalog is not
     /// inspected, so `ok` being True does not mean the store as a whole is sound.
-    /// A catalog that is corrupted, truncated, or paired with the wrong `.nc`
+    /// A catalog that is corrupted, truncated, or paired with the wrong `.h5`
     /// file still reports `ok`, while every read of the affected series raises.
     /// For catalog-side checks use `check_static_consistency` (per-resolution grid
     /// agreement) and `compact` (which reports the unreachable arrays and feature
@@ -1987,13 +2001,14 @@ impl PyStore {
     }
 
     /// Build a `ForecastReader` over the forecasts of `time_series_type` matching
-    /// the filter. A `resolution` is required; a `Deterministic` reader also
-    /// includes `DeterministicSingleTimeSeries`. Drive it with `forecast_read`.
+    /// the filter. A `resolution` is required; a `Deterministic` reader — and
+    /// equally the `"abstract_deterministic"` family — also includes
+    /// `DeterministicSingleTimeSeries`. Drive it with `forecast_read`.
     #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
-        time_series_type: PyTimeSeriesType,
+        time_series_type: &Bound<'_, PyAny>,
         resolution: Bound<'_, PyAny>,
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
@@ -2051,7 +2066,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -2062,7 +2077,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -2083,10 +2098,11 @@ impl PyStore {
     /// Distinct forecast intervals (ISO-8601 strings), optionally scoped to one
     /// time series type.
     #[pyo3(signature = (time_series_type=None))]
-    fn get_intervals(&self, time_series_type: Option<PyTimeSeriesType>) -> PyResult<Vec<String>> {
+    fn get_intervals(&self, time_series_type: Option<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
+        let requested = pyany_to_requested_type_opt(time_series_type.as_ref(), "time_series_type")?;
         Ok(self
             .store()?
-            .get_intervals(time_series_type.map(Into::into))
+            .get_intervals(requested)
             .map_err(map_err)?
             .into_iter()
             .map(|p| p.to_iso8601())
@@ -2104,7 +2120,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -2115,7 +2131,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -2136,7 +2152,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -2147,7 +2163,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -2169,7 +2185,7 @@ impl PyStore {
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
@@ -2180,7 +2196,7 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            time_series_type,
+            time_series_type.as_ref(),
             name,
             name_glob,
             resolution,
@@ -2220,19 +2236,16 @@ impl PyStore {
     fn list_owner_ids(
         &self,
         owner_category: PyOwnerCategory,
-        time_series_type: Option<PyTimeSeriesType>,
+        time_series_type: Option<Bound<'_, PyAny>>,
         resolution: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Vec<i64>> {
         let resolution = match resolution {
             Some(r) => Some(pyany_to_period(&r)?),
             None => None,
         };
+        let requested = pyany_to_requested_type_opt(time_series_type.as_ref(), "time_series_type")?;
         self.store()?
-            .list_owner_ids(
-                owner_category.into(),
-                time_series_type.map(Into::into),
-                resolution,
-            )
+            .list_owner_ids(owner_category.into(), requested, resolution)
             .map_err(map_err)
     }
 
@@ -2380,7 +2393,7 @@ impl PyStore {
         numpy_from_typed(py, &arr)
     }
 
-    /// Persist the store to a new NetCDF + SQLite artifact at `path`.
+    /// Persist the store to a new HDF5 + SQLite artifact at `path`.
     fn persist_to(&mut self, path: PathBuf) -> PyResult<()> {
         self.store_mut()?.persist_to(&path).map_err(map_err)
     }
@@ -2401,18 +2414,7 @@ impl PyStore {
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyTimeSeriesKey> {
-        let requested = if let Ok(s) = requested_type.extract::<String>() {
-            if s == "abstract_deterministic" {
-                core_lib::RequestedType::AbstractDeterministic
-            } else {
-                return Err(InvalidParameterError::new_err(
-                    "requested_type string must be 'abstract_deterministic'",
-                ));
-            }
-        } else {
-            let t = requested_type.extract::<PyTimeSeriesType>()?;
-            core_lib::RequestedType::Concrete(t.into())
-        };
+        let requested = pyany_to_requested_type(requested_type, "requested_type")?;
         let resolution = match resolution {
             Some(r) => Some(pyany_to_period(&r)?),
             None => None,
@@ -2835,6 +2837,49 @@ fn pyany_to_period(v: &Bound<'_, PyAny>) -> PyResult<core_lib::Period> {
     }
 }
 
+// ---- requested-type helpers -----------------------------------------------
+
+/// The string that names the `AbstractDeterministic` family in Python. The
+/// family is a *request*, not a stored type, so it has no `TimeSeriesType`
+/// member to name it (see [`core_lib::RequestedType`]).
+const ABSTRACT_DETERMINISTIC: &str = "abstract_deterministic";
+
+/// Accept a requested time series type as either a `TimeSeriesType` (one
+/// concrete stored type) or the string `"abstract_deterministic"` (the family
+/// matching a stored `Deterministic` *or* `DeterministicSingleTimeSeries`).
+///
+/// `param` names the argument in error messages. As in [`pyany_to_period`], an
+/// unrecognized string stays inside the library's exception hierarchy while a
+/// wholly wrong argument type raises `TypeError`.
+fn pyany_to_requested_type(v: &Bound<'_, PyAny>, param: &str) -> PyResult<core_lib::RequestedType> {
+    if let Ok(s) = v.extract::<String>() {
+        if s == ABSTRACT_DETERMINISTIC {
+            return Ok(core_lib::RequestedType::AbstractDeterministic);
+        }
+        return Err(InvalidParameterError::new_err(format!(
+            "{param} string must be '{ABSTRACT_DETERMINISTIC}'; got '{s}'"
+        )));
+    }
+    match v.extract::<PyTimeSeriesType>() {
+        Ok(t) => Ok(t.into()),
+        Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{param} must be a TimeSeriesType or the string '{ABSTRACT_DETERMINISTIC}'"
+        ))),
+    }
+}
+
+/// [`pyany_to_requested_type`] over an optional argument, for the filter kwargs
+/// that default to "any type".
+fn pyany_to_requested_type_opt(
+    v: Option<&Bound<'_, PyAny>>,
+    param: &str,
+) -> PyResult<Option<core_lib::RequestedType>> {
+    match v {
+        Some(v) => Ok(Some(pyany_to_requested_type(v, param)?)),
+        None => Ok(None),
+    }
+}
+
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
 fn hash_from_hex(s: &str) -> PyResult<[u8; 32]> {
     if s.len() != 64 {
@@ -2852,13 +2897,15 @@ fn hash_from_hex(s: &str) -> PyResult<[u8; 32]> {
 
 /// Build a [`core_lib::ListFilter`] from the optional filter kwargs shared by the
 /// listing/removal methods. `resolution` and `interval` accept a `timedelta` or
-/// an ISO-8601 duration string (see [`pyany_to_period`]).
+/// an ISO-8601 duration string (see [`pyany_to_period`]); `time_series_type`
+/// accepts a `TimeSeriesType` or the family string (see
+/// [`pyany_to_requested_type`]).
 #[allow(clippy::too_many_arguments)]
 fn build_list_filter(
     owner_id: Option<i64>,
     owner_category: Option<PyOwnerCategory>,
     owner_type: Option<String>,
-    time_series_type: Option<PyTimeSeriesType>,
+    time_series_type: Option<&Bound<'_, PyAny>>,
     name: Option<String>,
     name_glob: Option<String>,
     resolution: Option<Bound<'_, PyAny>>,
@@ -2876,7 +2923,7 @@ fn build_list_filter(
         filter = filter.owner_type(t);
     }
     if let Some(t) = time_series_type {
-        filter = filter.time_series_type(t.into());
+        filter = filter.time_series_type(pyany_to_requested_type(t, "time_series_type")?);
     }
     if let Some(n) = name {
         filter = filter.name(n);

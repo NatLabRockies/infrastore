@@ -52,8 +52,10 @@ transforming a stored `SingleTimeSeries`.
 `DeterministicSingleTimeSeries` variant, and a read synthesizes the windowed `Deterministic` from
 the underlying static array without copying it. The `DeterministicSingleTimeSeries` tag stays
 visible in _catalog_ surfaces — keys, metadata rows, counts, summaries — because callers need it to
-address, copy, or remove the association (and `RequestedType::AbstractDeterministic` exists so
-readers can match either concrete type without caring which is stored).
+address, copy, or remove the association (and `RequestedType::AbstractDeterministic` exists so a
+query — a catalog filter, a key resolution, or a reader build — can match either concrete type
+without caring which is stored; Julia passes the `AbstractDeterministic` type, Python the string
+`"abstract_deterministic"`).
 
 Reading forecast _values_ is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic `add_time_series` (a `Deterministic`, `Probabilistic`, or
@@ -66,7 +68,7 @@ server serves forecast reads but does not accept writes. See [Forecasts](#foreca
 
 A `NonSequentialTimeSeries` pairs each value with an explicit UTC timestamp. Timestamps must be
 strictly increasing and their count must match the data length. Its values are stored as a
-standalone NetCDF array; timestamps are stored with the association metadata.
+standalone HDF5 array; timestamps are stored with the association metadata.
 
 ### `SingleTimeSeries`
 
@@ -113,8 +115,8 @@ itself never interprets it.
 ### Forecasts
 
 The four forecast types store their values as a content-addressed `TypedArray` in its **native
-shape** (the dense types as standalone NetCDF variables; a `DeterministicSingleTimeSeries` reuses
-its backing `SingleTimeSeries` array), while the windowing parameters live in metadata. A forecast
+shape** (the dense types as standalone HDF5 variables; a `DeterministicSingleTimeSeries` reuses its
+backing `SingleTimeSeries` array), while the windowing parameters live in metadata. A forecast
 association records `horizon` (the span each window covers), `interval` (the spacing between
 successive window start times), `count` (the number of windows), and — for `Probabilistic` — a
 `percentiles` vector.

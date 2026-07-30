@@ -10,10 +10,10 @@ Most users install a published package and need no build tools at all:
 | CLI      | `cargo install infrastore-cli` |
 
 The Python wheels and the Julia binary (`InfraStore_jll`) are prebuilt and self-contained. The Rust
-crates build NetCDF, HDF5, and zlib from vendored sources and link them statically, so they need
-`cmake` and a C compiler but **no system NetCDF or HDF5**. The same vendored, statically linked
-stack backs every channel, so the HDF5 version behind the on-disk format is pinned by infrastore
-rather than by the target environment.
+crates build HDF5 and zlib from vendored sources and link them statically, so they need `cmake` and
+a C compiler but **no system HDF5**. The same vendored, statically linked stack backs every channel,
+so the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
+environment.
 
 The rest of this page covers building the workspace from a checkout.
 
@@ -27,14 +27,14 @@ brew install cmake protobuf maturin              # macOS
 sudo apt-get install cmake protobuf-compiler     # Linux (Debian / Ubuntu)
 ```
 
-The first build compiles netcdf-c and HDF5 from source — a few minutes — and then caches the result.
+The first build compiles HDF5 from source — a few minutes — and then caches the result.
 
-> **Do not set `HDF5_DIR` or `NETCDF_DIR`.** The vendored netcdf-c build forwards them to cmake as
-> `HDF5_ROOT` while still requesting static libraries, which fails against a shared-only install. To
-> build against system libraries instead, turn vendoring off with `--no-default-features` and
-> install them (`brew install hdf5 netcdf` / `apt-get install libhdf5-dev libnetcdf-dev`).
+> **Do not set `HDF5_DIR`.** The vendored build forwards it to cmake as `HDF5_ROOT` while still
+> requesting static libraries, which fails against a shared-only install. To build against system
+> libraries instead, turn vendoring off with `--no-default-features` and install them
+> (`brew install hdf5` / `apt-get install libhdf5-dev`).
 >
-> Because `netcdf-sys` declares `links = "netcdf"`, Cargo's feature unification makes the
+> Because `hdf5-metno-sys` declares `links = "hdf5"`, Cargo's feature unification makes the
 > vendored-versus-system choice all-or-nothing across the whole dependency graph — an individual
 > crate cannot opt out on its own.
 
@@ -66,7 +66,7 @@ The workspace Cargo config (`.cargo/config.toml`) sets macOS linker flags so
 
 | Crate               | What it builds                                                       |
 | ------------------- | -------------------------------------------------------------------- |
-| `infrastore-core`   | Types, NetCDF + SQLite storage, hashing, Rust API                    |
+| `infrastore-core`   | Types, HDF5 + SQLite storage, hashing, Rust API                      |
 | `infrastore-proto`  | Protobuf service definition + `tonic` codegen                        |
 | `infrastore-server` | gRPC server binary + Rust client                                     |
 | `infrastore-py`     | PyO3 bindings, `abi3-py311` wheel                                    |

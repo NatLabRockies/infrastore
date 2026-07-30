@@ -55,13 +55,13 @@ code.
 The workspace is a single core crate plus four binding crates that wrap it. Keep that dependency
 direction: bindings depend on `infrastore-core`, never the reverse.
 
-| Crate               | Role                                                     |
-| ------------------- | -------------------------------------------------------- |
-| `infrastore-core`   | Types, NetCDF + SQLite storage, hashing, public Rust API |
-| `infrastore-proto`  | Protobuf service definition, tonic codegen, conversions  |
-| `infrastore-server` | gRPC server binary + Rust client                         |
-| `infrastore-py`     | PyO3 bindings (abi3-py311 wheel)                         |
-| `infrastore-ffi`    | C ABI cdylib consumed by the Julia binding               |
+| Crate               | Role                                                    |
+| ------------------- | ------------------------------------------------------- |
+| `infrastore-core`   | Types, HDF5 + SQLite storage, hashing, public Rust API  |
+| `infrastore-proto`  | Protobuf service definition, tonic codegen, conversions |
+| `infrastore-server` | gRPC server binary + Rust client                        |
+| `infrastore-py`     | PyO3 bindings (abi3-py311 wheel)                        |
+| `infrastore-ffi`    | C ABI cdylib consumed by the Julia binding              |
 
 Shared dependency versions are declared once in the root `Cargo.toml` `[workspace.dependencies]`.
 Reference them from member crates with `{ workspace = true }` rather than pinning a version locally.
@@ -98,7 +98,7 @@ changing it:
 3. Build with `cargo build -p infrastore-ffi --release` and run the Julia test suite.
 
 Cross-language types must round-trip. Add a case to the relevant round-trip test
-(`tests/round_trip.rs`, `tests/netcdf_roundtrip.rs`, `python/tests/`, `julia/.../test/`).
+(`tests/round_trip.rs`, `tests/disk_roundtrip.rs`, `python/tests/`, `julia/.../test/`).
 
 ## Error Handling
 
@@ -128,7 +128,7 @@ pub enum TimeSeriesError {
 - Use `#[from]` for foreign errors that map cleanly (`std::io::Error`, `rusqlite::Error`,
   `serde_json::Error`).
 - **Reserved-but-unimplemented behavior** (e.g. the five time-series types beyond
-  `SingleTimeSeries`, or multi-dim per-step values in the NetCDF backend) must return
+  `SingleTimeSeries`, or multi-dim per-step values in the HDF5 backend) must return
   `InvalidParameter`, never silently mis-handle input. This preserves the v0 forward-compatibility
   contract.
 
@@ -149,7 +149,7 @@ async server paths. There is no `rstest`/`anyhow` dependency; don't add one with
 
 - **Unit tests**: inline `#[cfg(test)]` modules next to the code (e.g. `hash.rs`, `auth.rs`).
 - **Integration tests**: under each crate's `tests/` directory:
-  - `infrastore-core/tests/round_trip.rs`, `netcdf_roundtrip.rs`
+  - `infrastore-core/tests/round_trip.rs`, `disk_roundtrip.rs`
   - `infrastore-server/tests/grpc_round_trip.rs`, `auth.rs`
 - **Python**: `python/tests/` (pytest) — run via `maturin develop` then `pytest`.
 - **Julia**: `julia/TimeSeries.jl/test/runtests.jl`.
@@ -159,7 +159,7 @@ async server paths. There is no `rstest`/`anyhow` dependency; don't add one with
 1. Cover error conditions, not just the happy path — especially the `InvalidParameter` rejections
    that enforce v0 scope.
 2. Keep tests focused: one behavior per test function.
-3. Prefer in-memory stores for fast unit tests; reserve NetCDF/SQLite file tests for the storage and
+3. Prefer in-memory stores for fast unit tests; reserve HDF5 + SQLite file tests for the storage and
    round-trip suites.
 4. New cross-binding features need a round-trip test in each affected binding's suite.
 

@@ -55,7 +55,7 @@ class TestExceptions:
         # A missing parent directory fails in the catalog layer, staying
         # inside the library's exception hierarchy.
         with pytest.raises(infrastore.StorageError):
-            Store.open("/nonexistent/dir/x.nc")
+            Store.open("/nonexistent/dir/x.h5")
 
 
 class TestDunders:

@@ -111,18 +111,11 @@ function _type_code(::Type{T}) where {T}
     return throw(InvalidParameterError("$T is not a time series type"))
 end
 
-# The type code a catalog *filter* takes. A filter selects stored rows, so the
-# request-only `AbstractDeterministic` family sentinel is not a valid value: it
-# names no stored type. Ask for one of its two concrete members instead.
-function _filter_type_code(::Type{T}) where {T}
-    T === AbstractDeterministic && throw(
-        InvalidParameterError(
-            "AbstractDeterministic is a request-only family and matches no stored rows; " *
-            "filter on Deterministic or DeterministicSingleTimeSeries",
-        ),
-    )
-    return Int32(_type_code(T))
-end
+# The type code a catalog *filter* takes: any stored type, or the
+# `AbstractDeterministic` family sentinel, which the core expands to its two
+# concrete members (`Deterministic` and `DeterministicSingleTimeSeries`) in the
+# catalog predicate.
+_filter_type_code(::Type{T}) where {T} = Int32(_type_code(T))
 
 # The Julia time series type for a metadata row's type name (the `as_str` form).
 function _type_for_name(name::AbstractString)
@@ -287,7 +280,9 @@ List the key of every stored time series matching the (all-optional, independent
 filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 
 - `owner_id`, `owner_category` (an `OwnerCategory`) — scope to one owner.
-- `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, ...).
+- `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, ...),
+  or `AbstractDeterministic` to match both `Deterministic` and
+  `DeterministicSingleTimeSeries`.
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and
@@ -573,10 +568,10 @@ probe over the same (all-optional, independent) filters as [`list_keys`](@ref),
 answered off the catalog indexes without hydrating or marshaling any rows, so
 it is safe for hot per-component loops. `features` is a subset match, unlike
 the exact-key [`has_time_series`](@ref) forms, which compare the whole feature
-set by content hash. It is also the one exception to the index-only guarantee:
-a non-empty `features` filter cannot be answered from an index and falls back
-to a full listing internally, so prefer the exact-key forms in hot loops when
-the whole feature set is known.
+set by content hash — but it stays on indexes: the store probes the requested
+set as an exact set (by hash) first, so callers passing the complete feature
+set get a single covering-index seek; only genuinely partial feature lists take
+the indexed per-feature fallback probe.
 """
 function has_any_time_series(
     store::Store;
@@ -634,23 +629,15 @@ Association count grouped by time series type, as
 catalog query in the core.
 """
 function counts_by_type(store::Store)
-    out_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_counts_by_type(
-        store.handle::Ptr{Cvoid},
-        C_NULL::Ptr{UInt8},
-        UInt64(0)::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = @ccall lib_path().infrastore_store_counts_by_type(
-        store.handle::Ptr{Cvoid},
-        buf::Ptr{UInt8},
-        UInt64(length(buf))::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    rows = JSON.parse(String(buf[1:Int(out_len[])]))
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_counts_by_type(
+            store.handle::Ptr{Cvoid},
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    rows = JSON.parse(json)
     return TimeSeriesTypeCount[
         TimeSeriesTypeCount(_type_for_name(r["time_series_type"]), Int(r["count"])) for
         r in rows
@@ -707,32 +694,19 @@ function list_owner_ids(
     type_arg = has_type ? _filter_type_code(time_series_type) : Int32(0)
     resolution_iso = _period_to_cstr(resolution)
     cat = _category_int(owner_category)
-    out_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_list_owner_ids(
-        store.handle::Ptr{Cvoid},
-        cat::Int32,
-        has_type::Bool,
-        type_arg::Int32,
-        resolution_iso::Cstring,
-        C_NULL::Ptr{UInt8},
-        UInt64(0)::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = @ccall lib_path().infrastore_store_list_owner_ids(
-        store.handle::Ptr{Cvoid},
-        cat::Int32,
-        has_type::Bool,
-        type_arg::Int32,
-        resolution_iso::Cstring,
-        buf::Ptr{UInt8},
-        UInt64(length(buf))::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    ids = JSON.parse(String(buf[1:Int(out_len[])]))
-    return Int[Int(i) for i in ids]
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_list_owner_ids(
+            store.handle::Ptr{Cvoid},
+            cat::Int32,
+            has_type::Bool,
+            type_arg::Int32,
+            resolution_iso::Cstring,
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    return Int[Int(i) for i in JSON.parse(json)]
 end
 
 function _decode_static_summary_row(r::AbstractDict)
@@ -773,24 +747,15 @@ associations in the group. The core does the GROUP BY; callers build any
 presentation table (e.g. a DataFrame).
 """
 function static_summary(store::Store)
-    out_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_static_summary(
-        store.handle::Ptr{Cvoid},
-        C_NULL::Ptr{UInt8},
-        UInt64(0)::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = @ccall lib_path().infrastore_store_static_summary(
-        store.handle::Ptr{Cvoid},
-        buf::Ptr{UInt8},
-        UInt64(length(buf))::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return StaticSummaryRow[_decode_static_summary_row(r) for r in rows]
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_static_summary(
+            store.handle::Ptr{Cvoid},
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    return StaticSummaryRow[_decode_static_summary_row(r) for r in JSON.parse(json)]
 end
 
 """
@@ -801,22 +766,13 @@ time_series_type, name, initial_timestamp, resolution, horizon, interval,
 window_count)` with `count` = the number of associations in the group.
 """
 function forecast_summary(store::Store)
-    out_len = Ref{UInt64}(0)
-    code = @ccall lib_path().infrastore_store_forecast_summary(
-        store.handle::Ptr{Cvoid},
-        C_NULL::Ptr{UInt8},
-        UInt64(0)::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
-    code = @ccall lib_path().infrastore_store_forecast_summary(
-        store.handle::Ptr{Cvoid},
-        buf::Ptr{UInt8},
-        UInt64(length(buf))::UInt64,
-        out_len::Ref{UInt64},
-    )::Int32
-    _check(code)
-    rows = JSON.parse(String(buf[1:Int(out_len[])]))
-    return ForecastSummaryRow[_decode_forecast_summary_row(r) for r in rows]
+    json = _probe(
+        (buf, cap, out_len) -> @ccall lib_path().infrastore_store_forecast_summary(
+            store.handle::Ptr{Cvoid},
+            buf::Ptr{UInt8},
+            cap::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    return ForecastSummaryRow[_decode_forecast_summary_row(r) for r in JSON.parse(json)]
 end

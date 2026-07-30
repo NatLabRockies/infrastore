@@ -111,7 +111,7 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
     out
 }
 
-/// Hex-encode a 32-byte hash for storage in TEXT columns / NetCDF string vars.
+/// Hex-encode a 32-byte hash for storage in TEXT columns / HDF5 hash datasets.
 pub fn hash_hex(hash: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
     for byte in hash {

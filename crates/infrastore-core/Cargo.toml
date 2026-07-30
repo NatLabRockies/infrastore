@@ -8,33 +8,35 @@ repository.workspace = true
 readme.workspace = true
 description = "Core types, storage, and metadata for infrastore"
 homepage = "https://natlabrockies.github.io/infrastore/"
-keywords = ["time-series", "netcdf", "hdf5", "energy", "simulation"]
+keywords = ["time-series", "hdf5", "energy", "simulation"]
 categories = ["science", "database-implementations"]
 
-# `vendored` builds netcdf-c, HDF5, and zlib from source (via `netcdf-src` and
-# `hdf5-metno-src`) and links them statically, so consumers need no system
-# libnetcdf/libhdf5 — the same tradeoff `rusqlite`'s `bundled` feature already
-# makes for SQLite. It is on by default so downstream crates get a working build
-# for free; opt out with `default-features = false` to link the system libraries
-# instead. Because `netcdf-sys` sets `links = "netcdf"`, there is exactly one
-# copy in any dependency graph and Cargo's feature unification makes this choice
+# `vendored` builds HDF5 and zlib from source (via `hdf5-metno-src`) and links
+# them statically, so consumers need no system libhdf5 — the same tradeoff
+# `rusqlite`'s `bundled` feature already makes for SQLite. It is on by default
+# so downstream crates get a working build for free; opt out with
+# `default-features = false` to link the system library instead. Because
+# `hdf5-metno-sys` sets `links = "hdf5"`, there is exactly one copy in any
+# dependency graph and Cargo's feature unification makes this choice
 # all-or-nothing across the whole graph, not per-crate.
 #
+# The `zlib` feature is required for the DEFLATE filter either way.
+#
 # Vendoring requires `cmake` and a C compiler at build time, in place of the
-# system NetCDF/HDF5 development packages.
+# system HDF5 development packages.
 [features]
 default = ["vendored"]
-vendored = ["netcdf/static"]
+vendored = ["hdf5-metno/static", "hdf5-metno/zlib"]
 
 [dependencies]
 chrono = { workspace = true }
 ndarray = { workspace = true }
-netcdf = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+hdf5-metno = { version = "0.14.0", features = ["zlib"] }
 
 # `asm` selects hand-written SHA-256 kernels (and the ARMv8 crypto extensions
 # on aarch64), ~5x faster than the portable fallback for content hashing on
@@ -48,4 +50,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "user-hooks"] }
+# White-box store perturbation in `disk_roundtrip.rs` (attribute/byte edits
+# behind the recorded content hash).
+hdf5-metno = "0.14.0"
 tempfile = "3"

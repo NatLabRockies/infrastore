@@ -12,8 +12,8 @@ use crate::metadata::{
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
-    ArrayLayout, CompactionReport, Compression, IntegrityReport, MemoryBackend, NetCdfBackend,
-    StorageBackend,
+    ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
+    MemoryBackend, StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::key::{
@@ -23,8 +23,8 @@ use crate::types::key::{
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
 use crate::types::time_series::{
-    Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesType, compute_h,
+    Deterministic, NonSequentialTimeSeries, Probabilistic, RequestedType, Scenarios,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -32,7 +32,9 @@ pub struct ListFilter {
     pub owner_id: Option<i64>,
     pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
-    pub time_series_type: Option<TimeSeriesType>,
+    /// Type filter: a concrete stored type, or `RequestedType::AbstractDeterministic`
+    /// to match both `Deterministic` and `DeterministicSingleTimeSeries`.
+    pub time_series_type: Option<RequestedType>,
     pub name: Option<String>,
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
     /// wildcards). Applied in addition to `name` when both are set.
@@ -58,8 +60,8 @@ impl ListFilter {
         self.owner_type = Some(t.into());
         self
     }
-    pub fn time_series_type(mut self, t: TimeSeriesType) -> Self {
-        self.time_series_type = Some(t);
+    pub fn time_series_type(mut self, t: impl Into<RequestedType>) -> Self {
+        self.time_series_type = Some(t.into());
         self
     }
     pub fn name(mut self, n: impl Into<String>) -> Self {
@@ -197,7 +199,7 @@ pub struct ForecastParameters {
 /// Bookkeeping for an open cross-operation transaction (see
 /// [`Store::begin_transaction`]).
 ///
-/// The SQLite half rolls back on its own; this tracks the NetCDF half, which has
+/// The SQLite half rolls back on its own; this tracks the HDF5 half, which has
 /// no transaction of its own to enlist. The trick is that the array store is
 /// content-addressed, so it can be made **append-only for the transaction's
 /// duration**: writes are recorded here and undone on rollback, and frees are
@@ -223,15 +225,15 @@ pub struct Store {
     backend: Box<dyn StorageBackend>,
     metadata: MetadataStore,
     read_only: bool,
-    /// Filesystem path for the NetCDF file (None if `in_memory`).
-    netcdf_path: Option<PathBuf>,
+    /// Filesystem path for the HDF5 array file (None if `in_memory`).
+    file_path: Option<PathBuf>,
     /// `Some` while a cross-operation transaction is open.
     txn: Option<OpenTxn>,
 }
 
 impl Store {
     /// Create a new store. With `in_memory=true`, no filesystem I/O occurs;
-    /// otherwise a NetCDF4 file is created at `path` and a catalog SQLite
+    /// otherwise an HDF5 file is created at `path` and a catalog SQLite
     /// file at `<path>.sqlite` holds metadata.
     ///
     /// Uses the default compression policy ([`Compression::default`]). Use
@@ -240,7 +242,7 @@ impl Store {
         Self::create_with_compression(path, in_memory, Compression::default())
     }
 
-    /// Like [`Self::create`], but applies `compression` to NetCDF data
+    /// Like [`Self::create`], but applies `compression` to HDF5 data
     /// variables. The setting is persisted with the store so later appends
     /// reuse it. It is ignored for `in_memory` stores, which never touch disk.
     pub fn create_with_compression(
@@ -254,21 +256,20 @@ impl Store {
                 backend: Box::new(MemoryBackend::new()),
                 metadata: MetadataStore::open_in_memory()?,
                 read_only: false,
-                netcdf_path: None,
+                file_path: None,
                 txn: None,
             });
         }
-        let nc_path = path.ok_or_else(|| {
+        let file_path = path.ok_or_else(|| {
             TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
         })?;
-        let sqlite_path = catalog_sqlite_path(nc_path);
+        let sqlite_path = catalog_sqlite_path(file_path);
         let metadata = MetadataStore::open_path(&sqlite_path, false)?;
-        let backend = NetCdfBackend::create(nc_path, compression)?;
         Ok(Self {
-            backend: Box::new(backend),
+            backend: Box::new(Hdf5Backend::create(file_path, compression)?),
             metadata,
             read_only: false,
-            netcdf_path: Some(nc_path.to_path_buf()),
+            file_path: Some(file_path.to_path_buf()),
             txn: None,
         })
     }
@@ -276,16 +277,16 @@ impl Store {
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
         let metadata = MetadataStore::open_path(&sqlite_path, read_only)?;
-        // A read-only store opens both halves read-only: the NetCDF side needs
+        // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
         // `Store::add_*` / `remove_*` guards.
-        let backend = NetCdfBackend::open(path, read_only)?;
+        let backend = open_backend(path, read_only)?;
         Ok(Self {
-            backend: Box::new(backend),
+            backend,
             metadata,
             read_only,
-            netcdf_path: Some(path.to_path_buf()),
+            file_path: Some(path.to_path_buf()),
             txn: None,
         })
     }
@@ -309,13 +310,13 @@ impl Store {
     ///
     /// Every mutating entry point is already atomic on its own; this composes
     /// several of them into one unit. It does *not* replace [`Self::bulk_add`] —
-    /// batching is still what buys block-sized NetCDF writes and feature-set
+    /// batching is still what buys block-sized HDF5 writes and feature-set
     /// dedup, and a loop of single adds under a transaction gets neither. Open a
     /// transaction when you need several *operations* to be atomic together, and
     /// keep using a bulk add for each one.
     ///
     /// Both halves of the artifact roll back, by different means. SQLite rolls
-    /// back its own statements. The NetCDF side, which has no transaction to
+    /// back its own statements. The HDF5 side, which has no transaction to
     /// enlist, is instead made append-only for the duration: arrays written here
     /// are removed on rollback, and arrays that removals leave unreferenced are
     /// not freed until the outermost commit — so a rollback restores catalog rows
@@ -474,10 +475,10 @@ impl Store {
         self.backend.compression()
     }
 
-    /// The filesystem path backing this store's NetCDF file, or `None` for an
-    /// in-memory store.
-    pub fn netcdf_path(&self) -> Option<&Path> {
-        self.netcdf_path.as_deref()
+    /// The filesystem path backing this store's HDF5 array file, or `None`
+    /// for an in-memory store.
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
     }
 
     /// Mirrors the spec's `add_time_series` signature; the public surface is
@@ -922,6 +923,32 @@ impl Store {
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
         let meta = self.metadata.get_by_key(key)?;
+        self.materialize_time_series(&meta, time_range)
+    }
+
+    /// Like [`Self::get_time_series`], but also returns the association's
+    /// catalog row from the same single lookup. Callers that need both the
+    /// reconstructed series and row-level detail (the FFI getters read the
+    /// `ext` payload alongside the data) would otherwise pay a second SQLite
+    /// key lookup per read — at 100k-series scale that lookup is ~20% of a
+    /// full read.
+    pub fn get_time_series_with_metadata(
+        &self,
+        key: &KeyIdentity,
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<(TimeSeriesData, TimeSeriesMetadata)> {
+        let meta = self.metadata.get_by_key(key)?;
+        let data = self.materialize_time_series(&meta, time_range)?;
+        Ok((data, meta))
+    }
+
+    /// Reconstruct the series described by `meta`, reading its array (or the
+    /// requested `time_range` slice) from the backend.
+    fn materialize_time_series(
+        &self,
+        meta: &TimeSeriesMetadata,
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
@@ -983,7 +1010,7 @@ impl Store {
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
-                let timestamps = meta.timestamps.ok_or_else(|| {
+                let timestamps = meta.timestamps.clone().ok_or_else(|| {
                     TimeSeriesError::IntegrityError(
                         "NonSequentialTimeSeries missing timestamps".into(),
                     )
@@ -1018,11 +1045,11 @@ impl Store {
             }
             TimeSeriesType::Deterministic => {
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "Deterministic")?;
-                let resolution = required_resolution(&meta, "Deterministic")?;
-                let horizon = required_horizon(&meta, "Deterministic")?;
-                let interval = required_interval(&meta, "Deterministic")?;
-                let count = required_count(&meta, "Deterministic")?;
+                let initial = required_initial(meta, "Deterministic")?;
+                let resolution = required_resolution(meta, "Deterministic")?;
+                let horizon = required_horizon(meta, "Deterministic")?;
+                let interval = required_interval(meta, "Deterministic")?;
+                let count = required_count(meta, "Deterministic")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // Validate stored shape: [H, count, *E].
                 validate_forecast_shape(&arr, &[h, count], "Deterministic")?;
@@ -1048,11 +1075,11 @@ impl Store {
 
             TimeSeriesType::Probabilistic => {
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "Probabilistic")?;
-                let resolution = required_resolution(&meta, "Probabilistic")?;
-                let horizon = required_horizon(&meta, "Probabilistic")?;
-                let interval = required_interval(&meta, "Probabilistic")?;
-                let count = required_count(&meta, "Probabilistic")?;
+                let initial = required_initial(meta, "Probabilistic")?;
+                let resolution = required_resolution(meta, "Probabilistic")?;
+                let horizon = required_horizon(meta, "Probabilistic")?;
+                let interval = required_interval(meta, "Probabilistic")?;
+                let count = required_count(meta, "Probabilistic")?;
                 let percentiles = meta.percentiles.clone().ok_or_else(|| {
                     TimeSeriesError::IntegrityError("Probabilistic missing percentiles".into())
                 })?;
@@ -1083,11 +1110,11 @@ impl Store {
 
             TimeSeriesType::Scenarios => {
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "Scenarios")?;
-                let resolution = required_resolution(&meta, "Scenarios")?;
-                let horizon = required_horizon(&meta, "Scenarios")?;
-                let interval = required_interval(&meta, "Scenarios")?;
-                let count = required_count(&meta, "Scenarios")?;
+                let initial = required_initial(meta, "Scenarios")?;
+                let resolution = required_resolution(meta, "Scenarios")?;
+                let horizon = required_horizon(meta, "Scenarios")?;
+                let interval = required_interval(meta, "Scenarios")?;
+                let count = required_count(meta, "Scenarios")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
                 // scenario_count = arr.shape[0]; validate remaining dims.
                 if arr.shape.len() < 3 {
@@ -1124,20 +1151,26 @@ impl Store {
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
                 let arr = self.backend.get_array(&meta.data_hash)?;
-                let initial = required_initial(&meta, "DeterministicSingleTimeSeries")?;
-                let resolution = required_resolution(&meta, "DeterministicSingleTimeSeries")?;
-                let horizon = required_horizon(&meta, "DeterministicSingleTimeSeries")?;
-                let interval = required_interval(&meta, "DeterministicSingleTimeSeries")?;
-                let count = required_count(&meta, "DeterministicSingleTimeSeries")?;
+                let initial = required_initial(meta, "DeterministicSingleTimeSeries")?;
+                let resolution = required_resolution(meta, "DeterministicSingleTimeSeries")?;
+                let horizon = required_horizon(meta, "DeterministicSingleTimeSeries")?;
+                let interval = required_interval(meta, "DeterministicSingleTimeSeries")?;
+                let count = required_count(meta, "DeterministicSingleTimeSeries")?;
                 let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                    TimeSeriesError::IntegrityError(format!(
-                        "DeterministicSingleTimeSeries: interval ({}) is not an integer \
-                         multiple of resolution ({})",
-                        interval.to_iso8601(),
-                        resolution.to_iso8601()
-                    ))
-                })?;
+                // A single-window view carries a zero interval; its one window
+                // starts at index 0, so the step width is irrelevant.
+                let interval_steps = if count == 1 && interval.is_zero() {
+                    0
+                } else {
+                    resolution.divide_into(&interval).map_err(|_| {
+                        TimeSeriesError::IntegrityError(format!(
+                            "DeterministicSingleTimeSeries: interval ({}) is not an integer \
+                             multiple of resolution ({})",
+                            interval.to_iso8601(),
+                            resolution.to_iso8601()
+                        ))
+                    })?
+                };
                 let total_len = arr.length();
                 // Validate that all windows fit in the underlying array.
                 let required = (count.saturating_sub(1)) * interval_steps + h;
@@ -1247,8 +1280,8 @@ impl Store {
         }
         // SingleTimeSeries-only; accept an explicit matching type, reject others.
         match filter.time_series_type {
-            None | Some(TimeSeriesType::SingleTimeSeries) => {
-                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
+            None | Some(RequestedType::Concrete(TimeSeriesType::SingleTimeSeries)) => {
+                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries.into());
             }
             Some(other) => {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -1293,12 +1326,15 @@ impl Store {
     /// [`crate::reader`].
     pub fn build_forecast_reader(&self, filter: ListFilter) -> Result<ForecastReader> {
         let reported = match filter.time_series_type {
-            Some(
+            // The family reads exactly like a Deterministic reader, which is
+            // already abstract over its two concrete storage types.
+            Some(RequestedType::AbstractDeterministic) => TimeSeriesType::Deterministic,
+            Some(RequestedType::Concrete(
                 t @ (TimeSeriesType::Deterministic
                 | TimeSeriesType::DeterministicSingleTimeSeries
                 | TimeSeriesType::Probabilistic
                 | TimeSeriesType::Scenarios),
-            ) => t,
+            )) => t,
             Some(other) => {
                 return Err(TimeSeriesError::InvalidParameter(format!(
                     "build_forecast_reader handles forecast types (Deterministic/\
@@ -1330,7 +1366,7 @@ impl Store {
         let mut items = Vec::new();
         for t in concrete {
             let mut f = filter.clone();
-            f.time_series_type = Some(t);
+            f.time_series_type = Some(t.into());
             for m in self.list_time_series(f)? {
                 let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
                 items.push((m, shape));
@@ -1556,6 +1592,21 @@ impl Store {
         self.backend.get_array(hash)
     }
 
+    /// Where a content hash's array physically lives in the backing file.
+    ///
+    /// Complements [`Self::get_array_by_hash`] for the case where the caller
+    /// wants to inspect the bytes with an outside HDF5 tool rather than read
+    /// them through this crate. The hash on its own does not locate an array: a
+    /// packed array is one column of a shared dataset, and a full packed pool
+    /// spills into suffixed datasets, so neither the dataset name nor the column
+    /// index is derivable from metadata.
+    ///
+    /// Errors with [`TimeSeriesError::NotFound`] if no array with that hash is
+    /// stored.
+    pub fn locate_array(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+        self.backend.locate(hash)
+    }
+
     pub fn get_time_series_keys(
         &self,
         owner_id: i64,
@@ -1594,7 +1645,7 @@ impl Store {
         // whose components are transformed one resolution at a time should not
         // pay to hydrate the other resolutions' features on every call.
         let sources = self.metadata.list(&MetadataFilter {
-            time_series_type: Some(TimeSeriesType::SingleTimeSeries),
+            time_series_type: Some(TimeSeriesType::SingleTimeSeries.into()),
             owner_category,
             resolution,
             ..Default::default()
@@ -1656,6 +1707,51 @@ impl Store {
                     src.name
                 )));
             }
+            let resolution = required_resolution(src, "transform_single_time_series")?;
+            let total_len = src.length.ok_or_else(|| {
+                TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
+            })?;
+            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
+            if h == 0 || h > total_len {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "horizon ({h} steps) exceeds SingleTimeSeries length ({total_len}) \
+                     for '{}'",
+                    src.name
+                )));
+            }
+            // A zero interval is the explicit single-window request (the
+            // encoding InfrastructureSystems.jl writes for directly-added
+            // single-window forecasts): the one window must cover the whole
+            // series, so it is only accepted when the horizon spans it.
+            let count = if interval.is_zero() {
+                if h != total_len {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "a zero interval derives a single window covering the whole \
+                         series, but horizon ({h} steps) does not span SingleTimeSeries \
+                         length ({total_len}) for '{}'",
+                        src.name
+                    )));
+                }
+                1
+            } else {
+                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::InvalidParameter(format!(
+                        "interval ({}) must be zero or a positive integer multiple of \
+                         resolution ({})",
+                        interval.to_iso8601(),
+                        resolution.to_iso8601()
+                    ))
+                })?;
+                (total_len - h) / interval_steps + 1
+            };
+            // The requested interval is stored verbatim, including both
+            // single-window encodings — `interval == horizon` (clients that
+            // map the empty interval to the horizon on write and back on
+            // read) and the explicit zero interval
+            // (InfrastructureSystems.jl's `Second(0)`). A derived view keeps
+            // whichever encoding its client writes so that client can find it
+            // by the identity it wrote. The identity/idempotency check below
+            // uses the stored form.
             let src_key = AssociationIdentity {
                 owner_id: src.owner_id,
                 owner_category: src.owner_category,
@@ -1686,26 +1782,6 @@ impl Store {
                     horizon.to_iso8601(),
                 )));
             }
-            let resolution = required_resolution(src, "transform_single_time_series")?;
-            let total_len = src.length.ok_or_else(|| {
-                TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-            })?;
-            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                TimeSeriesError::InvalidParameter(format!(
-                    "interval ({}) must be a positive integer multiple of resolution ({})",
-                    interval.to_iso8601(),
-                    resolution.to_iso8601()
-                ))
-            })?;
-            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
-            if h == 0 || h > total_len {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "horizon ({h} steps) exceeds SingleTimeSeries length ({total_len}) \
-                     for '{}'",
-                    src.name
-                )));
-            }
-            let count = (total_len - h) / interval_steps + 1;
             new_metas.push(TimeSeriesMetadata {
                 time_series_type: TimeSeriesType::DeterministicSingleTimeSeries,
                 horizon: Some(horizon),
@@ -1742,7 +1818,7 @@ impl Store {
         self.metadata.exists(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
-            time_series_type: Some(key.time_series_type),
+            time_series_type: Some(key.time_series_type.into()),
             name: Some(key.name.clone()),
             resolution: key.resolution,
             interval: key.interval,
@@ -1758,14 +1834,15 @@ impl Store {
     /// component have any time series (of type T)?" without listing them.
     ///
     /// Same covering-index probe as the keyed check (one statement, nothing
-    /// hydrated), so it is safe for hot loops. The one exception is a filter
-    /// carrying a `features` subset match, which cannot be answered from an
-    /// index and falls back to a full listing internally.
+    /// hydrated), so it is safe for hot loops. A `features` filter stays on
+    /// indexes too: the requested set is probed as an exact set by hash first
+    /// (one covering seek when the caller passes the complete feature set),
+    /// with an indexed per-feature subset fallback for partial lists.
     pub fn has_any_time_series(&self, filter: ListFilter) -> Result<bool> {
         self.metadata.exists(&filter.into())
     }
 
-    pub fn get_resolutions(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn get_resolutions(&self, time_series_type: Option<RequestedType>) -> Result<Vec<Period>> {
         self.metadata.distinct_resolutions(time_series_type)
     }
 
@@ -1773,7 +1850,7 @@ impl Store {
     /// The interval analog of [`Self::get_resolutions`]; ordered lexically by
     /// ISO-8601 text (mixed period kinds have no numeric order). Non-forecast
     /// types have no interval, so they return an empty list.
-    pub fn get_intervals(&self, time_series_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn get_intervals(&self, time_series_type: Option<RequestedType>) -> Result<Vec<Period>> {
         self.metadata.distinct_intervals(time_series_type)
     }
 
@@ -1858,7 +1935,7 @@ impl Store {
             TimeSeriesType::Scenarios,
         ] {
             let rows = self.metadata.list(&MetadataFilter {
-                time_series_type: Some(ts_type),
+                time_series_type: Some(ts_type.into()),
                 resolution,
                 interval,
                 ..Default::default()
@@ -1980,7 +2057,7 @@ impl Store {
     pub fn list_owner_ids(
         &self,
         category: OwnerCategory,
-        time_series_type: Option<TimeSeriesType>,
+        time_series_type: Option<RequestedType>,
         resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
         self.metadata
@@ -2244,7 +2321,7 @@ impl Store {
     }
 
     /// Reclaim space in both halves of the artifact: reusable packed slots and
-    /// unreachable arrays in the NetCDF file, and feature sets in the SQLite
+    /// unreachable arrays in the HDF5 file, and feature sets in the SQLite
     /// catalog that no association references any more.
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
@@ -2270,15 +2347,15 @@ impl Store {
     ///
     /// # Scope: the array half only
     ///
-    /// A persisted store is two artifacts — the NetCDF file and its companion
+    /// A persisted store is two artifacts — the HDF5 file and its companion
     /// `<path>.sqlite` catalog — but this checks only the first. It reads each
-    /// array the NetCDF side knows about, rehashes it, and compares. It does
+    /// array the HDF5 side knows about, rehashes it, and compares. It does
     /// **not** open, parse, or cross-reference the catalog, so an empty report is
     /// not a statement that the store as a whole is sound. In particular these
     /// are all invisible to it:
     ///
     /// - a `data_hash` in the catalog that names no stored array (a truncated or
-    ///   corrupted catalog, or a catalog paired with the wrong NetCDF file) —
+    ///   corrupted catalog, or a catalog paired with the wrong HDF5 file) —
     ///   every read of the affected key fails, but this reports no error;
     /// - a catalog row whose `dtype`, `element_shape`, or `length` misdescribes
     ///   the array it points at;
@@ -2301,10 +2378,15 @@ impl Store {
     }
 
     pub fn flush(&mut self) -> Result<()> {
+        // Checkpoint the catalog's WAL so the `.sqlite` file is complete on
+        // its own: after a flush the two on-disk artifacts can be copied as a
+        // pair (`Self::persist_to` relies on this via the `flush` it opens
+        // with).
+        self.metadata.checkpoint()?;
         self.backend.flush()
     }
 
-    /// Persist this store's data to `path` (the NetCDF arrays) and its companion
+    /// Persist this store's data to `path` (the HDF5 arrays) and its companion
     /// `<path>.sqlite` (the metadata). Works for both on-disk stores (copies the
     /// two artifacts) and in-memory stores (materializes arrays + metadata to
     /// disk). Existing target files are overwritten.
@@ -2316,12 +2398,12 @@ impl Store {
         self.flush()?;
         let sqlite_path = catalog_sqlite_path(path);
 
-        if let Some(src) = self.netcdf_path.clone() {
+        if let Some(src) = self.file_path.clone() {
             if src != path {
                 // HDF5 keeps a byte-range lock on an open file. On Windows that
                 // makes `fs::copy` (CopyFileEx) fail with ERROR_LOCK_VIOLATION
                 // ("another process has locked a portion of the file"), so drop
-                // the NetCDF handle for the duration of the copy and reopen it
+                // the HDF5 handle for the duration of the copy and reopen it
                 // afterwards. The placeholder backend is never observed: nothing
                 // else runs between the swap and the reopen.
                 drop(std::mem::replace(
@@ -2334,7 +2416,7 @@ impl Store {
 
                 // Reopen before surfacing a copy failure, so a failed persist
                 // leaves the store usable instead of stranded on the placeholder.
-                self.backend = Box::new(NetCdfBackend::open(&src, self.read_only)?);
+                self.backend = open_backend(&src, self.read_only)?;
                 copied?;
             }
             return Ok(());
@@ -2345,7 +2427,7 @@ impl Store {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(&sqlite_path);
         {
-            let mut nc = NetCdfBackend::create(path, self.compression())?;
+            let mut backend = Hdf5Backend::create(path, self.compression())?;
             // Plan each distinct array's layout before writing: packed is only
             // valid for arrays that every referencing association reads as a
             // series along axis 0 (SingleTimeSeries and its derived DST views).
@@ -2374,9 +2456,9 @@ impl Store {
             }
             for (hash, (layout, resolution)) in &plans {
                 let array = self.backend.get_array(hash)?;
-                nc.put_array(hash, &array, *resolution, *layout)?;
+                backend.put_array(hash, &array, *resolution, *layout)?;
             }
-            nc.flush()?;
+            backend.flush()?;
         }
         self.metadata.backup_to(&sqlite_path)?;
         Ok(())
@@ -2793,8 +2875,30 @@ fn forecast_key(
     ))
 }
 
-fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {
-    let mut p = nc_path.to_path_buf();
+/// Open the array backend for an existing store file. The `storage_backend`
+/// root attribute identifies files written by [`Hdf5Backend`]; files without it
+/// (including stores written by the removed netcdf backend) are rejected with
+/// an actionable error instead of being misread.
+fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
+    if !crate::storage::hdf5::is_hdf5_backend_file(path) {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "{} is not an infrastore hdf5 store (stores written by the removed \
+             netcdf backend are no longer supported; re-create the store to \
+             migrate)",
+            path.display()
+        )));
+    }
+    Ok(Box::new(Hdf5Backend::open(path, read_only)?))
+}
+
+/// The SQLite catalog path paired with an HDF5 data path: `<path>.sqlite`.
+///
+/// Public because the two files are one logical artifact that must be moved,
+/// copied, and deleted together, so a tool that reports or manipulates store
+/// paths needs the same derivation the store itself uses rather than its own
+/// copy of the rule.
+pub fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
+    let mut p = data_path.to_path_buf();
     let new_name = match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => format!("{name}.sqlite"),
         None => "metadata.sqlite".to_string(),
@@ -2883,6 +2987,23 @@ fn resolve_windows(
                 return Err(TimeSeriesError::InvalidParameter("end < start".into()));
             }
             if !interval.is_positive() {
+                // A single-window forecast may carry a zero interval (there is
+                // no second window to step to); its only window starts at
+                // `initial`, which is also the only valid `start`.
+                if count == 1 && interval.is_zero() {
+                    if start != initial {
+                        return Err(TimeSeriesError::InvalidParameter(
+                            "forecast start_time must align to a window boundary \
+                             (initial_timestamp + k·interval)"
+                                .into(),
+                        ));
+                    }
+                    return if initial < end {
+                        Ok((0, 1, initial))
+                    } else {
+                        Ok((0, 0, initial))
+                    };
+                }
                 return Err(TimeSeriesError::InvalidParameter(
                     "forecast interval must be positive".into(),
                 ));

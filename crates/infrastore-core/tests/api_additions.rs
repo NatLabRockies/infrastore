@@ -378,7 +378,7 @@ fn metadata_and_data_json_round_trip() {
 // filtered delete, discovery, and copy all touch the *array* side as well as
 // the catalog — reclaiming a slot, re-resolving a shared hash — so their
 // in-memory result is not evidence about the persisted one. Each case below
-// re-runs through `common::for_each_backend_mut`, which for NetCDF flushes,
+// re-runs through `common::for_each_backend_mut`, which for HDF5 flushes,
 // closes, and reopens read-write before the mutation, so the state being
 // mutated came off disk.
 //
@@ -610,14 +610,14 @@ fn discovery_enumerations() {
             );
             assert!(
                 store
-                    .get_intervals(Some(TimeSeriesType::SingleTimeSeries))
+                    .get_intervals(Some(TimeSeriesType::SingleTimeSeries.into()))
                     .unwrap()
                     .is_empty(),
                 "{backend}"
             );
             assert_eq!(
                 store
-                    .get_intervals(Some(TimeSeriesType::Deterministic))
+                    .get_intervals(Some(TimeSeriesType::Deterministic.into()))
                     .unwrap(),
                 vec![Period::fixed(Duration::hours(1))],
                 "{backend}"
@@ -879,8 +879,9 @@ fn existence_probes_distinguish_features() {
     wrong.features = low.clone();
     assert!(!store.has_time_series(&wrong).unwrap());
 
-    // The filtered probe's `features` predicate is a subset match (in-memory
-    // fallback path, not the index probe).
+    // The filtered probe's `features` predicate is a subset match. A complete
+    // set is answered by the exact-hash fast path; a wrong value falls through
+    // to the SQL subset probe and still misses.
     let by_owner = || {
         ListFilter::new()
             .owner_id(1)
@@ -895,6 +896,107 @@ fn existence_probes_distinguish_features() {
     assert!(
         store
             .has_any_time_series(by_owner().features(Features::new()))
+            .unwrap()
+    );
+}
+
+#[test]
+fn has_any_time_series_feature_subset_probe() {
+    let mut store = create_store(None, true).unwrap();
+    let mut stored: Features = BTreeMap::new();
+    stored.insert("scenario".into(), FeatureValue::Str("high".into()));
+    stored.insert("model_year".into(), FeatureValue::Int(2030));
+    stored.insert("validated".into(), FeatureValue::Bool(true));
+    store
+        .add(
+            AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+            )
+            .with_features(stored.clone()),
+        )
+        .unwrap();
+
+    let by_owner = || {
+        ListFilter::new()
+            .owner_id(1)
+            .owner_category(OwnerCategory::Component)
+    };
+    let feats = |pairs: &[(&str, FeatureValue)]| -> Features {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    };
+
+    // Complete set: exact-hash fast path.
+    assert!(
+        store
+            .has_any_time_series(by_owner().features(stored.clone()))
+            .unwrap()
+    );
+    // Partial lists exercise the SQL subset fallback: every stored pair and
+    // every 2-subset must match.
+    for pair in [
+        ("scenario", FeatureValue::Str("high".into())),
+        ("model_year", FeatureValue::Int(2030)),
+        ("validated", FeatureValue::Bool(true)),
+    ] {
+        assert!(
+            store
+                .has_any_time_series(by_owner().features(feats(&[pair])))
+                .unwrap()
+        );
+    }
+    assert!(
+        store
+            .has_any_time_series(by_owner().features(feats(&[
+                ("scenario", FeatureValue::Str("high".into())),
+                ("validated", FeatureValue::Bool(true)),
+            ])))
+            .unwrap()
+    );
+
+    // Wrong value, wrong key, and one-good-one-bad all miss.
+    for bad in [
+        feats(&[("scenario", FeatureValue::Str("low".into()))]),
+        feats(&[("nonexistent", FeatureValue::Str("high".into()))]),
+        feats(&[
+            ("scenario", FeatureValue::Str("high".into())),
+            ("model_year", FeatureValue::Int(2031)),
+        ]),
+    ] {
+        assert!(!store.has_any_time_series(by_owner().features(bad)).unwrap());
+    }
+
+    // Value matching is kind-strict, like the in-memory subset filter:
+    // Int(2030) is not Str("2030") or Float(2030.0).
+    assert!(
+        !store
+            .has_any_time_series(
+                by_owner().features(feats(&[("model_year", FeatureValue::Str("2030".into()))]))
+            )
+            .unwrap()
+    );
+    assert!(
+        !store
+            .has_any_time_series(
+                by_owner().features(feats(&[("model_year", FeatureValue::Float(2030.0))]))
+            )
+            .unwrap()
+    );
+
+    // A subset probe scoped by the other filter columns still honors them.
+    assert!(
+        !store
+            .has_any_time_series(
+                ListFilter::new()
+                    .owner_id(2)
+                    .owner_category(OwnerCategory::Component)
+                    .features(feats(&[("scenario", FeatureValue::Str("high".into()))]))
+            )
             .unwrap()
     );
 }
@@ -1050,7 +1152,7 @@ fn replace_owner_into_a_colliding_identity_is_a_duplicate() {
 #[test]
 fn replace_owner_is_rejected_on_a_read_only_store() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
         add_sts(&mut store, 1, "load", 10.0);
@@ -1063,23 +1165,23 @@ fn replace_owner_is_rejected_on_a_read_only_store() {
     ));
 }
 
-// ---- read_only() / netcdf_path() across all three store states ------------
+// ---- read_only() / file_path() across all three store states --------------
 
 #[test]
 fn read_only_and_path_accessors_report_each_store_state() {
     // 1. In-memory: writable, no path.
     let mem = create_store(None, true).unwrap();
     assert!(!mem.read_only());
-    assert_eq!(mem.netcdf_path(), None);
+    assert_eq!(mem.file_path(), None);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     // 2. Created on disk: writable, path is the file it was created at.
     {
         let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
         assert!(!store.read_only());
-        assert_eq!(store.netcdf_path(), Some(path.as_path()));
+        assert_eq!(store.file_path(), Some(path.as_path()));
         add_sts(&mut store, 1, "load", 10.0);
         store.flush().unwrap();
     }
@@ -1087,18 +1189,18 @@ fn read_only_and_path_accessors_report_each_store_state() {
     // 3. Reopened read-write, then read-only.
     let rw = infrastore_core::open_store(path.as_path(), false).unwrap();
     assert!(!rw.read_only());
-    assert_eq!(rw.netcdf_path(), Some(path.as_path()));
+    assert_eq!(rw.file_path(), Some(path.as_path()));
     drop(rw);
 
     let ro = infrastore_core::open_store(path.as_path(), true).unwrap();
     assert!(ro.read_only());
-    assert_eq!(ro.netcdf_path(), Some(path.as_path()));
+    assert_eq!(ro.file_path(), Some(path.as_path()));
 }
 
 #[test]
 fn a_read_only_store_rejects_every_write_entry_point() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
         let key = add_sts(&mut store, 1, "load", 10.0);

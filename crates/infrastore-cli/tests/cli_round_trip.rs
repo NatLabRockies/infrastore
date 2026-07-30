@@ -32,9 +32,25 @@ fn data_lines(csv: &str) -> Vec<String> {
         .collect()
 }
 
-/// Flatten every CSV value cell (skipping the header) into one list.
-fn flat_values(csv: &str) -> Vec<String> {
+/// Data rows with the leading `timestamp` column dropped.
+///
+/// Every sequential CSV the CLI writes carries a timestamp column, a
+/// SingleTimeSeries included: its grid lives in metadata that a piped file does
+/// not carry, so emitting values alone silently dropped the time axis.
+fn value_lines(csv: &str) -> Vec<String> {
     data_lines(csv)
+        .iter()
+        .map(|line| match line.split_once(',') {
+            Some((_ts, rest)) => rest.to_string(),
+            None => line.clone(),
+        })
+        .collect()
+}
+
+/// Flatten every CSV value cell (skipping the header and the timestamp column)
+/// into one list.
+fn flat_values(csv: &str) -> Vec<String> {
+    value_lines(csv)
         .iter()
         .flat_map(|line| line.split(',').map(str::to_string).collect::<Vec<_>>())
         .collect()
@@ -58,7 +74,7 @@ fn single_round_trip_all_dtypes() {
     ];
     let dir = tempfile::tempdir().unwrap();
     for (dtype, csv_body, expected) in cases {
-        let store = dir.path().join(format!("{dtype}.nc"));
+        let store = dir.path().join(format!("{dtype}.h5"));
         write(dir.path(), "data.csv", csv_body);
         let json = format!(
             r#"{{
@@ -93,14 +109,14 @@ fn single_round_trip_all_dtypes() {
                 "load",
             ],
         );
-        assert_eq!(data_lines(&out), *expected, "dtype {dtype} round-trip");
+        assert_eq!(value_lines(&out), *expected, "dtype {dtype} round-trip");
     }
 }
 
 #[test]
 fn non_sequential_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("ns.nc");
+    let store = dir.path().join("ns.h5");
     write(
         dir.path(),
         "ns.csv",
@@ -141,7 +157,7 @@ fn forecast_round_trips() {
     let dir = tempfile::tempdir().unwrap();
 
     // Deterministic: H=2 (2h/1h), count=3 -> 6 flat values.
-    let det_store = dir.path().join("det.nc");
+    let det_store = dir.path().join("det.h5");
     write(dir.path(), "det.csv", "1\n2\n3\n4\n5\n6\n");
     let det = write(
         dir.path(),
@@ -177,7 +193,7 @@ fn forecast_round_trips() {
     assert!(lines[1].starts_with("2024-01-01T00:00:00+00:00,2024-01-01T01:00:00+00:00"));
 
     // Probabilistic: P=3, H=2, count=2 -> 12 flat values.
-    let prob_store = dir.path().join("prob.nc");
+    let prob_store = dir.path().join("prob.h5");
     let prob_vals: String = (1..=12).map(|i| format!("{i}\n")).collect();
     write(dir.path(), "prob.csv", &prob_vals);
     let prob = write(
@@ -217,7 +233,7 @@ fn forecast_round_trips() {
     assert_eq!(lines.iter().flat_map(|l| l.split(',').skip(2)).count(), 12);
 
     // Scenarios: scenario_count inferred (8 values / (H=2 * count=2) = 2).
-    let scen_store = dir.path().join("scen.nc");
+    let scen_store = dir.path().join("scen.h5");
     let scen_vals: String = (1..=8).map(|i| format!("{i}\n")).collect();
     write(dir.path(), "scen.csv", &scen_vals);
     let scen = write(
@@ -259,7 +275,7 @@ fn forecast_round_trips() {
 #[test]
 fn multidim_single_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("md.nc");
+    let store = dir.path().join("md.h5");
     write(dir.path(), "md.csv", "1,2\n3,4\n5,6\n");
     let descriptor = write(
         dir.path(),
@@ -291,7 +307,7 @@ fn multidim_single_round_trip() {
 #[test]
 fn list_info_and_json_succeed() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("ok.nc");
+    let store = dir.path().join("ok.h5");
     write(dir.path(), "d.csv", "1\n2\n3\n4\n");
     let descriptor = write(
         dir.path(),
@@ -317,12 +333,12 @@ fn list_info_and_json_succeed() {
     // list in all three formats
     let table = run(&store, &["list"]);
     assert!(
-        table.contains("Owner Category"),
-        "list table includes owner category column"
+        table.contains("Category"),
+        "list table includes the owner category column"
     );
     let csv = run(&store, &["-f", "csv", "list"]);
     assert!(
-        csv.contains("owner_category") || csv.contains("Owner Category"),
+        csv.contains("owner_category") || csv.contains("Category"),
         "list csv includes owner category header"
     );
     let json = run(&store, &["-f", "json", "list"]);
@@ -367,7 +383,7 @@ fn list_info_and_json_succeed() {
 #[test]
 fn batch_json_array_adds_multiple() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("batch.nc");
+    let store = dir.path().join("batch.h5");
     write(dir.path(), "a.csv", "1\n2\n3\n");
     write(dir.path(), "b.csv", "4\n5\n6\n");
     let descriptor = write(
@@ -407,13 +423,13 @@ fn batch_json_array_adds_multiple() {
         &store,
         &["-f", "csv", "get", "--owner-id", "10", "--name", "series_a"],
     );
-    assert_eq!(data_lines(&out_a), ["1", "2", "3"]);
+    assert_eq!(value_lines(&out_a), ["1", "2", "3"]);
 
     let out_b = run(
         &store,
         &["-f", "csv", "get", "--owner-id", "10", "--name", "series_b"],
     );
-    assert_eq!(data_lines(&out_b), ["4", "5", "6"]);
+    assert_eq!(value_lines(&out_b), ["4", "5", "6"]);
 }
 
 /// Seed a store with two SingleTimeSeries (owners 1 and 2, name "load").
@@ -444,15 +460,15 @@ fn seed_two(dir: &Path, store: &Path) {
 #[test]
 fn admin_commands_json() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("admin.nc");
+    let store = dir.path().join("admin.h5");
     seed_two(dir.path(), &store);
 
     let stats = run(&store, &["-f", "json", "stats"]);
     assert!(
-        stats.contains("\"static_time_series\": 2"),
+        stats.contains("\"associations.static\": 2"),
         "stats: {stats}"
     );
-    assert!(stats.contains("num_distinct_arrays"), "stats: {stats}");
+    assert!(stats.contains("arrays.distinct_total"), "stats: {stats}");
 
     let res = run(&store, &["-f", "json", "resolutions"]);
     assert!(res.contains("PT1H"), "resolutions: {res}");
@@ -474,7 +490,7 @@ fn admin_commands_json() {
 #[test]
 fn rename_and_remove_all() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("rn.nc");
+    let store = dir.path().join("rn.h5");
     seed_two(dir.path(), &store);
 
     // Rename owner 1's series.
@@ -555,7 +571,7 @@ fn seed_named(dir: &Path, store: &Path, names: &[&str]) {
 #[test]
 fn name_glob_selector() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("glob.nc");
+    let store = dir.path().join("glob.h5");
     seed_named(dir.path(), &store, &["wind_speed", "wind_dir", "solar"]);
 
     let list = run(&store, &["-f", "json", "list", "--name-glob", "wind_*"]);
@@ -573,7 +589,7 @@ fn name_glob_selector() {
 #[test]
 fn dry_run_mutates_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("dry.nc");
+    let store = dir.path().join("dry.h5");
     seed_two(dir.path(), &store);
 
     let out = run(&store, &["remove", "--all", "--dry-run", "--name", "load"]);
@@ -617,7 +633,7 @@ fn dry_run_mutates_nothing() {
 #[test]
 fn export_to_dir_and_stdout() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("exp.nc");
+    let store = dir.path().join("exp.h5");
     seed_named(dir.path(), &store, &["a_series", "b_series"]);
 
     // stdout export requires a unique match.
@@ -656,7 +672,7 @@ fn export_to_dir_and_stdout() {
 #[test]
 fn ext_round_trips_through_descriptor() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("lt.nc");
+    let store = dir.path().join("lt.h5");
     write(dir.path(), "lt.csv", "1.0\n2.0\n");
     let descriptor = write(
         dir.path(),
@@ -687,7 +703,7 @@ fn ext_round_trips_through_descriptor() {
 #[test]
 fn compression_flag_only_on_creation() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("comp.nc");
+    let store = dir.path().join("comp.h5");
     write(dir.path(), "c.csv", "1.0\n2.0\n");
     let descriptor = write(
         dir.path(),

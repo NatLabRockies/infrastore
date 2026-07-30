@@ -37,7 +37,7 @@ julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 
 ## The On-Disk Format Is a Contract
 
-The NetCDF layout, the SQLite schema, and the [hashing rules](./explanation/content-addressing.md)
+The HDF5 layout, the SQLite schema, and the [hashing rules](./explanation/content-addressing.md)
 together form the on-disk format, versioned by `DATA_FORMAT_VERSION`. Any backward-incompatible
 change to any of them must bump that version. The `hash_golden` test pins representative hashes; if
 it fails because you changed the hashing domain, that is a format-breaking change, not a test to

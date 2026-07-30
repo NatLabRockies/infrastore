@@ -19,7 +19,7 @@ pub struct ServerSection {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DataSection {
-    /// Paths to NetCDF files served read-only by this server. v0 supports a
+    /// Paths to HDF5 files served read-only by this server. v0 supports a
     /// single file (the first entry); multi-file is reserved for a follow-up.
     pub files: Vec<PathBuf>,
 }
@@ -100,7 +100,7 @@ host = "127.0.0.1"
 port = 50051
 
 [data]
-files = ["store.nc"]
+files = ["store.h5"]
 "#;
 
     #[test]

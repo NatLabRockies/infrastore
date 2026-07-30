@@ -3,7 +3,7 @@
 //! Simulations consume the store with a `for` loop over every timestamp: at
 //! each timestamp they want the value of *every* time series at that instant.
 //! [`StaticReader`] serves exactly that access pattern for `SingleTimeSeries`,
-//! which is why those arrays are kept in the compacted/packed NetCDF format
+//! which is why those arrays are kept in the compacted/packed on-disk format
 //! (one timestamp across all columns of a packed dataset is a single hyperslab).
 //!
 //! # Design (locked 2026-06-25)
@@ -36,7 +36,7 @@ use std::ops::Range;
 use chrono::{DateTime, Utc};
 
 use crate::error::{Result, TimeSeriesError};
-use crate::storage::netcdf::window_block_cols;
+use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
@@ -235,6 +235,16 @@ fn index_on_grid(
     at: DateTime<Utc>,
     what: &str,
 ) -> Result<usize> {
+    // A single-window forecast may carry a zero interval; its grid has exactly
+    // one point, `initial`.
+    if step.is_zero() && len == 1 {
+        if at == initial {
+            return Ok(0);
+        }
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "timestamp {at} is off the single-point {what} grid at {initial}"
+        )));
+    }
     // `steps_between` is calendar-aware and rejects off-grid / pre-origin
     // timestamps; here we add the extent bound.
     let idx = step.steps_between(initial, at)?;
@@ -743,15 +753,21 @@ fn entry_layout(
             let horizon = m.horizon.ok_or_else(|| missing("horizon"))?;
             let interval = m.interval.ok_or_else(|| missing("interval"))?;
             let h = compute_h(horizon, resolution).map_err(TimeSeriesError::IntegrityError)?;
-            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                TimeSeriesError::IntegrityError(format!(
-                    "DeterministicSingleTimeSeries '{}' interval ({}) is not a multiple of \
-                     resolution ({})",
-                    m.name,
-                    interval.to_iso8601(),
-                    resolution.to_iso8601()
-                ))
-            })?;
+            // A single-window view carries a zero interval; its one window
+            // starts at index 0, so the step width is irrelevant.
+            let interval_steps = if count == 1 && interval.is_zero() {
+                0
+            } else {
+                resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::IntegrityError(format!(
+                        "DeterministicSingleTimeSeries '{}' interval ({}) is not a multiple of \
+                         resolution ({})",
+                        m.name,
+                        interval.to_iso8601(),
+                        resolution.to_iso8601()
+                    ))
+                })?
+            };
             let total_len = shape.first().copied().unwrap_or(0);
             let required = count.saturating_sub(1) * interval_steps + h;
             if required > total_len {
@@ -1044,7 +1060,7 @@ mod tests {
     }
 
     /// Populate `store` with the same mixed-dtype, mixed-shape set used to
-    /// exercise both the default and NetCDF read paths.
+    /// exercise both the default and on-disk read paths.
     fn populate(store: &mut Store) {
         add_f64(store, 2, "load", &[20.0, 21.0, 22.0, 23.0]);
         add_f64(store, 1, "load", &[10.0, 11.0, 12.0, 13.0]);
@@ -1059,13 +1075,13 @@ mod tests {
         );
     }
 
-    /// On-disk store: drives `NetCdfBackend::read_index_into` (the one-hyperslab-
+    /// On-disk store: drives `Hdf5Backend::read_index_into` (the one-hyperslab-
     /// per-dataset override) and cross-checks it byte-for-byte against the
     /// in-memory backend (the default per-hash path).
     #[test]
-    fn netcdf_override_matches_default() {
+    fn disk_override_matches_default() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
 
         let mut disk = Store::create(Some(&path), false).unwrap();
         populate(&mut disk);
@@ -1113,7 +1129,7 @@ mod tests {
     #[test]
     fn override_handles_noncontiguous_high_columns() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
 
         // Four f64 scalar series -> columns 0,1,2,3 in add order.
@@ -1198,7 +1214,7 @@ mod tests {
             .resolution(Duration::hours(1))
     }
 
-    /// On-disk forecast reader (drives the NetCDF hyperslab window read) cross-
+    /// On-disk forecast reader (drives the HDF5 hyperslab window read) cross-
     /// checked byte-for-byte against the in-memory default, plus concrete value
     /// assertions including a multi-dimensional per-step shape.
     #[test]
@@ -1216,7 +1232,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut disk = Store::create(Some(&path), false).unwrap();
         populate(&mut disk);
         let mut mem = Store::create(None, true).unwrap();
@@ -1444,7 +1460,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut disk = Store::create(Some(&path), false).unwrap();
         populate(&mut disk);
         let mut mem = Store::create(None, true).unwrap();
@@ -1481,7 +1497,7 @@ mod tests {
             );
             // Concrete expectation: window k = [sts[k], sts[k+1]].
             assert_eq!(f64_window(dst), vec![sts[k as usize], sts[k as usize + 1]]);
-            // NetCDF (packed underlying hyperslab) == in-memory default.
+            // On-disk (packed underlying hyperslab) == in-memory default.
             assert_eq!(dst.window(), rm.entry_slot(0).window());
             assert_eq!(det_entry.window(), rm.entry_slot(1).window());
         }
@@ -1492,7 +1508,7 @@ mod tests {
     // The strongest correctness check: a reader's bytes must equal what the
     // independent, separately-tested `get_time_series` path returns for the
     // same series at the same timestamp / window. These run on-disk so they
-    // exercise the NetCDF hyperslab overrides.
+    // exercise the HDF5 hyperslab overrides.
 
     /// Encode `vals` into `dtype`'s little-endian bytes for a typed array.
     fn typed_from(dtype: Dtype, shape: Vec<usize>, vals: &[f64]) -> TypedArray {
@@ -1519,7 +1535,7 @@ mod tests {
     #[test]
     fn static_reader_matches_get_time_series_all_dtypes() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.nc");
+        let path = dir.path().join("s.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
         let length = 5usize;
         let res = Duration::hours(1);
@@ -1692,7 +1708,7 @@ mod tests {
     #[test]
     fn forecast_reader_matches_get_time_series_all_types() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f.nc");
+        let path = dir.path().join("f.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
         let res = Duration::hours(1);
         let ivl = Duration::hours(1);
@@ -1798,7 +1814,7 @@ mod tests {
     #[test]
     fn static_reader_spans_spilled_datasets() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("spill.nc");
+        let path = dir.path().join("spill.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
         let res = Duration::hours(1);
         let length = 3usize;

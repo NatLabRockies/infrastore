@@ -146,7 +146,7 @@ fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
 #[test]
 fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mixed.nc");
+    let path = dir.path().join("mixed.h5");
 
     // Byte-identical data referenced by a packed (STS) key and a standalone
     // (NonSeq) key -> one content-addressed array with two competing layouts.
@@ -257,4 +257,131 @@ fn rename_preserves_the_shared_array_and_refcount() {
             .data,
         sts_series().data
     );
+}
+
+// ---------------------------------------------------------------------------
+// Physical location of a content-addressed array
+// ---------------------------------------------------------------------------
+
+/// `locate_array` tells a caller where to find an array's bytes with an outside
+/// HDF5 tool. The hash alone cannot: a packed array is one *column* of a shared
+/// dataset, recoverable only by scanning that dataset's companion `_h` hashes,
+/// and a full packed pool spills into suffixed datasets so even the name is not
+/// derivable from metadata.
+#[test]
+fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
+    use infrastore_core::ArrayLocation;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let hashes = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        // Two different arrays, so at least one lands past column 0.
+        let mut hashes = Vec::new();
+        for (i, owner) in [1i64, 2].iter().enumerate() {
+            let vals: Vec<f64> = (0..8).map(|v| (v + i * 100) as f64).collect();
+            let series = SingleTimeSeries::new(
+                t0(),
+                Duration::hours(1),
+                TypedArray::from_f64(vec![8], &vals),
+                "load",
+            );
+            let key = store
+                .add_time_series(
+                    *owner,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(series),
+                    Features::new(),
+                    None,
+                )
+                .unwrap();
+            hashes.push(store.get_metadata(key.identity()).unwrap().data_hash);
+        }
+        store.flush().unwrap();
+        hashes
+    };
+
+    let store = open_store(path.as_path(), true).unwrap();
+    let mut columns = Vec::new();
+    for hash in &hashes {
+        match store.locate_array(hash).unwrap() {
+            ArrayLocation::Packed { dataset, column } => {
+                assert!(
+                    dataset.starts_with("/time_series/single/sts_f64_"),
+                    "an absolute path a user can paste into h5dump, got {dataset}"
+                );
+                columns.push(column);
+            }
+            other => panic!("a SingleTimeSeries is packed, got {other:?}"),
+        }
+    }
+    columns.sort_unstable();
+    assert_eq!(
+        columns,
+        vec![0, 1],
+        "distinct arrays occupy distinct columns of the shared dataset"
+    );
+
+    // An unknown hash is NotFound, not a bogus location.
+    assert!(store.locate_array(&[0u8; 32]).is_err());
+}
+
+#[test]
+fn locate_array_names_the_standalone_dataset_of_an_irregular_series() {
+    use infrastore_core::ArrayLocation;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let hash = {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let ns = NonSequentialTimeSeries::new(
+            vec![t0(), t0() + Duration::hours(3)],
+            TypedArray::from_f64(vec![2], &[1.0, 2.0]),
+            "events",
+        )
+        .unwrap();
+        let key = store
+            .add_time_series(
+                9,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(ns),
+                Features::new(),
+                None,
+            )
+            .unwrap();
+        let hash = store.get_metadata(key.identity()).unwrap().data_hash;
+        store.flush().unwrap();
+        hash
+    };
+
+    let store = open_store(path.as_path(), true).unwrap();
+    match store.locate_array(&hash).unwrap() {
+        ArrayLocation::Standalone { dataset } => assert!(
+            dataset.starts_with("/time_series/single/arr_"),
+            "a standalone array is its own dataset, got {dataset}"
+        ),
+        other => panic!("a NonSequentialTimeSeries is standalone, got {other:?}"),
+    }
+}
+
+#[test]
+fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
+    use infrastore_core::ArrayLocation;
+
+    let mut store = create_store(None, true).unwrap();
+    let key = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts_series()),
+            Features::new(),
+            None,
+        )
+        .unwrap();
+    let hash = store.get_metadata(key.identity()).unwrap().data_hash;
+    assert_eq!(store.locate_array(&hash).unwrap(), ArrayLocation::InMemory);
+    assert!(store.locate_array(&[0u8; 32]).is_err());
 }

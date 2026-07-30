@@ -3,11 +3,11 @@
 A persistent store is **two files that travel together**:
 
 ```text
-system.nc          # NetCDF4 — the numerical arrays
-system.nc.sqlite   # SQLite  — the metadata associations
+system.h5          # HDF5 — the numerical arrays
+system.h5.sqlite   # SQLite  — the metadata associations
 ```
 
-The catalog path is derived by appending `.sqlite` to the NetCDF file name. This page explains the
+The catalog path is derived by appending `.sqlite` to the HDF5 file name. This page explains the
 split and how the two halves stay consistent. For the exact bytes, dataset names, and table columns,
 see the [On-Disk File Format reference](../reference/file-format.md).
 
@@ -20,14 +20,14 @@ Arrays and metadata pull in opposite directions:
 | Size           | Large (thousands of values each)                  | Small (a row plus a shared feature set)   |
 | Access pattern | Bulk read by content                              | Filtered queries by owner, name, features |
 | Mutation       | Immutable; whole-array add/delete, dedup-on-write | Insert / delete with constraints          |
-| Best tool      | NetCDF4 (chunked, compressed HDF5)                | SQLite (indexes, transactions)            |
+| Best tool      | HDF5 (chunked, compressed)                        | SQLite (indexes, transactions)            |
 
 Forcing both into one format would compromise one of them. Instead, each lives where it is
 strongest, and the `Store` layer coordinates them.
 
-## The Array Side: NetCDF4
+## The Array Side: HDF5
 
-Arrays live under `time_series/single/` in the NetCDF file, in one of **two storage modes**.
+Arrays live under `time_series/single/` in the HDF5 file, in one of **two storage modes**.
 
 Stored arrays are **immutable**: a value array is added or deleted as a whole and is never edited in
 place — there is no API to mutate a row, slice, or column of an array already in the store. Changing
@@ -66,9 +66,9 @@ flowchart TB
   fills whole chunks in one pass) and **reads across series by timestamp** (one timestamp is one
   chunk). The reverse directions are the slow ones, by design: reading a single series in full
   touches every chunk band, and adding one series at a time rewrites a chunk band per timestep.
-- **A companion string variable holds the hashes.** For each packed dataset there is a sibling
-  `{dataset}_h`; slot `i` holds the SHA-256 hex of column `i`, or an empty string if the slot is
-  free. This is the on-disk index the backend rebuilds on open.
+- **A companion dataset holds the hashes.** For each packed dataset there is a sibling
+  `{dataset}_h`, a `(cols, 64)` array of `u8`; row `i` holds the SHA-256 hex of column `i` as raw
+  bytes, or is all-zero if the slot is free. This is the on-disk index the backend rebuilds on open.
 - **Datasets spill when full** into `…__1`, `…__2`, and so on — when a batch exceeds the per-dataset
   column cap, or when incremental writes fill a default-width (1,000-column) dataset.
 - **Compression is configurable** at store creation and applies to every data variable (packed and
@@ -87,7 +87,7 @@ shaped `[length, *element_shape]` and chunked whole; dense forecasts are shaped
 in bounded blocks along the `count` (window) axis, so reading one forecast window decompresses a
 single block rather than the whole array. The `ForecastReader` caches a block at a time to match.
 
-The [file-format reference](../reference/file-format.md#netcdf-layout) gives the precise naming and
+The [file-format reference](../reference/file-format.md#hdf5-layout) gives the precise naming and
 dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
 same physical shape — the type, timestamps, and windowing parameters all live in metadata.
 
@@ -144,7 +144,7 @@ dangling reference:
 ```mermaid
 sequenceDiagram
     participant C as add_time_series
-    participant B as NetCDF backend
+    participant B as HDF5 backend
     participant M as SQLite
     C->>B: put_array(hash, data)
     Note over C,B: idempotent on hash — staged for rollback
@@ -178,8 +178,8 @@ feature set; the set is left unreachable for a later `compact()` to sweep.
 
 ## Persistence and Copying
 
-The NetCDF backend buffers writes. Call `flush()` (which issues `nc_sync`) before copying the files
-for backup or archival; afterward both `system.nc` and `system.nc.sqlite` can be copied as a pair
+The HDF5 backend buffers writes. Call `flush()` (which issues `H5Fflush`) before copying the files
+for backup or archival; afterward both `system.h5` and `system.h5.sqlite` can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.
 
 ## Compaction
@@ -187,15 +187,14 @@ without closing the handle. The two files must always be kept together — neith
 `compact()` reclaims space in both halves of the artifact, and the two halves behave differently.
 
 **On the array side, compaction reports rather than reclaims.** Deleting a series frees its column
-slot but does not shrink the NetCDF dataset. The freed slot is transparently reused by the next
-compatible write (`first_free`), and a deleted standalone variable lingers as dead space.
-`compact()` reports how many slots are reclaimable (`slots_reclaimed`); v0 does not physically
-shrink datasets or drop dead variables, because netcdf-c cannot resize a dimension in place — that
-is a follow-up.
+slot but does not shrink the HDF5 dataset. The freed slot is transparently reused by the next
+compatible write (`first_free`), and a deleted standalone dataset lingers as dead space. `compact()`
+reports how many slots are reclaimable (`slots_reclaimed`); v0 does not physically shrink datasets
+or drop dead ones, because HDF5 cannot reclaim the space in place — that is a follow-up.
 
 **On the catalog side, compaction physically deletes.** Because feature sets are shared, deleting an
 association cannot cascade into them: removing the last association that referenced a set leaves it
-unreachable, mirroring the NetCDF side's unreachable standalone variables. `compact()` sweeps those
+unreachable, mirroring the HDF5 side's unreachable standalone variables. `compact()` sweeps those
 rows and reports the count as `feature_sets_reclaimed` — the one thing compaction actually removes.
 (Clearing the whole store is the exception that needs no sweep: it orphans every set by
 construction, so it drops them all outright.)

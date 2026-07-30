@@ -8,9 +8,12 @@
 # valid across subsequent reads.
 
 # A forecast reader covers one forecast type, so it takes a narrower set than
-# `_type_code`: static types and the family sentinel are rejected here.
+# `_type_code`: static types are rejected here. `AbstractDeterministic` is
+# accepted and reads like a `Deterministic` reader (which is already abstract
+# over the deterministic pair).
 const _FORECAST_TYPES = (
-    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios
+    Deterministic, DeterministicSingleTimeSeries, Probabilistic, Scenarios,
+    AbstractDeterministic,
 )
 
 function _int_for_type(::Type{T}) where {T}
@@ -236,7 +239,7 @@ One forecast's entry in a [`ForecastReader`]. `key` identifies the forecast;
 `[scenarios, H, *E]`). `slot` is the 0-based index of the deduplicated window
 read backing this entry — entries that share an array and read plan (e.g.
 components referencing one shared forecast) report the same `slot`, so the
-`.nc` data is read once per timestamp and a caller can group by `slot` to
+`.h5` data is read once per timestamp and a caller can group by `slot` to
 materialize each unique window only once.
 """
 struct ForecastEntry
@@ -398,14 +401,14 @@ end
 
 The reader's per-key window entries (resolved once at build time). Each entry's
 `slot` field identifies its deduplicated window read; entries sharing a `slot`
-read the same `.nc` data once per timestamp.
+read the same `.h5` data once per timestamp.
 """
 forecast_entries(reader::ForecastReader) = reader.entries
 
 """
     forecast_num_slots(reader) -> Int
 
-The number of deduplicated window slots — i.e. the count of physical `.nc` reads
+The number of deduplicated window slots — i.e. the count of physical `.h5` reads
 [`forecast_read!`] performs per timestamp. Entries that share an array and read
 plan collapse to one slot, so this is `≤ length(forecast_entries(reader))`.
 """

@@ -120,7 +120,7 @@ void infrastore_string_free(char *s);
 int32_t infrastore_store_create(const char *path, bool in_memory, struct InfraStore **out);
 
 /**
- * Create a store with an explicit NetCDF compression policy.
+ * Create a store with an explicit compression policy.
  *
  * `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
  * DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
@@ -456,7 +456,7 @@ int32_t infrastore_store_get_intervals(const struct InfraStore *handle,
 int32_t infrastore_store_read_only(const struct InfraStore *handle, bool *out_read_only);
 
 /**
- * Write the store's backing NetCDF path into `buf` (probe-then-fetch: call with a
+ * Write the store's backing HDF5 file path into `buf` (probe-then-fetch: call with a
  * null `buf` to learn `*out_len`, then again with a buffer of that size). An
  * in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.
  *
@@ -589,9 +589,9 @@ int32_t infrastore_store_get_compression(const struct InfraStore *handle,
  * Recompute each stored array's content hash and report how many disagree with
  * the hash recorded alongside them through `out_error_count`.
  *
- * Covers the NetCDF half of the store only: the SQLite catalog is not inspected,
+ * Covers the HDF5 half of the store only: the SQLite catalog is not inspected,
  * so a zero count does not mean the store as a whole is sound. A catalog that is
- * corrupted, truncated, or paired with the wrong NetCDF file still reports zero,
+ * corrupted, truncated, or paired with the wrong HDF5 file still reports zero,
  * while every read of the affected series fails.
  *
  * # Safety
@@ -679,7 +679,7 @@ int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
 int32_t infrastore_store_flush(struct InfraStore *handle);
 
 /**
- * Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+ * Persist the store's data to `path` (HDF5 arrays) and `<path>.sqlite` (metadata),
  * materializing in-memory stores to disk. Existing target files are overwritten.
  *
  * # Safety

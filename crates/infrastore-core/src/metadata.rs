@@ -18,7 +18,7 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::features_hash;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
-use crate::types::time_series::TimeSeriesType;
+use crate::types::time_series::{RequestedType, TimeSeriesType};
 
 pub struct MetadataStore {
     conn: Connection,
@@ -343,7 +343,9 @@ pub struct MetadataFilter {
     pub owner_id: Option<i64>,
     pub owner_category: Option<OwnerCategory>,
     pub owner_type: Option<String>,
-    pub time_series_type: Option<TimeSeriesType>,
+    /// Type filter: a concrete stored type, or the `AbstractDeterministic`
+    /// family (matching `Deterministic` and `DeterministicSingleTimeSeries`).
+    pub time_series_type: Option<RequestedType>,
     pub name: Option<String>,
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*`/`?` wildcards).
     /// Combined with `name` as AND when both are set.
@@ -407,6 +409,32 @@ impl From<AssociationIdentity> for SeriesFamily {
     }
 }
 
+/// Append the `time_series_type` predicate for `requested` to `sql`/`params`:
+/// an equality for a concrete type, an `IN (…)` over both concrete members for
+/// the `AbstractDeterministic` family. Shared by every catalog query that
+/// filters on type.
+fn push_type_predicate(
+    sql: &mut String,
+    params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    requested: RequestedType,
+) {
+    match requested {
+        RequestedType::Concrete(t) => {
+            sql.push_str(" AND time_series_type = ?");
+            params.push(Box::new(t.as_str().to_string()));
+        }
+        RequestedType::AbstractDeterministic => {
+            sql.push_str(" AND time_series_type IN (?, ?)");
+            params.push(Box::new(TimeSeriesType::Deterministic.as_str().to_string()));
+            params.push(Box::new(
+                TimeSeriesType::DeterministicSingleTimeSeries
+                    .as_str()
+                    .to_string(),
+            ));
+        }
+    }
+}
+
 impl MetadataFilter {
     /// Render the filter as a `WHERE` clause plus its bound parameters, so the
     /// same predicate can be reused across the row query and the batched
@@ -429,9 +457,8 @@ impl MetadataFilter {
             sql.push_str(" AND owner_type = ?");
             params_vec.push(Box::new(owner_type.clone()));
         }
-        if let Some(ts_type) = self.time_series_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(ts_type.as_str().to_string()));
+        if let Some(requested) = self.time_series_type {
+            push_type_predicate(&mut sql, &mut params_vec, requested);
         }
         if let Some(ref name) = self.name {
             sql.push_str(" AND name = ?");
@@ -507,13 +534,36 @@ impl MetadataStore {
         // handle to the same on-disk artifact holds a lock (e.g. a CLI writer
         // and the read-only gRPC server overlapping). Harmless for in-memory and
         // read-only connections, which still acquire SHARED locks.
-        //
-        // NOTE: we intentionally do NOT switch to WAL / synchronous=NORMAL here.
-        // WAL would raise write throughput, but it persists `-wal`/`-shm` sidecar
-        // files (complicating the "move the .nc and .sqlite together" artifact
-        // contract) and can prevent a read-only connection from opening the
-        // database in some deployments. That trade-off deserves its own change.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // WAL journal mode, for the *read* path: in rollback-journal mode every
+        // read transaction pays a hot-journal `stat()` plus a shared-lock
+        // fcntl dance per statement — ~20% of a key lookup in a per-series
+        // read loop. WAL drops both (readers coordinate through the WAL
+        // index) and also lets readers overlap a writer. The `-wal`/`-shm`
+        // sidecars do not outlive the store: SQLite checkpoints and removes
+        // them when the last connection closes, and `Store::persist_to`
+        // checkpoints explicitly before copying the artifact pair, so the
+        // "move the file and its .sqlite together" contract holds. A sidecar
+        // can survive a crash; a read-write open recovers it (a read-only
+        // open of a crashed store fails until one happens).
+        //
+        // Skipped for read-only connections (the pragma writes the header on
+        // a rollback-mode file; a cleanly closed WAL store reads fine without
+        // it) and no-ops for in-memory databases.
+        if !conn.is_readonly(rusqlite::DatabaseName::Main)? {
+            // `journal_mode` returns a row ("wal"); use `query_row` to consume
+            // it — `execute` would report a misuse error.
+            conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+            // NORMAL sync under WAL: commits stop fsyncing the WAL (the sync
+            // moves to checkpoints), which is the dominant cost of small
+            // single-op transactions — a per-series removal spends ~25% of its
+            // time in that fsync. WAL guarantees the database stays consistent
+            // either way; what NORMAL gives up is durability of the last few
+            // commits on an OS crash or power loss, which this store accepts:
+            // the artifact is rebuilt from serialized systems, and the prior
+            // metadata store held everything in process memory.
+            conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        }
         // `prepare_cached` keys on SQL text, and `MetadataFilter` renders a
         // distinct statement per combination of set predicates (times two, since
         // `list` issues a row query and a features query). rusqlite's default
@@ -532,6 +582,23 @@ impl MetadataStore {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// Flush the WAL into the main database file and truncate it, so the
+    /// `.sqlite` artifact is complete on its own (required before any
+    /// file-level copy of it). No-op for read-only connections — which cannot
+    /// checkpoint, and see only cleanly closed stores whose WAL is already
+    /// empty — for in-memory databases (not in WAL mode), and while a
+    /// transaction is open on this connection: checkpointing there would error
+    /// (`SQLITE_LOCKED`), and mid-transaction the artifact is incomplete by
+    /// definition — the post-commit flush checkpoints instead.
+    pub fn checkpoint(&self) -> Result<()> {
+        if self.read_only || !self.conn.is_autocommit() {
+            return Ok(());
+        }
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
         Ok(())
     }
 
@@ -723,7 +790,7 @@ impl MetadataStore {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
         let interval_iso = key.interval.map(period_to_iso);
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare_cached(
             "SELECT id, data_hash FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
                AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
@@ -747,10 +814,8 @@ impl MetadataStore {
 
         let mut out = Vec::with_capacity(rows.len());
         for (id, hash_bytes) in rows {
-            tx.execute(
-                "DELETE FROM time_series_associations WHERE id = ?1",
-                params![id],
-            )?;
+            tx.prepare_cached("DELETE FROM time_series_associations WHERE id = ?1")?
+                .execute(params![id])?;
             let mut h = [0u8; 32];
             if hash_bytes.len() == 32 {
                 h.copy_from_slice(&hash_bytes);
@@ -995,13 +1060,26 @@ impl MetadataStore {
     /// `idx_category_owner`. Unlike `list`, no row leaves the index — nothing
     /// is hydrated, no JSON is parsed, and no second features query runs.
     ///
-    /// The one predicate an index cannot answer is the in-memory
-    /// `features` subset match, so a filter carrying one falls back to
-    /// `list`. Callers testing an *exact* feature set (the keyed existence
-    /// check) pass `features_hash` instead, which stays on the index path.
+    /// A `features` filter keeps that guarantee through a two-step strategy
+    /// (ported from InfrastructureSystems.jl's optimized `has_metadata`): the
+    /// requested set is hashed and probed as an *exact* set first — callers
+    /// overwhelmingly pass the complete feature set, and that equality rides
+    /// `uq_ts_assoc` like any other keyed probe. Only when the exact probe
+    /// misses (a genuinely partial feature list, or a true miss) does the
+    /// indexed subset fallback [`Self::exists_feature_subset`] run.
     pub fn exists(&self, filter: &MetadataFilter) -> Result<bool> {
-        if filter.features.as_ref().is_some_and(|f| !f.is_empty()) {
-            return Ok(!self.list(filter)?.is_empty());
+        if let Some(required) = filter.features.as_ref().filter(|f| !f.is_empty()) {
+            // The exact-set shortcut substitutes its own hash, so it must not
+            // override a caller that already pinned one.
+            if filter.features_hash.is_none() {
+                let mut exact = filter.clone();
+                exact.features = None;
+                exact.features_hash = Some(features_hash(required));
+                if self.exists(&exact)? {
+                    return Ok(true);
+                }
+            }
+            return self.exists_feature_subset(filter, required);
         }
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1016,11 +1094,50 @@ impl MetadataStore {
         Ok(found.is_some())
     }
 
+    /// Subset-match existence probe answered entirely in SQL: one correlated
+    /// `EXISTS` seek of `feature_sets`' `(features_hash, key)` primary key per
+    /// requested feature — nothing hydrated, no JSON parsed. The value
+    /// comparison is kind-strict, matching [`is_subset`]'s `FeatureValue`
+    /// equality (an `Int(2030)` never matches a `Str("2030")`).
+    ///
+    /// The SQL text depends only on the shape (feature count and value kinds
+    /// in key order), so `prepare_cached` reuses statements across calls the
+    /// same way the plain probes do.
+    fn exists_feature_subset(&self, filter: &MetadataFilter, required: &Features) -> Result<bool> {
+        let (where_clause, mut params_vec) = filter.to_sql();
+        let mut sql = format!("SELECT 1 FROM time_series_associations {where_clause}");
+        for (key, value) in required {
+            let (kind, column, param): (&str, &str, Box<dyn rusqlite::ToSql>) = match value {
+                FeatureValue::Int(i) => ("int", "value_int", Box::new(*i)),
+                FeatureValue::Float(f) => ("float", "value_float", Box::new(*f)),
+                FeatureValue::Bool(b) => ("bool", "value_bool", Box::new(*b as i64)),
+                FeatureValue::Str(s) => ("str", "value_str", Box::new(s.clone())),
+            };
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM feature_sets fs \
+                 WHERE fs.features_hash = time_series_associations.features_hash \
+                 AND fs.key = ? AND fs.value_kind = '{kind}' AND fs.{column} = ?)"
+            ));
+            params_vec.push(Box::new(key.clone()));
+            params_vec.push(param);
+        }
+        sql.push_str(" LIMIT 1");
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let found: Option<i64> = stmt
+            .query_row(param_refs.as_slice(), |r| r.get(0))
+            .optional()?;
+        Ok(found.is_some())
+    }
+
     pub fn get_by_key(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         let mut matches = self.list(&MetadataFilter {
             owner_id: Some(key.owner_id),
             owner_category: Some(key.owner_category),
-            time_series_type: Some(key.time_series_type),
+            time_series_type: Some(key.time_series_type.into()),
             name: Some(key.name.clone()),
             resolution: key.resolution,
             interval: key.interval,
@@ -1042,15 +1159,14 @@ impl MetadataStore {
         }
     }
 
-    pub fn distinct_resolutions(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn distinct_resolutions(&self, ts_type: Option<RequestedType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT resolution FROM time_series_associations
              WHERE resolution IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(t.as_str().to_string()));
+            push_type_predicate(&mut sql, &mut params_vec, t);
         }
         sql.push_str(" ORDER BY resolution ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1070,15 +1186,14 @@ impl MetadataStore {
     /// mixed period kinds have no numeric order, so text order is the stable
     /// choice. Only forecast rows carry an interval, so non-forecast types yield
     /// an empty list.
-    pub fn distinct_intervals(&self, ts_type: Option<TimeSeriesType>) -> Result<Vec<Period>> {
+    pub fn distinct_intervals(&self, ts_type: Option<RequestedType>) -> Result<Vec<Period>> {
         let mut sql = String::from(
             "SELECT DISTINCT interval FROM time_series_associations
              WHERE interval IS NOT NULL",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         if let Some(t) = ts_type {
-            sql.push_str(" AND time_series_type = ?");
-            params_vec.push(Box::new(t.as_str().to_string()));
+            push_type_predicate(&mut sql, &mut params_vec, t);
         }
         sql.push_str(" ORDER BY interval ASC");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
@@ -1329,20 +1444,28 @@ impl MetadataStore {
     pub fn list_owner_ids(
         &self,
         category: OwnerCategory,
-        ts_type: Option<TimeSeriesType>,
+        ts_type: Option<RequestedType>,
         resolution: Option<Period>,
     ) -> Result<Vec<i64>> {
-        let ts_type_str = ts_type.map(|t| t.as_str());
-        let res_iso = resolution.map(period_to_iso);
-        let mut stmt = self.conn.prepare(
+        let mut sql = String::from(
             "SELECT DISTINCT owner_id FROM time_series_associations
-             WHERE owner_category = ?1
-               AND (?2 IS NULL OR time_series_type = ?2)
-               AND (?3 IS NULL OR resolution = ?3)",
-        )?;
-        let rows = stmt.query_map(params![category.as_str(), ts_type_str, res_iso], |r| {
-            r.get::<_, i64>(0)
-        })?;
+             WHERE owner_category = ?",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(category.as_str().to_string())];
+        if let Some(t) = ts_type {
+            push_type_predicate(&mut sql, &mut params_vec, t);
+        }
+        if let Some(res) = resolution {
+            sql.push_str(" AND resolution = ?");
+            params_vec.push(Box::new(period_to_iso(res)));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p.as_ref() as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |r| r.get::<_, i64>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -2065,11 +2188,9 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
 // `Store` layer where a tx is already in-flight for atomicity). Implemented as
 // helper free fns so we don't have two parallel Send/Sync wrappers.
 pub fn references_to_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<i64> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1",
-        params![data_hash.as_slice()],
-        |row| row.get(0),
-    )?;
+    let count: i64 = tx
+        .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1")?
+        .query_row(params![data_hash.as_slice()], |row| row.get(0))?;
     Ok(count)
 }
 
@@ -2080,12 +2201,14 @@ pub fn typed_references_to_in_tx(
     data_hash: &[u8; 32],
     ts_type: TimeSeriesType,
 ) -> Result<i64> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM time_series_associations
+    let count: i64 = tx
+        .prepare_cached(
+            "SELECT COUNT(*) FROM time_series_associations
          WHERE data_hash = ?1 AND time_series_type = ?2",
-        params![data_hash.as_slice(), ts_type.as_str()],
-        |row| row.get(0),
-    )?;
+        )?
+        .query_row(params![data_hash.as_slice(), ts_type.as_str()], |row| {
+            row.get(0)
+        })?;
     Ok(count)
 }
 
@@ -2110,13 +2233,18 @@ pub fn forecast_family_conflict(
     conflicting_type: TimeSeriesType,
 ) -> Result<bool> {
     let resolution_iso = resolution.map(period_to_iso);
+    // `prepare_cached`: this runs once per Deterministic row in a bulk add, and
+    // an uncached prepare (SQL parse + query plan) costs more than executing
+    // the point query itself.
     let exists: Option<i64> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT 1 FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
                AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
                AND features_hash = ?6
              LIMIT 1",
+        )?
+        .query_row(
             params![
                 owner_id,
                 owner_category.as_str(),

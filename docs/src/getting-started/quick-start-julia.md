@@ -10,7 +10,7 @@ the first store call errors, see [Integrate with Julia](../how-to/integrate-juli
 using Dates, InfraStore
 
 # `in_memory=true` means no filesystem I/O. Pass `path=` with `in_memory=false`
-# to write a NetCDF file plus its SQLite catalog.
+# to write an HDF5 file plus its SQLite catalog.
 store = Store(in_memory=true)
 
 # The name lives on the series struct, not on `add_time_series!`.
@@ -78,21 +78,21 @@ or `(owner_id, owner_category, name; resolution, features)` attributes.
 Swap the constructor to persist. The do-block form closes the store on exit, including on throw:
 
 ```julia
-Store(in_memory=false, path="system.nc") do store
+Store(in_memory=false, path="system.h5") do store
     add_time_series!(store, 42, "Generator", Component, ts; units = "MW")
-    flush!(store)   # sync buffered NetCDF writes to disk
+    flush!(store)   # sync buffered HDF5 writes to disk
 end
 ```
 
 This produces two files that travel together:
 
-- `system.nc` — the NetCDF4 file holding the arrays.
-- `system.nc.sqlite` — the catalog holding the metadata associations.
+- `system.h5` — the HDF5 file holding the arrays.
+- `system.h5.sqlite` — the catalog holding the metadata associations.
 
-Reopen them later with `open_store("system.nc"; read_only=true)`, which has a do-block form too:
+Reopen them later with `open_store("system.h5"; read_only=true)`, which has a do-block form too:
 
 ```julia
-open_store("system.nc"; read_only=true) do store
+open_store("system.h5"; read_only=true) do store
     keys = get_time_series_keys(store, 42, Component)
     series = get_time_series(SingleTimeSeries, store, keys[1])
 end

@@ -10,7 +10,7 @@ understand what infrastore optimizes for — and, just as importantly, what it d
 
 ## Data Orientation: Optimize for Reading Every Component at One Timestamp
 
-**The decision.** In the NetCDF file, `SingleTimeSeries` arrays that share a
+**The decision.** In the HDF5 file, `SingleTimeSeries` arrays that share a
 `(dtype, element_shape, length, resolution)` are packed as columns of one dataset: **columns are
 series, rows are timesteps**, and the HDF5 chunking is `(1, cols, *element_shape)` so that a single
 chunk holds one timestamp across every column. We optimize for reading **all components' values at a
@@ -19,7 +19,7 @@ given timestamp**, and accept that reading **one component's entire array** is c
 **Why.** The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
 timestamp — a slice _across_ series, not _down_ one. With this layout that slice is a single chunk
-read; the [`ForecastReader` / `StaticReader`](./storage-model.md#the-array-side-netcdf4) columnar
+read; the [`ForecastReader` / `StaticReader`](./storage-model.md#the-array-side-hdf5) columnar
 surface is built directly on it. The inverse access — pulling one component's full history — has to
 touch every chunk band and is slow by design. That trade is deliberate: the simulation read path is
 the hot one, and it is the one parent packages hand to their users.
@@ -33,9 +33,8 @@ the hot one, and it is the one parent packages hand to their users.
   and expect it to be cheap. It works, but it is the slow direction. If a downstream workload
   genuinely needs that orientation, that is a signal to raise with infrastore, not to work around
   with many single-series reads.
-- The orientation is a property of the _packed_ NetCDF layout only. `NonSequentialTimeSeries` and
-  the dense forecast types are stored as standalone per-array variables and do not participate in
-  it.
+- The orientation is a property of the _packed_ HDF5 layout only. `NonSequentialTimeSeries` and the
+  dense forecast types are stored as standalone per-array variables and do not participate in it.
 
 **Values are immutable.** There is no API — in any binding, by design — to edit a single value,
 slice, row, or column of an array already in the store. A stored array is added or deleted as a
@@ -76,9 +75,9 @@ a store was written with, so it does not change the on-disk format version.
 
 ## Split Arrays From Metadata
 
-Numerical arrays live in NetCDF4 and metadata associations live in a companion SQLite catalog,
-because the two have opposite size, access, and mutation profiles and each format is strongest at
-one of them. The full rationale, the consistency ordering that keeps the two files in step, and the
+Numerical arrays live in HDF5 and metadata associations live in a companion SQLite catalog, because
+the two have opposite size, access, and mutation profiles and each format is strongest at one of
+them. The full rationale, the consistency ordering that keeps the two files in step, and the
 compaction behavior are covered in the [Storage Model](./storage-model.md).
 
 ## Content-Address and Deduplicate Arrays
@@ -97,7 +96,7 @@ explicit error rather than silently changing semantics. This keeps a parent pack
 between bindings — for example, Julia via the C ABI and Python via the wheel — without the data
 model shifting underneath it. See [Language Bindings](./bindings.md).
 
-## Make Transactions Span Operations, Without Enlisting NetCDF
+## Make Transactions Span Operations, Without Enlisting HDF5
 
 Every mutating entry point is atomic on its own, and a [bulk add](./storage-model.md) commits a
 whole batch in one catalog transaction. Neither helps when several _operations_ have to succeed or
@@ -106,9 +105,9 @@ from it. `Store::begin_transaction` opens a unit of work spanning any number of 
 its outermost commit makes anything durable.
 
 The obstacle is that a store is two artifacts and only one of them has transactions. SQLite rolls
-back its own statements; NetCDF has nothing to enlist. Rather than trying to give NetCDF a
-transaction, the array store is made **append-only for the transaction's duration**, which content
-addressing makes cheap:
+back its own statements; HDF5 has nothing to enlist. Rather than trying to give HDF5 a transaction,
+the array store is made **append-only for the transaction's duration**, which content addressing
+makes cheap:
 
 - **Writes** are recorded as they happen and removed on rollback. An array is recorded only if it
   was _physically written_ — a write of content that already exists is a no-op on hash, so there is
@@ -130,7 +129,7 @@ usable.
 
 The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
-timeout. And a transaction is not a substitute for batching: block-sized NetCDF writes and
-feature-set dedup come from `bulk_add`, and a loop of single adds gets neither just because it is
-wrapped in a transaction. The two compose — batch each operation, and use a transaction when several
-of them must be atomic together.
+timeout. And a transaction is not a substitute for batching: block-sized HDF5 writes and feature-set
+dedup come from `bulk_add`, and a loop of single adds gets neither just because it is wrapped in a
+transaction. The two compose — batch each operation, and use a transaction when several of them must
+be atomic together.

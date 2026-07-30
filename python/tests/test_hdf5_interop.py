@@ -1,6 +1,6 @@
 """Guard against HDF5 symbol collisions in the published wheel.
 
-The wheel statically links its own netcdf-c + HDF5 + zlib (infrastore's default
+The wheel statically links its own HDF5 + zlib (infrastore's default
 `vendored` feature). Downstream users -- notably `infrasys` -- typically also
 have `netCDF4` and/or `h5py` installed, each of which bundles its own libhdf5.
 That puts several independent HDF5 copies in one interpreter.
@@ -58,28 +58,33 @@ def _infrastore_roundtrip(path):
     assert np.array_equal(np.asarray(store.get_time_series(key).data), values)
     del store
 
-    # Reopen from disk so the read path runs against a fresh NetCDF/HDF5 handle.
+    # Reopen from disk so the read path runs against a fresh HDF5 handle.
     reopened = Store.open(str(path))
     assert np.array_equal(np.asarray(reopened.get_time_series(key).data), values)
 
 
 def test_infrastore_then_netcdf4_then_h5py(tmp_path):
     """infrastore initializes HDF5 first."""
-    _infrastore_roundtrip(tmp_path / "store.nc")
-    _netcdf4_roundtrip(tmp_path / "nc4.nc")
+    _infrastore_roundtrip(tmp_path / "store.h5")
+    _netcdf4_roundtrip(tmp_path / "nc4.h5")
     _h5py_roundtrip(tmp_path / "h5.h5")
 
 
 def test_h5py_then_netcdf4_then_infrastore(tmp_path):
     """Reverse order: another libhdf5 initializes before infrastore's."""
     _h5py_roundtrip(tmp_path / "h5.h5")
-    _netcdf4_roundtrip(tmp_path / "nc4.nc")
-    _infrastore_roundtrip(tmp_path / "store.nc")
+    _netcdf4_roundtrip(tmp_path / "nc4.h5")
+    _infrastore_roundtrip(tmp_path / "store.h5")
 
 
 def test_netcdf4_reads_an_infrastore_store(tmp_path):
-    """A foreign libnetcdf must read a store infrastore's vendored copy wrote."""
-    path = tmp_path / "store.nc"
+    """netCDF4 must still open a store infrastore's vendored HDF5 wrote.
+
+    The store is a plain HDF5 file, not NetCDF4, so netcdf-c reads it via its
+    generic-HDF5 path (datasets without dimension scales get phony dimensions).
+    This pins that the layout stays within what netcdf-c can open.
+    """
+    path = tmp_path / "store.h5"
     _infrastore_roundtrip(path)
 
     def first_var(group):
@@ -100,7 +105,7 @@ def test_netcdf4_reads_an_infrastore_store(tmp_path):
 
 def test_h5py_reads_an_infrastore_store(tmp_path):
     """Same, one layer down: a foreign libhdf5 reading the raw datasets."""
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     _infrastore_roundtrip(path)
 
     with h5py.File(path, "r") as f:

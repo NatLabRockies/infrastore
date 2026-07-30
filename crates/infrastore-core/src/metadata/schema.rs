@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
 -- There is deliberately NO foreign key to time_series_associations and NO
 -- cascade: rows here are shared, so deleting one association must not delete a
 -- set another association still uses. Deleting the last user of a set instead
--- leaves it unreachable, mirroring the NetCDF side's unreachable standalone
+-- leaves it unreachable, mirroring the HDF5 side's unreachable standalone
 -- variables. `Store::compact` sweeps unreachable sets.
 CREATE TABLE IF NOT EXISTS feature_sets (
     key               TEXT    NOT NULL,
@@ -224,4 +224,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_parent_child
     ON parent_child_associations(parent_id, child_id);
 CREATE INDEX IF NOT EXISTS idx_parent_child_child
     ON parent_child_associations(child_id, parent_id, parent_type);
+
+-- A readable projection of the association table, for humans opening the
+-- catalog in `sqlite3` directly. The two content-address hashes are BLOBs, and
+-- sqlite3 renders a BLOB as raw bytes in its default `list` mode and in
+-- `.mode box`/`.mode json` -- which corrupts the terminal and, in box mode, the
+-- table borders themselves. This view hands back the same rows with both hashes
+-- hex-encoded.
+--
+-- The encoding is `lower(hex(...))`, not bare `hex(...)`: SQLite's `hex()`
+-- returns uppercase, while `hash_hex` in `crate::hash` -- the spelling every
+-- binding, the CLI, and every error message uses -- is lowercase. Lowercasing
+-- here means a hash copied out of this view pastes straight into a CLI
+-- `--data-hash` argument and compares equal to one printed by any binding.
+--
+-- The hashes stay BLOB in the base table deliberately. Hex TEXT would cost
+-- ~32% more catalog space (measured: the two columns sit in the table, in
+-- `idx_hash`, and in BOTH unique indexes), add hex decoding to the per-row
+-- parse path, and -- worst for the very use case this view serves -- make
+-- lookups case-sensitive, so a hash copied from `hex()` would silently match
+-- zero rows. A BLOB literal (`X'..'`) is case-free.
+--
+-- Additive, like the association tables above: the DDL is idempotent, so an
+-- existing store gains the view on its first writable open and no
+-- DATA_FORMAT_VERSION bump is needed. Nothing in this crate reads the view --
+-- it exists purely for outside inspection -- so a read-only open of an older
+-- store that lacks it is harmless.
+CREATE VIEW IF NOT EXISTS time_series_readable AS
+SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, dtype, element_shape, ext,
+       lower(hex(data_hash))     AS data_hash,
+       lower(hex(features_hash)) AS features_hash
+FROM time_series_associations;
 "#;

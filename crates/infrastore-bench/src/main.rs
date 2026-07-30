@@ -3,7 +3,7 @@
 //! Two scenarios:
 //!
 //! - `add`: measures `add_time_series_bulk` for `SingleTimeSeries` and
-//!   `Deterministic`, stressing NetCDF packing (packed columns per dataset)
+//!   `Deterministic`, stressing HDF5 packing (packed columns per dataset)
 //!   and SQLite transaction throughput.
 //!
 //! - `read`: simulates the per-timestep simulation I/O pattern — for each
@@ -38,7 +38,7 @@ type Error = Box<dyn std::error::Error>;
 #[command(
     name = "infrastore-bench",
     about = "infrastore performance benchmarks",
-    long_about = "Benchmarks bulk add (NetCDF packing + SQLite transactions) and \
+    long_about = "Benchmarks bulk add (HDF5 packing + SQLite transactions) and \
                   per-timestep simulation reads for SingleTimeSeries and Deterministic."
 )]
 struct Cli {
@@ -130,7 +130,7 @@ struct StoreHandle {
     store: Store,
     /// Kept alive to prevent the temp dir from being deleted.
     _tmp: Option<tempfile::TempDir>,
-    nc_path: Option<PathBuf>,
+    store_path: Option<PathBuf>,
 }
 
 fn create_store(common: &CommonArgs, suffix: &str) -> Result<StoreHandle, Error> {
@@ -138,45 +138,45 @@ fn create_store(common: &CommonArgs, suffix: &str) -> Result<StoreHandle, Error>
         return Ok(StoreHandle {
             store: Store::create(None, true)?,
             _tmp: None,
-            nc_path: None,
+            store_path: None,
         });
     }
-    let (nc_path, tmp) = if let Some(ref base) = common.path {
+    let (store_path, tmp) = if let Some(ref base) = common.path {
         std::fs::create_dir_all(base)?;
-        (base.join(format!("bench_{suffix}.nc")), None)
+        (base.join(format!("bench_{suffix}.h5")), None)
     } else {
         let tmp = tempfile::tempdir()?;
-        let nc = tmp.path().join(format!("bench_{suffix}.nc"));
-        (nc, Some(tmp))
+        let store_path = tmp.path().join(format!("bench_{suffix}.h5"));
+        (store_path, Some(tmp))
     };
     Ok(StoreHandle {
-        store: Store::create(Some(&nc_path), false)?,
+        store: Store::create(Some(&store_path), false)?,
         _tmp: tmp,
-        nc_path: Some(nc_path),
+        store_path: Some(store_path),
     })
 }
 
 /// Flush writes, drop the store, and reopen it read-only from disk.
 ///
-/// This forces a cold-ish read path: the NetCDF index is rebuilt from the file
+/// This forces a cold-ish read path: the store index is rebuilt from the file
 /// and the HDF5 chunk cache starts empty. (The OS page cache may still be warm,
 /// but that reflects real simulation startup conditions.)
 fn flush_and_reopen(handle: StoreHandle) -> Result<StoreHandle, Error> {
     let StoreHandle {
         mut store,
         _tmp,
-        nc_path,
+        store_path,
     } = handle;
     store.flush()?;
     drop(store);
-    let path = nc_path
+    let path = store_path
         .as_deref()
         .ok_or("cannot reopen an in-memory store")?;
     let store = Store::open(path, true)?;
     Ok(StoreHandle {
         store,
         _tmp,
-        nc_path,
+        store_path,
     })
 }
 

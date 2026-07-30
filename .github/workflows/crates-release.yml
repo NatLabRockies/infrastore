@@ -36,8 +36,8 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # No HDF5/NetCDF provisioning, and never set HDF5_DIR/NETCDF_DIR here --
-      # the default `vendored` feature builds netcdf-c + HDF5 + zlib from source.
+      # No HDF5 provisioning, and never set HDF5_DIR here --
+      # the default `vendored` feature builds HDF5 + zlib from source.
       # See the long comment in test.yml for why those variables break the build.
 
       - name: Cache Cargo
@@ -96,7 +96,7 @@ jobs:
       # Verification is left on deliberately: it rebuilds each packaged crate
       # from its own tarball, which is what catches a file that builds in the
       # workspace but was never included in the `.crate` (a path reaching
-      # outside the package root, say). It recompiles the vendored netcdf-c and
+      # outside the package root, say). It recompiles the vendored
       # HDF5 stack per crate, so expect this step to take on the order of ten
       # minutes -- worth it for an irreversible upload.
       - name: Publish

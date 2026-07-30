@@ -76,7 +76,7 @@ def test_every_dtype_round_trips_as_a_static_series():
 
 def test_every_dtype_round_trips_through_disk(tmp_path):
     """The same matrix, but persisted and reopened rather than in memory."""
-    path = tmp_path / "dtypes.nc"
+    path = tmp_path / "dtypes.h5"
     store = Store.create(path=str(path), in_memory=False)
     keys = {}
     expected = {}
@@ -244,7 +244,7 @@ def test_non_float64_forecast_dtypes():
 
 def test_forecast_persists_and_reopens(tmp_path):
     """Only statics were ever persisted from Python; forecasts stayed in memory."""
-    path = tmp_path / "forecasts.nc"
+    path = tmp_path / "forecasts.h5"
     H, C = 2, 3
     horizon, interval = timedelta(hours=2), timedelta(hours=1)
     det_data = np.arange(H * C, dtype=np.float64).reshape(H, C)
@@ -295,7 +295,7 @@ def test_forecast_persists_and_reopens(tmp_path):
 
 
 def test_non_finite_forecast_round_trips_through_disk(tmp_path):
-    path = tmp_path / "nonfinite_forecast.nc"
+    path = tmp_path / "nonfinite_forecast.h5"
     data = np.array([[np.nan, np.inf], [-np.inf, -0.0]], dtype=np.float64)
     store = Store.create(path=str(path), in_memory=False)
     key = _add(
@@ -608,6 +608,97 @@ def test_resolve_forecast_key_finds_a_transformed_dst():
     assert resolved.time_series_type == TimeSeriesType.DeterministicSingleTimeSeries
 
 
+def _both_forecast_types() -> Store:
+    """One explicitly stored ``Deterministic`` (owner 1) and one derived
+    ``DeterministicSingleTimeSeries`` (owner 2), both at PT1H/PT1H."""
+    store = Store.create(in_memory=True)
+    data = np.arange(2 * 3, dtype=np.float64).reshape(2, 3)
+    _add(
+        store,
+        1,
+        Deterministic(T0, RES_1H, timedelta(hours=2), timedelta(hours=1), 3, data, "det"),
+    )
+    _add(store, 2, _sts("load", np.arange(8, dtype=np.float64)))
+    assert store.transform_single_time_series(timedelta(hours=2), timedelta(hours=1)) == 1
+    return store
+
+
+def test_the_abstract_deterministic_filter_matches_both_stored_types():
+    """The family selects both concrete members in one catalog query, while each
+    concrete member still selects only itself."""
+    store = _both_forecast_types()
+
+    rows = store.list_time_series(time_series_type="abstract_deterministic")
+    assert {(r["owner_id"], r["time_series_type"]) for r in rows} == {
+        (1, "Deterministic"),
+        (2, "DeterministicSingleTimeSeries"),
+    }
+    assert [
+        r["owner_id"] for r in store.list_time_series(time_series_type=TimeSeriesType.Deterministic)
+    ] == [1]
+    assert [
+        r["owner_id"]
+        for r in store.list_time_series(
+            time_series_type=TimeSeriesType.DeterministicSingleTimeSeries
+        )
+    ] == [2]
+
+    # The same value threads through every other filter-taking surface.
+    assert len(store.list_keys(time_series_type="abstract_deterministic")) == 2
+    assert len(store.list_array_groups(time_series_type="abstract_deterministic")) == 2
+    assert store.list_names(time_series_type="abstract_deterministic") == ["det", "load"]
+    assert store.list_owner_types(time_series_type="abstract_deterministic") == [OWNER_TYPE]
+    assert sorted(store.list_owner_ids(OWNER_CAT, time_series_type="abstract_deterministic")) == [
+        1,
+        2,
+    ]
+    assert store.get_resolutions("abstract_deterministic") == ["PT1H"]
+    assert store.get_intervals("abstract_deterministic") == ["PT1H"]
+
+
+def test_has_any_time_series_accepts_the_family():
+    """The probe a per-owner hot loop makes: one call instead of one per member."""
+    store = _both_forecast_types()
+
+    for owner in (1, 2):
+        assert store.has_any_time_series(owner_id=owner, time_series_type="abstract_deterministic")
+    # The derived view is not a `Deterministic` row, so the concrete filter misses it.
+    assert not store.has_any_time_series(
+        owner_id=2, time_series_type=TimeSeriesType.Deterministic
+    )
+    assert not store.has_any_time_series(owner_id=3, time_series_type="abstract_deterministic")
+
+
+def test_the_family_builds_a_forecast_reader():
+    store = _both_forecast_types()
+    reader = store.build_forecast_reader("abstract_deterministic", RES_1H, owner_id=2)
+    assert len(reader.entries()) == 1
+
+    store.forecast_read(reader, T0 + timedelta(hours=1))
+    # The DST's window at T0+1h is two steps of the underlying series.
+    np.testing.assert_array_equal(reader.entry_values(0), np.array([1.0, 2.0]))
+
+
+def test_remove_by_filter_accepts_the_family():
+    store = _both_forecast_types()
+    assert store.remove_by_filter(time_series_type="abstract_deterministic") == 2
+    assert not store.list_time_series(time_series_type="abstract_deterministic")
+    # Removing the derived view leaves the SingleTimeSeries it viewed in place.
+    assert len(store.list_time_series(time_series_type=TimeSeriesType.SingleTimeSeries)) == 1
+
+
+def test_an_unusable_requested_type_is_rejected():
+    store = _both_forecast_types()
+    # A string that is not the family sentinel is a bad value, not a bad type.
+    with pytest.raises(InvalidParameterError):
+        store.list_time_series(time_series_type="Deterministic")
+    with pytest.raises(InvalidParameterError):
+        store.resolve_forecast_key(1, OWNER_CAT, "det", "deterministic", resolution=RES_1H)
+    # Something that is neither a TimeSeriesType nor a string is a TypeError.
+    with pytest.raises(TypeError):
+        store.has_any_time_series(time_series_type=5)
+
+
 def test_copy_time_series():
     store = Store.create(in_memory=True)
     values = np.arange(4, dtype=np.float64) + 7
@@ -635,7 +726,7 @@ def test_copy_time_series():
 def test_compact(tmp_path):
     """``compact`` reports the tombstones a delete left behind and leaves the
     surviving series readable."""
-    path = tmp_path / "compact.nc"
+    path = tmp_path / "compact.h5"
     store = Store.create(path=str(path), in_memory=False)
     keep_values = np.arange(4, dtype=np.float64)
     keep = _add(store, 1, _sts("keep", keep_values))
@@ -752,7 +843,7 @@ def test_time_series_counts_detailed():
 
 
 def test_verify_integrity_reports_ok_for_a_healthy_store(tmp_path):
-    path = tmp_path / "healthy.nc"
+    path = tmp_path / "healthy.h5"
     store = Store.create(path=str(path), in_memory=False)
     _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
     store.flush()
@@ -824,7 +915,7 @@ def test_microsecond_datetimes_round_trip():
 
 
 def test_microsecond_datetimes_round_trip_through_disk(tmp_path):
-    path = tmp_path / "micro.nc"
+    path = tmp_path / "micro.h5"
     precise = datetime(2024, 1, 1, 0, 0, 0, 999999, tzinfo=timezone.utc)
     store = Store.create(path=str(path), in_memory=False)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
@@ -899,7 +990,7 @@ def test_a_naive_datetime_is_rejected():
 
 
 def test_pre_1970_and_far_future_timestamps_round_trip(tmp_path):
-    path = tmp_path / "spans.nc"
+    path = tmp_path / "spans.h5"
     store = Store.create(path=str(path), in_memory=False)
     cases = {
         "pre_epoch": datetime(1900, 1, 1, tzinfo=timezone.utc),
@@ -943,7 +1034,7 @@ def test_non_sequential_timestamps_keep_microsecond_spacing():
 
 
 def test_a_century_spanning_non_sequential_series_round_trips(tmp_path):
-    path = tmp_path / "century.nc"
+    path = tmp_path / "century.h5"
     timestamps = [
         datetime(1900, 1, 1, tzinfo=timezone.utc),
         datetime(1970, 1, 1, tzinfo=timezone.utc),

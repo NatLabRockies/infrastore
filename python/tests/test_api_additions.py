@@ -217,7 +217,7 @@ def test_close_and_repr():
 
 
 def test_context_manager_reopen(tmp_path):
-    path = tmp_path / "s.nc"
+    path = tmp_path / "s.h5"
     with Store.create(path=str(path)) as store:
         store.add_time_series(
             owner_id=1, owner_type="Generator",

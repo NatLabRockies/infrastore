@@ -1,14 +1,17 @@
 //! Read-side inspection commands: `stats`, `summary`, `verify`,
 //! `check-consistency`, `resolutions`, and `params`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use infrastore_core::Period;
 use serde_json::{Value, json};
 
 use crate::color;
+use crate::fields;
 use crate::output::{self, Format};
 use crate::parse;
+use crate::select::SelectorArgs;
 use crate::store_access;
 
 /// Render a list of `(label, value)` rows in the selected format. The JSON form
@@ -49,6 +52,14 @@ fn value_to_cell(v: &Value) -> String {
 }
 
 /// `stats`: overall counts, detailed counts, per-type counts, distinct arrays.
+///
+/// The labels below are deliberately explicit about *what is being counted*.
+/// The catalog reports two different quantities that used to sit next to each
+/// other under near-identical names: the number of catalog rows (associations),
+/// and the number of distinct stored arrays those rows point at. Content
+/// addressing makes them diverge sharply — a store where every series shares one
+/// array has thousands of associations and one array — so a reader who takes
+/// them for the same thing draws the wrong conclusion about storage.
 pub fn stats(store_path: &Path, format: Format) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let counts = store.get_time_series_counts().map_err(|e| e.to_string())?;
@@ -59,34 +70,188 @@ pub fn stats(store_path: &Path, format: Format) -> Result<(), String> {
     let distinct = store.num_distinct_arrays().map_err(|e| e.to_string())?;
 
     let mut pairs = vec![
+        // Associations: one per stored time series, i.e. catalog rows.
         (
-            "components_with_time_series".into(),
-            json!(counts.components_with_time_series),
-        ),
-        (
-            "static_time_series".into(),
+            "associations.static".into(),
             json!(counts.static_time_series),
         ),
-        ("forecasts".into(), json!(counts.forecasts)),
+        ("associations.forecast".into(), json!(counts.forecasts)),
         (
-            "components_with_time_series (detailed)".into(),
+            "associations.total".into(),
+            json!(counts.static_time_series + counts.forecasts),
+        ),
+        // Owners: distinct ids that have at least one association.
+        (
+            "owners.components".into(),
             json!(detailed.components_with_time_series),
         ),
         (
-            "supplemental_attributes_with_time_series".into(),
+            "owners.supplemental_attributes".into(),
             json!(detailed.supplemental_attributes_with_time_series),
         ),
         (
-            "static_time_series_count".into(),
+            "owners.total".into(),
+            json!(counts.components_with_time_series),
+        ),
+        // Arrays: distinct content hashes. Always <= associations, and far
+        // smaller wherever series share data.
+        (
+            "arrays.distinct_static".into(),
             json!(detailed.static_time_series_count),
         ),
-        ("forecast_count".into(), json!(detailed.forecast_count)),
-        ("num_distinct_arrays".into(), json!(distinct)),
+        (
+            "arrays.distinct_forecast".into(),
+            json!(detailed.forecast_count),
+        ),
+        ("arrays.distinct_total".into(), json!(distinct)),
     ];
     for (t, n) in by_type {
-        pairs.push((format!("count[{}]", t.as_str()), json!(n)));
+        pairs.push((format!("associations.by_type[{}]", t.as_str()), json!(n)));
     }
     render_kv("Store statistics", pairs, format)
+}
+
+/// `arrays`: one row per distinct stored array, with the series that share it.
+///
+/// This is the inspection counterpart to `stats`' `arrays.distinct_total`: it
+/// shows *which* series collapsed onto one array and where that array lives in
+/// the HDF5 file, which is what makes a dataset with fewer columns than the
+/// catalog has rows explicable rather than alarming.
+pub fn arrays(
+    store_path: &Path,
+    selector: &SelectorArgs,
+    data_hash: Option<&str>,
+    format: Format,
+) -> Result<(), String> {
+    let wanted = data_hash.map(parse::parse_hash_prefix).transpose()?;
+    let store = store_access::open_readonly(store_path)?;
+    let rows = store
+        .list_keys_with_hash(selector.to_filter()?)
+        .map_err(|e| e.to_string())?;
+
+    // BTreeMap keeps the output stably ordered by hash across runs, which
+    // matters for diffing two inspections of the same store.
+    let mut groups: BTreeMap<[u8; 32], Vec<infrastore_core::TimeSeriesKey>> = BTreeMap::new();
+    for (key, hash) in rows {
+        if let Some(prefix) = &wanted
+            && !fields::hash_hex(&hash).starts_with(prefix)
+        {
+            continue;
+        }
+        groups.entry(hash).or_default().push(key);
+    }
+
+    if let Some(prefix) = &wanted
+        && groups.is_empty()
+    {
+        return Err(format!(
+            "no stored array has a hash starting with '{prefix}'"
+        ));
+    }
+
+    let mut items = Vec::with_capacity(groups.len());
+    for (hash, keys) in &groups {
+        let location = match store.locate_array(hash) {
+            Ok(loc) => loc.to_string(),
+            Err(e) => format!("unavailable: {e}"),
+        };
+        let (sts_refs, dst_refs) = store
+            .count_array_references(hash)
+            .map_err(|e| e.to_string())?;
+        items.push(json!({
+            "data_hash": fields::hash_hex(hash),
+            "location": location,
+            "refs": keys.len(),
+            "refs_single": sts_refs,
+            "refs_dst": dst_refs,
+            "keys": keys.iter().map(key_json).collect::<Vec<_>>(),
+        }));
+    }
+
+    let headers: Vec<String> = ["Hash", "Refs", "Location", "Series"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let table_rows: Vec<Vec<String>> = groups
+        .iter()
+        .zip(&items)
+        .map(|((hash, keys), item)| {
+            vec![
+                fields::short_hash(hash),
+                keys.len().to_string(),
+                item["location"].as_str().unwrap_or("-").to_string(),
+                summarize_keys(keys),
+            ]
+        })
+        .collect();
+
+    match format {
+        Format::Json => output::print_json_wrapped(&items)?,
+        Format::Csv => output::display_csv_rows(&headers, &table_rows)?,
+        Format::Table => output::display_table_dyn(&headers, &table_rows),
+    }
+    Ok(())
+}
+
+/// A key as a JSON object, spelling out every identity field.
+fn key_json(key: &infrastore_core::TimeSeriesKey) -> Value {
+    let id = key.identity();
+    json!({
+        "owner_id": id.owner_id,
+        "owner_category": id.owner_category.as_str(),
+        "type": id.time_series_type.as_str(),
+        "name": id.name,
+        "resolution": id.resolution.map(|p| p.to_iso8601()),
+        "interval": id.interval.map(|p| p.to_iso8601()),
+        "features": fields::features_json(&id.features),
+    })
+}
+
+/// A compact `name (owner N)` list for the table view, truncated so one
+/// heavily-shared array cannot flood the terminal.
+fn summarize_keys(keys: &[infrastore_core::TimeSeriesKey]) -> String {
+    const MAX: usize = 3;
+    let mut parts: Vec<String> = keys
+        .iter()
+        .take(MAX)
+        .map(|k| format!("{} (owner {})", k.name(), k.owner_id()))
+        .collect();
+    if keys.len() > MAX {
+        parts.push(format!("+{} more", keys.len() - MAX));
+    }
+    parts.join(", ")
+}
+
+/// `store-info`: what this artifact is, before you open it with anything else.
+pub fn store_info(store_path: &Path, format: Format) -> Result<(), String> {
+    let store = store_access::open_readonly(store_path)?;
+    let sqlite = store_access::catalog_path(store_path);
+    let size = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| m.len())
+            .map(Value::from)
+            .unwrap_or(Value::Null)
+    };
+    let compression = match store.compression() {
+        infrastore_core::Compression::None => "none".to_string(),
+        infrastore_core::Compression::Deflate { level, shuffle } => {
+            format!("deflate:{level}{}", if shuffle { " +shuffle" } else { "" })
+        }
+    };
+    let pairs = vec![
+        ("hdf5_path".into(), json!(store_path.display().to_string())),
+        ("hdf5_bytes".into(), size(store_path)),
+        ("sqlite_path".into(), json!(sqlite.display().to_string())),
+        ("sqlite_bytes".into(), size(&sqlite)),
+        ("storage_backend".into(), json!("hdf5")),
+        (
+            "data_format_version".into(),
+            json!(infrastore_core::DATA_FORMAT_VERSION),
+        ),
+        ("compression".into(), json!(compression)),
+        ("cli_version".into(), json!(env!("CARGO_PKG_VERSION"))),
+    ];
+    render_kv("Store", pairs, format)
 }
 
 /// `verify`: run integrity verification; nonzero exit when errors are present.
@@ -271,12 +436,24 @@ pub fn summary(
             "forecast": forecast_items,
         }))?,
         _ => {
+            // `Series` (not `Count`): this column is how many series fall in the
+            // group. The forecast table also has a real forecast `count` — the
+            // number of windows — and spelling both "Count" invited reading one
+            // as the other. `Time Steps` / `Windows` name the per-series shape
+            // the JSON has always carried but the table used to drop.
             if show_static {
                 println!("{}", color::header("Static series"));
-                let headers: Vec<String> = ["Owner Type", "Type", "Name", "Resolution", "Count"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let headers: Vec<String> = [
+                    "Owner Type",
+                    "Type",
+                    "Name",
+                    "Resolution",
+                    "Time Steps",
+                    "Series",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
                 let rows: Vec<Vec<String>> = static_items
                     .iter()
                     .map(|v| {
@@ -285,6 +462,7 @@ pub fn summary(
                             json_str(v, "time_series_type"),
                             json_str(v, "name"),
                             json_str(v, "resolution"),
+                            json_str(v, "time_step_count"),
                             json_str(v, "count"),
                         ]
                     })
@@ -297,11 +475,19 @@ pub fn summary(
             }
             if show_forecast {
                 println!("{}", color::header("Forecast series"));
-                let headers: Vec<String> =
-                    ["Owner Type", "Type", "Name", "Horizon", "Interval", "Count"]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                let headers: Vec<String> = [
+                    "Owner Type",
+                    "Type",
+                    "Name",
+                    "Resolution",
+                    "Horizon",
+                    "Interval",
+                    "Windows",
+                    "Series",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
                 let rows: Vec<Vec<String>> = forecast_items
                     .iter()
                     .map(|v| {
@@ -309,8 +495,10 @@ pub fn summary(
                             json_str(v, "owner_type"),
                             json_str(v, "time_series_type"),
                             json_str(v, "name"),
+                            json_str(v, "resolution"),
                             json_str(v, "horizon"),
                             json_str(v, "interval"),
+                            json_str(v, "window_count"),
                             json_str(v, "count"),
                         ]
                     })

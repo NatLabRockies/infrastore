@@ -6,7 +6,7 @@ Wire `InfraStore.jl` to the native library. For API usage once it loads, see the
 ## Prerequisites
 
 - Julia 1.10 or newer.
-- The [system libraries](./install.md#1-install-system-libraries) (HDF5, NetCDF, Protobuf).
+- The [system libraries](./install.md#1-install-system-libraries) (HDF5, Protobuf).
 
 ## 1. Build the Native Library
 

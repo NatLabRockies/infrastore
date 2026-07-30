@@ -412,18 +412,6 @@ function _get_forecast_raw(
     )
 end
 
-# Helper: decode raw forecast bytes into a properly-shaped Julia array.
-# `dims` is in row-major order [d0, d1, ...]; we reconstruct the column-major
-# Julia array as the inverse of `_row_major_bytes`.
-function _decode_forecast_array(bytes::Vector{UInt8}, dtype_code::Int32, dims::Vector{Int})
-    T = _julia_dtype(dtype_code)
-    flat = collect(reinterpret(T, bytes))
-    n = length(dims)
-    n <= 1 && return reshape(flat, dims...)
-    # Row-major → column-major: reshape with reversed dims, then permute axes.
-    return permutedims(reshape(flat, reverse(dims)...), reverse(ntuple(identity, n)))
-end
-
 # Result struct for a requested forecast type: the deterministic family
 # (including a stored `DeterministicSingleTimeSeries`, which has no materialized
 # form) reads back as `Deterministic`.
@@ -440,7 +428,7 @@ function _forecast_from_raw(::Type{Deterministic}, r, name::AbstractString)
         r.horizon,
         r.interval,
         r.count,
-        _decode_forecast_array(r.bytes, r.dtype_code, r.dims),
+        _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
         ext=r.ext,
     )
@@ -454,7 +442,7 @@ function _forecast_from_raw(::Type{Probabilistic}, r, name::AbstractString)
         r.interval,
         r.count,
         r.percentiles,
-        _decode_forecast_array(r.bytes, r.dtype_code, r.dims),
+        _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
         ext=r.ext,
     )
@@ -468,7 +456,7 @@ function _forecast_from_raw(::Type{Scenarios}, r, name::AbstractString)
         r.horizon,
         r.interval,
         r.count,
-        _decode_forecast_array(r.bytes, r.dtype_code, r.dims),
+        _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
         ext=r.ext,
     )

@@ -1,10 +1,11 @@
 //! `infrastore` — a command-line tool for loading and inspecting a infrastore store
-//! directly on disk (NetCDF + SQLite).
+//! directly on disk (HDF5 + SQLite).
 
 mod color;
 mod commands;
 mod csv_io;
 mod descriptor;
+mod fields;
 mod output;
 mod parse;
 mod select;
@@ -13,7 +14,7 @@ mod store_access;
 use std::path::PathBuf;
 
 use clap::builder::styling::{AnsiColor, Styles};
-use clap::{Parser, Subcommand};
+use clap::{FromArgMatches, Parser, Subcommand};
 
 use output::Format;
 use select::SelectorArgs;
@@ -25,6 +26,131 @@ const HELP_STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Cyan.on_default().bold())
     .placeholder(AnsiColor::Cyan.on_default());
 
+/// How `--help` groups the subcommands, in display order.
+///
+/// Twenty-five commands in one flat list is a wall of text that tells a reader
+/// nothing about which ones belong together. clap renders every subcommand under
+/// a single heading and has no per-subcommand grouping, so the top-level help
+/// template below omits its `{subcommands}` block and substitutes the listing
+/// [`grouped_command_help`] builds from this table.
+///
+/// Only the *display* is grouped. Every command keeps its flat name, so
+/// `infrastore list` is still `infrastore list` — no script, documented example,
+/// or shell completion changes meaning.
+///
+/// The names here are the membership contract; the one-line descriptions come
+/// from each command's own `about`, so they cannot drift. A test asserts this
+/// table lists exactly the commands clap knows about, which is what stops a
+/// newly added command from silently vanishing out of the help.
+const COMMAND_GROUPS: &[(&str, &[&str])] = &[
+    ("Read data", &["list", "get", "info", "export"]),
+    (
+        "Write data",
+        &[
+            "add",
+            "transform",
+            "remove",
+            "rename",
+            "copy",
+            "replace-owner",
+            "clear",
+        ],
+    ),
+    (
+        "Inspect the store",
+        &[
+            "stats",
+            "store-info",
+            "arrays",
+            "summary",
+            "resolutions",
+            "params",
+        ],
+    ),
+    ("Associations", &["attributes", "links"]),
+    (
+        "Integrity & maintenance",
+        &["verify", "check-consistency", "compact", "persist"],
+    ),
+    ("Scaffolding", &["template", "completions", "help"]),
+];
+
+/// clap adds `help` during its own build, after [`Cli::command`] hands us the
+/// command, so its description is not available to look up like the rest.
+const HELP_SUBCOMMAND_ABOUT: &str = "Print this message or the help of the given subcommand(s)";
+
+/// Render [`COMMAND_GROUPS`] as the block that replaces clap's `Commands:`
+/// section.
+///
+/// Descriptions are pulled from `cmd` rather than restated here. The
+/// description column is aligned across *all* groups, not per group, so the
+/// listing reads as one table with headings rather than several ragged ones.
+fn grouped_command_help(cmd: &clap::Command) -> String {
+    let about_of = |name: &str| -> String {
+        if name == "help" {
+            return HELP_SUBCOMMAND_ABOUT.to_string();
+        }
+        cmd.get_subcommands()
+            .find(|s| s.get_name() == name)
+            .and_then(|s| s.get_about())
+            // Only the first line: several commands carry a long `about` whose
+            // later paragraphs belong in `<cmd> --help`, not the index.
+            .map(|a| a.to_string().lines().next().unwrap_or_default().to_string())
+            .unwrap_or_default()
+    };
+
+    let width = COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, names)| names.iter())
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0);
+
+    let mut out = String::new();
+    for (i, (title, names)) in COMMAND_GROUPS.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&color::header(&format!("{title}:")));
+        out.push('\n');
+        for name in *names {
+            let about = about_of(name);
+            // Pad on the untinted name, then colorize: ANSI escapes have no
+            // display width but would otherwise be counted by `{:width$}`.
+            let padded = format!("{name:width$}");
+            out.push_str(&format!("  {}  {about}\n", color::literal(&padded)));
+        }
+    }
+    out
+}
+
+/// The root command with its subcommand listing replaced by the grouped one.
+///
+/// Set on the root only. Subcommands keep clap's default template, so
+/// `infrastore list --help` is unaffected.
+fn build_command() -> clap::Command {
+    use clap::CommandFactory;
+    let cmd = Cli::command();
+    let groups = grouped_command_help(&cmd);
+    debug_assert!(
+        !groups.contains('{') && !groups.contains('}'),
+        "a command description containing braces would be parsed as a help-template \
+         placeholder; see the `command_descriptions_are_template_safe` test"
+    );
+    // `{options}` emits the option list without its heading — clap writes that
+    // only from `{all-args}`, which would drag the ungrouped subcommand block
+    // back in — so the heading is supplied here, styled to match the group ones.
+    let options_heading = color::header("Options:");
+    let template = format!(
+        "{{before-help}}{{about-with-newline}}\n\
+         {{usage-heading}} {{usage}}\n\n\
+         {groups}\n\
+         {options_heading}\n\
+         {{options}}{{after-help}}"
+    );
+    cmd.help_template(template)
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "infrastore",
@@ -33,7 +159,7 @@ const HELP_STYLES: Styles = Styles::styled()
     styles = HELP_STYLES
 )]
 struct Cli {
-    /// Path to the NetCDF store file (.nc). The SQLite catalog is derived
+    /// Path to the HDF5 store file (.h5). The SQLite catalog is derived
     /// automatically. Falls back to the INFRASTORE_STORE environment variable.
     #[arg(long, global = true, env = "INFRASTORE_STORE")]
     store: Option<PathBuf>,
@@ -52,7 +178,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Add one or more time series from a descriptor JSON + CSV data.
+    /// Add time series from a descriptor JSON + CSV data.
     Add {
         /// Descriptor JSON describing the series (single object or array of objects).
         #[arg(long)]
@@ -69,7 +195,17 @@ enum Commands {
         no_shuffle: bool,
     },
     /// List stored time series matching the given filters.
-    List(SelectorArgs),
+    List {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Show at most N series (table/CSV output).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Add the remaining metadata columns (timestamps, horizon, count,
+        /// element shape, ext).
+        #[arg(long)]
+        wide: bool,
+    },
     /// Read and display a single time series.
     Get {
         #[command(flatten)]
@@ -84,13 +220,19 @@ enum Commands {
         #[arg(long)]
         full: bool,
     },
-    /// Show metadata and numeric stats for a single time series.
+    /// Metadata, content hash, HDF5 location, and stats for one series.
     Info {
         #[command(flatten)]
         selector: SelectorArgs,
+        /// Skip the min/max/mean stats, which are the only part that reads the
+        /// array itself.
+        #[arg(long)]
+        no_stats: bool,
     },
-    /// Remove time series. A selector resolving to one series removes that one;
-    /// with `--all` a selector may match several.
+    /// Delete time series.
+    ///
+    /// A selector resolving to one series removes that one; with `--all` a
+    /// selector may match several.
     Remove {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -171,21 +313,23 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Persist the store to a new NetCDF + SQLite artifact.
+    /// Write the store to a new HDF5 + SQLite artifact.
     Persist {
-        /// Destination `.nc` path.
+        /// Destination `.h5` path.
         #[arg(long)]
         dest: PathBuf,
     },
-    /// Reclaim reusable space and print the compaction report.
+    /// Reclaim reusable space; print the compaction report.
     Compact {
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
         force: bool,
     },
-    /// Export series values to CSV or JSON files (the read-direction inverse
-    /// of `add`). One file per matched series into --dir, or stdout when the
-    /// selector matches exactly one series.
+    /// Write series values to CSV or JSON files.
+    ///
+    /// The read-direction inverse of `add`: one file per matched series into
+    /// --dir, or stdout when the selector matches exactly one series. The CSV it
+    /// writes is re-readable by `add`, which detects the layout from the header.
     Export {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -193,14 +337,56 @@ enum Commands {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// Generate shell completions to stdout (e.g. `infrastore completions zsh`).
+    /// Generate shell completions to stdout.
+    ///
+    /// For example `infrastore completions zsh`.
     Completions {
         /// Shell to generate for.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Overall counts, detailed counts, per-type counts, distinct arrays.
+    /// Association, owner, and distinct-array counts.
+    ///
+    /// Association counts are catalog rows; array counts are distinct content
+    /// hashes. Content addressing makes the two diverge, so they are namespaced
+    /// (`associations.*`, `owners.*`, `arrays.*`) rather than listed flat.
     Stats,
+    /// HDF5 + SQLite paths, on-disk format version, and compression.
+    StoreInfo,
+    /// Distinct stored arrays: content hash, HDF5 location, and sharers.
+    Arrays {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Restrict to arrays whose content hash starts with this hex prefix.
+        #[arg(long, value_name = "HEX")]
+        data_hash: Option<String>,
+    },
+    /// Component <-> supplemental-attribute associations.
+    Attributes {
+        #[arg(long)]
+        component_id: Option<i64>,
+        #[arg(long)]
+        attribute_id: Option<i64>,
+        #[arg(long)]
+        component_type: Option<String>,
+        #[arg(long)]
+        attribute_type: Option<String>,
+        /// Show counts grouped by (component type, attribute type) instead of
+        /// individual rows.
+        #[arg(long)]
+        summary: bool,
+    },
+    /// Directed parent -> child component associations.
+    Links {
+        #[arg(long)]
+        parent_id: Option<i64>,
+        #[arg(long)]
+        child_id: Option<i64>,
+        #[arg(long)]
+        parent_type: Option<String>,
+        #[arg(long)]
+        child_type: Option<String>,
+    },
     /// Grouped static and/or forecast summaries.
     Summary {
         #[arg(long)]
@@ -208,13 +394,13 @@ enum Commands {
         #[arg(long)]
         forecast_only: bool,
     },
-    /// Verify stored array integrity; nonzero exit if errors are present.
+    /// Verify stored array integrity (nonzero exit on errors).
     ///
     /// Recomputes each stored array's content hash and reports the ones that
-    /// disagree with the hash recorded alongside them. This checks the NetCDF
+    /// disagree with the hash recorded alongside them. This checks the HDF5
     /// half of the store only: the SQLite catalog is not inspected, so a clean
     /// report does not mean the store as a whole is sound. A catalog that is
-    /// corrupted, truncated, or paired with the wrong .nc file still verifies
+    /// corrupted, truncated, or paired with the wrong .h5 file still verifies
     /// clean here, while every read of the affected series fails.
     ///
     /// For catalog-side checks use `infrastore check-consistency` (per-resolution grid
@@ -244,7 +430,13 @@ enum Commands {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // Parsed through `build_command` rather than `Cli::parse` so the grouped
+    // help template is the one a user actually sees.
+    let matches = build_command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
     init_tracing(cli.log_level.as_deref());
     if let Err(e) = run(&cli) {
         eprintln!("Error: {e}");
@@ -271,9 +463,11 @@ fn run(cli: &Cli) -> Result<(), String> {
                 compression,
             )
         }
-        Commands::List(selector) => {
-            commands::show::list(&require_store(cli)?, selector, cli.format)
-        }
+        Commands::List {
+            selector,
+            limit,
+            wide,
+        } => commands::show::list(&require_store(cli)?, selector, *limit, *wide, cli.format),
         Commands::Get {
             selector,
             time_range,
@@ -287,8 +481,8 @@ fn run(cli: &Cli) -> Result<(), String> {
             *full,
             cli.format,
         ),
-        Commands::Info { selector } => {
-            commands::show::info(&require_store(cli)?, selector, cli.format)
+        Commands::Info { selector, no_stats } => {
+            commands::show::info(&require_store(cli)?, selector, *no_stats, cli.format)
         }
         Commands::Remove {
             selector,
@@ -366,16 +560,55 @@ fn run(cli: &Cli) -> Result<(), String> {
             commands::export::run(&require_store(cli)?, selector, dir.as_deref(), cli.format)
         }
         Commands::Completions { shell } => {
-            use clap::CommandFactory;
+            // The same command the binary parses with, so completions can never
+            // describe a different set of subcommands than `--help` does.
             clap_complete::generate(
                 *shell,
-                &mut Cli::command(),
+                &mut build_command(),
                 "infrastore",
                 &mut std::io::stdout(),
             );
             Ok(())
         }
         Commands::Stats => commands::admin::stats(&require_store(cli)?, cli.format),
+        Commands::StoreInfo => commands::admin::store_info(&require_store(cli)?, cli.format),
+        Commands::Arrays {
+            selector,
+            data_hash,
+        } => commands::admin::arrays(
+            &require_store(cli)?,
+            selector,
+            data_hash.as_deref(),
+            cli.format,
+        ),
+        Commands::Attributes {
+            component_id,
+            attribute_id,
+            component_type,
+            attribute_type,
+            summary,
+        } => commands::assoc::attributes(
+            &require_store(cli)?,
+            *component_id,
+            *attribute_id,
+            component_type.as_deref(),
+            attribute_type.as_deref(),
+            *summary,
+            cli.format,
+        ),
+        Commands::Links {
+            parent_id,
+            child_id,
+            parent_type,
+            child_type,
+        } => commands::assoc::links(
+            &require_store(cli)?,
+            *parent_id,
+            *child_id,
+            parent_type.as_deref(),
+            child_type.as_deref(),
+            cli.format,
+        ),
         Commands::Summary {
             static_only,
             forecast_only,
@@ -408,7 +641,7 @@ fn run(cli: &Cli) -> Result<(), String> {
 fn require_store(cli: &Cli) -> Result<PathBuf, String> {
     cli.store
         .clone()
-        .ok_or_else(|| "missing --store <path.nc>".to_string())
+        .ok_or_else(|| "missing --store <path.h5>".to_string())
 }
 
 fn init_tracing(level: Option<&str>) {
@@ -421,4 +654,118 @@ fn init_tracing(level: Option<&str>) {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use std::collections::BTreeSet;
+
+    /// Every command name listed across [`COMMAND_GROUPS`].
+    fn grouped_names() -> Vec<&'static str> {
+        COMMAND_GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect()
+    }
+
+    /// The command names clap actually defines. `help` is added during clap's
+    /// own build rather than by the derive, so it is folded in here.
+    fn clap_names() -> BTreeSet<String> {
+        let mut names: BTreeSet<String> = Cli::command()
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .collect();
+        names.insert("help".to_string());
+        names
+    }
+
+    /// The guard that keeps the grouped help honest: a command added to
+    /// `Commands` without a home in `COMMAND_GROUPS` would simply not appear in
+    /// `--help`, which is worse than the flat list this replaced.
+    #[test]
+    fn every_command_appears_in_exactly_one_group() {
+        let grouped = grouped_names();
+        let listed: BTreeSet<String> = grouped.iter().map(|s| (*s).to_string()).collect();
+
+        assert_eq!(
+            listed.len(),
+            grouped.len(),
+            "a command is listed in more than one group: {grouped:?}"
+        );
+
+        let actual = clap_names();
+        let missing: Vec<_> = actual.difference(&listed).collect();
+        assert!(
+            missing.is_empty(),
+            "these commands exist but are in no group, so `--help` hides them: {missing:?}"
+        );
+        let unknown: Vec<_> = listed.difference(&actual).collect();
+        assert!(
+            unknown.is_empty(),
+            "these names are grouped but are not commands (renamed? removed?): {unknown:?}"
+        );
+    }
+
+    /// The generated block is spliced into a clap help *template*, where `{` and
+    /// `}` delimit placeholders. A brace in any `about` would be silently
+    /// swallowed or mangled.
+    #[test]
+    fn command_descriptions_are_template_safe() {
+        let rendered = grouped_command_help(&Cli::command());
+        assert!(
+            !rendered.contains('{') && !rendered.contains('}'),
+            "a command description contains a brace, which the help template would \
+             read as a placeholder:\n{rendered}"
+        );
+    }
+
+    /// The index is a scanning aid, so its lines have to stay scannable. This is
+    /// what stops a long `about` first line — the sort that belongs in
+    /// `long_about` — from stretching the listing off the side of a terminal.
+    #[test]
+    fn the_grouped_listing_stays_within_a_readable_width() {
+        const MAX: usize = 100;
+        // Rendered without color so the assertion measures display width, not
+        // ANSI escapes; `color::enabled()` is already false under `cargo test`
+        // because stdout is not a terminal, but the intent is worth stating.
+        let rendered = grouped_command_help(&Cli::command());
+        let long: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.chars().count() > MAX)
+            .collect();
+        assert!(
+            long.is_empty(),
+            "these help lines exceed {MAX} columns; shorten the command's first \
+             doc-comment line and move the detail to a following paragraph, which \
+             clap renders as long help:\n{long:#?}"
+        );
+    }
+
+    /// Group headings are the whole point of the exercise; a template that lost
+    /// them would still render a valid-looking command list.
+    #[test]
+    fn the_help_template_renders_every_group_heading() {
+        let mut buf = Vec::new();
+        build_command().write_help(&mut buf).expect("help renders");
+        let help = String::from_utf8(buf).expect("utf8 help");
+
+        for (title, names) in COMMAND_GROUPS {
+            assert!(
+                help.contains(&format!("{title}:")),
+                "group heading {title:?} missing from --help:\n{help}"
+            );
+            for name in *names {
+                assert!(
+                    help.contains(*name),
+                    "command {name:?} missing from --help:\n{help}"
+                );
+            }
+        }
+        assert!(
+            help.contains("Options:"),
+            "the options heading is written by the template, not by clap:\n{help}"
+        );
+    }
 }

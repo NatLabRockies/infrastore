@@ -38,10 +38,10 @@ end
     Store(; in_memory=true, path=nothing,
             compression=:deflate, compression_level=3, shuffle=true)
 
-Construct a new store. Pass `path` (and `in_memory=false`) to persist to a
-NetCDF file on disk.
+Construct a new store. Pass `path` (and `in_memory=false`) to persist to an
+HDF5 file on disk.
 
-`compression` selects the on-disk filter for NetCDF data variables:
+`compression` selects the on-disk filter for HDF5 data variables:
 `:deflate` (default) applies DEFLATE at `compression_level` (0–9) with optional
 byte `shuffle`; `:none` disables compression. The setting is ignored for
 in-memory stores and is persisted so later appends reuse it.

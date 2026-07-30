@@ -9,7 +9,7 @@
 //! marked `// FINDING:` and recorded in `TEST_COVERAGE_PLAN.md` §9.
 //!
 //! Value round trips run through `common::for_each_backend` so the in-memory
-//! and persisted-NetCDF paths are held to the same answer.
+//! and persisted-HDF5 paths are held to the same answer.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
@@ -209,17 +209,19 @@ fn differing_nan_bit_patterns_content_address_to_one_array() {
 }
 
 #[test]
-fn netcdf_default_fill_value_is_not_special_cased() {
-    // NetCDF's default f64 `_FillValue` is 9.969209968386869e+36. A stored
-    // value that happens to equal it must survive a reopen as data, not be
-    // read back as "missing".
+fn hdf5_default_fill_value_is_not_special_cased() {
+    // 9.969209968386869e+36 was netcdf-c's default f64 `_FillValue`, from the
+    // era when this store was netcdf-backed. The HDF5 backend has no such
+    // sentinel, but the pin is kept: a stored value that happens to equal a
+    // fill sentinel must survive a reopen as data, not be read back as
+    // "missing".
     const NC_FILL_DOUBLE: f64 = 9.969_209_968_386_869e36;
-    // NetCDF's `NC_FILL_FLOAT`, which is the f32 nearest the double above; it
-    // carries only f32's precision, so writing more digits is a clippy error.
+    // netcdf-c's `NC_FILL_FLOAT`, the f32 nearest the double above; it carries
+    // only f32's precision, so writing more digits is a clippy error.
     const NC_FILL_FLOAT: f32 = 9.969_21e36;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let f64_data = TypedArray::from_slice(vec![3], &[1.0, NC_FILL_DOUBLE, 3.0]).unwrap();
     let f32_data = TypedArray::from_slice(vec![3], &[1.0f32, NC_FILL_FLOAT, 3.0]).unwrap();
 
@@ -281,10 +283,10 @@ fn zero_length_single_time_series_is_pinned() {
 #[test]
 fn zero_length_single_time_series_on_disk_is_pinned() {
     // PIN: what the *persisted* backend does with a zero-length series. The
-    // NetCDF path packs series into fixed-length datasets keyed partly by
+    // HDF5 path packs series into fixed-length datasets keyed partly by
     // length, so length 0 is a degenerate dataset shape.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let empty = TypedArray::from_slice(vec![0], &[] as &[f64]).unwrap();
 
     let key = {
@@ -494,7 +496,7 @@ fn extreme_i64_round_trips_through_disk() {
 #[test]
 fn extreme_u64_round_trips_through_disk() {
     // u64::MAX has the sign bit set; a signed round trip anywhere in the
-    // NetCDF path would corrupt it.
+    // HDF5 path would corrupt it.
     let values = vec![0u64, 1, i64::MAX as u64, u64::MAX];
     let data = TypedArray::from_slice(vec![values.len()], &values).unwrap();
     for_each_backend(
@@ -689,13 +691,13 @@ fn empty_string_name_is_pinned() {
 #[test]
 fn ten_kilobyte_name_is_pinned() {
     // PIN: names are not length-limited. A 10 kB name round trips through the
-    // catalog (TEXT column, no CHECK constraint) and through the NetCDF half,
+    // catalog (TEXT column, no CHECK constraint) and through the HDF5 half,
     // which stores no name at all.
     let name: String = "n".repeat(10_240);
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts(&name, data));
@@ -775,7 +777,7 @@ fn one_megabyte_ext_round_trips_through_disk() {
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = store
@@ -844,7 +846,7 @@ fn hostile_names_survive_a_non_sequential_disk_round_trip() {
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let series = NonSequentialTimeSeries::new(timestamps.clone(), data.clone(), name).unwrap();

@@ -15,7 +15,7 @@ categories = ["external-ffi-bindings", "science"]
 name = "infrastore_ffi"
 crate-type = ["cdylib", "staticlib"]
 
-# Statically link netcdf-c/HDF5 so the cdylib the Julia binding loads is
+# Statically link HDF5 so the cdylib the Julia binding loads is
 # self-contained; see `infrastore-core`'s manifest for the full tradeoff.
 [features]
 default = ["vendored"]

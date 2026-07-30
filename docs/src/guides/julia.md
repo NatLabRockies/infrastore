@@ -31,11 +31,11 @@ Exported names include `Store`, `SingleTimeSeries`, `NonSequentialTimeSeries`, t
 # In-memory.
 store = Store(in_memory=true)
 
-# On disk: writes system.nc and system.nc.sqlite.
-store = Store(in_memory=false, path="system.nc")
+# On disk: writes system.h5 and system.h5.sqlite.
+store = Store(in_memory=false, path="system.h5")
 
 # Reopen read-only.
-store = open_store("system.nc"; read_only=true)
+store = open_store("system.h5"; read_only=true)
 ```
 
 The store is finalized automatically, but you can release it eagerly with `close!(store)`.
@@ -273,7 +273,7 @@ into identical windows).
 
 Forecasts that share a backing array (deduplicated identical data, or several
 `DeterministicSingleTimeSeries` over one `SingleTimeSeries`) collapse to a single **window slot**.
-`forecast_read!` reads each slot from the `.nc` file once per timestamp, so a forecast shared by 10
+`forecast_read!` reads each slot from the `.h5` file once per timestamp, so a forecast shared by 10
 components costs one read, not ten. `forecast_num_slots(reader)` is the physical read count, and
 each `ForecastEntry.slot` says which slot an entry uses — group by `slot` to materialize each unique
 window only once:
@@ -371,10 +371,10 @@ Neither table is reachable over gRPC or the `infrastore` CLI.
 ## Persist to Disk
 
 ```julia
-flush!(store)   # sync NetCDF + SQLite; afterwards system.nc + system.nc.sqlite can be copied
+flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite can be copied
 ```
 
-Keep the `.nc` and `.nc.sqlite` files together.
+Keep the `.h5` and `.h5.sqlite` files together.
 
 ## Error Handling
 
@@ -449,6 +449,6 @@ add_time_series!(store, ...)   # spans appear on stderr
 `RUST_LOG`). The filter syntax is the same as `RUST_LOG`: comma-separated `target=level` pairs, or a
 bare level such as `"debug"` to match everything. Useful targets:
 
-| Target            | What it covers                                               |
-| ----------------- | ------------------------------------------------------------ |
-| `infrastore_core` | All store operations — `add`, `get`, `remove` and NetCDF I/O |
+| Target            | What it covers                                             |
+| ----------------- | ---------------------------------------------------------- |
+| `infrastore_core` | All store operations — `add`, `get`, `remove` and HDF5 I/O |

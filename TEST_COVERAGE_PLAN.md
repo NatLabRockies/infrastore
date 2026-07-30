@@ -49,9 +49,9 @@ changes listed in Phase 0 — nothing else changes.
   `mod slice_axis` and the test-file copies. No public export.
 - **0.2 Shared backend harness.** `fn for_each_backend` is duplicated verbatim in
   `tests/indexing.rs:24` and `tests/forecasts.rs:66` (runs a populate/verify pair against both the
-  in-memory and NetCDF backends). Extract to `crates/infrastore-core/tests/common/mod.rs` and
-  include with `mod common;` from each integration-test file that uses it. Phase 1 threads more
-  tests through it.
+  in-memory and HDF5 backends). Extract to `crates/infrastore-core/tests/common/mod.rs` and include
+  with `mod common;` from each integration-test file that uses it. Phase 1 threads more tests
+  through it.
 - **0.3 Dev-dependencies** (authorized, needed by later phases): add `rusqlite` to `infrastore-core`
   dev-deps if not already visible to tests (used to corrupt catalogs in 1.7 — precedent:
   `tests/associations.rs` already opens the sqlite file raw to drop tables), and to `infrastore-cli`
@@ -66,15 +66,15 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
   byte-exact round trip (compare via `to_le_bytes`, not `==`, because NaN). Dedup determinism: two
   arrays identical except different NaN _bit patterns_ must content-address to one stored array
   (`num_distinct_arrays == 1`) — `hash.rs` canonicalizes NaN, this pins it end-to-end. Also pin that
-  NetCDF fill values do not collide: a stored value equal to the NetCDF default f64 fill must
-  survive reopen.
+  Legacy netcdf-c fill values do not collide: a stored value equal to netcdf-c's default f64 fill
+  must survive reopen.
 - **1.2 Empty and minimal arrays.** Pin current behavior (accept-or-error, with a comment) for:
   `SingleTimeSeries` with `length == 0`; single-element series persisted and reopened (memory-only
   today); `Deterministic` with `count == 1` and with `horizon_count == 1`; `Probabilistic` with one
   percentile; `Scenarios` with `scenario_count == 1`. Window-select the count-1 forecast at its only
   window.
 - **1.3 Extreme integers.** `i64::MIN`/`MAX`, `u64::MAX`, `i32::MIN` through store add/get and a
-  disk round trip (unit tests in `array.rs` cover the type layer; nothing covers the NetCDF trip).
+  disk round trip (unit tests in `array.rs` cover the type layer; nothing covers the on-disk trip).
 - **1.4 Hostile strings.** Names/owner_type/units/ext containing: non-ASCII (`"负荷_ø"`), spaces and
   quotes, GLOB metacharacters as _literals_ (`"wind[1]"`, `"a*b"`, `"100%_load"`), a 10 kB name, and
   the empty-string name — pin each. Then query back: exact-name filter must match the metacharacter
@@ -93,13 +93,13 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
   horizon/resolution (`compute_h`); `Probabilistic::new` with empty, non-increasing, and
   wrong-length percentiles; `Scenarios::new` with scenario_count mismatch; `NonSequentialTimeSeries`
   single-point (length 1) construction.
-- **1.7 Failure-side persistence** (extend `tests/netcdf_roundtrip.rs`):
+- **1.7 Failure-side persistence** (extend `tests/disk_roundtrip.rs`):
   - `verify_integrity` has never produced a failing report anywhere. Create a store on disk, flip
     one association's `data_hash` via raw `rusqlite`
     (`UPDATE time_series_associations SET
     data_hash = ...`), reopen, assert the report lists the
     error. Same recipe drives the CLI test in 3.6.
-  - Torn artifacts: delete the `.sqlite` half and open (pin); zero-byte `.nc` (pin); open a path
+  - Torn artifacts: delete the `.sqlite` half and open (pin); zero-byte `.h5` (pin); open a path
     that exists but is a directory.
   - Version: backdate precedent exists (`opening_a_store_from_an_older_format_is_rejected` writes
     attribute `"0.9.0"`); add the **newer**-version case (e.g. `"99.0.0"`) and the missing-attribute
@@ -148,10 +148,10 @@ New integration-test file `tests/edge_values.rs` for 1.1–1.4; other items exte
     `get_array_by_hash`, `list_array_groups`, `time_series_counts_detailed`.
   - Replace both bare `pytest.raises(Exception)` (off-grid static read; post-close use) with the
     concrete exception types.
-  - `IncompatibleFormatError`: build a store, backdate its `data_format_version` NetCDF attribute to
-    `"0.9.0"` by reopening the file with raw bytes? Not feasible from Python without a netcdf
-    library — instead do it via a tiny Rust-side fixture? **Skip**; pin it in Rust (1.7) and log a
-    Finding that Python cannot construct this case natively.
+  - `IncompatibleFormatError`: build a store, backdate its `data_format_version` HDF5 attribute to
+    `"0.9.0"` by reopening the file with raw bytes? Not feasible from Python without an HDF5 library
+    — instead do it via a tiny Rust-side fixture? **Skip**; pin it in Rust (1.7) and log a Finding
+    that Python cannot construct this case natively.
 - **2.2 Julia** (`julia/InfraStore.jl/test/runtests.jl`):
   - Stored round trips for `UInt64` and `Int32` (today only constructor-inference covers Int32); a
     `Float32` forecast.
@@ -295,11 +295,11 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
      proto surface change that the plan froze and is better ridden along with other proto work.
      Documented on field 10 in `proto/infrastore/v1/store.proto` and on
      `time_series_data_to_get_resp`; pinned by `ext_is_always_empty_in_get_resp`.
-- F2: Python cannot natively construct an `IncompatibleFormatError` fixture (no NetCDF attribute
+- F2: Python cannot natively construct an `IncompatibleFormatError` fixture (no HDF5 attribute
   access from the test suite); the case is pinned in Rust only (1.7).
-- F3: `infrastore-core/src/store.rs:1979` — `Store::verify_integrity` delegates straight to the
-  NetCDF backend, which walks only its own hash index. A `data_hash` corrupted in the SQLite catalog
-  is therefore **not** reported even though every read of that key then fails. Pinned by
+- F3: `infrastore-core/src/store.rs:1979` — `Store::verify_integrity` delegates straight to the HDF5
+  backend, which walks only its own hash index. A `data_hash` corrupted in the SQLite catalog is
+  therefore **not** reported even though every read of that key then fails. Pinned by
   `verify_integrity_does_not_inspect_the_sqlite_catalog` (1.7). **RESOLVED as documented scope**
   (user decision, 2026-07-24): the behavior stays as it is and the check's scope is now stated
   wherever it is surfaced — `Store::verify_integrity` and `IntegrityReport` rustdoc,
@@ -312,16 +312,16 @@ Append entries here as `F<n>: <file:line> — <what the test pinned and why it l
   enforces the `NOT NULL`/`CHECK`/unique-index invariants itself. If it is ever revisited, the
   cheapest worthwhile version is a dangling-`data_hash` sweep: `SELECT DISTINCT data_hash`
   cross-checked against `StorageBackend::contains`, which already exists on both backends and is an
-  in-memory `HashMap` lookup (`netcdf.rs:1382`). That alone catches a truncated catalog, a corrupted
-  one, and a catalog paired with the wrong `.nc`. Note that `PRAGMA integrity_check` would **not**
-  catch this finding's case: a flipped `data_hash` is structurally valid SQLite.
-- F4: `infrastore-core/src/store.rs:247` — a torn artifact (NetCDF present, `.sqlite` deleted)
-  opened **read-write** silently recreates an empty catalog: the store reports zero time series
-  while the arrays are still on disk as unreachable garbage. Read-only opens fail loudly instead.
-  Pinned by `opening_a_store_whose_sqlite_half_is_missing_creates_an_empty_catalog` (1.7).
-- F5: `infrastore-core/src/store.rs:248` — `Store::open` opens the SQLite catalog _before_ the
-  NetCDF format-version check, so when both halves are wrong the caller sees `Sqlite(CannotOpen)`
-  rather than the more informative `IncompatibleFormat`. Pinned by
+  in-memory `HashMap` lookup (`storage/hdf5.rs`). That alone catches a truncated catalog, a
+  corrupted one, and a catalog paired with the wrong `.h5`. Note that `PRAGMA integrity_check` would
+  **not** catch this finding's case: a flipped `data_hash` is structurally valid SQLite.
+- F4: `infrastore-core/src/store.rs:247` — a torn artifact (HDF5 present, `.sqlite` deleted) opened
+  **read-write** silently recreates an empty catalog: the store reports zero time series while the
+  arrays are still on disk as unreachable garbage. Read-only opens fail loudly instead. Pinned by
+  `opening_a_store_whose_sqlite_half_is_missing_creates_an_empty_catalog` (1.7).
+- F5: `infrastore-core/src/store.rs:248` — `Store::open` opens the SQLite catalog _before_ the HDF5
+  format-version check, so when both halves are wrong the caller sees `Sqlite(CannotOpen)` rather
+  than the more informative `IncompatibleFormat`. Pinned by
   `the_catalog_half_is_opened_before_the_format_check` (1.7).
 - F7: a closed store reports differently in the two bindings. Python raises
   `TimeSeriesError("store is closed")` from its own guard; Julia nulls the handle so the call

@@ -2,7 +2,13 @@
 
 use infrastore_core::{Features, KeyIdentity, ListFilter, Store, TimeSeriesMetadata};
 
+use crate::fields;
 use crate::parse;
+
+/// How many candidates the ambiguous-selector error spells out before
+/// summarizing the rest. Unbounded, this printed one line per match — 715 lines
+/// of stderr on a store with 5000 series, which buries the message that matters.
+const AMBIGUITY_LIST_MAX: usize = 10;
 
 /// Flags that narrow a query down to (ideally) a single stored series.
 #[derive(Debug, Clone, clap::Args)]
@@ -20,8 +26,17 @@ pub struct SelectorArgs {
     /// with --name when both are given.
     #[arg(long)]
     pub name_glob: Option<String>,
-    /// Time series type (single|non_sequential|deterministic|probabilistic|scenarios).
-    #[arg(long = "type")]
+    /// Time series type. `any_deterministic` matches both a stored
+    /// Deterministic and a DeterministicSingleTimeSeries.
+    #[arg(
+        long = "type",
+        value_name = "TYPE",
+        long_help = "Time series type. One of:\n  \
+                     single, non_sequential, deterministic, deterministic_single,\n  \
+                     probabilistic, scenarios\n\
+                     plus `any_deterministic`, which matches both a stored Deterministic\n\
+                     and a DeterministicSingleTimeSeries (what `transform` produces)."
+    )]
     pub ts_type: Option<String>,
     /// Resolution, e.g. 1h or 15min.
     #[arg(long)]
@@ -48,7 +63,7 @@ impl SelectorArgs {
             filter = filter.name_glob(g.clone());
         }
         if let Some(t) = &self.ts_type {
-            filter = filter.time_series_type(parse::parse_ts_type(t)?);
+            filter = filter.time_series_type(parse::parse_requested_type(t)?);
         }
         if let Some(r) = &self.resolution {
             filter = filter.resolution(parse::parse_period(r)?);
@@ -79,18 +94,16 @@ impl SelectorArgs {
             }
             n => {
                 let mut msg = format!(
-                    "{n} time series matched; narrow with --name/--name-glob/--type/--resolution/--feature:\n"
+                    "{n} time series matched; narrow with \
+                     --owner-id/--name/--name-glob/--type/--resolution/--feature:\n"
                 );
-                for m in &matches {
+                for m in matches.iter().take(AMBIGUITY_LIST_MAX) {
+                    msg.push_str(&format!("  - {}\n", fields::identity_line(m)));
+                }
+                if n > AMBIGUITY_LIST_MAX {
                     msg.push_str(&format!(
-                        "  - owner={} owner_category={} type={} name={} resolution={}\n",
-                        m.owner_id,
-                        m.owner_category.as_str(),
-                        m.time_series_type.as_str(),
-                        m.name,
-                        m.resolution
-                            .map(parse::format_period)
-                            .unwrap_or_else(|| "-".to_string()),
+                        "  ... and {} more; run `list` with the same flags to see them all\n",
+                        n - AMBIGUITY_LIST_MAX
                     ));
                 }
                 Err(msg)

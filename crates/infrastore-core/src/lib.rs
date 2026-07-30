@@ -26,10 +26,10 @@ pub use metadata::{
     SupplementalAttributeAssociation, SupplementalAttributeFilter, SupplementalAttributeSummaryRow,
 };
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
-pub use storage::{CompactionReport, Compression, IntegrityReport};
+pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
-    TimeSeriesCounts, TimeSeriesCountsDetailed,
+    TimeSeriesCounts, TimeSeriesCountsDetailed, catalog_sqlite_path,
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},
@@ -52,13 +52,13 @@ pub use version::DATA_FORMAT_VERSION;
 /// Create a new store.
 ///
 /// If `in_memory` is true, no filesystem I/O occurs and `path` is ignored.
-/// Otherwise a catalog SQLite database is created at `path` (NetCDF persistence
-/// is wired in M1).
+/// Otherwise an HDF5 array file is created at `path` and a catalog SQLite
+/// database at `<path>.sqlite`.
 pub fn create_store(path: Option<&std::path::Path>, in_memory: bool) -> Result<Store> {
     Store::create(path, in_memory)
 }
 
-/// Create a new store with an explicit NetCDF compression policy.
+/// Create a new store with an explicit compression policy.
 ///
 /// Behaves like [`create_store`] but applies `compression` to data variables
 /// (ignored for `in_memory` stores).

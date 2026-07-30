@@ -622,7 +622,7 @@ fn parent_child_bulk_add_is_all_or_nothing() {
 #[test]
 fn associations_survive_persist_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = create_store(None, true).unwrap();
         store
@@ -650,7 +650,7 @@ fn associations_survive_persist_and_reopen() {
 #[test]
 fn read_only_store_rejects_association_writes() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         store
@@ -715,7 +715,7 @@ fn read_only_open_of_a_pre_associations_store_reads_empty() {
     // them through the idempotent DDL; a read-only open cannot, and must degrade
     // to empty answers rather than erroring.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     drop(create_store(Some(path.as_path()), false).unwrap());
 
     let sqlite_path = {
@@ -833,7 +833,7 @@ fn opening_for_writing_renames_the_legacy_time_series_indexes() {
     // DDL renames them in place on first writable open; leaving the old pair
     // behind would silently double the index maintenance on every insert.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     drop(create_store(Some(path.as_path()), false).unwrap());
 
     let sqlite_path = {
@@ -1231,7 +1231,7 @@ fn counts_and_summary_match_brute_force_on_a_fan_in_and_fan_out_graph() {
 
     // ---- and the aggregates survive a disk round trip ----
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("assoc.nc");
+    let path = dir.path().join("assoc.h5");
     store.persist_to(path.as_path()).unwrap();
     let reopened = open_store(path.as_path(), true).unwrap();
     assert_eq!(

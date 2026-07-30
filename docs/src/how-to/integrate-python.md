@@ -6,7 +6,7 @@ Get the `infrastore` module into a Python environment. For API usage once it imp
 ## Prerequisites
 
 - Python 3.11 or newer.
-- The [system libraries](./install.md#1-install-system-libraries) (HDF5, NetCDF, Protobuf).
+- The [system libraries](./install.md#1-install-system-libraries) (HDF5, Protobuf).
 
 ## Build and Install the Wheel (development)
 

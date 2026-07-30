@@ -1,9 +1,9 @@
 # Introduction
 
 **infrastore** is a Rust library for managing time-series data in power-systems and energy
-simulations. It separates persistence into two concerns: numerical arrays are stored in NetCDF4,
-while the metadata that associates each array with an owning component lives in SQLite. Identical
-arrays are stored once and shared through content addressing.
+simulations. It separates persistence into two concerns: numerical arrays are stored in HDF5, while
+the metadata that associates each array with an owning component lives in SQLite. Identical arrays
+are stored once and shared through content addressing.
 
 The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the
 `infrastore` command-line tool and a read-only gRPC server with a Rust client.
@@ -19,7 +19,7 @@ flowchart TB
 
     subgraph core["infrastore-core"]
         STORE["Store"]
-        STORE --> NC[("NetCDF4<br/>arrays")]
+        STORE --> NC[("HDF5<br/>arrays")]
         STORE --> SQL[("SQLite<br/>metadata")]
     end
 
@@ -51,8 +51,8 @@ flowchart TB
 - **One array, stored once** — Arrays are addressed by a SHA-256 content hash, so identical series
   shared across components are written to disk a single time
   ([content addressing](./explanation/content-addressing.md))
-- **NetCDF4 for arrays, SQLite for metadata** — Numerical data lands in a compact, chunked NetCDF4
-  file; queryable associations live in a catalog SQLite database
+- **HDF5 for arrays, SQLite for metadata** — Numerical data lands in a compact, chunked HDF5 file;
+  queryable associations live in a catalog SQLite database
   ([storage model](./explanation/storage-model.md))
 - **Feature-tagged associations** — Each association carries an arbitrary map of typed features
   (`int` / `float` / `bool` / `str`) so multiple variants of a series can coexist under one owner

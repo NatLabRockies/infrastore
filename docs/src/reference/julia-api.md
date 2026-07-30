@@ -52,7 +52,7 @@ open_store(path::AbstractString; read_only::Bool=false) -> Store
 ```
 
 - `Store()` — in-memory store.
-- `Store(in_memory=false, path="system.nc")` — persists to `system.nc` plus `system.nc.sqlite`.
+- `Store(in_memory=false, path="system.h5")` — persists to `system.h5` plus `system.h5.sqlite`.
 - `compression=:none` stores arrays uncompressed; `:deflate` (default) applies DEFLATE at
   `compression_level` (0–9) with optional byte `shuffle`. The policy is persisted with the store and
   reused on later appends; it is ignored for in-memory stores. An unknown `compression` throws
@@ -137,8 +137,9 @@ abstract type DeterministicSingleTimeSeries <: AbstractDeterministic end
 
 # Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
 # Pass it as the requested type to get_time_series to read whichever of the two
-# is stored (see Reading forecast values). It is NOT a valid build_forecast_reader
-# type — that call takes a concrete forecast type.
+# is stored (see Reading forecast values), as a catalog filter to match both, or
+# to build_forecast_reader, where it reads like a Deterministic reader. No row is
+# ever stored under it.
 abstract type AbstractDeterministic end
 
 mutable struct Store
@@ -605,9 +606,9 @@ includes `DeterministicSingleTimeSeries` (read into identical `[H, *E]` windows)
 forecasts must share one window timeline (`initial_timestamp` + `interval` + `count`).
 
 `time_series_type` must be one of the four concrete forecast types — `Deterministic`,
-`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios`. Any other type (including
-`AbstractDeterministic`, which is a `get_time_series` request type only) raises
-`InvalidParameterError`; a `Deterministic` reader already covers the family.
+`DeterministicSingleTimeSeries`, `Probabilistic`, or `Scenarios` — or `AbstractDeterministic`, which
+reads exactly like a `Deterministic` reader (already abstract over the pair). Any other type raises
+`InvalidParameterError`.
 
 ```julia
 build_forecast_reader(store, time_series_type::Type; resolution::Period,
@@ -642,7 +643,7 @@ end
 
 Forecasts that reference the **same backing array and read plan** — deduplicated identical data, or
 several `DeterministicSingleTimeSeries` over one `SingleTimeSeries` — collapse to a single _window
-slot_. `forecast_read!` performs one backend (`.nc`) read per slot, not per entry, so a forecast
+slot_. `forecast_read!` performs one backend (`.h5`) read per slot, not per entry, so a forecast
 shared by N owners is read once per timestamp. `forecast_num_slots(reader)` is that physical read
 count (`≤ length(forecast_entries(reader))`), and every `ForecastEntry.slot` (0-based) identifies
 the slot backing that entry; entries that share data report the same `slot`. Group entries by `slot`
@@ -678,7 +679,7 @@ get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct r
 get_compression(store) -> CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
-flush!(store) -> Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
+flush!(store) -> Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only
@@ -709,8 +710,9 @@ and independent, and combine as a conjunction; with none set the whole store is 
 
 - `owner_id`, `owner_category` — scope to one owner.
 - `time_series_type` — the Julia type (`SingleTimeSeries`, `Deterministic`, …), the same value the
-  `time_series_type` field of a returned row carries. A filter selects stored rows, so
-  `AbstractDeterministic` is rejected: filter on `Deterministic` or `DeterministicSingleTimeSeries`.
+  `time_series_type` field of a returned row carries, or `AbstractDeterministic` to match both
+  `Deterministic` and `DeterministicSingleTimeSeries` (no row is ever _stored_ under the family, so
+  it never appears in a returned row).
 - `name` — exact association name.
 - `resolution` — a `Period`.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval

@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
 const CYAN: &str = "\x1b[36m";
+const CYAN_BOLD: &str = "\x1b[1;36m";
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
@@ -41,4 +42,10 @@ pub fn label(s: &str) -> String {
 /// Secondary text: dim (truncation notes, "no results").
 pub fn dim(s: &str) -> String {
     paint(DIM, s)
+}
+
+/// Command names in the grouped `--help` listing: cyan + bold, matching the
+/// `literal` style clap applies to the flags it renders in the same output.
+pub fn literal(s: &str) -> String {
+    paint(CYAN_BOLD, s)
 }

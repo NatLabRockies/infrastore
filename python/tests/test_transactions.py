@@ -127,7 +127,7 @@ def test_commit_or_rollback_without_a_transaction_raises():
 
 
 def test_read_only_store_cannot_begin_a_transaction(tmp_path):
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     store = Store.create(path=str(path))
     add(store, 1, 0.0)
     store.flush()
@@ -140,7 +140,7 @@ def test_read_only_store_cannot_begin_a_transaction(tmp_path):
 
 def test_rollback_survives_a_reopen(tmp_path):
     """Rollback restores the on-disk artifact, not merely the in-memory view."""
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     store = Store.create(path=str(path))
     k1 = add(store, 1, 0.0)
 

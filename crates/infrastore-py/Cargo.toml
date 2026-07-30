@@ -21,7 +21,7 @@ publish = false
 name = "infrastore_py"
 crate-type = ["cdylib"]
 
-# Statically link netcdf-c/HDF5 so a built wheel needs no system libraries; see
+# Statically link HDF5 so a built wheel needs no system libraries; see
 # `infrastore-core`'s manifest for the full tradeoff.
 [features]
 default = ["vendored"]

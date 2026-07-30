@@ -1,4 +1,4 @@
-/// Semver version of the on-disk data format. Bumped when the NetCDF layout,
+/// Semver version of the on-disk data format. Bumped when the HDF5 layout,
 /// SQLite schema, or hash domain changes in a backward-incompatible way.
 ///
 /// Purely additive SQLite tables do not bump it. The version is checked by

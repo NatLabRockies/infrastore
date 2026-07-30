@@ -1,0 +1,1526 @@
+//! Direct-HDF5 storage backend.
+//!
+//! Layout (shared policy in [`super::common`]): packed
+//! `sts_{dtype}_{shape}_{length}_{res}` datasets for SingleTimeSeries/DST
+//! arrays, one standalone `arr_{hexhash}` dataset per irregular series or
+//! dense forecast, written through libhdf5 via `hdf5-metno`.
+//!
+//! This backend replaced a netcdf-c–driven one with the same logical layout.
+//! The motivation was netcdf-c's define-mode semantics: every new variable
+//! followed by a data write triggers an implicit whole-file `H5Fflush` that
+//! iterates every open dataset, making a forecast-heavy ingest O(N²). Plain
+//! HDF5 dataset creation is O(log n) and flushes metadata lazily, so the
+//! per-array standalone layout stays flat with store size. Its files are not
+//! readable by this backend (`Store::open` checks the `storage_backend` root
+//! attribute, which netcdf-written stores lack, and rejects them).
+//!
+//! Layout details specific to this backend:
+//!
+//! * A packed dataset's per-column hashes live in a `{name}_h` dataset of
+//!   shape `(cols, 64)` u8 (hex bytes; an all-zero row = free slot).
+//! * Standalone arrays at or below [`COMPACT_MAX_BYTES`] use HDF5's compact
+//!   layout: the data lives in the object header, no chunk B-tree, no filter
+//!   pipeline. (Compact datasets cannot be compressed; arrays that small gain
+//!   little from DEFLATE anyway.)
+//! * No per-variable dimension objects — HDF5 dataspaces carry the shape.
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::Mutex;
+
+use hdf5_metno as h5;
+
+use h5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
+use h5::{Group, Hyperslab, Selection, SliceOrIndex};
+
+use crate::error::{Result, TimeSeriesError};
+use crate::hash::{array_hash, hash_hex};
+use crate::storage::{ArrayLayout, Compression};
+use crate::types::array::{Dtype, TypedArray};
+use crate::types::period::Period;
+use crate::version::DATA_FORMAT_VERSION;
+
+use super::common::{
+    COMPRESSION_ATTR, HASH_SUFFIX, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX, dataset_base_name,
+    element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
+    standalone_chunks,
+};
+use super::{ArrayLocation, CompactionReport, IntegrityReport, StorageBackend};
+
+/// Root attribute naming the backend that wrote the file; `Store::open` checks
+/// it (absent on stores written by the removed netcdf backend, which are
+/// rejected).
+pub(crate) const BACKEND_ATTR: &str = "storage_backend";
+pub(crate) const BACKEND_NAME: &str = "hdf5";
+
+/// Standalone arrays at or below this size use HDF5's compact layout (data in
+/// the object header, no chunk index, no filters). The format limit on a
+/// compact dataset is 64 KiB including type/space metadata; stay safely under.
+const COMPACT_MAX_BYTES: usize = 56 * 1024;
+
+/// Raw-data chunk cache applied file-wide (every dataset opened through the
+/// handle inherits it unless overridden). HDF5's default is 1 MiB / 521 slots
+/// — far too small for the packed layout, whose timestamp-major chunks run up
+/// to the 1 MiB budget × the series length per dataset: a repeated
+/// single-column read then evicts and re-inflates every chunk on each call.
+/// 64 MiB keeps a whole packed dataset's chunks resident (netcdf-c sizes its
+/// per-variable cache generously for the same reason). Slot count is a prime
+/// well above the chunks a dataset can hold.
+const CHUNK_CACHE_NSLOTS: usize = 8209;
+const CHUNK_CACHE_NBYTES: usize = 64 << 20;
+const CHUNK_CACHE_W0: f64 = 0.75;
+
+/// File builder with the store's chunk-cache policy applied.
+fn file_builder() -> h5::FileBuilder {
+    let mut b = h5::FileBuilder::new();
+    b.with_fapl(|p| p.chunk_cache(CHUNK_CACHE_NSLOTS, CHUNK_CACHE_NBYTES, CHUNK_CACHE_W0));
+    b
+}
+
+fn map_h5(e: h5::Error) -> TimeSeriesError {
+    TimeSeriesError::IntegrityError(format!("hdf5: {e}"))
+}
+
+/// Selection from one range per axis.
+fn sel(ranges: Vec<Range<usize>>) -> Selection {
+    Selection::from(Hyperslab::from(
+        ranges
+            .into_iter()
+            .map(SliceOrIndex::from)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn packed_ranges(time: Range<usize>, col: usize, element_shape: &[usize]) -> Vec<Range<usize>> {
+    let mut ranges = vec![time, col..col + 1];
+    ranges.extend(element_shape.iter().map(|&k| 0..k));
+    ranges
+}
+
+fn packed_block_ranges(
+    time: Range<usize>,
+    width: usize,
+    element_shape: &[usize],
+) -> Vec<Range<usize>> {
+    let mut ranges = vec![time, 0..width];
+    ranges.extend(element_shape.iter().map(|&k| 0..k));
+    ranges
+}
+
+fn standalone_ranges(time: Range<usize>, element_shape: &[usize]) -> Vec<Range<usize>> {
+    let mut ranges = vec![time];
+    ranges.extend(element_shape.iter().map(|&k| 0..k));
+    ranges
+}
+
+// ---- typed read/write helpers ---------------------------------------------
+
+macro_rules! vec_from_le {
+    ($bytes:expr, $t:ty, $n:expr) => {
+        $bytes
+            .chunks_exact($n)
+            .map(|c| <$t>::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<$t>>()
+    };
+}
+
+/// Read the hyperslab `ranges` of `ds` as little-endian bytes.
+fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result<Vec<u8>> {
+    let s = sel(ranges);
+    macro_rules! rd {
+        ($t:ty) => {{
+            let a = ds.read_slice::<$t, _, ndarray::IxDyn>(s).map_err(map_h5)?;
+            a.iter().flat_map(|v| v.to_le_bytes()).collect()
+        }};
+    }
+    Ok(match dtype {
+        Dtype::F64 => rd!(f64),
+        Dtype::F32 => rd!(f32),
+        Dtype::I64 => rd!(i64),
+        Dtype::I32 => rd!(i32),
+        Dtype::U64 => rd!(u64),
+        Dtype::Bool => {
+            let a = ds.read_slice::<u8, _, ndarray::IxDyn>(s).map_err(map_h5)?;
+            a.iter().copied().collect()
+        }
+    })
+}
+
+/// Read the whole dataset as little-endian bytes (row-major).
+fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
+    macro_rules! rd {
+        ($t:ty) => {
+            ds.read_raw::<$t>()
+                .map_err(map_h5)?
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect()
+        };
+    }
+    Ok(match dtype {
+        Dtype::F64 => rd!(f64),
+        Dtype::F32 => rd!(f32),
+        Dtype::I64 => rd!(i64),
+        Dtype::I32 => rd!(i32),
+        Dtype::U64 => rd!(u64),
+        Dtype::Bool => ds.read_raw::<u8>().map_err(map_h5)?,
+    })
+}
+
+/// Write little-endian `bytes` (logical shape `shape`) into the hyperslab
+/// `ranges` of `ds`. The selection's shape must equal `shape`.
+fn write_sel(
+    ds: &h5::Dataset,
+    dtype: Dtype,
+    bytes: &[u8],
+    shape: &[usize],
+    ranges: Vec<Range<usize>>,
+) -> Result<()> {
+    let s = sel(ranges);
+    let dyn_shape = ndarray::IxDyn(shape);
+    macro_rules! wr {
+        ($t:ty, $n:expr) => {{
+            let v = vec_from_le!(bytes, $t, $n);
+            let view = ndarray::ArrayViewD::from_shape(dyn_shape, &v)
+                .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
+            ds.write_slice(view, s).map_err(map_h5)
+        }};
+    }
+    match dtype {
+        Dtype::F64 => wr!(f64, 8),
+        Dtype::F32 => wr!(f32, 4),
+        Dtype::I64 => wr!(i64, 8),
+        Dtype::I32 => wr!(i32, 4),
+        Dtype::U64 => wr!(u64, 8),
+        Dtype::Bool => {
+            let view = ndarray::ArrayViewD::from_shape(dyn_shape, bytes)
+                .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
+            ds.write_slice(view, s).map_err(map_h5)
+        }
+    }
+}
+
+/// Write little-endian `bytes` as the whole content of `ds`.
+fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
+    macro_rules! wr {
+        ($t:ty, $n:expr) => {{
+            let v = vec_from_le!(bytes, $t, $n);
+            ds.write_raw(&v).map_err(map_h5)
+        }};
+    }
+    match dtype {
+        Dtype::F64 => wr!(f64, 8),
+        Dtype::F32 => wr!(f32, 4),
+        Dtype::I64 => wr!(i64, 8),
+        Dtype::I32 => wr!(i32, 4),
+        Dtype::U64 => wr!(u64, 8),
+        Dtype::Bool => ds.write_raw(bytes).map_err(map_h5),
+    }
+}
+
+/// Create a dataset of `dtype` with the given shape/chunking/filters.
+/// `chunks = None` → compact when small enough, else contiguous.
+fn create_ds(
+    group: &Group,
+    name: &str,
+    dtype: Dtype,
+    shape: &[usize],
+    chunks: Option<&[usize]>,
+    compression: Compression,
+) -> Result<h5::Dataset> {
+    let nbytes: usize = shape.iter().product::<usize>() * dtype.size();
+    macro_rules! mk {
+        ($t:ty) => {{
+            let b = group.new_dataset::<$t>().shape(shape.to_vec());
+            match chunks {
+                Some(c) => {
+                    let b = b.chunk(c.to_vec());
+                    match compression {
+                        Compression::Deflate { level, shuffle } => {
+                            let b = if shuffle { b.shuffle() } else { b };
+                            b.deflate(level).create(name)
+                        }
+                        Compression::None => b.create(name),
+                    }
+                }
+                None => {
+                    if nbytes > 0 && nbytes <= COMPACT_MAX_BYTES {
+                        b.layout(h5::dataset::Layout::Compact).create(name)
+                    } else {
+                        b.create(name)
+                    }
+                }
+            }
+        }
+        .map_err(map_h5)};
+    }
+    match dtype {
+        Dtype::F64 => mk!(f64),
+        Dtype::F32 => mk!(f32),
+        Dtype::I64 => mk!(i64),
+        Dtype::I32 => mk!(i32),
+        Dtype::U64 => mk!(u64),
+        Dtype::Bool => mk!(u8),
+    }
+}
+
+/// Map an HDF5 dataset's element type back to a [`Dtype`].
+fn dtype_of_dataset(ds: &h5::Dataset) -> Result<Dtype> {
+    let desc = ds
+        .dtype()
+        .map_err(map_h5)?
+        .to_descriptor()
+        .map_err(map_h5)?;
+    Ok(match desc {
+        TypeDescriptor::Float(FloatSize::U8) => Dtype::F64,
+        TypeDescriptor::Float(FloatSize::U4) => Dtype::F32,
+        TypeDescriptor::Integer(IntSize::U8) => Dtype::I64,
+        TypeDescriptor::Integer(IntSize::U4) => Dtype::I32,
+        TypeDescriptor::Unsigned(IntSize::U8) => Dtype::U64,
+        TypeDescriptor::Unsigned(IntSize::U1) => Dtype::Bool,
+        other => {
+            return Err(TimeSeriesError::IntegrityError(format!(
+                "unsupported hdf5 dataset type {other:?}"
+            )));
+        }
+    })
+}
+
+fn write_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
+    let v = VarLenUnicode::from_str(value)
+        .map_err(|e| TimeSeriesError::IntegrityError(format!("attr encode: {e}")))?;
+    file.new_attr::<VarLenUnicode>()
+        .create(name)
+        .map_err(map_h5)?
+        .write_scalar(&v)
+        .map_err(map_h5)
+}
+
+fn read_str_attr(file: &h5::File, name: &str) -> Option<String> {
+    file.attr(name)
+        .ok()?
+        .read_scalar::<VarLenUnicode>()
+        .ok()
+        .map(|v| v.to_string())
+}
+
+// ---- backend state ---------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum Location {
+    Packed { dataset: String, col: usize },
+    Standalone { var: String },
+}
+
+#[derive(Debug, Clone)]
+struct DatasetState {
+    hash_name: String,
+    dtype: Dtype,
+    element_shape: Vec<usize>,
+    length: usize,
+    columns: Vec<Option<String>>,
+}
+
+impl DatasetState {
+    fn first_free(&self) -> Option<usize> {
+        self.columns.iter().position(|c| c.is_none())
+    }
+    fn full(&self) -> bool {
+        !self.columns.iter().any(|c| c.is_none())
+    }
+}
+
+type DatasetGroupKey = (Dtype, Vec<usize>, usize, Period);
+
+pub(crate) struct Hdf5Backend {
+    inner: Mutex<Inner>,
+}
+
+struct Inner {
+    file: h5::File,
+    /// The `/time_series/single` group, held open for the file's lifetime.
+    single: Group,
+    /// Open dataset handles, cached for the file's lifetime. HDF5's raw-data
+    /// chunk cache lives per *open dataset handle* — reopening a dataset on
+    /// every read would discard the cache and re-inflate every touched chunk
+    /// per call (netcdf-c avoids this by keeping all variables open; so do
+    /// we). Interior mutability is safe: `Inner` sits behind the backend's
+    /// `Mutex`.
+    handles: std::cell::RefCell<HashMap<String, h5::Dataset>>,
+    read_only: bool,
+    datasets: HashMap<String, DatasetState>,
+    dataset_groups: HashMap<DatasetGroupKey, Vec<String>>,
+    standalone_vars: HashSet<String>,
+    by_hash: HashMap<[u8; 32], Location>,
+    compression: Compression,
+}
+
+impl Hdf5Backend {
+    pub fn create(path: &Path, compression: Compression) -> Result<Self> {
+        let file = file_builder().create(path).map_err(map_h5)?;
+        write_str_attr(&file, "data_format_version", DATA_FORMAT_VERSION)?;
+        write_str_attr(&file, COMPRESSION_ATTR, &compression.encode())?;
+        write_str_attr(&file, BACKEND_ATTR, BACKEND_NAME)?;
+        let ts = file.create_group(ROOT_GROUP).map_err(map_h5)?;
+        let single = ts.create_group(SINGLE_GROUP).map_err(map_h5)?;
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                file,
+                single,
+                handles: std::cell::RefCell::new(HashMap::new()),
+                read_only: false,
+                datasets: HashMap::new(),
+                dataset_groups: HashMap::new(),
+                standalone_vars: HashSet::new(),
+                by_hash: HashMap::new(),
+                compression,
+            }),
+        })
+    }
+
+    pub fn open(path: &Path, read_only: bool) -> Result<Self> {
+        let file = if read_only {
+            file_builder().open(path).map_err(map_h5)?
+        } else {
+            file_builder().open_rw(path).map_err(map_h5)?
+        };
+        let found =
+            read_str_attr(&file, "data_format_version").unwrap_or_else(|| "unspecified".into());
+        if found != DATA_FORMAT_VERSION {
+            return Err(TimeSeriesError::IncompatibleFormat {
+                found,
+                expected: DATA_FORMAT_VERSION,
+            });
+        }
+        let compression = read_str_attr(&file, COMPRESSION_ATTR)
+            .map(|s| Compression::decode(&s))
+            .unwrap_or_default();
+        let single = file
+            .group(&format!("{ROOT_GROUP}/{SINGLE_GROUP}"))
+            .map_err(map_h5)?;
+        let mut backend = Self {
+            inner: Mutex::new(Inner {
+                file,
+                single,
+                handles: std::cell::RefCell::new(HashMap::new()),
+                read_only,
+                datasets: HashMap::new(),
+                dataset_groups: HashMap::new(),
+                standalone_vars: HashSet::new(),
+                by_hash: HashMap::new(),
+                compression,
+            }),
+        };
+        backend.rebuild_index()?;
+        Ok(backend)
+    }
+
+    pub fn compression(&self) -> Compression {
+        self.inner.lock().expect("mutex poisoned").compression
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn rebuild_index(&mut self) -> Result<()> {
+        let inner = self.inner.get_mut().expect("mutex poisoned");
+        let single = inner.single()?;
+        let names = single.member_names().map_err(map_h5)?;
+        for name in names {
+            if name.ends_with(HASH_SUFFIX) {
+                continue;
+            }
+            if let Some(hex) = name.strip_prefix(STANDALONE_PREFIX) {
+                let hash = hex_to_hash(hex)?;
+                inner.standalone_vars.insert(name.clone());
+                inner
+                    .by_hash
+                    .insert(hash, Location::Standalone { var: name });
+                continue;
+            }
+
+            let (dtype, element_shape, length, resolution) = parse_dataset_name(&name)?;
+            let hash_name = format!("{name}{HASH_SUFFIX}");
+            let hash_ds = single.dataset(&hash_name).map_err(|_| {
+                TimeSeriesError::IntegrityError(format!("missing hash dataset {hash_name}"))
+            })?;
+            let raw = hash_ds.read_raw::<u8>().map_err(map_h5)?;
+            let num_cols = raw.len() / 64;
+            let mut columns = Vec::with_capacity(num_cols);
+            for i in 0..num_cols {
+                let row = &raw[i * 64..(i + 1) * 64];
+                if row[0] == 0 {
+                    columns.push(None);
+                } else {
+                    let hex = std::str::from_utf8(row).map_err(|_| {
+                        TimeSeriesError::IntegrityError(format!("bad hash row {i} in {hash_name}"))
+                    })?;
+                    let hash = hex_to_hash(hex)?;
+                    inner.by_hash.insert(
+                        hash,
+                        Location::Packed {
+                            dataset: name.clone(),
+                            col: i,
+                        },
+                    );
+                    columns.push(Some(hex.to_string()));
+                }
+            }
+            inner
+                .dataset_groups
+                .entry((dtype, element_shape.clone(), length, resolution))
+                .or_default()
+                .push(name.clone());
+            inner.datasets.insert(
+                name.clone(),
+                DatasetState {
+                    hash_name,
+                    dtype,
+                    element_shape,
+                    length,
+                    columns,
+                },
+            );
+        }
+        for names in inner.dataset_groups.values_mut() {
+            names.sort();
+        }
+        Ok(())
+    }
+}
+
+impl Inner {
+    fn single(&self) -> Result<Group> {
+        Ok(self.single.clone())
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        Ok(())
+    }
+
+    fn dataset(&self, name: &str) -> Result<h5::Dataset> {
+        if let Some(ds) = self.handles.borrow().get(name) {
+            return Ok(ds.clone());
+        }
+        let ds = self
+            .single
+            .dataset(name)
+            .map_err(|_| TimeSeriesError::IntegrityError(format!("missing dataset {name}")))?;
+        self.handles
+            .borrow_mut()
+            .insert(name.to_string(), ds.clone());
+        Ok(ds)
+    }
+
+    fn ensure_writable_dataset(
+        &mut self,
+        dtype: Dtype,
+        element_shape: &[usize],
+        length: usize,
+        resolution: Period,
+    ) -> Result<String> {
+        let key = (dtype, element_shape.to_vec(), length, resolution);
+        let mut spill_count = 0;
+        if let Some(names) = self.dataset_groups.get(&key) {
+            spill_count = names.len();
+            for name in names {
+                if let Some(state) = self.datasets.get(name)
+                    && !state.full()
+                {
+                    return Ok(name.clone());
+                }
+            }
+        }
+        let base = dataset_base_name(dtype, element_shape, length, resolution);
+        let new_name = spill_name(&base, spill_count);
+        self.create_packed_dataset(&new_name, dtype, element_shape, length, resolution, None)?;
+        Ok(new_name)
+    }
+
+    fn create_packed_dataset(
+        &mut self,
+        name: &str,
+        dtype: Dtype,
+        element_shape: &[usize],
+        length: usize,
+        resolution: Period,
+        requested_cols: Option<usize>,
+    ) -> Result<()> {
+        let cols = resolve_dataset_cols(requested_cols, dtype, element_shape);
+        let mut shape = vec![length, cols];
+        shape.extend_from_slice(element_shape);
+        // Chunk one timestamp row across every column, matching the packed
+        // backend: a read-by-timestamp gathers one chunk and a full-width bulk
+        // write fills whole chunks.
+        let mut chunks = vec![1, cols];
+        chunks.extend_from_slice(element_shape);
+        let hash_name = format!("{name}{HASH_SUFFIX}");
+        let single = self.single()?;
+        create_ds(
+            &single,
+            name,
+            dtype,
+            &shape,
+            Some(&chunks),
+            self.compression,
+        )?;
+        // The hash companion is tiny and rewritten per column; contiguous.
+        create_ds(
+            &single,
+            &hash_name,
+            Dtype::Bool, // stored as u8
+            &[cols, 64],
+            None,
+            Compression::None,
+        )?;
+        self.datasets.insert(
+            name.to_string(),
+            DatasetState {
+                hash_name,
+                dtype,
+                element_shape: element_shape.to_vec(),
+                length,
+                columns: vec![None; cols],
+            },
+        );
+        let group = self
+            .dataset_groups
+            .entry((dtype, element_shape.to_vec(), length, resolution))
+            .or_default();
+        let pos = group
+            .binary_search_by(|n| n.as_str().cmp(name))
+            .unwrap_or_else(|p| p);
+        group.insert(pos, name.to_string());
+        Ok(())
+    }
+
+    fn write_hash_row(&self, hash_name: &str, col: usize, hex: Option<&str>) -> Result<()> {
+        let ds = self.dataset(hash_name)?;
+        let row: Vec<u8> = match hex {
+            Some(h) => h.as_bytes().to_vec(),
+            None => vec![0u8; 64],
+        };
+        write_sel(&ds, Dtype::Bool, &row, &[1, 64], vec![col..col + 1, 0..64])
+    }
+
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
+    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution: Period) -> Result<()> {
+        let length = data.length();
+        let element_shape = data.element_shape().to_vec();
+        let dtype = data.dtype;
+
+        let dataset_name =
+            self.ensure_writable_dataset(dtype, &element_shape, length, resolution)?;
+        let (col_index, hash_name) = {
+            let state = self.datasets.get(&dataset_name).expect("dataset ensured");
+            let col = state.first_free().ok_or_else(|| {
+                TimeSeriesError::IntegrityError("no free slot in newly-ensured dataset".into())
+            })?;
+            (col, state.hash_name.clone())
+        };
+
+        let ds = self.dataset(&dataset_name)?;
+        let mut slice_shape = vec![length, 1];
+        slice_shape.extend_from_slice(&element_shape);
+        write_sel(
+            &ds,
+            dtype,
+            &data.bytes,
+            &slice_shape,
+            packed_ranges(0..length, col_index, &element_shape),
+        )?;
+        let hex = hash_hex(hash);
+        self.write_hash_row(&hash_name, col_index, Some(&hex))?;
+
+        self.datasets
+            .get_mut(&dataset_name)
+            .expect("dataset ensured")
+            .columns[col_index] = Some(hex);
+        self.by_hash.insert(
+            *hash,
+            Location::Packed {
+                dataset: dataset_name,
+                col: col_index,
+            },
+        );
+        Ok(())
+    }
+
+    /// Write a block of same-shaped packed arrays into one or more freshly
+    /// created, batch-sized datasets — one interleaved hyperslab write per
+    /// dataset (every chunk is written whole, no read-modify-write).
+    #[tracing::instrument(skip(self, hashes, arrays), fields(n = hashes.len()))]
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>> {
+        let mut written = vec![false; hashes.len()];
+
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        let mut new: Vec<(usize, [u8; 32], &TypedArray)> = Vec::with_capacity(hashes.len());
+        for (i, (&hash, &array)) in hashes.iter().zip(arrays).enumerate() {
+            if self.by_hash.contains_key(&hash) || !seen.insert(hash) {
+                continue;
+            }
+            new.push((i, hash, array));
+        }
+        if new.is_empty() {
+            return Ok(written);
+        }
+
+        let dtype = new[0].2.dtype;
+        let element_shape = new[0].2.element_shape().to_vec();
+        let length = new[0].2.length();
+        let block = element_block_bytes(dtype, &element_shape);
+        let group_key = (dtype, element_shape.clone(), length, resolution);
+
+        let mut start = 0;
+        while start < new.len() {
+            let remaining = new.len() - start;
+            let width = resolve_dataset_cols(Some(remaining), dtype, &element_shape);
+            let seg = &new[start..start + width];
+
+            let base = dataset_base_name(dtype, &element_shape, length, resolution);
+            let spill_count = self.dataset_groups.get(&group_key).map_or(0, Vec::len);
+            let name = spill_name(&base, spill_count);
+            self.create_packed_dataset(
+                &name,
+                dtype,
+                &element_shape,
+                length,
+                resolution,
+                Some(width),
+            )?;
+            let hash_name = format!("{name}{HASH_SUFFIX}");
+
+            // Interleave the segment's arrays into one row-major
+            // `(length, width, *element_shape)` buffer and write it as a
+            // single hyperslab covering whole chunks.
+            let mut buf = vec![0u8; length * width * block];
+            for (c, (_, _, array)) in seg.iter().enumerate() {
+                for t in 0..length {
+                    let src = &array.bytes[t * block..(t + 1) * block];
+                    let dst = (t * width + c) * block;
+                    buf[dst..dst + block].copy_from_slice(src);
+                }
+            }
+            let ds = self.dataset(&name)?;
+            let mut slice_shape = vec![length, width];
+            slice_shape.extend_from_slice(&element_shape);
+            write_sel(
+                &ds,
+                dtype,
+                &buf,
+                &slice_shape,
+                packed_block_ranges(0..length, width, &element_shape),
+            )?;
+            // Hash rows for the whole segment in one write.
+            let mut hash_buf = vec![0u8; width * 64];
+            for (c, (_, hash, _)) in seg.iter().enumerate() {
+                hash_buf[c * 64..(c + 1) * 64].copy_from_slice(hash_hex(hash).as_bytes());
+            }
+            let hash_ds = self.dataset(&hash_name)?;
+            write_sel(
+                &hash_ds,
+                Dtype::Bool,
+                &hash_buf,
+                &[width, 64],
+                vec![0..width, 0..64],
+            )?;
+
+            let state = self.datasets.get_mut(&name).expect("dataset created");
+            for (c, (_, hash, _)) in seg.iter().enumerate() {
+                state.columns[c] = Some(hash_hex(hash));
+            }
+            for (c, (orig, hash, _)) in seg.iter().enumerate() {
+                self.by_hash.insert(
+                    *hash,
+                    Location::Packed {
+                        dataset: name.clone(),
+                        col: c,
+                    },
+                );
+                written[*orig] = true;
+            }
+            start += width;
+        }
+        Ok(written)
+    }
+
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
+    fn put_standalone(
+        &mut self,
+        hash: &[u8; 32],
+        data: &TypedArray,
+        window_axis: Option<usize>,
+    ) -> Result<()> {
+        let var = format!("{STANDALONE_PREFIX}{}", hash_hex(hash));
+        if self.standalone_vars.contains(&var) {
+            self.by_hash.insert(*hash, Location::Standalone { var });
+            return Ok(());
+        }
+        let single = self.single()?;
+        // Small arrays go compact (no chunks, no filters, data in the object
+        // header). Larger ones keep the shared chunking policy:
+        // whole-array for irregular series, bounded blocks along the window
+        // axis for dense forecasts.
+        let ds = if data.bytes.len() <= COMPACT_MAX_BYTES || data.shape.contains(&0) {
+            create_ds(
+                &single,
+                &var,
+                data.dtype,
+                &data.shape,
+                None,
+                Compression::None,
+            )?
+        } else {
+            let chunks = standalone_chunks(data, window_axis);
+            create_ds(
+                &single,
+                &var,
+                data.dtype,
+                &data.shape,
+                Some(&chunks),
+                self.compression,
+            )?
+        };
+        if !data.bytes.is_empty() {
+            write_all(&ds, data.dtype, &data.bytes)?;
+        }
+        self.standalone_vars.insert(var.clone());
+        self.by_hash.insert(*hash, Location::Standalone { var });
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, hash, range))]
+    fn read_locked(&self, hash: &[u8; 32], range: Option<Range<usize>>) -> Result<TypedArray> {
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
+        match loc {
+            Location::Packed { dataset, col } => {
+                let state = self.datasets.get(&dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                })?;
+                let total = state.length;
+                let range = range.unwrap_or(0..total);
+                if range.start > range.end || range.end > total {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "slice {:?} out of bounds for length {}",
+                        range, total
+                    )));
+                }
+                let out_len = range.end - range.start;
+                let ds = self.dataset(&dataset)?;
+                let bytes = read_sel(
+                    &ds,
+                    state.dtype,
+                    packed_ranges(range, col, &state.element_shape),
+                )?;
+                let mut shape = vec![out_len];
+                shape.extend_from_slice(&state.element_shape);
+                TypedArray::new(state.dtype, shape, bytes).map_err(TimeSeriesError::IntegrityError)
+            }
+            Location::Standalone { var } => {
+                let ds = self.dataset(&var)?;
+                let full_shape = ds.shape();
+                let dtype = dtype_of_dataset(&ds)?;
+                let total = full_shape.first().copied().unwrap_or(0);
+                match range {
+                    None => {
+                        let bytes = read_all(&ds, dtype)?;
+                        TypedArray::new(dtype, full_shape, bytes)
+                            .map_err(TimeSeriesError::IntegrityError)
+                    }
+                    Some(range) => {
+                        if range.start > range.end || range.end > total {
+                            return Err(TimeSeriesError::InvalidParameter(format!(
+                                "slice {:?} out of bounds for length {}",
+                                range, total
+                            )));
+                        }
+                        let element_shape = &full_shape[1.min(full_shape.len())..];
+                        let out_len = range.end - range.start;
+                        let bytes = read_sel(&ds, dtype, standalone_ranges(range, element_shape))?;
+                        let mut shape = vec![out_len];
+                        shape.extend_from_slice(element_shape);
+                        TypedArray::new(dtype, shape, bytes)
+                            .map_err(TimeSeriesError::IntegrityError)
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_index_locked(
+        &self,
+        hashes: &[[u8; 32]],
+        index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        out.clear();
+        if hashes.is_empty() {
+            return Ok(());
+        }
+
+        enum Placement {
+            Packed { dataset: String, col: usize },
+            Standalone { hash: [u8; 32] },
+        }
+
+        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
+        let mut max_col: HashMap<String, usize> = HashMap::new();
+        for hash in hashes {
+            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => {
+                    max_col
+                        .entry(dataset.clone())
+                        .and_modify(|m| *m = (*m).max(*col))
+                        .or_insert(*col);
+                    placements.push(Placement::Packed {
+                        dataset: dataset.clone(),
+                        col: *col,
+                    });
+                }
+                Location::Standalone { .. } => {
+                    placements.push(Placement::Standalone { hash: *hash });
+                }
+            }
+        }
+
+        let mut rows: HashMap<String, (Vec<u8>, usize)> = HashMap::new();
+        for (dataset, &top) in &max_col {
+            let state = self.datasets.get(dataset).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+            })?;
+            if index >= state.length {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "index {index} out of bounds for dataset {dataset} length {}",
+                    state.length
+                )));
+            }
+            let width = top + 1;
+            let elem_bytes =
+                state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
+            let ds = self.dataset(dataset)?;
+            let bytes = read_sel(
+                &ds,
+                state.dtype,
+                packed_block_ranges(index..index + 1, width, &state.element_shape),
+            )?;
+            rows.insert(dataset.clone(), (bytes, elem_bytes));
+        }
+
+        for placement in &placements {
+            match placement {
+                Placement::Packed { dataset, col } => {
+                    let (row, elem_bytes) = rows.get(dataset).expect("dataset row read above");
+                    let start = col * elem_bytes;
+                    let block = row.get(start..start + elem_bytes).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!(
+                            "column {col} out of row bounds for dataset {dataset}"
+                        ))
+                    })?;
+                    out.extend_from_slice(block);
+                }
+                Placement::Standalone { hash } => {
+                    let arr = self.read_locked(hash, Some(index..index + 1))?;
+                    out.extend_from_slice(&arr.bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_arrays_locked(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        enum Placement {
+            Packed { dataset: String, col: usize },
+            Standalone { hash: [u8; 32] },
+        }
+
+        let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
+        let mut max_col: HashMap<String, usize> = HashMap::new();
+        for hash in hashes {
+            match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => {
+                    max_col
+                        .entry(dataset.clone())
+                        .and_modify(|m| *m = (*m).max(*col))
+                        .or_insert(*col);
+                    placements.push(Placement::Packed {
+                        dataset: dataset.clone(),
+                        col: *col,
+                    });
+                }
+                Location::Standalone { .. } => {
+                    placements.push(Placement::Standalone { hash: *hash });
+                }
+            }
+        }
+
+        struct DatasetRead {
+            bytes: Vec<u8>,
+            width: usize,
+            length: usize,
+            dtype: Dtype,
+            element_shape: Vec<usize>,
+            elem_bytes: usize,
+        }
+        let mut reads: HashMap<String, DatasetRead> = HashMap::new();
+        for (dataset, &top) in &max_col {
+            let state = self.datasets.get(dataset).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+            })?;
+            let width = top + 1;
+            let elem_bytes =
+                state.element_shape.iter().product::<usize>().max(1) * state.dtype.size();
+            let ds = self.dataset(dataset)?;
+            let bytes = read_sel(
+                &ds,
+                state.dtype,
+                packed_block_ranges(0..state.length, width, &state.element_shape),
+            )?;
+            reads.insert(
+                dataset.clone(),
+                DatasetRead {
+                    bytes,
+                    width,
+                    length: state.length,
+                    dtype: state.dtype,
+                    element_shape: state.element_shape.clone(),
+                    elem_bytes,
+                },
+            );
+        }
+
+        let mut out: Vec<TypedArray> = Vec::with_capacity(hashes.len());
+        for placement in &placements {
+            match placement {
+                Placement::Packed { dataset, col } => {
+                    let r = reads.get(dataset).expect("dataset read above");
+                    let mut col_bytes = Vec::with_capacity(r.length * r.elem_bytes);
+                    for t in 0..r.length {
+                        let start = (t * r.width + col) * r.elem_bytes;
+                        let block = r.bytes.get(start..start + r.elem_bytes).ok_or_else(|| {
+                            TimeSeriesError::IntegrityError(format!(
+                                "column {col} out of block bounds for dataset {dataset}"
+                            ))
+                        })?;
+                        col_bytes.extend_from_slice(block);
+                    }
+                    let mut shape = vec![r.length];
+                    shape.extend_from_slice(&r.element_shape);
+                    out.push(
+                        TypedArray::new(r.dtype, shape, col_bytes)
+                            .map_err(TimeSeriesError::IntegrityError)?,
+                    );
+                }
+                Placement::Standalone { hash } => {
+                    out.push(self.read_locked(hash, None)?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
+        match loc {
+            Location::Standalone { var } => {
+                let ds = self.dataset(&var)?;
+                Ok((dtype_of_dataset(&ds)?, ds.shape()))
+            }
+            Location::Packed { dataset, .. } => {
+                let state = self.datasets.get(&dataset).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                })?;
+                let mut shape = vec![state.length];
+                shape.extend_from_slice(&state.element_shape);
+                Ok((state.dtype, shape))
+            }
+        }
+    }
+
+    fn read_window_block_locked(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        out.clear();
+        let loc = self
+            .by_hash
+            .get(hash)
+            .ok_or(TimeSeriesError::NotFound)?
+            .clone();
+        match loc {
+            Location::Standalone { var } => {
+                let ds = self.dataset(&var)?;
+                let dims = ds.shape();
+                if count_axis >= dims.len() {
+                    return Err(TimeSeriesError::IntegrityError(format!(
+                        "count axis {count_axis} out of bounds for shape {dims:?}"
+                    )));
+                }
+                if start + len > dims[count_axis] {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "window block {start}..{} out of bounds for axis length {}",
+                        start + len,
+                        dims[count_axis]
+                    )));
+                }
+                let dtype = dtype_of_dataset(&ds)?;
+                let ranges: Vec<Range<usize>> = dims
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &axis_len)| {
+                        if i == count_axis {
+                            start..start + len
+                        } else {
+                            0..axis_len
+                        }
+                    })
+                    .collect();
+                let bytes = read_sel(&ds, dtype, ranges)?;
+                out.extend_from_slice(&bytes);
+                Ok(())
+            }
+            Location::Packed { .. } => Err(TimeSeriesError::IntegrityError(
+                "forecast window read expects a standalone array, found a packed one".into(),
+            )),
+        }
+    }
+}
+
+impl StorageBackend for Hdf5Backend {
+    #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
+    fn put_array(
+        &mut self,
+        hash: &[u8; 32],
+        data: &TypedArray,
+        resolution: Period,
+        layout: ArrayLayout,
+    ) -> Result<bool> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        inner.ensure_writable()?;
+        if inner.by_hash.contains_key(hash) {
+            return Ok(false);
+        }
+        match layout {
+            ArrayLayout::Packed => inner.put_packed(hash, data, resolution)?,
+            ArrayLayout::Standalone => inner.put_standalone(hash, data, None)?,
+            ArrayLayout::StandaloneWindowed { count_axis } => {
+                inner.put_standalone(hash, data, Some(count_axis))?
+            }
+        }
+        Ok(true)
+    }
+
+    #[tracing::instrument(skip(self, hashes, arrays), fields(n = hashes.len()))]
+    fn put_packed_block(
+        &mut self,
+        hashes: &[[u8; 32]],
+        arrays: &[&TypedArray],
+        resolution: Period,
+    ) -> Result<Vec<bool>> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        inner.ensure_writable()?;
+        inner.put_packed_block(hashes, arrays, resolution)
+    }
+
+    #[tracing::instrument(skip(self, hash))]
+    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_locked(hash, None)
+    }
+
+    #[tracing::instrument(skip(self, hash), fields(start = range.start, end = range.end))]
+    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_locked(hash, Some(range))
+    }
+
+    #[tracing::instrument(skip(self, hashes, out), fields(n = hashes.len(), index))]
+    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_index_locked(hashes, index, out)
+    }
+
+    #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]
+    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_arrays_locked(hashes)
+    }
+
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.array_shape_locked(hash)
+    }
+
+    #[tracing::instrument(skip(self, hash, out), fields(count_axis, window_start))]
+    fn read_window_block_into(
+        &self,
+        hash: &[u8; 32],
+        count_axis: usize,
+        window_start: usize,
+        len: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner.read_window_block_locked(hash, count_axis, window_start, len, out)
+    }
+
+    fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
+        let mut inner = self.inner.lock().expect("mutex poisoned");
+        inner.ensure_writable()?;
+        let loc = match inner.by_hash.remove(hash) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        match loc {
+            // Standalone: drop from the index; the dataset lingers as a
+            // tombstone until compact (HDF5 cannot reclaim the space in place, and
+            // keeping re-adds of the same content a pure re-index).
+            Location::Standalone { .. } => Ok(()),
+            // Packed: drop the column from the index and clear its hash
+            // companion so a reopen does not re-index it. The column's bytes
+            // stay in place as a tombstone until compact, exactly like a
+            // standalone dataset — zeroing them here would cost a whole-chunk
+            // read-modify-write per removal for no reachability change.
+            Location::Packed { dataset, col } => {
+                let hash_name = {
+                    let state = inner.datasets.get_mut(&dataset).ok_or_else(|| {
+                        TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
+                    })?;
+                    if col < state.columns.len() {
+                        state.columns[col] = None;
+                    }
+                    state.hash_name.clone()
+                };
+                inner.write_hash_row(&hash_name, col, None)
+            }
+        }
+    }
+
+    fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        Ok(inner.by_hash.contains_key(hash))
+    }
+
+    fn locate(&self, hash: &[u8; 32]) -> Result<ArrayLocation> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        // Both layouts live in the same group; `path` makes the name absolute
+        // so it can be pasted straight into h5dump/h5py.
+        let path = |name: &str| format!("/{ROOT_GROUP}/{SINGLE_GROUP}/{name}");
+        Ok(
+            match inner.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
+                Location::Packed { dataset, col } => ArrayLocation::Packed {
+                    dataset: path(dataset),
+                    column: *col,
+                },
+                Location::Standalone { var } => ArrayLocation::Standalone { dataset: path(var) },
+            },
+        )
+    }
+
+    fn compact(&mut self) -> Result<CompactionReport> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        let reclaimed = inner
+            .datasets
+            .values()
+            .map(|s| s.columns.iter().filter(|c| c.is_none()).count())
+            .sum();
+        Ok(CompactionReport {
+            slots_reclaimed: reclaimed,
+            datasets_dropped: 0,
+            feature_sets_reclaimed: 0,
+        })
+    }
+
+    fn verify(&self) -> Result<IntegrityReport> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        let mut errors = Vec::new();
+        let hashes: Vec<[u8; 32]> = inner.by_hash.keys().copied().collect();
+        for hash in hashes {
+            match inner.read_locked(&hash, None) {
+                Ok(arr) => {
+                    let recomputed = array_hash(&arr);
+                    if recomputed != hash {
+                        errors.push(format!(
+                            "hash mismatch: stored={} computed={}",
+                            hash_hex(&hash),
+                            hash_hex(&recomputed),
+                        ));
+                    }
+                }
+                Err(e) => errors.push(format!("read error: {e}")),
+            }
+        }
+        Ok(IntegrityReport { errors })
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        if inner.read_only {
+            return Ok(());
+        }
+        inner.file.flush().map_err(map_h5)
+    }
+
+    fn compression(&self) -> Compression {
+        Hdf5Backend::compression(self)
+    }
+}
+
+/// True iff the file at `path` was written by this backend (sniffed from the
+/// `storage_backend` root attribute; netcdf-written stores lack it).
+pub(crate) fn is_hdf5_backend_file(path: &Path) -> bool {
+    let Ok(file) = h5::File::open(path) else {
+        return false;
+    };
+    read_str_attr(&file, BACKEND_ATTR).as_deref() == Some(BACKEND_NAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::array_hash;
+    use crate::types::array::TypedArray;
+
+    fn f64_array(shape: Vec<usize>, seed: f64) -> TypedArray {
+        let n: usize = shape.iter().product();
+        let vals: Vec<f64> = (0..n).map(|x| seed + x as f64).collect();
+        TypedArray::from_f64(shape, &vals)
+    }
+
+    fn res() -> Period {
+        Period::from_iso8601("PT1H").unwrap()
+    }
+
+    #[test]
+    fn packed_round_trip_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![24], 0.0);
+        let b = f64_array(vec![24], 100.0);
+        let (ha, hb) = (array_hash(&a), array_hash(&b));
+        {
+            let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
+            assert!(be.put_array(&hb, &b, res(), ArrayLayout::Packed).unwrap());
+            // Duplicate put is a no-op.
+            assert!(!be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
+            assert_eq!(be.get_array(&ha).unwrap(), a);
+            assert_eq!(be.get_array(&hb).unwrap(), b);
+            let slice = be.get_slice(&ha, 6..18).unwrap();
+            assert_eq!(slice.shape, vec![12]);
+            assert_eq!(slice.bytes, a.bytes[6 * 8..18 * 8]);
+            be.flush().unwrap();
+        }
+        // Reopen: index rebuilt from the hash companions.
+        let be = Hdf5Backend::open(&path, true).unwrap();
+        assert_eq!(be.get_array(&ha).unwrap(), a);
+        assert_eq!(be.get_array(&hb).unwrap(), b);
+        assert!(be.verify().unwrap().ok());
+    }
+
+    #[test]
+    fn packed_block_write_and_bulk_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let arrays: Vec<TypedArray> = (0..7).map(|i| f64_array(vec![8, 3], i as f64)).collect();
+        let hashes: Vec<[u8; 32]> = arrays.iter().map(array_hash).collect();
+        let refs: Vec<&TypedArray> = arrays.iter().collect();
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        let written = be.put_packed_block(&hashes, &refs, res()).unwrap();
+        assert!(written.iter().all(|&w| w));
+        // read_arrays gathers all columns from one hyperslab per dataset.
+        let out = be.read_arrays(&hashes).unwrap();
+        assert_eq!(out, arrays);
+        // read_index_into returns each column's element block at one timestep.
+        let mut buf = Vec::new();
+        be.read_index_into(&hashes, 5, &mut buf).unwrap();
+        let elem = 3 * 8;
+        for (i, a) in arrays.iter().enumerate() {
+            assert_eq!(buf[i * elem..(i + 1) * elem], a.bytes[5 * elem..6 * elem]);
+        }
+    }
+
+    #[test]
+    fn standalone_forecast_round_trip_window_reads_and_compact_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        // (horizon=6, count=4) dense forecast, small enough for compact.
+        let a = f64_array(vec![6, 4], 0.0);
+        let ha = array_hash(&a);
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(
+            &ha,
+            &a,
+            res(),
+            ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        )
+        .unwrap();
+        assert_eq!(be.get_array(&ha).unwrap(), a);
+        assert_eq!(be.array_shape(&ha).unwrap(), (Dtype::F64, vec![6, 4]));
+        // Window block: windows 1..3 along axis 1.
+        let mut buf = Vec::new();
+        be.read_window_block_into(&ha, 1, 1, 2, &mut buf).unwrap();
+        let mut expect = Vec::new();
+        for h in 0..6 {
+            expect.extend_from_slice(&a.bytes[(h * 4 + 1) * 8..(h * 4 + 3) * 8]);
+        }
+        assert_eq!(buf, expect);
+        // Small standalone arrays use the compact layout (no chunk index).
+        {
+            let inner = be.inner.lock().unwrap();
+            let ds = inner
+                .dataset(&format!("{STANDALONE_PREFIX}{}", hash_hex(&ha)))
+                .unwrap();
+            assert_eq!(ds.layout(), h5::dataset::Layout::Compact);
+        }
+        // A large forecast falls back to chunked+compressed.
+        let big = f64_array(vec![24, 400], 0.5); // 76.8 KB > COMPACT_MAX_BYTES
+        let hb = array_hash(&big);
+        be.put_array(
+            &hb,
+            &big,
+            res(),
+            ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        )
+        .unwrap();
+        assert_eq!(be.get_array(&hb).unwrap(), big);
+        {
+            let inner = be.inner.lock().unwrap();
+            let ds = inner
+                .dataset(&format!("{STANDALONE_PREFIX}{}", hash_hex(&hb)))
+                .unwrap();
+            assert_eq!(ds.layout(), h5::dataset::Layout::Chunked);
+        }
+        // Reopen keeps both readable.
+        drop(be);
+        let be = Hdf5Backend::open(&path, false).unwrap();
+        assert_eq!(be.get_array(&ha).unwrap(), a);
+        assert_eq!(be.get_array(&hb).unwrap(), big);
+        assert!(be.verify().unwrap().ok());
+    }
+
+    #[test]
+    fn remove_and_re_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![24], 0.0);
+        let ha = array_hash(&a);
+        let f = f64_array(vec![6, 4], 9.0);
+        let hf = array_hash(&f);
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
+        be.put_array(
+            &hf,
+            &f,
+            res(),
+            ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        )
+        .unwrap();
+        be.remove_array(&ha).unwrap();
+        be.remove_array(&hf).unwrap();
+        assert!(!be.contains(&ha).unwrap());
+        assert!(!be.contains(&hf).unwrap());
+        assert!(matches!(be.get_array(&ha), Err(TimeSeriesError::NotFound)));
+        // Re-adding reuses the freed packed slot / tombstoned standalone var.
+        assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
+        assert!(
+            be.put_array(
+                &hf,
+                &f,
+                res(),
+                ArrayLayout::StandaloneWindowed { count_axis: 1 }
+            )
+            .unwrap()
+        );
+        assert_eq!(be.get_array(&ha).unwrap(), a);
+        assert_eq!(be.get_array(&hf).unwrap(), f);
+    }
+
+    #[test]
+    fn read_only_open_rejects_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![4], 0.0);
+        let ha = array_hash(&a);
+        {
+            let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
+        }
+        let mut be = Hdf5Backend::open(&path, true).unwrap();
+        assert_eq!(be.get_array(&ha).unwrap(), a);
+        let b = f64_array(vec![4], 5.0);
+        let hb = array_hash(&b);
+        assert!(matches!(
+            be.put_array(&hb, &b, res(), ArrayLayout::Packed),
+            Err(TimeSeriesError::ReadOnlyStore)
+        ));
+    }
+
+    #[test]
+    fn backend_sniff() {
+        let dir = tempfile::tempdir().unwrap();
+        let h5_path = dir.path().join("h.h5");
+        let plain_path = dir.path().join("p.h5");
+        Hdf5Backend::create(&h5_path, Compression::default()).unwrap();
+        // A valid HDF5 file without the backend attribute (e.g. one written by
+        // the removed netcdf backend) is not recognized as ours.
+        h5::File::create(&plain_path).unwrap();
+        assert!(is_hdf5_backend_file(&h5_path));
+        assert!(!is_hdf5_backend_file(&plain_path));
+    }
+
+    #[test]
+    fn standalone_chunk_shapes_follow_the_layout_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        // Big enough to skip the compact layout so a chunk shape exists.
+        let windowed = f64_array(vec![3, 4000], 0.0);
+        let whole = f64_array(vec![3, 4000], 1.0);
+        let (hw, hn) = (array_hash(&windowed), array_hash(&whole));
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(
+            &hw,
+            &windowed,
+            res(),
+            ArrayLayout::StandaloneWindowed { count_axis: 1 },
+        )
+        .unwrap();
+        be.put_array(&hn, &whole, res(), ArrayLayout::Standalone)
+            .unwrap();
+        let inner = be.inner.lock().unwrap();
+        // Full on the horizon axis, blocked along the count axis.
+        let cols = super::super::common::window_block_cols(Dtype::F64, &[3, 4000], 1);
+        let ds = inner
+            .dataset(&format!("{STANDALONE_PREFIX}{}", hash_hex(&hw)))
+            .unwrap();
+        assert_eq!(ds.chunk(), Some(vec![3, cols]));
+        // No window axis -> a single whole-array chunk.
+        let ds = inner
+            .dataset(&format!("{STANDALONE_PREFIX}{}", hash_hex(&hn)))
+            .unwrap();
+        assert_eq!(ds.chunk(), Some(vec![3, 4000]));
+    }
+}

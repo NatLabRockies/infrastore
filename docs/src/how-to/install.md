@@ -7,10 +7,10 @@ workspace build, see [Installation](../getting-started/installation.md).
 
 ```sh
 # macOS
-brew install hdf5 netcdf protobuf
+brew install hdf5 protobuf
 
 # Debian / Ubuntu
-sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
+sudo apt-get install libhdf5-dev protobuf-compiler
 ```
 
 If the build fails with `Unable to locate HDF5 root directory and/or headers`, set `HDF5_DIR`:

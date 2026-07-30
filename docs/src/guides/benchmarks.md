@@ -17,11 +17,11 @@ The binary is placed at `target/release/infrastore-bench`.
 
 ## Subcommands
 
-| Subcommand | What it measures                                                               |
-| ---------- | ------------------------------------------------------------------------------ |
-| `add`      | `add_time_series_bulk` throughput — NetCDF packing and SQLite transaction cost |
-| `read`     | Per-timestep simulation I/O — reading all N components at each step t          |
-| `all`      | Runs `add` then `read` back-to-back                                            |
+| Subcommand | What it measures                                                             |
+| ---------- | ---------------------------------------------------------------------------- |
+| `add`      | `add_time_series_bulk` throughput — HDF5 packing and SQLite transaction cost |
+| `read`     | Per-timestep simulation I/O — reading all N components at each step t        |
+| `all`      | Runs `add` then `read` back-to-back                                          |
 
 ## Common flags
 
@@ -51,9 +51,9 @@ Reports for both `SingleTimeSeries` and `Deterministic`:
   excluded from the add throughput measurement).
 - **`add_time_series_bulk`** — wall time, items/s, and data MB/s.
 
-`SingleTimeSeries` arrays are column-packed into NetCDF datasets of up to 1 000 columns each and
+`SingleTimeSeries` arrays are column-packed into HDF5 datasets of up to 1 000 columns each and
 wrapped in a single SQLite transaction; the add benchmark stresses both. `Deterministic` arrays are
-standalone NetCDF variables; their add cost is dominated by per-variable write overhead and the same
+standalone HDF5 variables; their add cost is dominated by per-variable write overhead and the same
 single-transaction SQLite commit.
 
 ## Read benchmark
@@ -78,7 +78,7 @@ for t in 0..T:
 ```
 
 For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
-This rebuilds the NetCDF in-memory index and starts the HDF5 chunk cache cold, reflecting real
+This rebuilds the HDF5 in-memory index and starts the HDF5 chunk cache cold, reflecting real
 simulation startup conditions. The OS page cache may still be warm.
 
 Reports per-step **min / median / p95 / max** and total **component-reads/s**.
@@ -92,9 +92,9 @@ Reports per-step **min / median / p95 / max** and total **component-reads/s**.
 
 The two metrics to watch:
 
-- **`add` throughput** drops sharply when the number of items exceeds a SQLite transaction or NetCDF
+- **`add` throughput** drops sharply when the number of items exceeds a SQLite transaction or HDF5
   dataset threshold. If adding 100 000 items is notably slower per-item than adding 10 000, the
-  bottleneck is likely the SQLite commit or NetCDF file growth, not array construction.
+  bottleneck is likely the SQLite commit or HDF5 file growth, not array construction.
 
 - **Per-step time** for the read benchmark scales linearly with `--count`. If the cost per step is
   much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
@@ -120,28 +120,28 @@ infrastore-bench --log-level debug add --count 100
 
 The key spans emitted by `infrastore-core`:
 
-| Span                      | Layer          | Key fields                                       |
-| ------------------------- | -------------- | ------------------------------------------------ |
-| `add_time_series_bulk`    | `Store`        | `count` — number of items in the bulk request    |
-| `get_time_series`         | `Store`        | `owner`, `name`, `has_time_range`                |
-| `copy_time_series`        | `Store`        | `owner`, `name` — of the source series           |
-| `remove_time_series`      | `Store`        | `owner`, `name`                                  |
-| `bulk_read`               | `Store`        | `count` — number of keys read in one pass        |
-| `put_array`               | NetCDF backend | `bytes`, `packed`                                |
-| `put_packed`              | NetCDF backend | `bytes`                                          |
-| `put_packed_block`        | NetCDF backend | `n` — series written in one batch-sized block    |
-| `put_standalone`          | NetCDF backend | `bytes`                                          |
-| `get_array` / `get_slice` | NetCDF backend | `start`, `end` (slice only)                      |
-| `read_arrays`             | NetCDF backend | `n` — arrays fetched in one decompress-once pass |
-| `read_index_into`         | NetCDF backend | `n`, `index` — one timestep across `n` series    |
-| `read_window_into`        | NetCDF backend | `count_axis`, `window_index`                     |
-| `read_locked`             | NetCDF backend | —                                                |
-| `rebuild_index`           | NetCDF backend | — (runs once on `Store::open`)                   |
+| Span                      | Layer        | Key fields                                       |
+| ------------------------- | ------------ | ------------------------------------------------ |
+| `add_time_series_bulk`    | `Store`      | `count` — number of items in the bulk request    |
+| `get_time_series`         | `Store`      | `owner`, `name`, `has_time_range`                |
+| `copy_time_series`        | `Store`      | `owner`, `name` — of the source series           |
+| `remove_time_series`      | `Store`      | `owner`, `name`                                  |
+| `bulk_read`               | `Store`      | `count` — number of keys read in one pass        |
+| `put_array`               | HDF5 backend | `bytes`, `packed`                                |
+| `put_packed`              | HDF5 backend | `bytes`                                          |
+| `put_packed_block`        | HDF5 backend | `n` — series written in one batch-sized block    |
+| `put_standalone`          | HDF5 backend | `bytes`                                          |
+| `get_array` / `get_slice` | HDF5 backend | `start`, `end` (slice only)                      |
+| `read_arrays`             | HDF5 backend | `n` — arrays fetched in one decompress-once pass |
+| `read_index_into`         | HDF5 backend | `n`, `index` — one timestep across `n` series    |
+| `read_window_into`        | HDF5 backend | `count_axis`, `window_index`                     |
+| `read_locked`             | HDF5 backend | —                                                |
+| `rebuild_index`           | HDF5 backend | — (runs once on `Store::open`)                   |
 
 Spans nest: a single `add_time_series_bulk` call groups packed series by shape and emits one
 `put_packed_block` span per group (filling whole chunks), plus a `put_array` → `put_standalone` span
 per standalone item; a single `add_time_series` call instead emits one `put_array` → `put_packed`
-span. This makes it straightforward to see whether time is spent in metadata insertion, NetCDF I/O,
-or the `debug_span` overhead itself.
+span. This makes it straightforward to see whether time is spent in metadata insertion, HDF5 I/O, or
+the `debug_span` overhead itself.
 
 The `infrastore` CLI supports the same `--log-level` flag for diagnosing a live store.

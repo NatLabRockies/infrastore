@@ -16,7 +16,7 @@ dprint check
 if command -v shellcheck >/dev/null 2>&1; then
   # Lint only files git knows about (the index, so staged additions count).
   # Walking the tree instead picks up scripts we do not own, such as the
-  # vendored netcdf-c shell scripts left behind by a local BinaryBuilder run.
+  # vendored HDF5 shell scripts left behind by a local BinaryBuilder run.
   if git ls-files -- '*.sh' | grep -q .; then
     echo '+shellcheck (tracked .sh files)'
     git ls-files -z -- '*.sh' | xargs -0 shellcheck --

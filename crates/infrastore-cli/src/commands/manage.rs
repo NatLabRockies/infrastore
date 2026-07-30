@@ -290,7 +290,7 @@ pub fn copy(
     Ok(())
 }
 
-/// `persist`: write the store to a new NetCDF + SQLite artifact.
+/// `persist`: write the store to a new HDF5 + SQLite artifact.
 pub fn persist(store_path: &Path, dest: &Path) -> Result<(), String> {
     let mut store = store_access::open_writable(store_path)?;
     store.persist_to(dest).map_err(|e| e.to_string())?;

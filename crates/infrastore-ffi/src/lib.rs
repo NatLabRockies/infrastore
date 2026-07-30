@@ -263,7 +263,7 @@ pub unsafe extern "C" fn infrastore_store_create(
     INFRASTORE_OK
 }
 
-/// Create a store with an explicit NetCDF compression policy.
+/// Create a store with an explicit compression policy.
 ///
 /// `compression_kind` selects the filter: `0` = none (uncompressed), `1` =
 /// DEFLATE at `deflate_level` (0–9) with byte `shuffle` when non-zero. Any
@@ -775,8 +775,11 @@ pub unsafe extern "C" fn infrastore_store_get_single(
             Ok(r) => r,
             Err(c) => return c,
         };
-    let data = match store.inner.get_time_series(&key.inner, time_range) {
-        Ok(d) => d,
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(&key.inner, time_range)
+    {
+        Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
     let single = match data {
@@ -801,14 +804,11 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         }
     };
     // The extension payload lives on the metadata row, not on the reconstructed
-    // series; a null `out_ext` skips the lookup.
+    // series; the row came back with the data from the single catalog lookup.
     let ext_cstr = if out_ext.is_null() {
         std::ptr::null_mut()
     } else {
-        match store.inner.get_metadata(&key.inner) {
-            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
-            Err(error) => return map_core_error(error),
-        }
+        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
@@ -896,28 +896,30 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
             Ok(r) => r,
             Err(c) => return c,
         };
-    let series = match store.inner.get_time_series(&key.inner, time_range) {
-        Ok(core_lib::TimeSeriesData::NonSequentialTimeSeries(series)) => series,
-        Ok(core_lib::TimeSeriesData::SingleTimeSeries(_)) => {
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(&key.inner, time_range)
+    {
+        Ok(pair) => pair,
+        Err(error) => return map_core_error(error),
+    };
+    let series = match data {
+        core_lib::TimeSeriesData::NonSequentialTimeSeries(series) => series,
+        core_lib::TimeSeriesData::SingleTimeSeries(_) => {
             set_error("key does not identify a NonSequentialTimeSeries");
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
         // Forecast types are not yet exposed through this FFI entry point.
-        Ok(
-            core_lib::TimeSeriesData::Deterministic(_)
-            | core_lib::TimeSeriesData::Probabilistic(_)
-            | core_lib::TimeSeriesData::Scenarios(_),
-        ) => {
+        core_lib::TimeSeriesData::Deterministic(_)
+        | core_lib::TimeSeriesData::Probabilistic(_)
+        | core_lib::TimeSeriesData::Scenarios(_) => {
             set_error("key identifies a forecast type; use the forecast FFI");
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
-        Err(error) => return map_core_error(error),
     };
-    // The extension payload lives on the metadata row, not on the reconstructed series.
-    let ext = match store.inner.get_metadata(&key.inner) {
-        Ok(meta) => meta.ext.unwrap_or_default(),
-        Err(error) => return map_core_error(error),
-    };
+    // The extension payload lives on the metadata row, not on the reconstructed
+    // series; the row came back with the data from the single catalog lookup.
+    let ext = meta.ext.unwrap_or_default();
     let mut timestamps = match series
         .timestamps
         .iter()
@@ -1236,7 +1238,7 @@ pub unsafe extern "C" fn infrastore_store_get_resolutions(
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1286,7 +1288,7 @@ pub unsafe extern "C" fn infrastore_store_get_intervals(
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1330,7 +1332,7 @@ pub unsafe extern "C" fn infrastore_store_read_only(
     INFRASTORE_OK
 }
 
-/// Write the store's backing NetCDF path into `buf` (probe-then-fetch: call with a
+/// Write the store's backing HDF5 file path into `buf` (probe-then-fetch: call with a
 /// null `buf` to learn `*out_len`, then again with a buffer of that size). An
 /// in-memory store has no path: `*out_has_path` is set to false and `*out_len` to 0.
 ///
@@ -1352,7 +1354,7 @@ pub unsafe extern "C" fn infrastore_store_get_path(
         set_error("out_has_path or out_len is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    match store.inner.netcdf_path() {
+    match store.inner.file_path() {
         Some(path) => {
             unsafe { *out_has_path = true };
             unsafe { write_str_out(&path.to_string_lossy(), buf, cap, out_len) };
@@ -1505,7 +1507,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_ids(
         }
     };
     let ts_type = if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => Some(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -1697,9 +1699,9 @@ pub unsafe extern "C" fn infrastore_store_get_compression(
 /// Recompute each stored array's content hash and report how many disagree with
 /// the hash recorded alongside them through `out_error_count`.
 ///
-/// Covers the NetCDF half of the store only: the SQLite catalog is not inspected,
+/// Covers the HDF5 half of the store only: the SQLite catalog is not inspected,
 /// so a zero count does not mean the store as a whole is sound. A catalog that is
-/// corrupted, truncated, or paired with the wrong NetCDF file still reports zero,
+/// corrupted, truncated, or paired with the wrong HDF5 file still reports zero,
 /// while every read of the affected series fails.
 ///
 /// # Safety
@@ -1845,7 +1847,7 @@ pub unsafe extern "C" fn infrastore_store_flush(handle: *mut InfraStoreHandle) -
     }
 }
 
-/// Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+/// Persist the store's data to `path` (HDF5 arrays) and `<path>.sqlite` (metadata),
 /// materializing in-memory stores to disk. Existing target files are overwritten.
 ///
 /// # Safety
@@ -2035,7 +2037,7 @@ pub unsafe extern "C" fn infrastore_store_has_for_owner(
         .owner_id(owner_id)
         .owner_category(category);
     if use_type {
-        let t = match time_series_type_from_int(ts_type) {
+        let t = match resolve_requested_type_from_int(ts_type) {
             Some(t) => t,
             None => {
                 set_error(format!("invalid time_series_type {ts_type}"));
@@ -3810,19 +3812,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     } else {
         None
     };
-    let data = match store.inner.get_time_series(key.identity(), time_range) {
-        Ok(d) => d,
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(key.identity(), time_range)
+    {
+        Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
-    // The association's `ext` payload lives on the metadata row; a null
-    // `out_ext` skips the lookup.
+    // The association's `ext` payload lives on the metadata row; the row came
+    // back with the data from the single catalog lookup.
     let ext_cstr = if out_ext.is_null() {
         std::ptr::null_mut()
     } else {
-        match store.inner.get_metadata(key.identity()) {
-            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
-            Err(error) => return map_core_error(error),
-        }
+        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
     let code = unsafe {
         *out_matched_type = matched_type;
@@ -4118,19 +4120,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     } else {
         None
     };
-    let data = match store.inner.get_time_series(&key.inner, time_range) {
-        Ok(d) => d,
+    let (data, meta) = match store
+        .inner
+        .get_time_series_with_metadata(&key.inner, time_range)
+    {
+        Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
-    // The association's `ext` payload lives on the metadata row; a null
-    // `out_ext` skips the lookup.
+    // The association's `ext` payload lives on the metadata row; the row came
+    // back with the data from the single catalog lookup.
     let ext_cstr = if out_ext.is_null() {
         std::ptr::null_mut()
     } else {
-        match store.inner.get_metadata(&key.inner) {
-            Ok(meta) => meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr),
-            Err(error) => return map_core_error(error),
-        }
+        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
     let code = unsafe {
         *out_matched_type = matched_type;
@@ -4947,7 +4949,7 @@ unsafe fn build_list_filter(
         filter = filter.owner_category(category);
     }
     if has_time_series_type {
-        match time_series_type_from_int(time_series_type) {
+        match resolve_requested_type_from_int(time_series_type) {
             Some(t) => filter = filter.time_series_type(t),
             None => {
                 set_error(format!("invalid time_series_type {time_series_type}"));
@@ -6833,7 +6835,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
         set_error("out_reader is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let ts_type = match time_series_type_from_int(time_series_type) {
+    let ts_type = match requested_type_from_int(time_series_type) {
         Some(t) => t,
         None => {
             set_error(format!("invalid time_series_type {time_series_type}"));
@@ -7648,7 +7650,7 @@ mod abi_tests {
     #[test]
     fn create_add_flush_free_then_reopen_read_only() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("abi.nc");
+        let path = dir.path().join("abi.h5");
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
 
         // create on a real path
@@ -7826,7 +7828,7 @@ mod abi_tests {
         assert_eq!(len, 0);
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("persisted.nc");
+        let path = dir.path().join("persisted.h5");
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
         assert_eq!(
             unsafe { infrastore_store_persist(store, path_c.as_ptr()) },
@@ -7849,7 +7851,7 @@ mod abi_tests {
     #[test]
     fn opening_a_missing_path_reports_an_error_and_a_message() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("nope.nc");
+        let missing = dir.path().join("nope.h5");
         let path_c = CString::new(missing.to_str().unwrap()).unwrap();
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         let rc = unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut store) };
@@ -8204,7 +8206,7 @@ mod abi_tests {
         );
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codes.nc");
+        let path = dir.path().join("codes.h5");
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
 
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
