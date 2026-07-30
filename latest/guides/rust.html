@@ -209,11 +209,11 @@ use infrastore_core::{create_store, open_store};
 // In-memory (tests, scratch work): no filesystem I/O.
 let mut store = create_store(None, true)?;
 
-// On disk: writes system.nc and system.nc.sqlite.
-let mut store = create_store(Some(Path::new("system.nc")), false)?;
+// On disk: writes system.h5 and system.h5.sqlite.
+let mut store = create_store(Some(Path::new("system.h5")), false)?;
 
 // Reopen later, read-only.
-let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
+let store = open_store(Path::new("system.h5"), /* read_only */ true)?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -557,10 +557,10 @@ assert_eq!(updated, 1);
 <span class="boring">}</span></code></pre></pre>
 <p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
-<p>The NetCDF backend buffers writes. Call <code>flush</code> before copying the files for backup:</p>
+<p>The HDF5 backend buffers writes. Call <code>flush</code> before copying the files for backup:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>store.flush()?;   // nc_sync; afterwards system.nc + system.nc.sqlite can be copied as a pair
+</span>store.flush()?;   // H5Fflush; afterwards system.h5 + system.h5.sqlite can be copied as a pair
 <span class="boring">}</span></code></pre></pre>
 <p><code>persist_to</code> writes the whole store to a new path — both halves of the artifact, <code>path</code> and
 <code>&lt;path&gt;.sqlite</code>, overwriting anything already there. It works for an on-disk store (it flushes and
@@ -570,9 +570,9 @@ with <code>create_store(None, true)</code>:</p>
 </span><span class="boring">fn main() {
 </span>let mut store = create_store(None, true)?;   // in-memory
 // ... add series ...
-store.persist_to(Path::new("system.nc"))?;   // writes system.nc + system.nc.sqlite
+store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sqlite
 <span class="boring">}</span></code></pre></pre>
-<p>Always keep the <code>.nc</code> and <code>.nc.sqlite</code> files together — neither is usable alone.</p>
+<p>Always keep the <code>.h5</code> and <code>.h5.sqlite</code> files together — neither is usable alone.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
 <p>Every fallible method returns <code>Result&lt;T, TimeSeriesError&gt;</code>. Match on the variant to react:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]

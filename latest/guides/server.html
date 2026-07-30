@@ -192,8 +192,8 @@ guide covers running the server and talking to it from Rust. For the wire contra
 <a href="../reference/server-config.html">Server Configuration</a>.</p>
 <h2 id="when-to-use-it"><a class="header" href="#when-to-use-it">When to Use It</a></h2>
 <p>Use the server to fan out reads of an existing store to many clients or across the network — for
-example, serving a published dataset to analysis jobs. A single writer produces the <code>.nc</code> +
-<code>.nc.sqlite</code> pair locally; the server then reads it and answers queries. It never modifies the
+example, serving a published dataset to analysis jobs. A single writer produces the <code>.h5</code> +
+<code>.h5.sqlite</code> pair locally; the server then reads it and answers queries. It never modifies the
 files.</p>
 <h2 id="run-the-server"><a class="header" href="#run-the-server">Run the Server</a></h2>
 <ol>
@@ -207,7 +207,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.nc"]   # the .nc.sqlite catalog must sit beside it
+files = ["./system.h5"]   # the .h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"

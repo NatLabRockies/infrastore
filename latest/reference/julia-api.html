@@ -230,7 +230,7 @@ open_store(path::AbstractString; read_only::Bool=false) -&gt; Store
 </code></pre>
 <ul>
 <li><code>Store()</code> — in-memory store.</li>
-<li><code>Store(in_memory=false, path="system.nc")</code> — persists to <code>system.nc</code> plus <code>system.nc.sqlite</code>.</li>
+<li><code>Store(in_memory=false, path="system.h5")</code> — persists to <code>system.h5</code> plus <code>system.h5.sqlite</code>.</li>
 <li><code>compression=:none</code> stores arrays uncompressed; <code>:deflate</code> (default) applies DEFLATE at
 <code>compression_level</code> (0–9) with optional byte <code>shuffle</code>. The policy is persisted with the store and
 reused on later appends; it is ignored for in-memory stores. An unknown <code>compression</code> throws
@@ -310,8 +310,9 @@ abstract type DeterministicSingleTimeSeries &lt;: AbstractDeterministic end
 
 # Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
 # Pass it as the requested type to get_time_series to read whichever of the two
-# is stored (see Reading forecast values). It is NOT a valid build_forecast_reader
-# type — that call takes a concrete forecast type.
+# is stored (see Reading forecast values), as a catalog filter to match both, or
+# to build_forecast_reader, where it reads like a Deterministic reader. No row is
+# ever stored under it.
 abstract type AbstractDeterministic end
 
 mutable struct Store
@@ -684,9 +685,9 @@ filter must name a forecast type and pin a resolution; a <code>Deterministic</co
 includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>[H, *E]</code> windows). All matched
 forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
 <p><code>time_series_type</code> must be one of the four concrete forecast types — <code>Deterministic</code>,
-<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>. Any other type (including
-<code>AbstractDeterministic</code>, which is a <code>get_time_series</code> request type only) raises
-<code>InvalidParameterError</code>; a <code>Deterministic</code> reader already covers the family.</p>
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — or <code>AbstractDeterministic</code>, which
+reads exactly like a <code>Deterministic</code> reader (already abstract over the pair). Any other type raises
+<code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
                       features=Dict()) -&gt; ForecastReader
@@ -714,7 +715,7 @@ end
 <h4 id="window-read-deduplication"><a class="header" href="#window-read-deduplication">Window-read deduplication</a></h4>
 <p>Forecasts that reference the <strong>same backing array and read plan</strong> — deduplicated identical data, or
 several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code> — collapse to a single <em>window
-slot</em>. <code>forecast_read!</code> performs one backend (<code>.nc</code>) read per slot, not per entry, so a forecast
+slot</em>. <code>forecast_read!</code> performs one backend (<code>.h5</code>) read per slot, not per entry, so a forecast
 shared by N owners is read once per timestamp. <code>forecast_num_slots(reader)</code> is that physical read
 count (<code>≤ length(forecast_entries(reader))</code>), and every <code>ForecastEntry.slot</code> (0-based) identifies
 the slot backing that entry; entries that share data report the same <code>slot</code>. Group entries by <code>slot</code>
@@ -745,7 +746,7 @@ get_resolutions(store; time_series_type=nothing) -&gt; Vector{Period}  # distinc
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; Nothing
-flush!(store) -&gt; Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
+flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only
@@ -773,8 +774,9 @@ and independent, and combine as a conjunction; with none set the whole store is 
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
 <li><code>time_series_type</code> — the Julia type (<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), the same value the
-<code>time_series_type</code> field of a returned row carries. A filter selects stored rows, so
-<code>AbstractDeterministic</code> is rejected: filter on <code>Deterministic</code> or <code>DeterministicSingleTimeSeries</code>.</li>
+<code>time_series_type</code> field of a returned row carries, or <code>AbstractDeterministic</code> to match both
+<code>Deterministic</code> and <code>DeterministicSingleTimeSeries</code> (no row is ever <em>stored</em> under the family, so
+it never appears in a returned row).</li>
 <li><code>name</code> — exact association name.</li>
 <li><code>resolution</code> — a <code>Period</code>.</li>
 <li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval

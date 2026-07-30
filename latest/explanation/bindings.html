@@ -277,7 +277,7 @@ for fan-out reads of an existing store. See the <a href="../guides/server.html">
 <a href="../reference/grpc-api.html">gRPC API reference</a>.</p>
 <h2 id="cli-infrastore"><a class="header" href="#cli-infrastore">CLI (<code>infrastore</code>)</a></h2>
 <p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, a thin wrapper over the core <code>Store</code> for use from a
-terminal. Unlike the gRPC server it is <strong>not</strong> read-only: it opens the on-disk <code>.nc</code> + <code>.nc.sqlite</code>
+terminal. Unlike the gRPC server it is <strong>not</strong> read-only: it opens the on-disk <code>.h5</code> + <code>.h5.sqlite</code>
 pair directly and supports both reads and writes. Its shape:</p>
 <ul>
 <li><strong>CSV in, store out.</strong> Numeric values come from a CSV; the metadata that does not fit a flat grid
@@ -292,7 +292,7 @@ mode can be added without touching the command handlers; today there is no remot
 <h2 id="what-every-binding-shares"><a class="header" href="#what-every-binding-shares">What Every Binding Shares</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Single source of truth</th></tr></thead><tbody>
 <tr><td>Types &amp; validation</td><td><code>infrastore-core</code> (<code>Store</code>, <code>TimeSeriesKey</code>, <code>Features</code>)</td></tr>
-<tr><td>On-disk format</td><td><code>NetCdfBackend</code> + <code>MetadataStore</code> — identical regardless of caller</td></tr>
+<tr><td>On-disk format</td><td><code>Hdf5Backend</code> + <code>MetadataStore</code> — identical regardless of caller</td></tr>
 <tr><td>Hashing</td><td><code>array_hash</code> / <code>features_hash</code> — the cross-language contract</td></tr>
 <tr><td>Error taxonomy</td><td><code>TimeSeriesError</code>, re-projected into each language's idiom</td></tr>
 </tbody></table>

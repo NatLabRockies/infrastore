@@ -206,7 +206,7 @@ on-disk format.</p>
         STORE[&quot;Store&quot;]
         META[&quot;MetadataStore&lt;br/&gt;(SQLite)&quot;]
         BACK[&quot;StorageBackend&lt;br/&gt;(trait)&quot;]
-        NC[&quot;NetCdfBackend&quot;]
+        NC[&quot;Hdf5Backend&quot;]
         MEM[&quot;MemoryBackend&quot;]
         STORE --&gt; META
         STORE --&gt; BACK
@@ -257,7 +257,7 @@ on-disk format.</p>
     CALL[&quot;add_time_series(...)&quot;] --&gt; HASH[&quot;array_hash()&quot;]
     HASH --&gt; PUT[&quot;backend.put_array(hash, data)&quot;]
     HASH --&gt; INS[&quot;MetadataStore::insert(association)&quot;]
-    PUT --&gt; NC[(&quot;NetCDF4&quot;)]
+    PUT --&gt; NC[(&quot;HDF5&quot;)]
     INS --&gt; SQL[(&quot;SQLite&quot;)]
 
     style CALL fill:#4a9eff,color:#fff
@@ -271,17 +271,17 @@ on-disk format.</p>
 trait. v0 ships two implementations:</p>
 <ul>
 <li><strong><code>MemoryBackend</code></strong> — arrays in a hash map; selected when <code>in_memory = true</code>. No filesystem I/O.</li>
-<li><strong><code>NetCdfBackend</code></strong> — arrays in a NetCDF4 file; selected when a path is given.</li>
+<li><strong><code>Hdf5Backend</code></strong> — arrays in an HDF5 file; selected when a path is given.</li>
 </ul>
 <p>Because the seam is a trait, the metadata layer, the hashing, and every binding are identical no
-matter where the arrays live. Tests run against the memory backend; production uses NetCDF.</p>
+matter where the arrays live. Tests run against the memory backend; production uses HDF5.</p>
 <h2 id="why-two-files"><a class="header" href="#why-two-files">Why Two Files</a></h2>
 <p>Numerical arrays and their descriptive metadata have different access patterns. Arrays are large,
 append-mostly, and read by content; metadata is small, frequently queried, and benefits from indexes
 and transactions. infrastore puts each where it is strongest:</p>
 <ul>
-<li><strong>Arrays → NetCDF4.</strong> Chunked, compressed, columnar storage that HDF5 tooling already understands.</li>
-<li><strong>Metadata → SQLite.</strong> A queryable, transactional catalog at <code>&lt;path&gt;.nc.sqlite</code>.</li>
+<li><strong>Arrays → HDF5.</strong> Chunked, compressed, columnar storage that the whole HDF5 ecosystem reads.</li>
+<li><strong>Metadata → SQLite.</strong> A queryable, transactional catalog at <code>&lt;path&gt;.h5.sqlite</code>.</li>
 </ul>
 <p>The <a href="./storage-model.html">Storage Model</a> page covers the trade-offs and the consistency protocol that
 keeps the two files in agreement.</p>
@@ -307,13 +307,13 @@ two ways:</p>
 existence checks, integrity). It never writes. See <a href="./bindings.html">Language Bindings</a> and the
 <a href="../guides/server.html">gRPC Server guide</a>.</p>
 <h2 id="concurrency"><a class="header" href="#concurrency">Concurrency</a></h2>
-<p>Within a process, <code>NetCdfBackend</code> guards its NetCDF handle with a <code>Mutex</code>, so the storage backend
-itself is <code>Send + Sync</code>. The <code>Store</code> as a whole, however, is <strong><code>Send</code> but not <code>Sync</code></strong>: its
-<code>MetadataStore</code> wraps a single <code>rusqlite::Connection</code>, which is internally a <code>RefCell</code> and therefore
-cannot be shared between threads. In practice this means a <code>Store</code> can be <strong>moved</strong> to another
-thread, but sharing one across threads requires external synchronization — the gRPC server holds its
-store as an <code>Arc&lt;Mutex&lt;Store&gt;&gt;</code>, and the PyO3 binding marks the class <code>unsendable</code> so a Python
-<code>Store</code> stays on the thread that created it.</p>
+<p>Within a process, <code>Hdf5Backend</code> guards its HDF5 handle with a <code>Mutex</code>, so the storage backend itself
+is <code>Send + Sync</code>. The <code>Store</code> as a whole, however, is <strong><code>Send</code> but not <code>Sync</code></strong>: its <code>MetadataStore</code>
+wraps a single <code>rusqlite::Connection</code>, which is internally a <code>RefCell</code> and therefore cannot be
+shared between threads. In practice this means a <code>Store</code> can be <strong>moved</strong> to another thread, but
+sharing one across threads requires external synchronization — the gRPC server holds its store as an
+<code>Arc&lt;Mutex&lt;Store&gt;&gt;</code>, and the PyO3 binding marks the class <code>unsendable</code> so a Python <code>Store</code> stays on
+the thread that created it.</p>
 <p><code>MetadataStore</code> uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.</p>
 

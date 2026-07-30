@@ -186,7 +186,7 @@
                     <main>
                         <h1 id="use-the-infrastore-cli"><a class="header" href="#use-the-infrastore-cli">Use the <code>infrastore</code> CLI</a></h1>
 <p><code>infrastore</code> loads time series from CSV files and inspects a store, talking directly to the on-disk
-<code>.nc</code> + <code>.nc.sqlite</code> pair (no gRPC server required). For the full command and descriptor reference,
+<code>.h5</code> + <code>.h5.sqlite</code> pair (no gRPC server required). For the full command and descriptor reference,
 see <a href="../reference/cli.html">CLI Reference</a>.</p>
 <h2 id="1-build-the-binary"><a class="header" href="#1-build-the-binary">1. Build the Binary</a></h2>
 <pre><code class="language-sh">cargo build -p infrastore-cli      # debug build at target/debug/infrastore
@@ -230,9 +230,9 @@ value
 <p>The descriptor rejects unknown keys, so a typo (<code>resolutionn</code>) is a hard error rather than a
 silently ignored setting.</p>
 <h2 id="3-add-it-to-a-store"><a class="header" href="#3-add-it-to-a-store">3. Add It to a Store</a></h2>
-<pre><code class="language-sh">infrastore --store demo.nc add --descriptor load.json
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json
 </code></pre>
-<p>The store (<code>demo.nc</code> and its <code>demo.nc.sqlite</code> catalog) is created on first <code>add</code>. A descriptor may
+<p>The store (<code>demo.h5</code> and its <code>demo.h5.sqlite</code> catalog) is created on first <code>add</code>. A descriptor may
 also be a JSON array of objects to add many series in one transaction. <code>--csv</code> overrides the
 descriptor's <code>csv</code> path, but only for a single-series descriptor: with an array of two or more
 objects it errors (<code>--csv cannot be used with an array descriptor</code>).</p>
@@ -240,27 +240,57 @@ objects it errors (<code>--csv cannot be used with an array descriptor</code>).<
 <p><code>infrastore</code> follows an output convention: a global <code>-f/--format</code> with <code>table</code> (default), <code>json</code>,
 and <code>csv</code>. Only the read commands (<code>list</code>, <code>get</code>, <code>info</code>) honor it; <code>add</code>, <code>remove</code>, <code>transform</code>,
 and <code>template</code> accept the flag but ignore it and print plain text.</p>
-<pre><code class="language-sh">infrastore --store demo.nc list                                       # what's in the store
-infrastore --store demo.nc list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
-infrastore --store demo.nc get  --owner-id 42 --name load             # pretty table
-infrastore --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable CSV
-infrastore --store demo.nc -f json info --owner-id 42 --name load     # metadata + stats
-infrastore --store demo.nc -f csv  export --dir out/                  # one file per series
+<pre><code class="language-sh">infrastore --store demo.h5 list                                       # what's in the store
+infrastore --store demo.h5 list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
+infrastore --store demo.h5 list --limit 20 --wide                     # bounded, all columns
+infrastore --store demo.h5 get  --owner-id 42 --name load             # pretty table
+infrastore --store demo.h5 -f csv  get  --owner-id 42 --name load     # timestamped CSV
+infrastore --store demo.h5 -f json info --owner-id 42 --name load     # metadata + hash + stats
+infrastore --store demo.h5 -f csv  export --dir out/                  # one file per series
 </code></pre>
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
 to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches). Setting
 <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, and destructive commands (<code>remove</code>,
 <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>) accept <code>--dry-run</code> to preview their effect.</p>
-<p><code>info</code> reports metadata plus stats over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or
-<code>true_count</code>/<code>false_count</code> when <code>dtype</code> is <code>bool</code>, and always <code>num_elements</code>.</p>
+<p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
+over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when <code>dtype</code>
+is <code>bool</code>, and always <code>num_elements</code>. The stats are the only part that reads the array —
+<code>--no-stats</code> skips it for a purely catalog-side query.</p>
+<p><code>list</code> shows every field that is part of a series' identity, features included, so two series that
+differ only by a feature never render as the same row. Its <code>Hash</code> column is the first 12 characters
+of the array's content hash: rows with equal hashes share one array on disk.</p>
 <p><code>get</code>/<code>info</code>/<code>remove</code> select a single series with <code>--owner-id</code>, <code>--owner-category</code>, <code>--name</code>,
 <code>--type</code>, <code>--resolution</code>, and repeated <code>--feature key=value</code> (<code>--feature</code> is the only repeatable
 one); if more than one series matches, <code>infrastore</code> lists the candidates so you can narrow the
 query. The owner is the <code>(owner_id, owner_category)</code> pair, so a component and a supplemental
 attribute may share a numeric id — add <code>--owner-category</code> (<code>component</code> / <code>supplemental_attribute</code>)
 to disambiguate. Large series truncate in <code>table</code> output — pass <code>--limit N</code> or <code>--full</code>.</p>
+<h2 id="5-find-the-bytes-on-disk"><a class="header" href="#5-find-the-bytes-on-disk">5. Find the Bytes on Disk</a></h2>
+<p>Arrays are content-addressed, so identical values are stored once and shared. <code>arrays</code> shows what
+collapsed onto what, and where each array actually lives:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 store-info    # both file paths, format version, compression
+infrastore --store demo.h5 arrays        # one row per distinct array + the series sharing it
+infrastore --store demo.h5 arrays --data-hash 2018057b   # narrow to one (any prefix, any case)
+</code></pre>
+<p><code>info</code> resolves a single series the same way, reporting <code>data_hash</code>, <code>hdf5_dataset</code>, and
+<code>hdf5_column</code>. You need all three to open the data with an outside tool: a packed array is one
+<em>column</em> of a dataset shared with other same-shaped arrays, and a packed dataset that fills up
+spills into suffixed siblings, so neither the column nor the dataset name can be worked out from
+metadata alone.</p>
+<p>Opening the catalog directly, use the <code>time_series_readable</code> view — <code>sqlite3</code> prints the raw <code>BLOB</code>
+hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
+<pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
+</code></pre>
+<h2 id="6-associations"><a class="header" href="#6-associations">6. Associations</a></h2>
+<p>Two association catalogs live alongside the time series and are readable here:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute
+infrastore --store demo.h5 attributes --summary       # counts by (component type, attribute type)
+infrastore --store demo.h5 links --parent-id 42       # directed parent -&gt; child edges
+</code></pre>
+<p>Both are read-only from the CLI: writing an association means writing the consumer's object graph
+alongside it, so that direction stays with the Rust, Python, and Julia APIs.</p>
 <p><code>--time-range START..END</code> on <code>get</code> takes two <em>timestamps</em> (RFC3339 or epoch-ms), not a duration:</p>
-<pre><code class="language-sh">infrastore --store demo.nc get --owner-id 42 --name load \
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load \
   --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
 </code></pre>
 <p>Beware that inputs and outputs are spelled differently. You type the short, lowercase forms
@@ -268,7 +298,7 @@ to disambiguate. Large series truncate in <code>table</code> output — pass <co
 CamelCase names (<code>SingleTimeSeries</code>, <code>Component</code>). Both spellings are accepted as input, so
 <code>-f json list</code> output can be fed back into a selector unchanged; just don't expect the rendered
 value to string-match what you typed.</p>
-<h2 id="5-forecasts"><a class="header" href="#5-forecasts">5. Forecasts</a></h2>
+<h2 id="7-forecasts"><a class="header" href="#7-forecasts">7. Forecasts</a></h2>
 <p>All five writable types work (<code>single</code>, <code>non_sequential</code>, <code>deterministic</code>, <code>probabilistic</code>,
 <code>scenarios</code>). <code>infrastore template deterministic</code> prints a descriptor to edit, but it is plain JSON
 and says nothing about the data layout, so here is the rule:</p>
@@ -290,12 +320,12 @@ re-ingestible by <code>add</code> (static series' <code>get -f csv</code> still 
 <code>transform</code> takes <strong>no selector</strong>: it rewrites <em>every</em> <code>SingleTimeSeries</code> in the store. <code>--horizon</code>
 must fit inside each one (<code>horizon / resolution</code> steps must not exceed its <code>length</code>), so with the
 6-row hourly <code>load</code> above, a 24-hour horizon fails and a 3-hour one works:</p>
-<pre><code class="language-sh">infrastore --store demo.nc transform --horizon 3h --interval 1h
+<pre><code class="language-sh">infrastore --store demo.h5 transform --horizon 3h --interval 1h
 </code></pre>
 <p>The derived series keeps the source's owner, name, and resolution, so <code>load</code> now matches two entries
 and a bare selector becomes ambiguous. Disambiguate with <code>--type</code>:</p>
-<pre><code class="language-sh">infrastore --store demo.nc get --owner-id 42 --name load --type single
-infrastore --store demo.nc get --owner-id 42 --name load --type deterministic_single
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load --type single
+infrastore --store demo.h5 get --owner-id 42 --name load --type deterministic_single
 </code></pre>
 <h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
 <ul>
@@ -304,7 +334,7 @@ added later).</li>
 <li>Output is colored (green table headers) only when stdout is a terminal; it is plain when
 piped/redirected or when <code>NO_COLOR</code> is set, so <code>-f json</code>/<code>-f csv</code> stay clean for other tools.</li>
 <li><code>--log-level</code> (or <code>RUST_LOG</code>) controls logging; the default is quiet (<code>warn</code>).</li>
-<li>The <code>.nc</code> and <code>.nc.sqlite</code> files are one artifact — move, copy, and delete them together.</li>
+<li>The <code>.h5</code> and <code>.h5.sqlite</code> files are one artifact — move, copy, and delete them together.</li>
 </ul>
 
                     </main>

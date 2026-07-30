@@ -219,7 +219,7 @@ def open(cls, path: str, read_only: bool = False) -&gt; Store: ...
 </code></pre>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
-<li><code>create(path=...)</code> — writes <code>path</code> (NetCDF) and <code>path + ".sqlite"</code> (metadata).</li>
+<li><code>create(path=...)</code> — writes <code>path</code> (HDF5) and <code>path + ".sqlite"</code> (metadata).</li>
 <li><code>create(path=..., compression="none")</code> — store arrays uncompressed; <code>compression="deflate"</code> with a
 <code>compression_level</code> / <code>shuffle</code> of your choice tunes the filter. The policy persists with the
 store and is reused on later appends. An unknown <code>compression</code> or out-of-range level raises
@@ -296,7 +296,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: TimeSeriesType | None = None,
+    time_series_type: RequestedType | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     resolution: timedelta | str | None = None,
@@ -307,6 +307,11 @@ def list_time_series(
 def list_array_groups(self, *, ...) -&gt; list[dict]: ...
 # Same keyword-only filter arguments as list_time_series; so do list_keys,
 # list_names, list_owner_types, and remove_by_filter.
+# `time_series_type` is a RequestedType: a TimeSeriesType, or the string
+# "abstract_deterministic" to match Deterministic and
+# DeterministicSingleTimeSeries in one query. Every filter surface takes it,
+# including has_any_time_series, get_resolutions, get_intervals,
+# list_owner_ids, and build_forecast_reader.
 
 def get_time_series_keys(
     self,
@@ -317,7 +322,7 @@ def has_time_series(self, key: TimeSeriesKey) -&gt; bool: ...
 def has_any_time_series(self, *, ...) -&gt; bool: ...
 # Existence without listing ("does this owner have any time series?"); same
 # keyword-only filter arguments as list_time_series. Index-probe fast.
-def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -&gt; list[str]: ...
+def get_resolutions(self, time_series_type: RequestedType | None = None) -&gt; list[str]: ...
 # resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
 def get_time_series_counts(self) -&gt; dict: ...
 def get_forecast_parameters(self, *, resolution: str | None = None,
@@ -440,6 +445,14 @@ TimeSeriesType.Scenarios
 OwnerCategory.Component
 OwnerCategory.SupplementalAttribute
 </code></pre>
+<p><code>TimeSeriesType</code> names a <em>stored</em> type. Queries take a slightly wider value, <code>RequestedType</code>:</p>
+<pre><code class="language-python">RequestedType = TimeSeriesType | Literal["abstract_deterministic"]
+</code></pre>
+<p><code>"abstract_deterministic"</code> is the family of both deterministic storage forms — it matches a stored
+<code>Deterministic</code> <em>or</em> <code>DeterministicSingleTimeSeries</code> in one query, which is what a caller asking
+"does this owner have a deterministic forecast?" wants. It is request-only: no row is stored under
+it, and no returned <code>time_series_type</code> is ever the family. Anything else raises
+<code>InvalidParameterError</code>; a value that is neither a <code>TimeSeriesType</code> nor a string raises <code>TypeError</code>.</p>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> objects and then
 passed to <a href="#methods"><code>add_time_series</code></a>. They are read back through <code>get_time_series</code>, which returns
@@ -533,7 +546,7 @@ def static_read(self, reader: StaticReader, when: datetime) -&gt; None: ...
 
 def build_forecast_reader(
     self,
-    time_series_type: TimeSeriesType,
+    time_series_type: RequestedType,
     resolution: timedelta | str,
     *,
     owner_id: int | None = None,
@@ -577,7 +590,8 @@ filter must name a forecast type and pin a resolution; a <code>Deterministic</co
 includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>(horizon, *element_shape)</code> windows).
 All matched forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
 <p><code>time_series_type</code> must be one of the concrete forecast types — <code>Deterministic</code>,
-<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>; any other raises
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — or the string
+<code>"abstract_deterministic"</code>, which reads exactly like a <code>Deterministic</code> reader; any other raises
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-python">class ForecastReader:
     def timeline(self) -&gt; dict: ...   # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "interval": ISO str, "count": int, "time_series_type": str}
@@ -603,7 +617,7 @@ for ts in reader.timestamps():
 </code></pre>
 <p><strong>Window-read deduplication.</strong> Forecasts that share one backing array and read plan — deduplicated
 identical data, or several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code> — collapse to
-a single <em>window slot</em>. <code>forecast_read</code> performs one backend (<code>.nc</code>) read per slot, not per entry,
+a single <em>window slot</em>. <code>forecast_read</code> performs one backend (<code>.h5</code>) read per slot, not per entry,
 so a forecast shared by N owners is read once per timestamp. <code>num_slots()</code> is that physical read
 count (<code>&lt;= len(entries())</code>), and <code>entry_slot(i)</code> (0-based) identifies the slot backing entry <code>i</code>;
 entries that share data report the same slot. Group by slot to also materialize each unique window

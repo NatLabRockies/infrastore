@@ -189,10 +189,10 @@
 <a href="../guides/server.html">gRPC Server guide</a>; for every config key, see
 <a href="../reference/server-config.html">Server Configuration</a>.</p>
 <h2 id="1-produce-a-store-on-disk"><a class="header" href="#1-produce-a-store-on-disk">1. Produce a Store on Disk</a></h2>
-<p>Create the <code>.nc</code> + <code>.nc.sqlite</code> pair with any binding, then <code>flush()</code> it. For example, in Rust:</p>
+<p>Create the <code>.h5</code> + <code>.h5.sqlite</code> pair with any binding, then <code>flush()</code> it. For example, in Rust:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let mut store = create_store(Some(Path::new("system.nc")), false)?;
+</span>let mut store = create_store(Some(Path::new("system.h5")), false)?;
 // ... add_time_series ...
 store.flush()?;
 <span class="boring">}</span></code></pre></pre>
@@ -203,7 +203,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.nc"]   # the ./system.nc.sqlite catalog must sit beside it
+files = ["./system.h5"]   # the ./system.h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"

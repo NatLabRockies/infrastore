@@ -225,8 +225,8 @@ pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
 <span class="boring">}</span></code></pre></pre>
 <ul>
 <li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
-<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (NetCDF) and <code>path.sqlite</code> (metadata).</li>
-<li><code>create_store_with_compression(...)</code> — as above but with an explicit NetCDF compression policy.</li>
+<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata).</li>
+<li><code>create_store_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
 <li><code>open_store(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
 </ul>
 <p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::open</code> are the inherent-method
@@ -531,10 +531,10 @@ key to metadata (including <code>data_hash</code>), then read the array directly
 caller can tell whether removing a <code>SingleTimeSeries</code> would orphan a
 <code>DeterministicSingleTimeSeries</code> derived from (and sharing) its array.</li>
 <li><strong><code>verify_integrity</code></strong> — Recomputes each stored array's hash and reports mismatches. Covers the
-NetCDF half only: the SQLite catalog is not inspected, so an empty report does not mean the store
-as a whole is sound. See
+HDF5 half only: the SQLite catalog is not inspected, so an empty report does not mean the store as
+a whole is sound. See
 <a href="../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</li>
-<li><strong><code>flush</code></strong> — Issues <code>nc_sync</code> so the files can be copied for persistence without closing.</li>
+<li><strong><code>flush</code></strong> — Issues <code>H5Fflush</code> so the files can be copied for persistence without closing.</li>
 <li><strong><code>persist_to</code></strong> — Writes both halves of the artifact to <code>path</code> and <code>&lt;path&gt;.sqlite</code>, overwriting
 existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
 (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
@@ -582,7 +582,7 @@ let key = store.add_time_series(
 )?;
 <span class="boring">}</span></code></pre></pre>
 <p>Dense forecast arrays (<code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>) are stored as standalone
-NetCDF variables. A <code>DeterministicSingleTimeSeries</code> is <strong>not</strong> added directly: call
+HDF5 variables. A <code>DeterministicSingleTimeSeries</code> is <strong>not</strong> added directly: call
 <code>transform_single_time_series(horizon, interval, owner_category, resolution)</code> to derive one from
 every stored <code>SingleTimeSeries</code> (it shares the backing column-packed array, derives <code>count</code> from the
 series length, and dedups against that series).</p>
@@ -1342,15 +1342,15 @@ pub enum TimeSeriesError {
 }
 <span class="boring">}</span></code></pre></pre>
 <h2 id="storagebackend-trait"><a class="header" href="#storagebackend-trait"><code>StorageBackend</code> Trait</a></h2>
-<p>The seam between <code>Store</code> and array storage. Implemented by <code>MemoryBackend</code> and <code>NetCdfBackend</code>. You
+<p>The seam between <code>Store</code> and array storage. Implemented by <code>MemoryBackend</code> and <code>Hdf5Backend</code>. You
 rarely call it directly, but it documents the backend contract. It is <strong>not</strong> re-exported at the
 crate root — import it (and the backends) from the <code>storage</code> module:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use infrastore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+</span>use infrastore_core::storage::{MemoryBackend, Hdf5Backend, StorageBackend};
 <span class="boring">}</span></code></pre></pre>
 <p>Every method below with a default is a performance override: the default is correct but naive, and
-<code>NetCdfBackend</code> implements a faster path (single hyperslab reads, whole-chunk block writes).</p>
+<code>Hdf5Backend</code> implements a faster path (single hyperslab reads, whole-chunk block writes).</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub trait StorageBackend: Send + Sync {
@@ -1375,7 +1375,7 @@ crate root — import it (and the backends) from the <code>storage</code> module
     fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
 
-    // --- provided (overridden by NetCdfBackend) ---
+    // --- provided (overridden by Hdf5Backend) ---
 
     // Write a block of same-shaped packed arrays at once (the bulk-add write path).
     // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.

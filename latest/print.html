@@ -184,9 +184,9 @@
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
 <p><strong>infrastore</strong> is a Rust library for managing time-series data in power-systems and energy
-simulations. It separates persistence into two concerns: numerical arrays are stored in NetCDF4,
-while the metadata that associates each array with an owning component lives in SQLite. Identical
-arrays are stored once and shared through content addressing.</p>
+simulations. It separates persistence into two concerns: numerical arrays are stored in HDF5, while
+the metadata that associates each array with an owning component lives in SQLite. Identical arrays
+are stored once and shared through content addressing.</p>
 <p>The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the
 <code>infrastore</code> command-line tool and a read-only gRPC server with a Rust client.</p>
 <pre class="mermaid">flowchart TB
@@ -199,7 +199,7 @@ arrays are stored once and shared through content addressing.</p>
 
     subgraph core[&quot;infrastore-core&quot;]
         STORE[&quot;Store&quot;]
-        STORE --&gt; NC[(&quot;NetCDF4&lt;br/&gt;arrays&quot;)]
+        STORE --&gt; NC[(&quot;HDF5&lt;br/&gt;arrays&quot;)]
         STORE --&gt; SQL[(&quot;SQLite&lt;br/&gt;metadata&quot;)]
     end
 
@@ -230,8 +230,8 @@ arrays are stored once and shared through content addressing.</p>
 <li><strong>One array, stored once</strong> — Arrays are addressed by a SHA-256 content hash, so identical series
 shared across components are written to disk a single time
 (<a href="./explanation/content-addressing.html">content addressing</a>)</li>
-<li><strong>NetCDF4 for arrays, SQLite for metadata</strong> — Numerical data lands in a compact, chunked NetCDF4
-file; queryable associations live in a catalog SQLite database
+<li><strong>HDF5 for arrays, SQLite for metadata</strong> — Numerical data lands in a compact, chunked HDF5 file;
+queryable associations live in a catalog SQLite database
 (<a href="./explanation/storage-model.html">storage model</a>)</li>
 <li><strong>Feature-tagged associations</strong> — Each association carries an arbitrary map of typed features
 (<code>int</code> / <code>float</code> / <code>bool</code> / <code>str</code>) so multiple variants of a series can coexist under one owner</li>
@@ -277,10 +277,10 @@ API-key authentication</li>
 </tbody></table>
 </div>
 <p>The Python wheels and the Julia binary (<code>InfraStore_jll</code>) are prebuilt and self-contained. The Rust
-crates build NetCDF, HDF5, and zlib from vendored sources and link them statically, so they need
-<code>cmake</code> and a C compiler but <strong>no system NetCDF or HDF5</strong>. The same vendored, statically linked
-stack backs every channel, so the HDF5 version behind the on-disk format is pinned by infrastore
-rather than by the target environment.</p>
+crates build HDF5 and zlib from vendored sources and link them statically, so they need <code>cmake</code> and
+a C compiler but <strong>no system HDF5</strong>. The same vendored, statically linked stack backs every channel,
+so the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
+environment.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
 <h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
 <p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia
@@ -288,13 +288,13 @@ bindings additionally need a Python interpreter (3.11+) or Julia (1.10+).</p>
 <pre><code class="language-sh">brew install cmake protobuf maturin              # macOS
 sudo apt-get install cmake protobuf-compiler     # Linux (Debian / Ubuntu)
 </code></pre>
-<p>The first build compiles netcdf-c and HDF5 from source — a few minutes — and then caches the result.</p>
+<p>The first build compiles HDF5 from source — a few minutes — and then caches the result.</p>
 <blockquote>
-<p><strong>Do not set <code>HDF5_DIR</code> or <code>NETCDF_DIR</code>.</strong> The vendored netcdf-c build forwards them to cmake as
-<code>HDF5_ROOT</code> while still requesting static libraries, which fails against a shared-only install. To
-build against system libraries instead, turn vendoring off with <code>--no-default-features</code> and
-install them (<code>brew install hdf5 netcdf</code> / <code>apt-get install libhdf5-dev libnetcdf-dev</code>).</p>
-<p>Because <code>netcdf-sys</code> declares <code>links = "netcdf"</code>, Cargo's feature unification makes the
+<p><strong>Do not set <code>HDF5_DIR</code>.</strong> The vendored build forwards it to cmake as <code>HDF5_ROOT</code> while still
+requesting static libraries, which fails against a shared-only install. To build against system
+libraries instead, turn vendoring off with <code>--no-default-features</code> and install them
+(<code>brew install hdf5</code> / <code>apt-get install libhdf5-dev</code>).</p>
+<p>Because <code>hdf5-metno-sys</code> declares <code>links = "hdf5"</code>, Cargo's feature unification makes the
 vendored-versus-system choice all-or-nothing across the whole dependency graph — an individual
 crate cannot opt out on its own.</p>
 </blockquote>
@@ -315,7 +315,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 <code>cargo build --workspace</code> can link the PyO3 cdylib without <code>maturin</code>. On Linux those flags are inert.</p>
 <h2 id="crates-in-the-workspace"><a class="header" href="#crates-in-the-workspace">Crates in the Workspace</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Crate</th><th>What it builds</th></tr></thead><tbody>
-<tr><td><code>infrastore-core</code></td><td>Types, NetCDF + SQLite storage, hashing, Rust API</td></tr>
+<tr><td><code>infrastore-core</code></td><td>Types, HDF5 + SQLite storage, hashing, Rust API</td></tr>
 <tr><td><code>infrastore-proto</code></td><td>Protobuf service definition + <code>tonic</code> codegen</td></tr>
 <tr><td><code>infrastore-server</code></td><td>gRPC server binary + Rust client</td></tr>
 <tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py311</code> wheel</td></tr>
@@ -344,7 +344,7 @@ import numpy as np
 from infrastore import OwnerCategory, SingleTimeSeries, Store
 
 # `in_memory=True` means no filesystem I/O. Pass `path=` instead to write a
-# NetCDF file plus its SQLite catalog.
+# HDF5 file plus its SQLite catalog.
 store = Store.create(in_memory=True)
 
 # The name lives on the series object, not on `add_time_series`.
@@ -404,16 +404,16 @@ print(window.length)   # 6
 </code></pre>
 <h2 id="writing-to-disk"><a class="header" href="#writing-to-disk">Writing to Disk</a></h2>
 <p>Swap the constructor to persist:</p>
-<pre><code class="language-python">store = Store.create(path="system.nc")
+<pre><code class="language-python">store = Store.create(path="system.h5")
 # ... add_time_series ...
-store.flush()   # sync buffered NetCDF writes to disk
+store.flush()   # sync buffered HDF5 writes to disk
 </code></pre>
 <p>This produces two files that travel together:</p>
 <ul>
-<li><code>system.nc</code> — the NetCDF4 file holding the arrays.</li>
-<li><code>system.nc.sqlite</code> — the catalog holding the metadata associations.</li>
+<li><code>system.h5</code> — the HDF5 file holding the arrays.</li>
+<li><code>system.h5.sqlite</code> — the catalog holding the metadata associations.</li>
 </ul>
-<p>Reopen them later with <code>Store.open("system.nc", read_only=True)</code>.</p>
+<p>Reopen them later with <code>Store.open("system.h5", read_only=True)</code>.</p>
 <h2 id="next-steps-2"><a class="header" href="#next-steps-2">Next Steps</a></h2>
 <ul>
 <li>Work through the <a href="getting-started/../guides/python.html">Python Developer Guide</a> for forecasts, bulk reads,
@@ -429,7 +429,7 @@ the first store call errors, see <a href="getting-started/../how-to/integrate-ju
 <pre><code class="language-julia">using Dates, InfraStore
 
 # `in_memory=true` means no filesystem I/O. Pass `path=` with `in_memory=false`
-# to write a NetCDF file plus its SQLite catalog.
+# to write an HDF5 file plus its SQLite catalog.
 store = Store(in_memory=true)
 
 # The name lives on the series struct, not on `add_time_series!`.
@@ -487,18 +487,18 @@ end
 or <code>(owner_id, owner_category, name; resolution, features)</code> attributes.</p>
 <h2 id="writing-to-disk-1"><a class="header" href="#writing-to-disk-1">Writing to Disk</a></h2>
 <p>Swap the constructor to persist. The do-block form closes the store on exit, including on throw:</p>
-<pre><code class="language-julia">Store(in_memory=false, path="system.nc") do store
+<pre><code class="language-julia">Store(in_memory=false, path="system.h5") do store
     add_time_series!(store, 42, "Generator", Component, ts; units = "MW")
-    flush!(store)   # sync buffered NetCDF writes to disk
+    flush!(store)   # sync buffered HDF5 writes to disk
 end
 </code></pre>
 <p>This produces two files that travel together:</p>
 <ul>
-<li><code>system.nc</code> — the NetCDF4 file holding the arrays.</li>
-<li><code>system.nc.sqlite</code> — the catalog holding the metadata associations.</li>
+<li><code>system.h5</code> — the HDF5 file holding the arrays.</li>
+<li><code>system.h5.sqlite</code> — the catalog holding the metadata associations.</li>
 </ul>
-<p>Reopen them later with <code>open_store("system.nc"; read_only=true)</code>, which has a do-block form too:</p>
-<pre><code class="language-julia">open_store("system.nc"; read_only=true) do store
+<p>Reopen them later with <code>open_store("system.h5"; read_only=true)</code>, which has a do-block form too:</p>
+<pre><code class="language-julia">open_store("system.h5"; read_only=true) do store
     keys = get_time_series_keys(store, 42, Component)
     series = get_time_series(SingleTimeSeries, store, keys[1])
 end
@@ -522,8 +522,8 @@ bindings sit on top of a single core.</li>
 developers of parent packages like IS.jl and infrasys.</li>
 <li><a href="explanation/./data-model.html">Data Model</a> — Owners, time-series types, keys, feature maps, and the
 associations between catalog entities.</li>
-<li><a href="explanation/./storage-model.html">Storage Model</a> — Why arrays go to NetCDF4 and metadata goes to SQLite, and
-how the two stay consistent.</li>
+<li><a href="explanation/./storage-model.html">Storage Model</a> — Why arrays go to HDF5 and metadata goes to SQLite, and how
+the two stay consistent.</li>
 <li><a href="explanation/./content-addressing.html">Content Addressing</a> — How arrays are hashed, deduplicated, and verified.</li>
 <li><a href="explanation/./bindings.html">Language Bindings</a> — How the Python, Julia, and gRPC interfaces wrap the Rust
 core.</li>
@@ -550,7 +550,7 @@ on-disk format.</p>
         STORE[&quot;Store&quot;]
         META[&quot;MetadataStore&lt;br/&gt;(SQLite)&quot;]
         BACK[&quot;StorageBackend&lt;br/&gt;(trait)&quot;]
-        NC[&quot;NetCdfBackend&quot;]
+        NC[&quot;Hdf5Backend&quot;]
         MEM[&quot;MemoryBackend&quot;]
         STORE --&gt; META
         STORE --&gt; BACK
@@ -601,7 +601,7 @@ on-disk format.</p>
     CALL[&quot;add_time_series(...)&quot;] --&gt; HASH[&quot;array_hash()&quot;]
     HASH --&gt; PUT[&quot;backend.put_array(hash, data)&quot;]
     HASH --&gt; INS[&quot;MetadataStore::insert(association)&quot;]
-    PUT --&gt; NC[(&quot;NetCDF4&quot;)]
+    PUT --&gt; NC[(&quot;HDF5&quot;)]
     INS --&gt; SQL[(&quot;SQLite&quot;)]
 
     style CALL fill:#4a9eff,color:#fff
@@ -615,17 +615,17 @@ on-disk format.</p>
 trait. v0 ships two implementations:</p>
 <ul>
 <li><strong><code>MemoryBackend</code></strong> — arrays in a hash map; selected when <code>in_memory = true</code>. No filesystem I/O.</li>
-<li><strong><code>NetCdfBackend</code></strong> — arrays in a NetCDF4 file; selected when a path is given.</li>
+<li><strong><code>Hdf5Backend</code></strong> — arrays in an HDF5 file; selected when a path is given.</li>
 </ul>
 <p>Because the seam is a trait, the metadata layer, the hashing, and every binding are identical no
-matter where the arrays live. Tests run against the memory backend; production uses NetCDF.</p>
+matter where the arrays live. Tests run against the memory backend; production uses HDF5.</p>
 <h2 id="why-two-files"><a class="header" href="#why-two-files">Why Two Files</a></h2>
 <p>Numerical arrays and their descriptive metadata have different access patterns. Arrays are large,
 append-mostly, and read by content; metadata is small, frequently queried, and benefits from indexes
 and transactions. infrastore puts each where it is strongest:</p>
 <ul>
-<li><strong>Arrays → NetCDF4.</strong> Chunked, compressed, columnar storage that HDF5 tooling already understands.</li>
-<li><strong>Metadata → SQLite.</strong> A queryable, transactional catalog at <code>&lt;path&gt;.nc.sqlite</code>.</li>
+<li><strong>Arrays → HDF5.</strong> Chunked, compressed, columnar storage that the whole HDF5 ecosystem reads.</li>
+<li><strong>Metadata → SQLite.</strong> A queryable, transactional catalog at <code>&lt;path&gt;.h5.sqlite</code>.</li>
 </ul>
 <p>The <a href="explanation/./storage-model.html">Storage Model</a> page covers the trade-offs and the consistency protocol that
 keeps the two files in agreement.</p>
@@ -651,13 +651,13 @@ two ways:</p>
 existence checks, integrity). It never writes. See <a href="explanation/./bindings.html">Language Bindings</a> and the
 <a href="explanation/../guides/server.html">gRPC Server guide</a>.</p>
 <h2 id="concurrency"><a class="header" href="#concurrency">Concurrency</a></h2>
-<p>Within a process, <code>NetCdfBackend</code> guards its NetCDF handle with a <code>Mutex</code>, so the storage backend
-itself is <code>Send + Sync</code>. The <code>Store</code> as a whole, however, is <strong><code>Send</code> but not <code>Sync</code></strong>: its
-<code>MetadataStore</code> wraps a single <code>rusqlite::Connection</code>, which is internally a <code>RefCell</code> and therefore
-cannot be shared between threads. In practice this means a <code>Store</code> can be <strong>moved</strong> to another
-thread, but sharing one across threads requires external synchronization — the gRPC server holds its
-store as an <code>Arc&lt;Mutex&lt;Store&gt;&gt;</code>, and the PyO3 binding marks the class <code>unsendable</code> so a Python
-<code>Store</code> stays on the thread that created it.</p>
+<p>Within a process, <code>Hdf5Backend</code> guards its HDF5 handle with a <code>Mutex</code>, so the storage backend itself
+is <code>Send + Sync</code>. The <code>Store</code> as a whole, however, is <strong><code>Send</code> but not <code>Sync</code></strong>: its <code>MetadataStore</code>
+wraps a single <code>rusqlite::Connection</code>, which is internally a <code>RefCell</code> and therefore cannot be
+shared between threads. In practice this means a <code>Store</code> can be <strong>moved</strong> to another thread, but
+sharing one across threads requires external synchronization — the gRPC server holds its store as an
+<code>Arc&lt;Mutex&lt;Store&gt;&gt;</code>, and the PyO3 binding marks the class <code>unsendable</code> so a Python <code>Store</code> stays on
+the thread that created it.</p>
 <p><code>MetadataStore</code> uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="design-choices"><a class="header" href="#design-choices">Design Choices</a></h1>
@@ -669,7 +669,7 @@ time-series data behind their component models. This page records the decisions 
 and the on-disk format, and the reasoning behind them, so that developers of those parent packages
 understand what infrastore optimizes for — and, just as importantly, what it deliberately does not.</p>
 <h2 id="data-orientation-optimize-for-reading-every-component-at-one-timestamp"><a class="header" href="#data-orientation-optimize-for-reading-every-component-at-one-timestamp">Data Orientation: Optimize for Reading Every Component at One Timestamp</a></h2>
-<p><strong>The decision.</strong> In the NetCDF file, <code>SingleTimeSeries</code> arrays that share a
+<p><strong>The decision.</strong> In the HDF5 file, <code>SingleTimeSeries</code> arrays that share a
 <code>(dtype, element_shape, length, resolution)</code> are packed as columns of one dataset: <strong>columns are
 series, rows are timesteps</strong>, and the HDF5 chunking is <code>(1, cols, *element_shape)</code> so that a single
 chunk holds one timestamp across every column. We optimize for reading <strong>all components' values at a
@@ -677,7 +677,7 @@ given timestamp</strong>, and accept that reading <strong>one component's entire
 <p><strong>Why.</strong> The workload that matters is simulation. A production-cost or power-flow model steps
 through time and, at each step, needs the value of every generator, load, and branch for that one
 timestamp — a slice <em>across</em> series, not <em>down</em> one. With this layout that slice is a single chunk
-read; the <a href="explanation/./storage-model.html#the-array-side-netcdf4"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar
+read; the <a href="explanation/./storage-model.html#the-array-side-hdf5"><code>ForecastReader</code> / <code>StaticReader</code></a> columnar
 surface is built directly on it. The inverse access — pulling one component's full history — has to
 touch every chunk band and is slow by design. That trade is deliberate: the simulation read path is
 the hot one, and it is the one parent packages hand to their users.</p>
@@ -690,9 +690,8 @@ whole chunks in one pass and keeps the timestamp-slice read fast. See
 and expect it to be cheap. It works, but it is the slow direction. If a downstream workload
 genuinely needs that orientation, that is a signal to raise with infrastore, not to work around
 with many single-series reads.</li>
-<li>The orientation is a property of the <em>packed</em> NetCDF layout only. <code>NonSequentialTimeSeries</code> and
-the dense forecast types are stored as standalone per-array variables and do not participate in
-it.</li>
+<li>The orientation is a property of the <em>packed</em> HDF5 layout only. <code>NonSequentialTimeSeries</code> and the
+dense forecast types are stored as standalone per-array variables and do not participate in it.</li>
 </ul>
 <p><strong>Values are immutable.</strong> There is no API — in any binding, by design — to edit a single value,
 slice, row, or column of an array already in the store. A stored array is added or deleted as a
@@ -728,9 +727,9 @@ references it.</li>
 <p>The block width is a write-time storage choice only — it reads transparently regardless of the width
 a store was written with, so it does not change the on-disk format version.</p>
 <h2 id="split-arrays-from-metadata"><a class="header" href="#split-arrays-from-metadata">Split Arrays From Metadata</a></h2>
-<p>Numerical arrays live in NetCDF4 and metadata associations live in a companion SQLite catalog,
-because the two have opposite size, access, and mutation profiles and each format is strongest at
-one of them. The full rationale, the consistency ordering that keeps the two files in step, and the
+<p>Numerical arrays live in HDF5 and metadata associations live in a companion SQLite catalog, because
+the two have opposite size, access, and mutation profiles and each format is strongest at one of
+them. The full rationale, the consistency ordering that keeps the two files in step, and the
 compaction behavior are covered in the <a href="explanation/./storage-model.html">Storage Model</a>.</p>
 <h2 id="content-address-and-deduplicate-arrays"><a class="header" href="#content-address-and-deduplicate-arrays">Content-Address and Deduplicate Arrays</a></h2>
 <p>Arrays are keyed by the SHA-256 of their contents, so two associations with identical data share one
@@ -744,16 +743,16 @@ it behaves the same across the bindings that support it, and unsupported operati
 explicit error rather than silently changing semantics. This keeps a parent package free to move
 between bindings — for example, Julia via the C ABI and Python via the wheel — without the data
 model shifting underneath it. See <a href="explanation/./bindings.html">Language Bindings</a>.</p>
-<h2 id="make-transactions-span-operations-without-enlisting-netcdf"><a class="header" href="#make-transactions-span-operations-without-enlisting-netcdf">Make Transactions Span Operations, Without Enlisting NetCDF</a></h2>
+<h2 id="make-transactions-span-operations-without-enlisting-hdf5"><a class="header" href="#make-transactions-span-operations-without-enlisting-hdf5">Make Transactions Span Operations, Without Enlisting HDF5</a></h2>
 <p>Every mutating entry point is atomic on its own, and a <a href="explanation/./storage-model.html">bulk add</a> commits a
 whole batch in one catalog transaction. Neither helps when several <em>operations</em> have to succeed or
 fail together — add a series and remove the one it replaces, or write a batch and derive a forecast
 from it. <code>Store::begin_transaction</code> opens a unit of work spanning any number of operations, and only
 its outermost commit makes anything durable.</p>
 <p>The obstacle is that a store is two artifacts and only one of them has transactions. SQLite rolls
-back its own statements; NetCDF has nothing to enlist. Rather than trying to give NetCDF a
-transaction, the array store is made <strong>append-only for the transaction's duration</strong>, which content
-addressing makes cheap:</p>
+back its own statements; HDF5 has nothing to enlist. Rather than trying to give HDF5 a transaction,
+the array store is made <strong>append-only for the transaction's duration</strong>, which content addressing
+makes cheap:</p>
 <ul>
 <li><strong>Writes</strong> are recorded as they happen and removed on rollback. An array is recorded only if it
 was <em>physically written</em> — a write of content that already exists is a no-op on hash, so there is
@@ -773,10 +772,10 @@ savepoint, so an inner failure unwinds only its own work and leaves the enclosin
 usable.</p>
 <p>The costs are real and bound where this is worth using. A transaction holds the SQLite write lock
 until it finishes, so a concurrent writer on the same artifact blocks and then fails on its busy
-timeout. And a transaction is not a substitute for batching: block-sized NetCDF writes and
-feature-set dedup come from <code>bulk_add</code>, and a loop of single adds gets neither just because it is
-wrapped in a transaction. The two compose — batch each operation, and use a transaction when several
-of them must be atomic together.</p>
+timeout. And a transaction is not a substitute for batching: block-sized HDF5 writes and feature-set
+dedup come from <code>bulk_add</code>, and a loop of single adds gets neither just because it is wrapped in a
+transaction. The two compose — batch each operation, and use a transaction when several of them must
+be atomic together.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="data-model"><a class="header" href="#data-model">Data Model</a></h1>
 <p>The data model mirrors the time-series concepts originally developed in
 <a href="https://github.com/NREL-Sienna/InfrastructureSystems.jl">InfrastructureSystems.jl</a>: a <strong>component</strong>
@@ -823,8 +822,10 @@ transforming a stored <code>SingleTimeSeries</code>.</p>
 <code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
 the underlying static array without copying it. The <code>DeterministicSingleTimeSeries</code> tag stays
 visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — because callers need it to
-address, copy, or remove the association (and <code>RequestedType::AbstractDeterministic</code> exists so
-readers can match either concrete type without caring which is stored).</p>
+address, copy, or remove the association (and <code>RequestedType::AbstractDeterministic</code> exists so a
+query — a catalog filter, a key resolution, or a reader build — can match either concrete type
+without caring which is stored; Julia passes the <code>AbstractDeterministic</code> type, Python the string
+<code>"abstract_deterministic"</code>).</p>
 <p>Reading forecast <em>values</em> is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic <code>add_time_series</code> (a <code>Deterministic</code>, <code>Probabilistic</code>, or
 <code>Scenarios</code> object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
@@ -834,7 +835,7 @@ server serves forecast reads but does not accept writes. See <a href="explanatio
 <h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
 <p>A <code>NonSequentialTimeSeries</code> pairs each value with an explicit UTC timestamp. Timestamps must be
 strictly increasing and their count must match the data length. Its values are stored as a
-standalone NetCDF array; timestamps are stored with the association metadata.</p>
+standalone HDF5 array; timestamps are stored with the association metadata.</p>
 <h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
 <p>A <code>SingleTimeSeries</code> is an <code>initial_timestamp</code>, a <code>resolution</code> (a <a href="explanation/data-model.html#periods">period</a>), and an array
 of values:</p>
@@ -870,8 +871,8 @@ payload travels with the metadata so a binding can reconstruct its domain object
 itself never interprets it.</p>
 <h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
 <p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
-shape</strong> (the dense types as standalone NetCDF variables; a <code>DeterministicSingleTimeSeries</code> reuses
-its backing <code>SingleTimeSeries</code> array), while the windowing parameters live in metadata. A forecast
+shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
+backing <code>SingleTimeSeries</code> array), while the windowing parameters live in metadata. A forecast
 association records <code>horizon</code> (the span each window covers), <code>interval</code> (the spacing between
 successive window start times), <code>count</code> (the number of windows), and — for <code>Probabilistic</code> — a
 <code>percentiles</code> vector.</p>
@@ -1008,10 +1009,10 @@ and a grouped summary) because each of its operations is driven by an existing c
 parent/child surface is deliberately narrower for now.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="storage-model"><a class="header" href="#storage-model">Storage Model</a></h1>
 <p>A persistent store is <strong>two files that travel together</strong>:</p>
-<pre><code class="language-text">system.nc          # NetCDF4 — the numerical arrays
-system.nc.sqlite   # SQLite  — the metadata associations
+<pre><code class="language-text">system.h5          # HDF5 — the numerical arrays
+system.h5.sqlite   # SQLite  — the metadata associations
 </code></pre>
-<p>The catalog path is derived by appending <code>.sqlite</code> to the NetCDF file name. This page explains the
+<p>The catalog path is derived by appending <code>.sqlite</code> to the HDF5 file name. This page explains the
 split and how the two halves stay consistent. For the exact bytes, dataset names, and table columns,
 see the <a href="explanation/../reference/file-format.html">On-Disk File Format reference</a>.</p>
 <h2 id="why-split-arrays-from-metadata"><a class="header" href="#why-split-arrays-from-metadata">Why Split Arrays From Metadata</a></h2>
@@ -1020,13 +1021,13 @@ see the <a href="explanation/../reference/file-format.html">On-Disk File Format 
 <tr><td>Size</td><td>Large (thousands of values each)</td><td>Small (a row plus a shared feature set)</td></tr>
 <tr><td>Access pattern</td><td>Bulk read by content</td><td>Filtered queries by owner, name, features</td></tr>
 <tr><td>Mutation</td><td>Immutable; whole-array add/delete, dedup-on-write</td><td>Insert / delete with constraints</td></tr>
-<tr><td>Best tool</td><td>NetCDF4 (chunked, compressed HDF5)</td><td>SQLite (indexes, transactions)</td></tr>
+<tr><td>Best tool</td><td>HDF5 (chunked, compressed)</td><td>SQLite (indexes, transactions)</td></tr>
 </tbody></table>
 </div>
 <p>Forcing both into one format would compromise one of them. Instead, each lives where it is
 strongest, and the <code>Store</code> layer coordinates them.</p>
-<h2 id="the-array-side-netcdf4"><a class="header" href="#the-array-side-netcdf4">The Array Side: NetCDF4</a></h2>
-<p>Arrays live under <code>time_series/single/</code> in the NetCDF file, in one of <strong>two storage modes</strong>.</p>
+<h2 id="the-array-side-hdf5"><a class="header" href="#the-array-side-hdf5">The Array Side: HDF5</a></h2>
+<p>Arrays live under <code>time_series/single/</code> in the HDF5 file, in one of <strong>two storage modes</strong>.</p>
 <p>Stored arrays are <strong>immutable</strong>: a value array is added or deleted as a whole and is never edited in
 place — there is no API to mutate a row, slice, or column of an array already in the store. Changing
 data means writing a new array (content-addressed and deduplicated on write) and, if desired,
@@ -1061,9 +1062,9 @@ chunk holds a single timestamp across every column. The layout favors <strong>bu
 fills whole chunks in one pass) and <strong>reads across series by timestamp</strong> (one timestamp is one
 chunk). The reverse directions are the slow ones, by design: reading a single series in full
 touches every chunk band, and adding one series at a time rewrites a chunk band per timestep.</li>
-<li><strong>A companion string variable holds the hashes.</strong> For each packed dataset there is a sibling
-<code>{dataset}_h</code>; slot <code>i</code> holds the SHA-256 hex of column <code>i</code>, or an empty string if the slot is
-free. This is the on-disk index the backend rebuilds on open.</li>
+<li><strong>A companion dataset holds the hashes.</strong> For each packed dataset there is a sibling
+<code>{dataset}_h</code>, a <code>(cols, 64)</code> array of <code>u8</code>; row <code>i</code> holds the SHA-256 hex of column <code>i</code> as raw
+bytes, or is all-zero if the slot is free. This is the on-disk index the backend rebuilds on open.</li>
 <li><strong>Datasets spill when full</strong> into <code>…__1</code>, <code>…__2</code>, and so on — when a batch exceeds the per-dataset
 column cap, or when incremental writes fill a default-width (1,000-column) dataset.</li>
 <li><strong>Compression is configurable</strong> at store creation and applies to every data variable (packed and
@@ -1081,7 +1082,7 @@ shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts 
 <code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and chunked
 in bounded blocks along the <code>count</code> (window) axis, so reading one forecast window decompresses a
 single block rather than the whole array. The <code>ForecastReader</code> caches a block at a time to match.</p>
-<p>The <a href="explanation/../reference/file-format.html#netcdf-layout">file-format reference</a> gives the precise naming and
+<p>The <a href="explanation/../reference/file-format.html#hdf5-layout">file-format reference</a> gives the precise naming and
 dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
 same physical shape — the type, timestamps, and windowing parameters all live in metadata.</p>
 <h2 id="the-metadata-side-sqlite"><a class="header" href="#the-metadata-side-sqlite">The Metadata Side: SQLite</a></h2>
@@ -1131,7 +1132,7 @@ any static series, which carry no interval) are still constrained. Indexes on <c
 dangling reference:</p>
 <pre class="mermaid">sequenceDiagram
     participant C as add_time_series
-    participant B as NetCDF backend
+    participant B as HDF5 backend
     participant M as SQLite
     C-&gt;&gt;B: put_array(hash, data)
     Note over C,B: idempotent on hash — staged for rollback
@@ -1163,20 +1164,19 @@ hash. This is what lets two keys <a href="explanation/./content-addressing.html"
 shared too, but they are <strong>not</strong> reference-counted — deleting an association never deletes its
 feature set; the set is left unreachable for a later <code>compact()</code> to sweep.</p>
 <h2 id="persistence-and-copying"><a class="header" href="#persistence-and-copying">Persistence and Copying</a></h2>
-<p>The NetCDF backend buffers writes. Call <code>flush()</code> (which issues <code>nc_sync</code>) before copying the files
-for backup or archival; afterward both <code>system.nc</code> and <code>system.nc.sqlite</code> can be copied as a pair
+<p>The HDF5 backend buffers writes. Call <code>flush()</code> (which issues <code>H5Fflush</code>) before copying the files
+for backup or archival; afterward both <code>system.h5</code> and <code>system.h5.sqlite</code> can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.</p>
 <h2 id="compaction"><a class="header" href="#compaction">Compaction</a></h2>
 <p><code>compact()</code> reclaims space in both halves of the artifact, and the two halves behave differently.</p>
 <p><strong>On the array side, compaction reports rather than reclaims.</strong> Deleting a series frees its column
-slot but does not shrink the NetCDF dataset. The freed slot is transparently reused by the next
-compatible write (<code>first_free</code>), and a deleted standalone variable lingers as dead space.
-<code>compact()</code> reports how many slots are reclaimable (<code>slots_reclaimed</code>); v0 does not physically
-shrink datasets or drop dead variables, because netcdf-c cannot resize a dimension in place — that
-is a follow-up.</p>
+slot but does not shrink the HDF5 dataset. The freed slot is transparently reused by the next
+compatible write (<code>first_free</code>), and a deleted standalone dataset lingers as dead space. <code>compact()</code>
+reports how many slots are reclaimable (<code>slots_reclaimed</code>); v0 does not physically shrink datasets
+or drop dead ones, because HDF5 cannot reclaim the space in place — that is a follow-up.</p>
 <p><strong>On the catalog side, compaction physically deletes.</strong> Because feature sets are shared, deleting an
 association cannot cascade into them: removing the last association that referenced a set leaves it
-unreachable, mirroring the NetCDF side's unreachable standalone variables. <code>compact()</code> sweeps those
+unreachable, mirroring the HDF5 side's unreachable standalone variables. <code>compact()</code> sweeps those
 rows and reports the count as <code>feature_sets_reclaimed</code> — the one thing compaction actually removes.
 (Clearing the whole store is the exception that needs no sweep: it orphans every set by
 construction, so it drops them all outright.)</p>
@@ -1266,7 +1266,7 @@ costs one array, one feature set, and a thousand small rows.</p>
 <li>Deletes the matching association rows inside a SQLite transaction, collecting their
 <code>data_hash</code>es.</li>
 <li>For each freed hash, counts how many associations still reference it.</li>
-<li>Only frees the NetCDF column for hashes whose reference count has dropped to zero.</li>
+<li>Only frees the HDF5 column for hashes whose reference count has dropped to zero.</li>
 </ol>
 <p>This keeps shared arrays alive until the last referencing key is gone.</p>
 <h3 id="feature-sets-are-the-deliberate-exception"><a class="header" href="#feature-sets-are-the-deliberate-exception">Feature sets are the deliberate exception</a></h3>
@@ -1278,7 +1278,7 @@ sweeps them in bulk. Concretely:</p>
 <li><strong>No foreign key, no <code>ON DELETE CASCADE</code>.</strong> A cascade would be actively wrong: rows are shared, so
 deleting one association must not delete a set another association still uses.</li>
 <li><strong>Deleting the last user leaves the set unreachable</strong>, rather than deleting it — the same
-end-state as the NetCDF side's dead standalone variables, which also linger.</li>
+end-state as the HDF5 side's dead standalone variables, which also linger.</li>
 <li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set no association references any more
 and reports the row count as <code>feature_sets_reclaimed</code>. This is the one thing compaction physically
 removes.</li>
@@ -1326,12 +1326,12 @@ is the contract.</p>
 reports any mismatch between the recorded hash and the recomputed one — detecting silent corruption.
 See <a href="explanation/../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
 <h3 id="what-it-does-not-cover"><a class="header" href="#what-it-does-not-cover">What it does not cover</a></h3>
-<p>The check is scoped to the <strong>array half</strong> of the store. It reads what the NetCDF side knows about
-and rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about
-the arrays, not about the store as a whole. Three things fall outside it:</p>
+<p>The check is scoped to the <strong>array half</strong> of the store. It reads what the HDF5 side knows about and
+rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about the
+arrays, not about the store as a whole. Three things fall outside it:</p>
 <ul>
 <li>a <code>data_hash</code> in the catalog that names no stored array — a truncated or corrupted catalog, or a
-catalog paired with the wrong <code>.nc</code> file. Every read of the affected key fails, and
+catalog paired with the wrong <code>.h5</code> file. Every read of the affected key fails, and
 <code>verify_integrity</code> reports nothing.</li>
 <li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at.</li>
 <li>a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
@@ -1347,7 +1347,7 @@ itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the tw
 uniqueness.</p>
 <p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the <a href="explanation/../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
-<code>.nc</code> and its <code>.sqlite</code> together.</p>
+<code>.h5</code> and its <code>.sqlite</code> together.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="language-bindings"><a class="header" href="#language-bindings">Language Bindings</a></h1>
 <p>Every interface wraps the same <code>Store</code>. Understanding how each binding bridges to the core explains
 why the APIs look the way they do, how errors propagate, and what each layer owns.</p>
@@ -1441,7 +1441,7 @@ for fan-out reads of an existing store. See the <a href="explanation/../guides/s
 <a href="explanation/../reference/grpc-api.html">gRPC API reference</a>.</p>
 <h2 id="cli-infrastore"><a class="header" href="#cli-infrastore">CLI (<code>infrastore</code>)</a></h2>
 <p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, a thin wrapper over the core <code>Store</code> for use from a
-terminal. Unlike the gRPC server it is <strong>not</strong> read-only: it opens the on-disk <code>.nc</code> + <code>.nc.sqlite</code>
+terminal. Unlike the gRPC server it is <strong>not</strong> read-only: it opens the on-disk <code>.h5</code> + <code>.h5.sqlite</code>
 pair directly and supports both reads and writes. Its shape:</p>
 <ul>
 <li><strong>CSV in, store out.</strong> Numeric values come from a CSV; the metadata that does not fit a flat grid
@@ -1456,7 +1456,7 @@ mode can be added without touching the command handlers; today there is no remot
 <h2 id="what-every-binding-shares"><a class="header" href="#what-every-binding-shares">What Every Binding Shares</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Single source of truth</th></tr></thead><tbody>
 <tr><td>Types &amp; validation</td><td><code>infrastore-core</code> (<code>Store</code>, <code>TimeSeriesKey</code>, <code>Features</code>)</td></tr>
-<tr><td>On-disk format</td><td><code>NetCdfBackend</code> + <code>MetadataStore</code> — identical regardless of caller</td></tr>
+<tr><td>On-disk format</td><td><code>Hdf5Backend</code> + <code>MetadataStore</code> — identical regardless of caller</td></tr>
 <tr><td>Hashing</td><td><code>array_hash</code> / <code>features_hash</code> — the cross-language contract</td></tr>
 <tr><td>Error taxonomy</td><td><code>TimeSeriesError</code>, re-projected into each language's idiom</td></tr>
 </tbody></table>
@@ -1521,11 +1521,11 @@ use infrastore_core::{create_store, open_store};
 // In-memory (tests, scratch work): no filesystem I/O.
 let mut store = create_store(None, true)?;
 
-// On disk: writes system.nc and system.nc.sqlite.
-let mut store = create_store(Some(Path::new("system.nc")), false)?;
+// On disk: writes system.h5 and system.h5.sqlite.
+let mut store = create_store(Some(Path::new("system.h5")), false)?;
 
 // Reopen later, read-only.
-let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
+let store = open_store(Path::new("system.h5"), /* read_only */ true)?;
 <span class="boring">}</span></code></pre></pre>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -1869,10 +1869,10 @@ assert_eq!(updated, 1);
 <span class="boring">}</span></code></pre></pre>
 <p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
-<p>The NetCDF backend buffers writes. Call <code>flush</code> before copying the files for backup:</p>
+<p>The HDF5 backend buffers writes. Call <code>flush</code> before copying the files for backup:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>store.flush()?;   // nc_sync; afterwards system.nc + system.nc.sqlite can be copied as a pair
+</span>store.flush()?;   // H5Fflush; afterwards system.h5 + system.h5.sqlite can be copied as a pair
 <span class="boring">}</span></code></pre></pre>
 <p><code>persist_to</code> writes the whole store to a new path — both halves of the artifact, <code>path</code> and
 <code>&lt;path&gt;.sqlite</code>, overwriting anything already there. It works for an on-disk store (it flushes and
@@ -1882,9 +1882,9 @@ with <code>create_store(None, true)</code>:</p>
 </span><span class="boring">fn main() {
 </span>let mut store = create_store(None, true)?;   // in-memory
 // ... add series ...
-store.persist_to(Path::new("system.nc"))?;   // writes system.nc + system.nc.sqlite
+store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sqlite
 <span class="boring">}</span></code></pre></pre>
-<p>Always keep the <code>.nc</code> and <code>.nc.sqlite</code> files together — neither is usable alone.</p>
+<p>Always keep the <code>.h5</code> and <code>.h5.sqlite</code> files together — neither is usable alone.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
 <p>Every fallible method returns <code>Result&lt;T, TimeSeriesError&gt;</code>. Match on the variant to react:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -1922,11 +1922,11 @@ exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
 <pre><code class="language-python"># In-memory: no filesystem I/O.
 store = Store.create(in_memory=True)
 
-# On disk: writes system.nc and system.nc.sqlite.
-store = Store.create(path="system.nc")
+# On disk: writes system.h5 and system.h5.sqlite.
+store = Store.create(path="system.h5")
 
 # Reopen read-only.
-store = Store.open("system.nc", read_only=True)
+store = Store.open("system.h5", read_only=True)
 </code></pre>
 <h2 id="build-a-series"><a class="header" href="#build-a-series">Build a Series</a></h2>
 <p><code>SingleTimeSeries</code> takes a timezone-aware <code>datetime</code>, a resolution (a <code>timedelta</code> or an ISO 8601
@@ -2015,7 +2015,7 @@ for ts in reader.timestamps():
 <h3 id="shared-forecasts-are-read-once"><a class="header" href="#shared-forecasts-are-read-once">Shared forecasts are read once</a></h3>
 <p>Forecasts that share a backing array (deduplicated identical data, or several
 <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>) collapse to a single <strong>window slot</strong>.
-<code>forecast_read</code> reads each slot from the <code>.nc</code> file once per timestamp, so a forecast shared by 10
+<code>forecast_read</code> reads each slot from the <code>.h5</code> file once per timestamp, so a forecast shared by 10
 components costs one read, not ten. <code>reader.num_slots()</code> is the physical read count, and
 <code>reader.entry_slot(i)</code> says which slot an entry uses — group by slot to materialize each unique
 window only once on the Python side too:</p>
@@ -2124,9 +2124,9 @@ assert store.list_parents(child_id=7) == [43, 99]
 </code></pre>
 <p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk-1"><a class="header" href="#persist-to-disk-1">Persist to Disk</a></h2>
-<pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.nc + system.nc.sqlite can be copied
+<pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
-<p>Keep the two files together — the <code>.nc</code> and <code>.nc.sqlite</code> pair is a single logical store.</p>
+<p>Keep the two files together — the <code>.h5</code> and <code>.h5.sqlite</code> pair is a single logical store.</p>
 <h2 id="error-handling-1"><a class="header" href="#error-handling-1">Error Handling</a></h2>
 <p>The store's own exceptions inherit from <code>TimeSeriesError</code>, so you can catch broadly or narrowly:</p>
 <pre><code class="language-python">from infrastore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
@@ -2187,7 +2187,7 @@ store.add_time_series(...)   # spans appear on stderr
 <code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
 bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
-<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and HDF5 I/O</td></tr>
 </tbody></table>
 </div><div style="break-before: page; page-break-before: always;"></div><h1 id="julia-developer-guide"><a class="header" href="#julia-developer-guide">Julia Developer Guide</a></h1>
 <p>This guide covers building on <code>InfraStore.jl</code>, the Julia package that wraps the
@@ -2211,11 +2211,11 @@ export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linu
 <pre><code class="language-julia"># In-memory.
 store = Store(in_memory=true)
 
-# On disk: writes system.nc and system.nc.sqlite.
-store = Store(in_memory=false, path="system.nc")
+# On disk: writes system.h5 and system.h5.sqlite.
+store = Store(in_memory=false, path="system.h5")
 
 # Reopen read-only.
-store = open_store("system.nc"; read_only=true)
+store = open_store("system.h5"; read_only=true)
 </code></pre>
 <p>The store is finalized automatically, but you can release it eagerly with <code>close!(store)</code>.</p>
 <h2 id="add-a-series-2"><a class="header" href="#add-a-series-2">Add a Series</a></h2>
@@ -2396,7 +2396,7 @@ into identical windows).</p>
 <h3 id="shared-forecasts-are-read-once-1"><a class="header" href="#shared-forecasts-are-read-once-1">Shared forecasts are read once</a></h3>
 <p>Forecasts that share a backing array (deduplicated identical data, or several
 <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>) collapse to a single <strong>window slot</strong>.
-<code>forecast_read!</code> reads each slot from the <code>.nc</code> file once per timestamp, so a forecast shared by 10
+<code>forecast_read!</code> reads each slot from the <code>.h5</code> file once per timestamp, so a forecast shared by 10
 components costs one read, not ten. <code>forecast_num_slots(reader)</code> is the physical read count, and
 each <code>ForecastEntry.slot</code> says which slot an entry uses — group by <code>slot</code> to materialize each unique
 window only once:</p>
@@ -2474,9 +2474,9 @@ list_parents(store; child_id=7)                     # [43, 99]
 </code></pre>
 <p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk-2"><a class="header" href="#persist-to-disk-2">Persist to Disk</a></h2>
-<pre><code class="language-julia">flush!(store)   # sync NetCDF + SQLite; afterwards system.nc + system.nc.sqlite can be copied
+<pre><code class="language-julia">flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
-<p>Keep the <code>.nc</code> and <code>.nc.sqlite</code> files together.</p>
+<p>Keep the <code>.h5</code> and <code>.h5.sqlite</code> files together.</p>
 <h2 id="error-handling-2"><a class="header" href="#error-handling-2">Error Handling</a></h2>
 <p>Errors subtype <code>InfraStore.TimeSeriesException</code>. The exception types are not exported, so reference
 them module-qualified. Catch broadly or narrowly:</p>
@@ -2535,7 +2535,7 @@ add_time_series!(store, ...)   # spans appear on stderr
 <code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
 bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
-<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and HDF5 I/O</td></tr>
 </tbody></table>
 </div><div style="break-before: page; page-break-before: always;"></div><h1 id="grpc-server--client-guide"><a class="header" href="#grpc-server--client-guide">gRPC Server &amp; Client Guide</a></h1>
 <p>The gRPC server exposes a store for remote, <strong>read-only</strong> access. Writes always require local
@@ -2545,8 +2545,8 @@ guide covers running the server and talking to it from Rust. For the wire contra
 <a href="guides/../reference/server-config.html">Server Configuration</a>.</p>
 <h2 id="when-to-use-it"><a class="header" href="#when-to-use-it">When to Use It</a></h2>
 <p>Use the server to fan out reads of an existing store to many clients or across the network — for
-example, serving a published dataset to analysis jobs. A single writer produces the <code>.nc</code> +
-<code>.nc.sqlite</code> pair locally; the server then reads it and answers queries. It never modifies the
+example, serving a published dataset to analysis jobs. A single writer produces the <code>.h5</code> +
+<code>.h5.sqlite</code> pair locally; the server then reads it and answers queries. It never modifies the
 files.</p>
 <h2 id="run-the-server"><a class="header" href="#run-the-server">Run the Server</a></h2>
 <ol>
@@ -2560,7 +2560,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.nc"]   # the .nc.sqlite catalog must sit beside it
+files = ["./system.h5"]   # the .h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"
@@ -2648,7 +2648,7 @@ cargo build --release -p infrastore-bench
 <p>The binary is placed at <code>target/release/infrastore-bench</code>.</p>
 <h2 id="subcommands"><a class="header" href="#subcommands">Subcommands</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Subcommand</th><th>What it measures</th></tr></thead><tbody>
-<tr><td><code>add</code></td><td><code>add_time_series_bulk</code> throughput — NetCDF packing and SQLite transaction cost</td></tr>
+<tr><td><code>add</code></td><td><code>add_time_series_bulk</code> throughput — HDF5 packing and SQLite transaction cost</td></tr>
 <tr><td><code>read</code></td><td>Per-timestep simulation I/O — reading all N components at each step t</td></tr>
 <tr><td><code>all</code></td><td>Runs <code>add</code> then <code>read</code> back-to-back</td></tr>
 </tbody></table>
@@ -2676,9 +2676,9 @@ infrastore-bench add --count 100000 --length 168
 excluded from the add throughput measurement).</li>
 <li><strong><code>add_time_series_bulk</code></strong> — wall time, items/s, and data MB/s.</li>
 </ul>
-<p><code>SingleTimeSeries</code> arrays are column-packed into NetCDF datasets of up to 1 000 columns each and
+<p><code>SingleTimeSeries</code> arrays are column-packed into HDF5 datasets of up to 1 000 columns each and
 wrapped in a single SQLite transaction; the add benchmark stresses both. <code>Deterministic</code> arrays are
-standalone NetCDF variables; their add cost is dominated by per-variable write overhead and the same
+standalone HDF5 variables; their add cost is dominated by per-variable write overhead and the same
 single-transaction SQLite commit.</p>
 <h2 id="read-benchmark"><a class="header" href="#read-benchmark">Read benchmark</a></h2>
 <pre><code class="language-sh"># 1 000 components, 168 timesteps, in-memory (pure CPU / metadata cost)
@@ -2696,7 +2696,7 @@ infrastore-bench read --count 10000 --length 168 --steps 24
         store.get_time_series(key, time_range=(t₀ + t·Δt, t₀ + (t+1)·Δt))
 </code></pre>
 <p>For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
-This rebuilds the NetCDF in-memory index and starts the HDF5 chunk cache cold, reflecting real
+This rebuilds the HDF5 in-memory index and starts the HDF5 chunk cache cold, reflecting real
 simulation startup conditions. The OS page cache may still be warm.</p>
 <p>Reports per-step <strong>min / median / p95 / max</strong> and total <strong>component-reads/s</strong>.</p>
 <blockquote>
@@ -2709,9 +2709,9 @@ per component. The benchmark output flags this explicitly so the overhead is vis
 <p>The two metrics to watch:</p>
 <ul>
 <li>
-<p><strong><code>add</code> throughput</strong> drops sharply when the number of items exceeds a SQLite transaction or NetCDF
+<p><strong><code>add</code> throughput</strong> drops sharply when the number of items exceeds a SQLite transaction or HDF5
 dataset threshold. If adding 100 000 items is notably slower per-item than adding 10 000, the
-bottleneck is likely the SQLite commit or NetCDF file growth, not array construction.</p>
+bottleneck is likely the SQLite commit or HDF5 file growth, not array construction.</p>
 </li>
 <li>
 <p><strong>Per-step time</strong> for the read benchmark scales linearly with <code>--count</code>. If the cost per step is
@@ -2739,23 +2739,23 @@ infrastore-bench --log-level debug add --count 100
 <tr><td><code>copy_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code> — of the source series</td></tr>
 <tr><td><code>remove_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code></td></tr>
 <tr><td><code>bulk_read</code></td><td><code>Store</code></td><td><code>count</code> — number of keys read in one pass</td></tr>
-<tr><td><code>put_array</code></td><td>NetCDF backend</td><td><code>bytes</code>, <code>packed</code></td></tr>
-<tr><td><code>put_packed</code></td><td>NetCDF backend</td><td><code>bytes</code></td></tr>
-<tr><td><code>put_packed_block</code></td><td>NetCDF backend</td><td><code>n</code> — series written in one batch-sized block</td></tr>
-<tr><td><code>put_standalone</code></td><td>NetCDF backend</td><td><code>bytes</code></td></tr>
-<tr><td><code>get_array</code> / <code>get_slice</code></td><td>NetCDF backend</td><td><code>start</code>, <code>end</code> (slice only)</td></tr>
-<tr><td><code>read_arrays</code></td><td>NetCDF backend</td><td><code>n</code> — arrays fetched in one decompress-once pass</td></tr>
-<tr><td><code>read_index_into</code></td><td>NetCDF backend</td><td><code>n</code>, <code>index</code> — one timestep across <code>n</code> series</td></tr>
-<tr><td><code>read_window_into</code></td><td>NetCDF backend</td><td><code>count_axis</code>, <code>window_index</code></td></tr>
-<tr><td><code>read_locked</code></td><td>NetCDF backend</td><td>—</td></tr>
-<tr><td><code>rebuild_index</code></td><td>NetCDF backend</td><td>— (runs once on <code>Store::open</code>)</td></tr>
+<tr><td><code>put_array</code></td><td>HDF5 backend</td><td><code>bytes</code>, <code>packed</code></td></tr>
+<tr><td><code>put_packed</code></td><td>HDF5 backend</td><td><code>bytes</code></td></tr>
+<tr><td><code>put_packed_block</code></td><td>HDF5 backend</td><td><code>n</code> — series written in one batch-sized block</td></tr>
+<tr><td><code>put_standalone</code></td><td>HDF5 backend</td><td><code>bytes</code></td></tr>
+<tr><td><code>get_array</code> / <code>get_slice</code></td><td>HDF5 backend</td><td><code>start</code>, <code>end</code> (slice only)</td></tr>
+<tr><td><code>read_arrays</code></td><td>HDF5 backend</td><td><code>n</code> — arrays fetched in one decompress-once pass</td></tr>
+<tr><td><code>read_index_into</code></td><td>HDF5 backend</td><td><code>n</code>, <code>index</code> — one timestep across <code>n</code> series</td></tr>
+<tr><td><code>read_window_into</code></td><td>HDF5 backend</td><td><code>count_axis</code>, <code>window_index</code></td></tr>
+<tr><td><code>read_locked</code></td><td>HDF5 backend</td><td>—</td></tr>
+<tr><td><code>rebuild_index</code></td><td>HDF5 backend</td><td>— (runs once on <code>Store::open</code>)</td></tr>
 </tbody></table>
 </div>
 <p>Spans nest: a single <code>add_time_series_bulk</code> call groups packed series by shape and emits one
 <code>put_packed_block</code> span per group (filling whole chunks), plus a <code>put_array</code> → <code>put_standalone</code> span
 per standalone item; a single <code>add_time_series</code> call instead emits one <code>put_array</code> → <code>put_packed</code>
-span. This makes it straightforward to see whether time is spent in metadata insertion, NetCDF I/O,
-or the <code>debug_span</code> overhead itself.</p>
+span. This makes it straightforward to see whether time is spent in metadata insertion, HDF5 I/O, or
+the <code>debug_span</code> overhead itself.</p>
 <p>The <code>infrastore</code> CLI supports the same <code>--log-level</code> flag for diagnosing a live store.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="how-to-guides"><a class="header" href="#how-to-guides">How-To Guides</a></h1>
 <p>Task-oriented recipes. Each page solves one problem in the fewest steps and links out to the
@@ -2772,10 +2772,10 @@ or the <code>debug_span</code> overhead itself.</p>
 workspace build, see <a href="how-to/../getting-started/installation.html">Installation</a>.</p>
 <h2 id="1-install-system-libraries"><a class="header" href="#1-install-system-libraries">1. Install System Libraries</a></h2>
 <pre><code class="language-sh"># macOS
-brew install hdf5 netcdf protobuf
+brew install hdf5 protobuf
 
 # Debian / Ubuntu
-sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
+sudo apt-get install libhdf5-dev protobuf-compiler
 </code></pre>
 <p>If the build fails with <code>Unable to locate HDF5 root directory and/or headers</code>, set <code>HDF5_DIR</code>:</p>
 <pre><code class="language-sh">export HDF5_DIR="$(brew --prefix hdf5)"          # macOS
@@ -2809,7 +2809,7 @@ cargo test --workspace
 <h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
 <ul>
 <li>Python 3.11 or newer.</li>
-<li>The <a href="how-to/./install.html#1-install-system-libraries">system libraries</a> (HDF5, NetCDF, Protobuf).</li>
+<li>The <a href="how-to/./install.html#1-install-system-libraries">system libraries</a> (HDF5, Protobuf).</li>
 </ul>
 <h2 id="build-and-install-the-wheel-development"><a class="header" href="#build-and-install-the-wheel-development">Build and Install the Wheel (development)</a></h2>
 <p>The binding is built with <a href="https://www.maturin.rs/">maturin</a>. <code>maturin develop</code> compiles the
@@ -2875,7 +2875,7 @@ or a string dtype) raises. Feature values must be <code>int</code>/<code>float</
 <h2 id="prerequisites-1"><a class="header" href="#prerequisites-1">Prerequisites</a></h2>
 <ul>
 <li>Julia 1.10 or newer.</li>
-<li>The <a href="how-to/./install.html#1-install-system-libraries">system libraries</a> (HDF5, NetCDF, Protobuf).</li>
+<li>The <a href="how-to/./install.html#1-install-system-libraries">system libraries</a> (HDF5, Protobuf).</li>
 </ul>
 <h2 id="1-build-the-native-library"><a class="header" href="#1-build-the-native-library">1. Build the Native Library</a></h2>
 <p><code>InfraStore.jl</code> calls into the C ABI cdylib, so build it first:</p>
@@ -2945,10 +2945,10 @@ your variable points at <code>target/release</code>.</li>
 <a href="how-to/../guides/server.html">gRPC Server guide</a>; for every config key, see
 <a href="how-to/../reference/server-config.html">Server Configuration</a>.</p>
 <h2 id="1-produce-a-store-on-disk"><a class="header" href="#1-produce-a-store-on-disk">1. Produce a Store on Disk</a></h2>
-<p>Create the <code>.nc</code> + <code>.nc.sqlite</code> pair with any binding, then <code>flush()</code> it. For example, in Rust:</p>
+<p>Create the <code>.h5</code> + <code>.h5.sqlite</code> pair with any binding, then <code>flush()</code> it. For example, in Rust:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>let mut store = create_store(Some(Path::new("system.nc")), false)?;
+</span>let mut store = create_store(Some(Path::new("system.h5")), false)?;
 // ... add_time_series ...
 store.flush()?;
 <span class="boring">}</span></code></pre></pre>
@@ -2959,7 +2959,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.nc"]   # the ./system.nc.sqlite catalog must sit beside it
+files = ["./system.h5"]   # the ./system.h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"
@@ -3000,7 +3000,7 @@ result.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="use-the-infrastore-cli"><a class="header" href="#use-the-infrastore-cli">Use the <code>infrastore</code> CLI</a></h1>
 <p><code>infrastore</code> loads time series from CSV files and inspects a store, talking directly to the on-disk
-<code>.nc</code> + <code>.nc.sqlite</code> pair (no gRPC server required). For the full command and descriptor reference,
+<code>.h5</code> + <code>.h5.sqlite</code> pair (no gRPC server required). For the full command and descriptor reference,
 see <a href="how-to/../reference/cli.html">CLI Reference</a>.</p>
 <h2 id="1-build-the-binary"><a class="header" href="#1-build-the-binary">1. Build the Binary</a></h2>
 <pre><code class="language-sh">cargo build -p infrastore-cli      # debug build at target/debug/infrastore
@@ -3044,9 +3044,9 @@ value
 <p>The descriptor rejects unknown keys, so a typo (<code>resolutionn</code>) is a hard error rather than a
 silently ignored setting.</p>
 <h2 id="3-add-it-to-a-store"><a class="header" href="#3-add-it-to-a-store">3. Add It to a Store</a></h2>
-<pre><code class="language-sh">infrastore --store demo.nc add --descriptor load.json
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json
 </code></pre>
-<p>The store (<code>demo.nc</code> and its <code>demo.nc.sqlite</code> catalog) is created on first <code>add</code>. A descriptor may
+<p>The store (<code>demo.h5</code> and its <code>demo.h5.sqlite</code> catalog) is created on first <code>add</code>. A descriptor may
 also be a JSON array of objects to add many series in one transaction. <code>--csv</code> overrides the
 descriptor's <code>csv</code> path, but only for a single-series descriptor: with an array of two or more
 objects it errors (<code>--csv cannot be used with an array descriptor</code>).</p>
@@ -3054,27 +3054,57 @@ objects it errors (<code>--csv cannot be used with an array descriptor</code>).<
 <p><code>infrastore</code> follows an output convention: a global <code>-f/--format</code> with <code>table</code> (default), <code>json</code>,
 and <code>csv</code>. Only the read commands (<code>list</code>, <code>get</code>, <code>info</code>) honor it; <code>add</code>, <code>remove</code>, <code>transform</code>,
 and <code>template</code> accept the flag but ignore it and print plain text.</p>
-<pre><code class="language-sh">infrastore --store demo.nc list                                       # what's in the store
-infrastore --store demo.nc list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
-infrastore --store demo.nc get  --owner-id 42 --name load             # pretty table
-infrastore --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable CSV
-infrastore --store demo.nc -f json info --owner-id 42 --name load     # metadata + stats
-infrastore --store demo.nc -f csv  export --dir out/                  # one file per series
+<pre><code class="language-sh">infrastore --store demo.h5 list                                       # what's in the store
+infrastore --store demo.h5 list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
+infrastore --store demo.h5 list --limit 20 --wide                     # bounded, all columns
+infrastore --store demo.h5 get  --owner-id 42 --name load             # pretty table
+infrastore --store demo.h5 -f csv  get  --owner-id 42 --name load     # timestamped CSV
+infrastore --store demo.h5 -f json info --owner-id 42 --name load     # metadata + hash + stats
+infrastore --store demo.h5 -f csv  export --dir out/                  # one file per series
 </code></pre>
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
 to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches). Setting
 <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, and destructive commands (<code>remove</code>,
 <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>) accept <code>--dry-run</code> to preview their effect.</p>
-<p><code>info</code> reports metadata plus stats over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or
-<code>true_count</code>/<code>false_count</code> when <code>dtype</code> is <code>bool</code>, and always <code>num_elements</code>.</p>
+<p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
+over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when <code>dtype</code>
+is <code>bool</code>, and always <code>num_elements</code>. The stats are the only part that reads the array —
+<code>--no-stats</code> skips it for a purely catalog-side query.</p>
+<p><code>list</code> shows every field that is part of a series' identity, features included, so two series that
+differ only by a feature never render as the same row. Its <code>Hash</code> column is the first 12 characters
+of the array's content hash: rows with equal hashes share one array on disk.</p>
 <p><code>get</code>/<code>info</code>/<code>remove</code> select a single series with <code>--owner-id</code>, <code>--owner-category</code>, <code>--name</code>,
 <code>--type</code>, <code>--resolution</code>, and repeated <code>--feature key=value</code> (<code>--feature</code> is the only repeatable
 one); if more than one series matches, <code>infrastore</code> lists the candidates so you can narrow the
 query. The owner is the <code>(owner_id, owner_category)</code> pair, so a component and a supplemental
 attribute may share a numeric id — add <code>--owner-category</code> (<code>component</code> / <code>supplemental_attribute</code>)
 to disambiguate. Large series truncate in <code>table</code> output — pass <code>--limit N</code> or <code>--full</code>.</p>
+<h2 id="5-find-the-bytes-on-disk"><a class="header" href="#5-find-the-bytes-on-disk">5. Find the Bytes on Disk</a></h2>
+<p>Arrays are content-addressed, so identical values are stored once and shared. <code>arrays</code> shows what
+collapsed onto what, and where each array actually lives:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 store-info    # both file paths, format version, compression
+infrastore --store demo.h5 arrays        # one row per distinct array + the series sharing it
+infrastore --store demo.h5 arrays --data-hash 2018057b   # narrow to one (any prefix, any case)
+</code></pre>
+<p><code>info</code> resolves a single series the same way, reporting <code>data_hash</code>, <code>hdf5_dataset</code>, and
+<code>hdf5_column</code>. You need all three to open the data with an outside tool: a packed array is one
+<em>column</em> of a dataset shared with other same-shaped arrays, and a packed dataset that fills up
+spills into suffixed siblings, so neither the column nor the dataset name can be worked out from
+metadata alone.</p>
+<p>Opening the catalog directly, use the <code>time_series_readable</code> view — <code>sqlite3</code> prints the raw <code>BLOB</code>
+hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
+<pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
+</code></pre>
+<h2 id="6-associations"><a class="header" href="#6-associations">6. Associations</a></h2>
+<p>Two association catalogs live alongside the time series and are readable here:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute
+infrastore --store demo.h5 attributes --summary       # counts by (component type, attribute type)
+infrastore --store demo.h5 links --parent-id 42       # directed parent -&gt; child edges
+</code></pre>
+<p>Both are read-only from the CLI: writing an association means writing the consumer's object graph
+alongside it, so that direction stays with the Rust, Python, and Julia APIs.</p>
 <p><code>--time-range START..END</code> on <code>get</code> takes two <em>timestamps</em> (RFC3339 or epoch-ms), not a duration:</p>
-<pre><code class="language-sh">infrastore --store demo.nc get --owner-id 42 --name load \
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load \
   --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
 </code></pre>
 <p>Beware that inputs and outputs are spelled differently. You type the short, lowercase forms
@@ -3082,7 +3112,7 @@ to disambiguate. Large series truncate in <code>table</code> output — pass <co
 CamelCase names (<code>SingleTimeSeries</code>, <code>Component</code>). Both spellings are accepted as input, so
 <code>-f json list</code> output can be fed back into a selector unchanged; just don't expect the rendered
 value to string-match what you typed.</p>
-<h2 id="5-forecasts"><a class="header" href="#5-forecasts">5. Forecasts</a></h2>
+<h2 id="7-forecasts"><a class="header" href="#7-forecasts">7. Forecasts</a></h2>
 <p>All five writable types work (<code>single</code>, <code>non_sequential</code>, <code>deterministic</code>, <code>probabilistic</code>,
 <code>scenarios</code>). <code>infrastore template deterministic</code> prints a descriptor to edit, but it is plain JSON
 and says nothing about the data layout, so here is the rule:</p>
@@ -3104,12 +3134,12 @@ re-ingestible by <code>add</code> (static series' <code>get -f csv</code> still 
 <code>transform</code> takes <strong>no selector</strong>: it rewrites <em>every</em> <code>SingleTimeSeries</code> in the store. <code>--horizon</code>
 must fit inside each one (<code>horizon / resolution</code> steps must not exceed its <code>length</code>), so with the
 6-row hourly <code>load</code> above, a 24-hour horizon fails and a 3-hour one works:</p>
-<pre><code class="language-sh">infrastore --store demo.nc transform --horizon 3h --interval 1h
+<pre><code class="language-sh">infrastore --store demo.h5 transform --horizon 3h --interval 1h
 </code></pre>
 <p>The derived series keeps the source's owner, name, and resolution, so <code>load</code> now matches two entries
 and a bare selector becomes ambiguous. Disambiguate with <code>--type</code>:</p>
-<pre><code class="language-sh">infrastore --store demo.nc get --owner-id 42 --name load --type single
-infrastore --store demo.nc get --owner-id 42 --name load --type deterministic_single
+<pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load --type single
+infrastore --store demo.h5 get --owner-id 42 --name load --type deterministic_single
 </code></pre>
 <h2 id="notes-1"><a class="header" href="#notes-1">Notes</a></h2>
 <ul>
@@ -3118,7 +3148,7 @@ added later).</li>
 <li>Output is colored (green table headers) only when stdout is a terminal; it is plain when
 piped/redirected or when <code>NO_COLOR</code> is set, so <code>-f json</code>/<code>-f csv</code> stay clean for other tools.</li>
 <li><code>--log-level</code> (or <code>RUST_LOG</code>) controls logging; the default is quiet (<code>warn</code>).</li>
-<li>The <code>.nc</code> and <code>.nc.sqlite</code> files are one artifact — move, copy, and delete them together.</li>
+<li>The <code>.h5</code> and <code>.h5.sqlite</code> files are one artifact — move, copy, and delete them together.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="reference"><a class="header" href="#reference">Reference</a></h1>
 <p>Information-oriented listings: exact signatures, schemas, and on-disk layouts. Reach for these pages
@@ -3126,7 +3156,7 @@ when you already know what you want and need the precise shape of it. For narrat
 the <a href="reference/../guides/index.html">Developer Guides</a>; for concepts, the <a href="reference/../explanation/index.html">Explanation</a>
 section.</p>
 <ul>
-<li><a href="reference/./file-format.html">On-Disk File Format</a> — The NetCDF4 layout and SQLite schema, byte for byte.</li>
+<li><a href="reference/./file-format.html">On-Disk File Format</a> — The HDF5 layout and SQLite schema, byte for byte.</li>
 <li><a href="reference/./rust-api.html">Rust API</a> — <code>infrastore-core</code> public types and <code>Store</code> methods.</li>
 <li><a href="reference/./python-api.html">Python API</a> — The <code>infrastore</code> module.</li>
 <li><a href="reference/./julia-api.html">Julia API</a> — The <code>InfraStore.jl</code> package.</li>
@@ -3136,25 +3166,35 @@ section.</p>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="on-disk-file-format"><a class="header" href="#on-disk-file-format">On-Disk File Format</a></h1>
 <p>A persisted store is a pair of files that must be kept together:</p>
-<pre><code class="language-text">&lt;name&gt;.nc          # NetCDF4 — numerical arrays
-&lt;name&gt;.nc.sqlite   # SQLite  — metadata associations
+<pre><code class="language-text">&lt;name&gt;.h5          # HDF5   — numerical arrays
+&lt;name&gt;.h5.sqlite   # SQLite — metadata associations
 </code></pre>
-<p>The SQLite catalog path is the NetCDF path with <code>.sqlite</code> appended to the file name. This page is
-the authoritative description of both. For the rationale behind the split, see the
+<p>The SQLite catalog path is the HDF5 path with <code>.sqlite</code> appended to the file name. This page is the
+authoritative description of both. For the rationale behind the split, see the
 <a href="reference/../explanation/storage-model.html">Storage Model</a>.</p>
+<p>The array file is a <strong>plain HDF5 file</strong>, written directly against libhdf5 — not a NetCDF4 file.
+Earlier releases wrote it through netcdf-c; the layout below is unchanged, but the file no longer
+carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</code> accepts only files it wrote itself
+(see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
-<p>The NetCDF root carries two global attributes:</p>
+<p>The HDF5 root carries three global attributes:</p>
 <pre><code class="language-text">data_format_version = "0.11.0"
 compression         = "deflate:3:shuffle"
+storage_backend     = "hdf5"
 </code></pre>
 <p><code>data_format_version</code> is the semver of the on-disk format (<code>DATA_FORMAT_VERSION</code>). It is bumped when
-the NetCDF layout, the SQLite schema, or the <a href="reference/../explanation/content-addressing.html">hashing domain</a>
+the HDF5 layout, the SQLite schema, or the <a href="reference/../explanation/content-addressing.html">hashing domain</a>
 changes in a backward-incompatible way. A purely additive SQLite table does not qualify: it costs
 old readers nothing and old stores pick it up from the idempotent DDL on their first writable open.
 The <a href="reference/file-format.html#associations"><code>associations</code></a> table landed that way.</p>
 <p><code>compression</code> records the filter policy the store was created with, so that appends made after
 reopening reuse the same filter. It is <strong>not</strong> part of the compatibility contract — see
 <a href="reference/file-format.html#compression">Compression</a> below.</p>
+<p><code>storage_backend</code> marks the file as one infrastore wrote. <code>Store::open</code> checks it before reading
+anything else and rejects a file that lacks it with <code>InvalidParameter</code> — this is what distinguishes
+an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
+netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
+no in-place migration.</p>
 <p>Opening a store whose recorded version differs from the version this build reads fails with
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
@@ -3179,7 +3219,7 @@ owner identifier to a signed 64-bit integer (<code>owner_id</code>); <code>0.4.0
 InfrastructureSystems.jl shipped with — the version that introduced <code>DATA_FORMAT_VERSION</code> itself;
 <code>0.3.0</code> switched the time unit from nanoseconds to milliseconds, renaming the SQLite <code>*_ns</code> columns
 to <code>*_ms</code> and encoding the packed dataset name's <code>{res}</code> field in milliseconds instead of whole
-seconds; <code>0.2.0</code> introduced typed, multi-dimensional arrays and the two-mode NetCDF layout below;
+seconds; <code>0.2.0</code> introduced typed, multi-dimensional arrays and the two-mode array layout below;
 <code>0.1.0</code> stored only 1-D <code>f64</code>.)</p>
 <h2 id="arrays-are-typed-and-n-dimensional"><a class="header" href="#arrays-are-typed-and-n-dimensional">Arrays Are Typed and N-Dimensional</a></h2>
 <p>Every stored array is a <strong><code>TypedArray</code></strong>: an element <code>dtype</code>, a <code>shape</code> <code>[length, k1, k2, …]</code> whose
@@ -3194,32 +3234,27 @@ with the bindings and the C ABI):</p>
 </div>
 <p>A scalar-per-step series has an empty element shape; a per-step tuple (e.g. the 3 coefficients of a
 quadratic cost curve) has element shape <code>[3]</code>.</p>
-<h2 id="netcdf-layout"><a class="header" href="#netcdf-layout">NetCDF Layout</a></h2>
+<h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
-<pre><code class="language-text">&lt;name&gt;.nc
+<pre><code class="language-text">&lt;name&gt;.h5
 ├── attribute  data_format_version = "0.11.0"
 ├── attribute  compression         = "deflate:3:shuffle"
+├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
     └── group  single/
-        ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, cols, *element_shape)
-        ├── var  sts_{dtype}_{shape}_{length}_{res}_h    str  (cols,)     # per-column hex hashes
-        ├── var  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
-        ├── var  arr_{hex_hash}                          standalone array  [length, *element_shape]
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+        ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
         └── ...
 </code></pre>
-<p>Every dimension is private to the variable that owns it and is named after that variable, so
-<code>ncdump -h</code> shows one set of dimensions per dataset:</p>
-<ul>
-<li>A packed dataset <code>{dataset}</code> is dimensioned <code>({dataset}_t, {dataset}_c, {dataset}_e0, …)</code>:
-<code>{dataset}_t</code> = <code>length</code> (the time axis), <code>{dataset}_c</code> = <code>cols</code> (the column axis), and one
-<code>{dataset}_e{i}</code> per trailing axis, sized <code>element_shape[i]</code>. A scalar-per-step dataset has no
-<code>_e{i}</code> dimensions.</li>
-<li>Its hash companion <code>{dataset}_h</code> is dimensioned on <code>{dataset}_c</code> alone — one hash slot per column.</li>
-<li>A standalone array <code>arr_{hex_hash}</code> is dimensioned <code>arr_{hex_hash}_d{i}</code>, one per axis of its full
-shape <code>[length, *element_shape]</code>.</li>
-</ul>
-<p><code>{dataset}_c</code> is load-bearing, not decorative: on open the backend recovers each packed dataset's
-column count from the length of its second dimension, which is how per-dataset widths round-trip.</p>
+<p>Datasets carry <strong>no dimension scales and no dimension names</strong> — shape is read straight off the HDF5
+dataspace. (The netcdf-backed releases created a named dimension per axis, <code>{dataset}_t</code>,
+<code>{dataset}_c</code>, and so on; those objects are gone.) On open the backend recovers each packed
+dataset's column count from the second extent of its dataspace, which is how per-dataset widths
+round-trip.</p>
+<p>The hash companion <code>{dataset}_h</code> is a <code>(cols, 64)</code> array of <code>u8</code> holding each column's 64 lowercase
+hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero row marks a free slot.</strong></p>
 <h3 id="packed-mode"><a class="header" href="#packed-mode">Packed mode</a></h3>
 <p>Used for <strong><code>SingleTimeSeries</code></strong> and the underlying array of a <strong><code>DeterministicSingleTimeSeries</code></strong>.
 Many arrays that share a <code>(dtype, element_shape, length, resolution)</code> are column-packed into one
@@ -3289,13 +3324,13 @@ regardless of the filter, so stores written with different settings stay mutuall
 <code>data_format_version</code> is unaffected by the choice.</p>
 <h3 id="deletion-and-compaction"><a class="header" href="#deletion-and-compaction">Deletion and compaction</a></h3>
 <ul>
-<li><strong>Packed:</strong> deletion writes an empty string to the column's hash slot and zero-fills the column's
-data, so no stale values are readable through a reused slot. The slot becomes reusable by the next
-compatible write. The dataset does not shrink.</li>
-<li><strong>Standalone:</strong> deletion drops the array from the in-memory index; the NetCDF variable lingers as
-dead space (NetCDF cannot delete variables in place).</li>
+<li><strong>Packed:</strong> deletion zero-fills both the column's hash row and the column's data, so no stale
+values are readable through a reused slot. The slot becomes reusable by the next compatible write.
+The dataset does not shrink.</li>
+<li><strong>Standalone:</strong> deletion drops the array from the in-memory index; the HDF5 dataset lingers as
+dead space (HDF5 cannot reclaim the space in place).</li>
 <li><code>compact()</code> reports reclaimable slots but does not physically resize datasets or remove dead
-standalone variables in this release (netcdf-c cannot resize a dimension in place).</li>
+standalone datasets in this release (HDF5 cannot reclaim the space in place).</li>
 <li><strong>Feature sets:</strong> because they are shared, deleting an association never deletes its feature set;
 removing the last association that referenced one leaves it unreachable. <code>compact()</code> deletes
 unreachable sets and reports the row count as <code>feature_sets_reclaimed</code>. This is the one thing
@@ -3325,7 +3360,7 @@ compaction physically removes.</li>
 <tr><td><code>dtype</code></td><td>TEXT</td><td>Element dtype string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
 <tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
 <tr><td><code>ext</code></td><td>TEXT</td><td>Opaque package-owned extension payload (JSON), verbatim; <code>NULL</code> if unset</td></tr>
-<tr><td><code>data_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the array; links to a NetCDF column/variable</td></tr>
+<tr><td><code>data_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the array; links to an HDF5 column/variable</td></tr>
 <tr><td><code>features_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the feature map</td></tr>
 </tbody></table>
 </div>
@@ -3355,7 +3390,7 @@ associations with the same features therefore reference the same rows here — i
 <p>There is deliberately <strong>no foreign key</strong> to <code>time_series_associations</code> and <strong>no cascade</strong>: rows here
 are shared, so deleting one association must not delete a set another association still uses.
 Removing the last association that referenced a set instead leaves it unreachable — the same
-deletion semantics as the NetCDF side's unreachable standalone variables. <code>Store::compact</code> sweeps
+deletion semantics as the HDF5 side's unreachable standalone variables. <code>Store::compact</code> sweeps
 unreachable sets and reports the count as <code>feature_sets_reclaimed</code>; clearing a store drops them all
 outright.</p>
 <h3 id="supplemental_attribute_associations"><a class="header" href="#supplemental_attribute_associations"><code>supplemental_attribute_associations</code></a></h3>
@@ -3426,7 +3461,7 @@ have made every existing store unreadable in exchange for nothing.</p>
 </code></pre>
 <p>A single-column table holding the catalog schema version. Creating the catalog inserts <code>version = 1</code>
 if the table is empty; <code>1</code> is the current value. This tracks the SQLite schema alone and is distinct
-from the NetCDF <code>data_format_version</code> attribute, which governs the artifact as a whole and is the
+from the HDF5 <code>data_format_version</code> attribute, which governs the artifact as a whole and is the
 value <code>open</code> validates.</p>
 <h3 id="indexes"><a class="header" href="#indexes">Indexes</a></h3>
 <pre><code class="language-sql">CREATE UNIQUE INDEX uq_ts_assoc ON time_series_associations
@@ -3453,29 +3488,68 @@ and made a bare "assoc" ambiguous. The DDL drops the old names before creating t
 store written by an earlier build is renamed in place on its first writable open rather than
 accumulating two equivalent index pairs. Index names are not part of the on-disk contract, so this
 carries no <code>data_format_version</code> change.</p>
+<h3 id="time_series_readable-view"><a class="header" href="#time_series_readable-view"><code>time_series_readable</code> (view)</a></h3>
+<pre><code class="language-sql">CREATE VIEW time_series_readable AS
+SELECT id, owner_id, owner_type, owner_category, time_series_type, name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, dtype, element_shape, ext,
+       lower(hex(data_hash))     AS data_hash,
+       lower(hex(features_hash)) AS features_hash
+FROM time_series_associations;
+</code></pre>
+<p>A projection of the association table with both hashes hex-encoded, for humans opening the catalog
+in <code>sqlite3</code> — see <a href="reference/file-format.html#reading-the-catalog-by-hand">Reading the catalog by hand</a>. Nothing in the
+library reads it. It costs no storage, is created by the same idempotent DDL as the tables above,
+and so lands on an existing store's first writable open without a <code>data_format_version</code> change.</p>
 <h2 id="field-encoding-notes"><a class="header" href="#field-encoding-notes">Field Encoding Notes</a></h2>
 <ul>
 <li><strong>Timestamps</strong> are RFC 3339 strings in UTC.</li>
 <li><strong>Periods</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are canonical <strong>ISO-8601 duration strings</strong> in
 SQLite (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>), and the packed dataset name's <code>{res}</code> field uses the same encoding.
 Calendar periods (<code>Month</code>/<code>Quarter</code>/<code>Year</code>) are stored distinctly from fixed spans.</li>
-<li><strong>Hashes</strong> are raw 32-byte <code>BLOB</code>s in SQLite, lowercase hex in NetCDF (the <code>…_h</code> variable for
-packed arrays, the <code>arr_</code> variable name for standalone arrays).</li>
+<li><strong>Hashes</strong> are raw 32-byte <code>BLOB</code>s in SQLite, lowercase hex in HDF5 (the <code>…_h</code> dataset for packed
+arrays, the <code>arr_</code> dataset name for standalone arrays). <code>BLOB</code> rather than hex <code>TEXT</code> in SQLite
+because the two hash columns sit in the association table, in <code>idx_hash</code>, and in both unique
+indexes — hex would cost roughly 32% more catalog space — and because a <code>BLOB</code> literal (<code>X'…'</code>)
+compares case-insensitively while a hex <code>TEXT</code> column would not. The
+<a href="reference/file-format.html#reading-the-catalog-by-hand"><code>time_series_readable</code> view</a> supplies the readable form.</li>
 <li><strong><code>element_shape</code></strong> is the per-step shape only (the trailing axes); the time <code>length</code> is a
 separate column.</li>
 </ul>
 <h2 id="inspecting-a-store-by-hand"><a class="header" href="#inspecting-a-store-by-hand">Inspecting a Store by Hand</a></h2>
-<pre><code class="language-sh">ncdump -h system.nc                      # groups, variables, dtypes, shapes
-sqlite3 system.nc.sqlite '.schema'
-sqlite3 system.nc.sqlite \
+<p>The quickest route is the CLI, which resolves the hash-to-location step for you:</p>
+<pre><code class="language-sh">infrastore --store system.h5 store-info          # both file paths, format version, compression
+infrastore --store system.h5 arrays              # every distinct array, its location and sharers
+infrastore --store system.h5 info --name load    # one series: data_hash, hdf5_dataset, hdf5_column
+</code></pre>
+<p>To go straight at the files:</p>
+<pre><code class="language-sh">h5ls -r system.h5                        # groups, datasets, dtypes, shapes
+h5dump -A -n system.h5                   # root attributes and the object list
+sqlite3 system.h5.sqlite '.schema'
+sqlite3 system.h5.sqlite \
   'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_associations;'
 # Both association tables are absent in stores written before they existed.
-sqlite3 system.nc.sqlite 'SELECT * FROM supplemental_attribute_associations;'
-sqlite3 system.nc.sqlite 'SELECT * FROM parent_child_associations;'
+sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
+sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
 </code></pre>
-<p>To map an association to its values: read its <code>data_hash</code>. For a packed array, hex-encode it and
-find the matching column in the relevant <code>sts_…_h</code> variable; for a standalone array, read the
-variable named <code>arr_&lt;hex_hash&gt;</code> directly.</p>
+<h3 id="reading-the-catalog-by-hand"><a class="header" href="#reading-the-catalog-by-hand">Reading the catalog by hand</a></h3>
+<p><code>sqlite3</code> renders a <code>BLOB</code> as raw bytes in its default <code>list</code> mode and in <code>.mode box</code> / <code>.mode json</code>,
+which corrupts the terminal (and, in box mode, the table borders). Use the
+<strong><code>time_series_readable</code></strong> view, which is the association table with both hashes hex-encoded:</p>
+<pre><code class="language-sh">sqlite3 system.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
+</code></pre>
+<p>The view spells hashes in lowercase, matching <code>hash_hex</code> in the core, every binding, and the CLI, so
+a value copied from it compares equal to one printed anywhere else. Against the base table, use
+<code>hex(data_hash)</code> or <code>.mode quote</code>; <code>hex()</code> returns uppercase.</p>
+<p>The view is created by the same idempotent DDL as the tables, on a store's first writable open, so
+an older store gains it without a format bump. Nothing in the library reads it.</p>
+<h3 id="mapping-an-association-to-its-bytes"><a class="header" href="#mapping-an-association-to-its-bytes">Mapping an association to its bytes</a></h3>
+<p>Read the association's <code>data_hash</code>. For a <strong>standalone</strong> array, read the dataset named
+<code>arr_&lt;hex_hash&gt;</code> directly. For a <strong>packed</strong> array, hex-encode the hash and find the matching row in
+the relevant <code>sts_…_h</code> dataset; that row index is the column index into the <code>sts_…</code> dataset. Note
+that a packed pool which fills up spills into <code>{name}__1</code>, <code>{name}__2</code>, so the dataset holding a
+given array is not derivable from its metadata — scan the <code>_h</code> datasets, or let <code>infrastore info</code> /
+<code>infrastore arrays</code> report the resolved <code>dataset</code> and <code>column</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="rust-api"><a class="header" href="#rust-api">Rust API</a></h1>
 <p>The public surface of <code>infrastore-core</code>. Import paths below are relative to the crate root.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -3517,8 +3591,8 @@ pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
 <span class="boring">}</span></code></pre></pre>
 <ul>
 <li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
-<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (NetCDF) and <code>path.sqlite</code> (metadata).</li>
-<li><code>create_store_with_compression(...)</code> — as above but with an explicit NetCDF compression policy.</li>
+<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata).</li>
+<li><code>create_store_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
 <li><code>open_store(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
 </ul>
 <p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::open</code> are the inherent-method
@@ -3823,10 +3897,10 @@ key to metadata (including <code>data_hash</code>), then read the array directly
 caller can tell whether removing a <code>SingleTimeSeries</code> would orphan a
 <code>DeterministicSingleTimeSeries</code> derived from (and sharing) its array.</li>
 <li><strong><code>verify_integrity</code></strong> — Recomputes each stored array's hash and reports mismatches. Covers the
-NetCDF half only: the SQLite catalog is not inspected, so an empty report does not mean the store
-as a whole is sound. See
+HDF5 half only: the SQLite catalog is not inspected, so an empty report does not mean the store as
+a whole is sound. See
 <a href="reference/../explanation/content-addressing.html#what-it-does-not-cover">content addressing</a>.</li>
-<li><strong><code>flush</code></strong> — Issues <code>nc_sync</code> so the files can be copied for persistence without closing.</li>
+<li><strong><code>flush</code></strong> — Issues <code>H5Fflush</code> so the files can be copied for persistence without closing.</li>
 <li><strong><code>persist_to</code></strong> — Writes both halves of the artifact to <code>path</code> and <code>&lt;path&gt;.sqlite</code>, overwriting
 existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
 (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
@@ -3874,7 +3948,7 @@ let key = store.add_time_series(
 )?;
 <span class="boring">}</span></code></pre></pre>
 <p>Dense forecast arrays (<code>Deterministic</code> / <code>Probabilistic</code> / <code>Scenarios</code>) are stored as standalone
-NetCDF variables. A <code>DeterministicSingleTimeSeries</code> is <strong>not</strong> added directly: call
+HDF5 variables. A <code>DeterministicSingleTimeSeries</code> is <strong>not</strong> added directly: call
 <code>transform_single_time_series(horizon, interval, owner_category, resolution)</code> to derive one from
 every stored <code>SingleTimeSeries</code> (it shares the backing column-packed array, derives <code>count</code> from the
 series length, and dedups against that series).</p>
@@ -4634,15 +4708,15 @@ pub enum TimeSeriesError {
 }
 <span class="boring">}</span></code></pre></pre>
 <h2 id="storagebackend-trait"><a class="header" href="#storagebackend-trait"><code>StorageBackend</code> Trait</a></h2>
-<p>The seam between <code>Store</code> and array storage. Implemented by <code>MemoryBackend</code> and <code>NetCdfBackend</code>. You
+<p>The seam between <code>Store</code> and array storage. Implemented by <code>MemoryBackend</code> and <code>Hdf5Backend</code>. You
 rarely call it directly, but it documents the backend contract. It is <strong>not</strong> re-exported at the
 crate root — import it (and the backends) from the <code>storage</code> module:</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
-</span>use infrastore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+</span>use infrastore_core::storage::{MemoryBackend, Hdf5Backend, StorageBackend};
 <span class="boring">}</span></code></pre></pre>
 <p>Every method below with a default is a performance override: the default is correct but naive, and
-<code>NetCdfBackend</code> implements a faster path (single hyperslab reads, whole-chunk block writes).</p>
+<code>Hdf5Backend</code> implements a faster path (single hyperslab reads, whole-chunk block writes).</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub trait StorageBackend: Send + Sync {
@@ -4667,7 +4741,7 @@ crate root — import it (and the backends) from the <code>storage</code> module
     fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
 
-    // --- provided (overridden by NetCdfBackend) ---
+    // --- provided (overridden by Hdf5Backend) ---
 
     // Write a block of same-shaped packed arrays at once (the bulk-add write path).
     // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.
@@ -4757,7 +4831,7 @@ def open(cls, path: str, read_only: bool = False) -&gt; Store: ...
 </code></pre>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
-<li><code>create(path=...)</code> — writes <code>path</code> (NetCDF) and <code>path + ".sqlite"</code> (metadata).</li>
+<li><code>create(path=...)</code> — writes <code>path</code> (HDF5) and <code>path + ".sqlite"</code> (metadata).</li>
 <li><code>create(path=..., compression="none")</code> — store arrays uncompressed; <code>compression="deflate"</code> with a
 <code>compression_level</code> / <code>shuffle</code> of your choice tunes the filter. The policy persists with the
 store and is reused on later appends. An unknown <code>compression</code> or out-of-range level raises
@@ -4834,7 +4908,7 @@ def list_time_series(
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
-    time_series_type: TimeSeriesType | None = None,
+    time_series_type: RequestedType | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
     resolution: timedelta | str | None = None,
@@ -4845,6 +4919,11 @@ def list_time_series(
 def list_array_groups(self, *, ...) -&gt; list[dict]: ...
 # Same keyword-only filter arguments as list_time_series; so do list_keys,
 # list_names, list_owner_types, and remove_by_filter.
+# `time_series_type` is a RequestedType: a TimeSeriesType, or the string
+# "abstract_deterministic" to match Deterministic and
+# DeterministicSingleTimeSeries in one query. Every filter surface takes it,
+# including has_any_time_series, get_resolutions, get_intervals,
+# list_owner_ids, and build_forecast_reader.
 
 def get_time_series_keys(
     self,
@@ -4855,7 +4934,7 @@ def has_time_series(self, key: TimeSeriesKey) -&gt; bool: ...
 def has_any_time_series(self, *, ...) -&gt; bool: ...
 # Existence without listing ("does this owner have any time series?"); same
 # keyword-only filter arguments as list_time_series. Index-probe fast.
-def get_resolutions(self, time_series_type: TimeSeriesType | None = None) -&gt; list[str]: ...
+def get_resolutions(self, time_series_type: RequestedType | None = None) -&gt; list[str]: ...
 # resolutions are returned as ISO 8601 duration strings, e.g. "PT1H"
 def get_time_series_counts(self) -&gt; dict: ...
 def get_forecast_parameters(self, *, resolution: str | None = None,
@@ -4978,6 +5057,14 @@ TimeSeriesType.Scenarios
 OwnerCategory.Component
 OwnerCategory.SupplementalAttribute
 </code></pre>
+<p><code>TimeSeriesType</code> names a <em>stored</em> type. Queries take a slightly wider value, <code>RequestedType</code>:</p>
+<pre><code class="language-python">RequestedType = TimeSeriesType | Literal["abstract_deterministic"]
+</code></pre>
+<p><code>"abstract_deterministic"</code> is the family of both deterministic storage forms — it matches a stored
+<code>Deterministic</code> <em>or</em> <code>DeterministicSingleTimeSeries</code> in one query, which is what a caller asking
+"does this owner have a deterministic forecast?" wants. It is request-only: no row is stored under
+it, and no returned <code>time_series_type</code> is ever the family. Anything else raises
+<code>InvalidParameterError</code>; a value that is neither a <code>TimeSeriesType</code> nor a string raises <code>TypeError</code>.</p>
 <h2 id="forecasts-6"><a class="header" href="#forecasts-6">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> objects and then
 passed to <a href="reference/python-api.html#methods"><code>add_time_series</code></a>. They are read back through <code>get_time_series</code>, which returns
@@ -5071,7 +5158,7 @@ def static_read(self, reader: StaticReader, when: datetime) -&gt; None: ...
 
 def build_forecast_reader(
     self,
-    time_series_type: TimeSeriesType,
+    time_series_type: RequestedType,
     resolution: timedelta | str,
     *,
     owner_id: int | None = None,
@@ -5115,7 +5202,8 @@ filter must name a forecast type and pin a resolution; a <code>Deterministic</co
 includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>(horizon, *element_shape)</code> windows).
 All matched forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
 <p><code>time_series_type</code> must be one of the concrete forecast types — <code>Deterministic</code>,
-<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>; any other raises
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — or the string
+<code>"abstract_deterministic"</code>, which reads exactly like a <code>Deterministic</code> reader; any other raises
 <code>InvalidParameterError</code>.</p>
 <pre><code class="language-python">class ForecastReader:
     def timeline(self) -&gt; dict: ...   # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "interval": ISO str, "count": int, "time_series_type": str}
@@ -5141,7 +5229,7 @@ for ts in reader.timestamps():
 </code></pre>
 <p><strong>Window-read deduplication.</strong> Forecasts that share one backing array and read plan — deduplicated
 identical data, or several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code> — collapse to
-a single <em>window slot</em>. <code>forecast_read</code> performs one backend (<code>.nc</code>) read per slot, not per entry,
+a single <em>window slot</em>. <code>forecast_read</code> performs one backend (<code>.h5</code>) read per slot, not per entry,
 so a forecast shared by N owners is read once per timestamp. <code>num_slots()</code> is that physical read
 count (<code>&lt;= len(entries())</code>), and <code>entry_slot(i)</code> (0-based) identifies the slot backing entry <code>i</code>;
 entries that share data report the same slot. Group by slot to also materialize each unique window
@@ -5388,7 +5476,7 @@ open_store(path::AbstractString; read_only::Bool=false) -&gt; Store
 </code></pre>
 <ul>
 <li><code>Store()</code> — in-memory store.</li>
-<li><code>Store(in_memory=false, path="system.nc")</code> — persists to <code>system.nc</code> plus <code>system.nc.sqlite</code>.</li>
+<li><code>Store(in_memory=false, path="system.h5")</code> — persists to <code>system.h5</code> plus <code>system.h5.sqlite</code>.</li>
 <li><code>compression=:none</code> stores arrays uncompressed; <code>:deflate</code> (default) applies DEFLATE at
 <code>compression_level</code> (0–9) with optional byte <code>shuffle</code>. The policy is persisted with the store and
 reused on later appends; it is ignored for in-memory stores. An unknown <code>compression</code> throws
@@ -5468,8 +5556,9 @@ abstract type DeterministicSingleTimeSeries &lt;: AbstractDeterministic end
 
 # Request-only supertype of Deterministic and DeterministicSingleTimeSeries.
 # Pass it as the requested type to get_time_series to read whichever of the two
-# is stored (see Reading forecast values). It is NOT a valid build_forecast_reader
-# type — that call takes a concrete forecast type.
+# is stored (see Reading forecast values), as a catalog filter to match both, or
+# to build_forecast_reader, where it reads like a Deterministic reader. No row is
+# ever stored under it.
 abstract type AbstractDeterministic end
 
 mutable struct Store
@@ -5842,9 +5931,9 @@ filter must name a forecast type and pin a resolution; a <code>Deterministic</co
 includes <code>DeterministicSingleTimeSeries</code> (read into identical <code>[H, *E]</code> windows). All matched
 forecasts must share one window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>).</p>
 <p><code>time_series_type</code> must be one of the four concrete forecast types — <code>Deterministic</code>,
-<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code>. Any other type (including
-<code>AbstractDeterministic</code>, which is a <code>get_time_series</code> request type only) raises
-<code>InvalidParameterError</code>; a <code>Deterministic</code> reader already covers the family.</p>
+<code>DeterministicSingleTimeSeries</code>, <code>Probabilistic</code>, or <code>Scenarios</code> — or <code>AbstractDeterministic</code>, which
+reads exactly like a <code>Deterministic</code> reader (already abstract over the pair). Any other type raises
+<code>InvalidParameterError</code>.</p>
 <pre><code class="language-julia">build_forecast_reader(store, time_series_type::Type; resolution::Period,
                       owner_id=nothing, owner_category=nothing, name=nothing,
                       features=Dict()) -&gt; ForecastReader
@@ -5872,7 +5961,7 @@ end
 <h4 id="window-read-deduplication"><a class="header" href="#window-read-deduplication">Window-read deduplication</a></h4>
 <p>Forecasts that reference the <strong>same backing array and read plan</strong> — deduplicated identical data, or
 several <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code> — collapse to a single <em>window
-slot</em>. <code>forecast_read!</code> performs one backend (<code>.nc</code>) read per slot, not per entry, so a forecast
+slot</em>. <code>forecast_read!</code> performs one backend (<code>.h5</code>) read per slot, not per entry, so a forecast
 shared by N owners is read once per timestamp. <code>forecast_num_slots(reader)</code> is that physical read
 count (<code>≤ length(forecast_entries(reader))</code>), and every <code>ForecastEntry.slot</code> (0-based) identifies
 the slot backing that entry; entries that share data report the same <code>slot</code>. Group entries by <code>slot</code>
@@ -5903,7 +5992,7 @@ get_resolutions(store; time_series_type=nothing) -&gt; Vector{Period}  # distinc
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; Nothing
-flush!(store) -&gt; Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
+flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only
@@ -5931,8 +6020,9 @@ and independent, and combine as a conjunction; with none set the whole store is 
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
 <li><code>time_series_type</code> — the Julia type (<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), the same value the
-<code>time_series_type</code> field of a returned row carries. A filter selects stored rows, so
-<code>AbstractDeterministic</code> is rejected: filter on <code>Deterministic</code> or <code>DeterministicSingleTimeSeries</code>.</li>
+<code>time_series_type</code> field of a returned row carries, or <code>AbstractDeterministic</code> to match both
+<code>Deterministic</code> and <code>DeterministicSingleTimeSeries</code> (no row is ever <em>stored</em> under the family, so
+it never appears in a returned row).</li>
 <li><code>name</code> — exact association name.</li>
 <li><code>resolution</code> — a <code>Period</code>.</li>
 <li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval
@@ -6619,7 +6709,7 @@ once.</p>
 <h2 id="bulk-adds-1"><a class="header" href="#bulk-adds-1">Bulk Adds</a></h2>
 <p>A batch accumulates add requests client-side (no store I/O); <code>infrastore_store_add_batch</code> commits
 them all in <strong>one</strong> metadata transaction, which is much faster than per-item adds when ingesting
-many series. It is also the fast NetCDF write path: same-shaped <code>SingleTimeSeries</code> are packed into
+many series. It is also the fast HDF5 write path: same-shaped <code>SingleTimeSeries</code> are packed into
 batch-sized datasets so the timestamp-major chunks are filled whole rather than a column at a time.
 The <code>infrastore_batch_add_*</code> functions take the same arguments as their <code>infrastore_store_add_*</code>
 counterparts minus the store handle and <code>out_key</code>; data buffers are copied into the batch, so they
@@ -6718,7 +6808,7 @@ int32_t infrastore_store_begin_transaction(struct InfraStore *handle);
 int32_t infrastore_store_commit_transaction(struct InfraStore *handle);
 int32_t infrastore_store_rollback_transaction(struct InfraStore *handle);
 int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
-/* Persist the store's data to `path` (NetCDF) and `&lt;path&gt;.sqlite` (metadata),
+/* Persist the store's data to `path` (HDF5) and `&lt;path&gt;.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
@@ -7196,7 +7286,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./store.nc"]
+files = ["./store.h5"]
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys`; clients must send the
@@ -7213,11 +7303,11 @@ method = "none"
 </div>
 <h3 id="data"><a class="header" href="#data"><code>[data]</code></a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>files</code></td><td>array of string</td><td>yes</td><td>NetCDF file paths to serve read-only</td></tr>
+<tr><td><code>files</code></td><td>array of string</td><td>yes</td><td>HDF5 file paths to serve read-only</td></tr>
 </tbody></table>
 </div>
 <p>v0 serves a <strong>single</strong> file (the first entry). Multiple entries are reserved for a later milestone.
-The matching <code>&lt;path&gt;.sqlite</code> catalog must sit beside each NetCDF file. The server opens the store
+The matching <code>&lt;path&gt;.sqlite</code> catalog must sit beside each HDF5 file. The server opens the store
 read-only.</p>
 <h3 id="authentication-2"><a class="header" href="#authentication-2"><code>[authentication]</code></a></h3>
 <p>The whole section is optional; omitting it defaults to <code>method = "none"</code>.</p>
@@ -7257,17 +7347,18 @@ compare, treating length as non-secret.</p>
 <a href="reference/./grpc-api.html">gRPC API reference</a> for the served methods.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="cli-reference"><a class="header" href="#cli-reference">CLI Reference</a></h1>
 <p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, which reads and writes a store directly on disk
-(NetCDF + SQLite). For a task-oriented walkthrough, see
+(HDF5 + SQLite). For a task-oriented walkthrough, see
 <a href="reference/../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</p>
-<p>The CLI covers time series only. The
-<a href="reference/../explanation/data-model.html#associations-between-entities">association catalogs</a> in the same
-catalog file have no <code>infrastore</code> commands; reach them through the Rust, Python, or Julia API.</p>
+<p>The CLI covers time series, plus read-only views of the
+<a href="reference/../explanation/data-model.html#associations-between-entities">association catalogs</a> (<code>attributes</code>,
+<code>links</code>). Writing an association means writing the consumer's object graph alongside it, so that
+direction stays with the Rust, Python, and Julia APIs.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
-<pre><code class="language-text">infrastore [--store &lt;PATH.nc&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
+<pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
 </code></pre>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the NetCDF store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>INFRASTORE_STORE</code> environment variable.</td></tr>
+<tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the HDF5 store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>INFRASTORE_STORE</code> environment variable.</td></tr>
 <tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
 </tbody></table>
@@ -7279,34 +7370,62 @@ anywhere because it is global, but the write commands (<code>add</code>, <code>r
 <code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>) ignore it and print plain text; <code>template</code> always
 prints a JSON descriptor. <code>export</code> requires <code>-f csv</code> or <code>-f json</code> (there is no table export).</p>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<p><code>infrastore --help</code> lists these under the same six headings used below. The grouping is a display
+aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
+namespaces to type.</p>
+<h3 id="read-data"><a class="header" href="#read-data">Read data</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
-<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV.</td></tr>
 <tr><td><code>list</code></td><td>List stored series matching the selector filters.</td></tr>
 <tr><td><code>get</code></td><td>Read and display a single series' values.</td></tr>
-<tr><td><code>info</code></td><td>Show metadata plus numeric stats for a single series.</td></tr>
+<tr><td><code>info</code></td><td>Metadata, content hash, HDF5 location, and stats for one series.</td></tr>
 <tr><td><code>export</code></td><td>Write series values to CSV/JSON files (<code>--dir</code>), or stdout for one match.</td></tr>
+</tbody></table>
+</div>
+<h3 id="write-data"><a class="header" href="#write-data">Write data</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV.</td></tr>
+<tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
 <tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
 <tr><td><code>rename</code></td><td>Rename the single series a selector resolves to (<code>--new-name</code>).</td></tr>
 <tr><td><code>copy</code></td><td>Copy the single series a selector resolves to onto another owner.</td></tr>
 <tr><td><code>replace-owner</code></td><td>Reassign every series from one owner to another.</td></tr>
 <tr><td><code>clear</code></td><td>Remove all series, or all for one owner (prompts unless <code>--force</code>).</td></tr>
-<tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
-<tr><td><code>persist</code></td><td>Write the store to a new NetCDF + SQLite artifact (<code>--dest</code>).</td></tr>
-<tr><td><code>compact</code></td><td>Reclaim reusable space (prompts unless <code>--force</code>); print the report.</td></tr>
-<tr><td><code>completions</code></td><td>Generate shell completions to stdout (bash/zsh/fish/…).</td></tr>
-<tr><td><code>stats</code></td><td>Overall + detailed + per-type counts and distinct-array count.</td></tr>
+</tbody></table>
+</div>
+<h3 id="inspect-the-store"><a class="header" href="#inspect-the-store">Inspect the store</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>stats</code></td><td>Association, owner, and distinct-array counts.</td></tr>
+<tr><td><code>store-info</code></td><td>HDF5 + SQLite paths and sizes, on-disk format version, compression.</td></tr>
+<tr><td><code>arrays</code></td><td>Distinct stored arrays: content hash, HDF5 location, series sharing each.</td></tr>
 <tr><td><code>summary</code></td><td>Grouped static and/or forecast summaries (<code>--static-only</code>/<code>--forecast-only</code>).</td></tr>
-<tr><td><code>verify</code></td><td>Verify store integrity; nonzero exit if errors are present.</td></tr>
-<tr><td><code>check-consistency</code></td><td>Verify the per-resolution static grid (<code>--resolution</code>).</td></tr>
 <tr><td><code>resolutions</code></td><td>List distinct resolutions and forecast intervals.</td></tr>
 <tr><td><code>params</code></td><td>Show the store's forecast parameters (<code>--resolution</code>/<code>--interval</code>).</td></tr>
+</tbody></table>
+</div>
+<h3 id="associations-7"><a class="header" href="#associations-7">Associations</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>attributes</code></td><td>Component &lt;-&gt; supplemental-attribute associations (<code>--summary</code> for counts).</td></tr>
+<tr><td><code>links</code></td><td>Directed parent -&gt; child component associations.</td></tr>
+</tbody></table>
+</div>
+<h3 id="integrity--maintenance"><a class="header" href="#integrity--maintenance">Integrity &amp; maintenance</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>verify</code></td><td>Verify store integrity; nonzero exit if errors are present.</td></tr>
+<tr><td><code>check-consistency</code></td><td>Verify the per-resolution static grid (<code>--resolution</code>).</td></tr>
+<tr><td><code>compact</code></td><td>Reclaim reusable space (prompts unless <code>--force</code>); print the report.</td></tr>
+<tr><td><code>persist</code></td><td>Write the store to a new HDF5 + SQLite artifact (<code>--dest</code>).</td></tr>
+</tbody></table>
+</div>
+<h3 id="scaffolding"><a class="header" href="#scaffolding">Scaffolding</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>template</code></td><td>Print an example descriptor for a given type to stdout.</td></tr>
+<tr><td><code>completions</code></td><td>Generate shell completions to stdout (bash/zsh/fish/…).</td></tr>
 </tbody></table>
 </div>
 <pre><code class="language-text">infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json&gt; [--csv &lt;FILE.csv&gt;] [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle]
-infrastore --store &lt;PATH&gt; list    [SELECTOR...]
+infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
 infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
-infrastore --store &lt;PATH&gt; info    [SELECTOR...]
+infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
 infrastore --store &lt;PATH&gt; -f csv|json export [SELECTOR...] [--dir &lt;DIR&gt;]
 infrastore --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
 infrastore --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
@@ -7314,9 +7433,13 @@ infrastore --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; -
 infrastore --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
 infrastore --store &lt;PATH&gt; transform --horizon &lt;DUR&gt; --interval &lt;DUR&gt; [--owner-category &lt;C&gt;] [--resolution &lt;DUR&gt;]
-infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.nc&gt;
+infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt;
 infrastore --store &lt;PATH&gt; compact [--force]
 infrastore --store &lt;PATH&gt; stats
+infrastore --store &lt;PATH&gt; store-info
+infrastore --store &lt;PATH&gt; arrays [SELECTOR...] [--data-hash &lt;HEX&gt;]
+infrastore --store &lt;PATH&gt; attributes [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--summary]
+infrastore --store &lt;PATH&gt; links [--parent-id &lt;I&gt;] [--child-id &lt;I&gt;] [--parent-type &lt;T&gt;] [--child-type &lt;T&gt;]
 infrastore completions &lt;SHELL&gt;
 infrastore --store &lt;PATH&gt; summary [--static-only | --forecast-only]
 infrastore --store &lt;PATH&gt; verify
@@ -7339,9 +7462,15 @@ honor <code>-f/--format</code>; <code>verify</code> exits nonzero when the integ
 <p><code>export</code> is the read-direction inverse of the batch <code>add</code>: the selector may match many series, and
 each is written to <code>&lt;owner_id&gt;_&lt;owner_type&gt;_&lt;name&gt;_&lt;type&gt;.csv|json</code> inside <code>--dir</code>. Without <code>--dir</code>
 the selector must match exactly one series, which goes to stdout. CSV output carries real timestamps
-(see the CSV Layout section); JSON output is one structured object per series.</p>
+(see the CSV Layout section); JSON output is one structured object per series, including its
+<code>features</code> and <code>data_hash</code>.</p>
+<p>That plain filename omits resolution, interval, and features, all of which are part of a series'
+identity. When two matched series would share one filename, each gains a suffix naming the fields
+that distinguish them (<code>..._PT1H_model_year-2030.csv</code>), so an export never silently overwrites part
+of its own output. Filenames are compared case-insensitively, so an export produces the same set of
+files on Linux, macOS, and Windows.</p>
 <p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, and <code>copy</code> prints what would change and
-exits without opening the store for writing. <code>add --compression</code> sets the NetCDF compression policy
+exits without opening the store for writing. <code>add --compression</code> sets the HDF5 compression policy
 for a store this command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to
 disable byte-shuffle); passing it for an existing store is an error, since the persisted policy
 governs.</p>
@@ -7360,12 +7489,14 @@ value:</p>
 </tbody></table>
 </div>
 <p>If a selector matches more than one series, <code>infrastore</code> errors and lists the candidates so the
-query can be narrowed. The owner identity is the pair <code>(owner_id, owner_category)</code>, so a component
-and a supplemental attribute may share a numeric <code>owner_id</code>; add <code>--owner-category</code> to disambiguate
-when both exist.</p>
+query can be narrowed. Each candidate line spells out every field that is part of identity —
+including <code>features</code> and a short <code>data_hash</code> — so the flag that separates them is always visible.
+Long candidate lists are truncated after ten entries; rerun the same flags under <code>list</code> to see them
+all. The owner identity is the pair <code>(owner_id, owner_category)</code>, so a component and a supplemental
+attribute may share a numeric <code>owner_id</code>; add <code>--owner-category</code> to disambiguate when both exist.</p>
 <h3 id="type-spellings"><a class="header" href="#type-spellings">Type Spellings</a></h3>
-<p><code>--type</code> (and the descriptor's <code>type</code> key) accepts six values. Matching is case-insensitive and
-ignores underscores, so each type has a short form and a full form:</p>
+<p><code>--type</code> (and the descriptor's <code>type</code> key) accepts six concrete types. Matching is case-insensitive
+and ignores underscores, so each has a short form and a full form:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Accepted spellings</th></tr></thead><tbody>
 <tr><td><code>SingleTimeSeries</code></td><td><code>single</code>, <code>SingleTimeSeries</code></td></tr>
 <tr><td><code>NonSequentialTimeSeries</code></td><td><code>non_sequential</code>, <code>NonSequentialTimeSeries</code></td></tr>
@@ -7375,6 +7506,11 @@ ignores underscores, so each type has a short form and a full form:</p>
 <tr><td><code>Scenarios</code></td><td><code>scenarios</code></td></tr>
 </tbody></table>
 </div>
+<p><code>--type</code> additionally accepts <strong><code>any_deterministic</code></strong> (also <code>abstract_deterministic</code>), which matches
+a stored <code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>. It is not a storable type — it is a
+query over the family — so it is only valid as a selector, never in a descriptor. Use it when you
+want every deterministic forecast regardless of how it got there: <code>--type deterministic</code> alone will
+not match what <code>transform</code> produced.</p>
 <p><code>deterministic_single</code> is not writable from a descriptor (use <code>transform</code>), but it <em>is</em> selectable,
 and it is often required: <code>transform</code> derives a series that shares <code>(owner_id, name, resolution)</code>
 with its source <code>SingleTimeSeries</code>, so after a transform a query like
@@ -7439,14 +7575,72 @@ silently dropping a setting.</p>
 <tr><td><code>scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
 </tbody></table>
 </div>
-<p><code>bool</code> cells accept <code>true</code>/<code>false</code>/<code>1</code>/<code>0</code>. For <code>single</code> and <code>non_sequential</code> series, <code>get -f csv</code>
-re-emits the same layout <code>add</code> consumes, so values round-trip. That output always starts with a
-header row (<code>value</code>, or <code>timestamp,value...</code> for <code>non_sequential</code>), which is what the
-<code>has_header: true</code> default — and every <code>template</code> — expects.</p>
-<p>For forecasts, <code>get -f csv</code> and <code>export -f csv</code> emit <strong>timestamped</strong> rows instead of the flat ingest
-layout: one row per <code>(window, step)</code> with <code>issue_time</code> and <code>target_time</code> columns, and one value
-column per percentile (<code>value[p10]</code>), scenario (<code>value[s0]</code>), or element entry. This output is for
-analysis, not re-ingestion — re-adding a forecast needs the flat row-major CSV described above.</p>
+<p><code>bool</code> cells accept <code>true</code>/<code>false</code>/<code>1</code>/<code>0</code>. The table above is the <strong>write</strong> layout: the rawest
+form, which is what <code>template</code> prints and what a hand-authored CSV should look like.</p>
+<h3 id="reading-back-and-re-adding"><a class="header" href="#reading-back-and-re-adding">Reading back, and re-adding</a></h3>
+<p>Every CSV <code>infrastore</code> writes carries timestamps, because they are the useful part of the output and
+because a piped file otherwise loses the time axis entirely — <code>initial_timestamp</code> and <code>resolution</code>
+live in the catalog, not in the file.</p>
+<div class="table-wrapper"><table><thead><tr><th>Type</th><th><code>get -f csv</code> / <code>export -f csv</code> header</th></tr></thead><tbody>
+<tr><td><code>single</code>, <code>non_sequential</code></td><td><code>timestamp,value...</code></td></tr>
+<tr><td><code>deterministic</code></td><td><code>issue_time,target_time,value...</code></td></tr>
+<tr><td><code>probabilistic</code></td><td><code>issue_time,target_time,value[p10],...</code> (one column per percentile)</td></tr>
+<tr><td><code>scenarios</code></td><td><code>issue_time,target_time,value[s0],...</code> (one column per scenario)</td></tr>
+</tbody></table>
+</div>
+<p><code>add</code> reads both layouts. It picks between them from the header row, so a file written by <code>export</code>
+can be handed straight back to <code>add</code> with no column surgery:</p>
+<ul>
+<li>a first column named <code>timestamp</code> is read as the time axis;</li>
+<li>leading <code>issue_time</code> + <code>target_time</code> columns mark the timestamped forecast layout, whose rows run
+window-major with the percentiles/scenarios spread across columns — <code>add</code> transposes them back
+into the stored <code>[series, horizon, count, element]</code> order;</li>
+<li>anything else is the flat write layout above.</li>
+</ul>
+<p>Detection needs <code>has_header: true</code> (the default). With <code>has_header: false</code> there is no header to
+read, so the flat write layout is assumed.</p>
+<p>The round trip is exact for every type, including forecasts: values come back in the order they went
+in. What a CSV cannot carry is the descriptor metadata — owner, name, features, units — so re-adding
+still needs a descriptor supplying those. <code>export -f json</code> carries all of it, plus <code>data_hash</code>.</p>
+<h2 id="content-addressing-1"><a class="header" href="#content-addressing-1">Content Addressing</a></h2>
+<p>Arrays are stored by the SHA-256 of their contents, so two series holding identical values share one
+array on disk. Three commands surface that, which is what makes an HDF5 file with fewer columns than
+the catalog has rows explicable rather than alarming:</p>
+<ul>
+<li><code>list</code> shows a 12-character <code>Hash</code> column — equal hashes mean a shared array.</li>
+<li><code>info</code> shows the full 64-character <code>data_hash</code>, the <code>location</code> it maps to, and how many
+<code>SingleTimeSeries</code> / <code>DeterministicSingleTimeSeries</code> associations reference it.</li>
+<li><code>arrays</code> groups by hash: one row per distinct array with its location and the series sharing it.
+<code>--data-hash &lt;HEX&gt;</code> narrows to one array and accepts any prefix, in either case.</li>
+</ul>
+<p><code>location</code> is what lets you go look at the same bytes with an outside tool:</p>
+<pre><code class="language-text">$ infrastore --store store.h5 info --name load --type single
+  data_hash     2018057b75043a0b2716c36cbf6c183f909edf96952894f06fdad000abf45952
+  location      /time_series/single/sts_f64_s_6_PT1H[:, 0]
+  hdf5_dataset  /time_series/single/sts_f64_s_6_PT1H
+  hdf5_column   0
+</code></pre>
+<p>The hash alone would not be enough. A packed array is one <em>column</em> of a dataset shared with other
+same-shaped arrays, and the column index is only recoverable by scanning that dataset's companion
+<code>_h</code> hash dataset; a packed pool that fills up also spills into <code>{name}__1</code>, <code>{name}__2</code>, so even
+the dataset name is not derivable from metadata. A standalone array (irregular series, dense
+forecast) reports its own dataset and no column.</p>
+<p><code>info</code> reads the array to compute its min/max/mean. <code>--no-stats</code> skips that, leaving a purely
+catalog-side query that never touches the HDF5 file.</p>
+<h3 id="reading-the-sqlite-catalog-by-hand"><a class="header" href="#reading-the-sqlite-catalog-by-hand">Reading the SQLite catalog by hand</a></h3>
+<p>The catalog stores both hashes as <code>BLOB</code>, which <code>sqlite3</code> renders as raw bytes in its default <code>list</code>
+mode and in <code>.mode box</code> / <code>.mode json</code> — mangling the terminal, and in box mode the table borders
+too. The store therefore ships a <strong><code>time_series_readable</code></strong> view with both hashes hex-encoded:</p>
+<pre><code class="language-sql">sqlite&gt; SELECT name, data_hash FROM time_series_readable LIMIT 1;
+load|2018057b75043a0b2716c36cbf6c183f909edf96952894f06fdad000abf45952
+</code></pre>
+<p>The view spells hashes in lowercase, matching what every binding and the CLI print, so a value
+copied out of it pastes straight into <code>arrays --data-hash</code>. Querying the base table directly works
+too, via <code>hex(data_hash)</code> or <code>.mode quote</code>; note that SQLite's <code>hex()</code> returns <strong>uppercase</strong>, which
+<code>--data-hash</code> accepts.</p>
+<p>The view is created on a store's first writable open, so a store last written by an older build
+gains it as soon as anything opens it for writing. It is a projection only — nothing in the store
+reads it — so its absence never affects reads.</p>
 <h2 id="exit-status"><a class="header" href="#exit-status">Exit Status</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>0</code></td><td>Success.</td></tr>
@@ -7480,7 +7674,7 @@ export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linu
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 </code></pre>
 <h2 id="the-on-disk-format-is-a-contract"><a class="header" href="#the-on-disk-format-is-a-contract">The On-Disk Format Is a Contract</a></h2>
-<p>The NetCDF layout, the SQLite schema, and the <a href="./explanation/content-addressing.html">hashing rules</a>
+<p>The HDF5 layout, the SQLite schema, and the <a href="./explanation/content-addressing.html">hashing rules</a>
 together form the on-disk format, versioned by <code>DATA_FORMAT_VERSION</code>. Any backward-incompatible
 change to any of them must bump that version. The <code>hash_golden</code> test pins representative hashes; if
 it fails because you changed the hashing domain, that is a format-breaking change, not a test to
@@ -7535,32 +7729,32 @@ them together and tag the repo once per release, so every registry pins the same
 <code>infrastore-core</code> at the new version, then rejects <code>infrastore-proto</code> because its requirement still
 names the old one. Run <code>cargo update --workspace</code> after the edits so <code>Cargo.lock</code> moves too.</p>
 <p>The <code>crates-release</code> workflow refuses to publish if the tag does not match the workspace version.</p>
-<h2 id="netcdf-linkage"><a class="header" href="#netcdf-linkage">NetCDF linkage</a></h2>
+<h2 id="hdf5-linkage"><a class="header" href="#hdf5-linkage">HDF5 linkage</a></h2>
 <p>Every distribution channel — the Rust crates, the Python wheel, and <code>InfraStore_jll</code> — ships with
-the <code>vendored</code> feature: netcdf-c, HDF5, and zlib are compiled from source and linked statically.
+the <code>vendored</code> feature: HDF5 and zlib are compiled from source and linked statically.
 <code>pip install infrastore</code> and <code>cargo add infrastore-core</code> need no system libraries, only <code>cmake</code> and
 a C compiler at build time, and every channel is backed by the exact HDF5 version infrastore was
 tested against rather than whatever the target environment resolves.</p>
-<p>For the JLL this is a deliberate departure from Julia-ecosystem convention (linking
-<code>NetCDF_jll</code>/<code>HDF5_jll</code>), made for two reasons:</p>
+<p>For the JLL this is a deliberate departure from Julia-ecosystem convention (linking <code>HDF5_jll</code>),
+made for two reasons:</p>
 <ul>
 <li><strong>Format control.</strong> The store is a data artifact with a compatibility contract
 (<code>DATA_FORMAT_VERSION</code>); pinning the HDF5 that backs it removes an entire class of
 environment-dependent behavior. An <code>HDF5_jll</code> upgrade in a user's environment must not change how
 infrastore files are read or written.</li>
-<li><strong>No MPI dependency.</strong> <code>NetCDF_jll</code>/<code>HDF5_jll</code> are MPI-augmented and publish no serial variant, so
-linking them forces an MPI runtime dependency and a 17-triplet build matrix onto a library that
-never calls MPI — and propagates that dependency to <code>InfraStore.jl</code> and InfrastructureSystems.jl.</li>
+<li><strong>No MPI dependency.</strong> <code>HDF5_jll</code> is MPI-augmented and publishes no serial variant, so linking it
+forces an MPI runtime dependency and a 17-triplet build matrix onto a library that never calls MPI
+— and propagates that dependency to <code>InfraStore.jl</code> and InfrastructureSystems.jl.</li>
 </ul>
 <p>Two libhdf5 copies in one Julia process (ours plus HDF5.jl's) is safe here: the cdylib exports only
-its own <code>infrastore_*</code> symbols — the statically linked HDF5/netcdf symbols stay local, so nothing
-can cross-resolve. The one scenario that is genuinely hazardous, opening a live store's <code>.nc</code> file
+its own <code>infrastore_*</code> symbols — the statically linked HDF5 symbols stay local, so nothing can
+cross-resolve. The one scenario that is genuinely hazardous, opening a live store's <code>.h5</code> file
 directly with HDF5.jl/NCDatasets.jl while a <code>Store</code> handle is open, is explicitly unsupported.</p>
 <blockquote>
-<p><strong>Never set <code>HDF5_DIR</code> or <code>NETCDF_DIR</code> in CI.</strong> The vendored netcdf-c build forwards them to cmake
-as <code>HDF5_ROOT</code> while still requesting static libraries; against a shared-only install such as
-conda-forge's this fails with <code>Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)</code>.
-To build against system libraries, use <code>--no-default-features</code> instead.</p>
+<p><strong>Never set <code>HDF5_DIR</code> in CI.</strong> The vendored HDF5 build forwards it to cmake as <code>HDF5_ROOT</code> while
+still requesting static libraries; against a shared-only install such as conda-forge's this fails
+with <code>Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)</code>. To build against system
+libraries, use <code>--no-default-features</code> instead.</p>
 </blockquote>
 <h3 id="multiple-hdf5-copies-in-one-python-interpreter"><a class="header" href="#multiple-hdf5-copies-in-one-python-interpreter">Multiple HDF5 copies in one Python interpreter</a></h3>
 <p>The same hazard applies in reverse to the wheels, which carry a statically linked HDF5 while a
@@ -7633,11 +7827,11 @@ build all five.</li>
 <code>I/InfraStore/</code> and open a PR. Their CI builds every platform in the list and all must pass.
 Merging is done by Yggdrasil maintainers, so allow for review time.</li>
 </ol>
-<p>The recipe builds with the default <code>vendored</code> feature — see <a href="releasing.html#netcdf-linkage">NetCDF linkage</a> for
-why the JLL statically links its own netcdf-c/HDF5/zlib instead of depending on
-<code>NetCDF_jll</code>/<code>HDF5_jll</code>. Expect Yggdrasil reviewers to ask about that; the rationale is written out
-in the recipe's header comment. <code>HDF5_DIR</code> must remain unset during the build: <code>hdf5-metno-sys</code> only
-takes its build-from-source path when the <code>static</code> feature is enabled and <code>HDF5_DIR</code> is absent.</p>
+<p>The recipe builds with the default <code>vendored</code> feature — see <a href="releasing.html#hdf5-linkage">HDF5 linkage</a> for why
+the JLL statically links its own HDF5/zlib instead of depending on <code>HDF5_jll</code>. Expect Yggdrasil
+reviewers to ask about that; the rationale is written out in the recipe's header comment. <code>HDF5_DIR</code>
+must remain unset during the build: <code>hdf5-metno-sys</code> only takes its build-from-source path when the
+<code>static</code> feature is enabled and <code>HDF5_DIR</code> is absent.</p>
 <p>The recipe patches one thing in the source tree: it drops sha2's <code>asm</code> feature, because
 BinaryBuilder forbids forcing an arch via <code>-march</code> and the ARMv8 crypto kernels cannot be assembled
 there (x86-64 still detects SHA-NI at runtime).</p>
@@ -7662,7 +7856,7 @@ PR was retargeted before it merged — so the floor is <code>"0.2"</code>. Check
 assuming: a bound below the earliest published version resolves to nothing.</p>
 <p>JLL UUIDs are derived deterministically from the package name, so that value is already known —
 <code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>. (The same call reproduces the published UUIDs of
-<code>NetCDF_jll</code> and <code>HDF5_jll</code> exactly, which is how it was checked.)</p>
+<code>HDF5_jll</code> exactly, which is how it was checked.)</p>
 <p><strong>Step 2 — <code>julia/InfraStore.jl/src/lib.jl</code>.</strong> Replace <code>_jll_library_path</code> and <code>lib_path</code> with a
 direct import. <code>INFRASTORE_LIB</code> stays ahead of the JLL: that ordering is what lets a local
 <code>cargo build</code> shadow the released binary with no code change, and the CI job relies on it.</p>

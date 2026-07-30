@@ -230,8 +230,10 @@ transforming a stored <code>SingleTimeSeries</code>.</p>
 <code>DeterministicSingleTimeSeries</code> variant, and a read synthesizes the windowed <code>Deterministic</code> from
 the underlying static array without copying it. The <code>DeterministicSingleTimeSeries</code> tag stays
 visible in <em>catalog</em> surfaces — keys, metadata rows, counts, summaries — because callers need it to
-address, copy, or remove the association (and <code>RequestedType::AbstractDeterministic</code> exists so
-readers can match either concrete type without caring which is stored).</p>
+address, copy, or remove the association (and <code>RequestedType::AbstractDeterministic</code> exists so a
+query — a catalog filter, a key resolution, or a reader build — can match either concrete type
+without caring which is stored; Julia passes the <code>AbstractDeterministic</code> type, Python the string
+<code>"abstract_deterministic"</code>).</p>
 <p>Reading forecast <em>values</em> is wired across the Rust core, the C ABI, Python, Julia, and gRPC. Writing
 dense forecasts goes through the generic <code>add_time_series</code> (a <code>Deterministic</code>, <code>Probabilistic</code>, or
 <code>Scenarios</code> object) in the Rust core, Python, and Julia, with the C ABI exposing the per-type
@@ -241,7 +243,7 @@ server serves forecast reads but does not accept writes. See <a href="#forecasts
 <h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
 <p>A <code>NonSequentialTimeSeries</code> pairs each value with an explicit UTC timestamp. Timestamps must be
 strictly increasing and their count must match the data length. Its values are stored as a
-standalone NetCDF array; timestamps are stored with the association metadata.</p>
+standalone HDF5 array; timestamps are stored with the association metadata.</p>
 <h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
 <p>A <code>SingleTimeSeries</code> is an <code>initial_timestamp</code>, a <code>resolution</code> (a <a href="#periods">period</a>), and an array
 of values:</p>
@@ -277,8 +279,8 @@ payload travels with the metadata so a binding can reconstruct its domain object
 itself never interprets it.</p>
 <h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
 <p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
-shape</strong> (the dense types as standalone NetCDF variables; a <code>DeterministicSingleTimeSeries</code> reuses
-its backing <code>SingleTimeSeries</code> array), while the windowing parameters live in metadata. A forecast
+shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
+backing <code>SingleTimeSeries</code> array), while the windowing parameters live in metadata. A forecast
 association records <code>horizon</code> (the span each window covers), <code>interval</code> (the spacing between
 successive window start times), <code>count</code> (the number of windows), and — for <code>Probabilistic</code> — a
 <code>percentiles</code> vector.</p>

@@ -186,9 +186,9 @@
                     <main>
                         <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
 <p><strong>infrastore</strong> is a Rust library for managing time-series data in power-systems and energy
-simulations. It separates persistence into two concerns: numerical arrays are stored in NetCDF4,
-while the metadata that associates each array with an owning component lives in SQLite. Identical
-arrays are stored once and shared through content addressing.</p>
+simulations. It separates persistence into two concerns: numerical arrays are stored in HDF5, while
+the metadata that associates each array with an owning component lives in SQLite. Identical arrays
+are stored once and shared through content addressing.</p>
 <p>The library ships native Rust, Python (via PyO3), and Julia (via a C ABI) interfaces, plus the
 <code>infrastore</code> command-line tool and a read-only gRPC server with a Rust client.</p>
 <pre class="mermaid">flowchart TB
@@ -201,7 +201,7 @@ arrays are stored once and shared through content addressing.</p>
 
     subgraph core[&quot;infrastore-core&quot;]
         STORE[&quot;Store&quot;]
-        STORE --&gt; NC[(&quot;NetCDF4&lt;br/&gt;arrays&quot;)]
+        STORE --&gt; NC[(&quot;HDF5&lt;br/&gt;arrays&quot;)]
         STORE --&gt; SQL[(&quot;SQLite&lt;br/&gt;metadata&quot;)]
     end
 
@@ -232,8 +232,8 @@ arrays are stored once and shared through content addressing.</p>
 <li><strong>One array, stored once</strong> — Arrays are addressed by a SHA-256 content hash, so identical series
 shared across components are written to disk a single time
 (<a href="./explanation/content-addressing.html">content addressing</a>)</li>
-<li><strong>NetCDF4 for arrays, SQLite for metadata</strong> — Numerical data lands in a compact, chunked NetCDF4
-file; queryable associations live in a catalog SQLite database
+<li><strong>HDF5 for arrays, SQLite for metadata</strong> — Numerical data lands in a compact, chunked HDF5 file;
+queryable associations live in a catalog SQLite database
 (<a href="./explanation/storage-model.html">storage model</a>)</li>
 <li><strong>Feature-tagged associations</strong> — Each association carries an arbitrary map of typed features
 (<code>int</code> / <code>float</code> / <code>bool</code> / <code>str</code>) so multiple variants of a series can coexist under one owner</li>

@@ -195,7 +195,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./store.nc"]
+files = ["./store.h5"]
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys`; clients must send the
@@ -212,11 +212,11 @@ method = "none"
 </div>
 <h3 id="data"><a class="header" href="#data"><code>[data]</code></a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>files</code></td><td>array of string</td><td>yes</td><td>NetCDF file paths to serve read-only</td></tr>
+<tr><td><code>files</code></td><td>array of string</td><td>yes</td><td>HDF5 file paths to serve read-only</td></tr>
 </tbody></table>
 </div>
 <p>v0 serves a <strong>single</strong> file (the first entry). Multiple entries are reserved for a later milestone.
-The matching <code>&lt;path&gt;.sqlite</code> catalog must sit beside each NetCDF file. The server opens the store
+The matching <code>&lt;path&gt;.sqlite</code> catalog must sit beside each HDF5 file. The server opens the store
 read-only.</p>
 <h3 id="authentication"><a class="header" href="#authentication"><code>[authentication]</code></a></h3>
 <p>The whole section is optional; omitting it defaults to <code>method = "none"</code>.</p>

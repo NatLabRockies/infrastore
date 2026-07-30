@@ -269,7 +269,7 @@ costs one array, one feature set, and a thousand small rows.</p>
 <li>Deletes the matching association rows inside a SQLite transaction, collecting their
 <code>data_hash</code>es.</li>
 <li>For each freed hash, counts how many associations still reference it.</li>
-<li>Only frees the NetCDF column for hashes whose reference count has dropped to zero.</li>
+<li>Only frees the HDF5 column for hashes whose reference count has dropped to zero.</li>
 </ol>
 <p>This keeps shared arrays alive until the last referencing key is gone.</p>
 <h3 id="feature-sets-are-the-deliberate-exception"><a class="header" href="#feature-sets-are-the-deliberate-exception">Feature sets are the deliberate exception</a></h3>
@@ -281,7 +281,7 @@ sweeps them in bulk. Concretely:</p>
 <li><strong>No foreign key, no <code>ON DELETE CASCADE</code>.</strong> A cascade would be actively wrong: rows are shared, so
 deleting one association must not delete a set another association still uses.</li>
 <li><strong>Deleting the last user leaves the set unreachable</strong>, rather than deleting it — the same
-end-state as the NetCDF side's dead standalone variables, which also linger.</li>
+end-state as the HDF5 side's dead standalone variables, which also linger.</li>
 <li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set no association references any more
 and reports the row count as <code>feature_sets_reclaimed</code>. This is the one thing compaction physically
 removes.</li>
@@ -329,12 +329,12 @@ is the contract.</p>
 reports any mismatch between the recorded hash and the recomputed one — detecting silent corruption.
 See <a href="../reference/rust-api.html#store"><code>verify_integrity</code></a>.</p>
 <h3 id="what-it-does-not-cover"><a class="header" href="#what-it-does-not-cover">What it does not cover</a></h3>
-<p>The check is scoped to the <strong>array half</strong> of the store. It reads what the NetCDF side knows about
-and rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about
-the arrays, not about the store as a whole. Three things fall outside it:</p>
+<p>The check is scoped to the <strong>array half</strong> of the store. It reads what the HDF5 side knows about and
+rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about the
+arrays, not about the store as a whole. Three things fall outside it:</p>
 <ul>
 <li>a <code>data_hash</code> in the catalog that names no stored array — a truncated or corrupted catalog, or a
-catalog paired with the wrong <code>.nc</code> file. Every read of the affected key fails, and
+catalog paired with the wrong <code>.h5</code> file. Every read of the affected key fails, and
 <code>verify_integrity</code> reports nothing.</li>
 <li>a catalog row whose <code>dtype</code>, <code>element_shape</code>, or <code>length</code> misdescribes the array it points at.</li>
 <li>a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
@@ -350,7 +350,7 @@ itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the tw
 uniqueness.</p>
 <p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the <a href="../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
-<code>.nc</code> and its <code>.sqlite</code> together.</p>
+<code>.h5</code> and its <code>.sqlite</code> together.</p>
 
                     </main>
 

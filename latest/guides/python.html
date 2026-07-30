@@ -201,11 +201,11 @@ exception hierarchy rooted at <code>TimeSeriesError</code>.</p>
 <pre><code class="language-python"># In-memory: no filesystem I/O.
 store = Store.create(in_memory=True)
 
-# On disk: writes system.nc and system.nc.sqlite.
-store = Store.create(path="system.nc")
+# On disk: writes system.h5 and system.h5.sqlite.
+store = Store.create(path="system.h5")
 
 # Reopen read-only.
-store = Store.open("system.nc", read_only=True)
+store = Store.open("system.h5", read_only=True)
 </code></pre>
 <h2 id="build-a-series"><a class="header" href="#build-a-series">Build a Series</a></h2>
 <p><code>SingleTimeSeries</code> takes a timezone-aware <code>datetime</code>, a resolution (a <code>timedelta</code> or an ISO 8601
@@ -294,7 +294,7 @@ for ts in reader.timestamps():
 <h3 id="shared-forecasts-are-read-once"><a class="header" href="#shared-forecasts-are-read-once">Shared forecasts are read once</a></h3>
 <p>Forecasts that share a backing array (deduplicated identical data, or several
 <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>) collapse to a single <strong>window slot</strong>.
-<code>forecast_read</code> reads each slot from the <code>.nc</code> file once per timestamp, so a forecast shared by 10
+<code>forecast_read</code> reads each slot from the <code>.h5</code> file once per timestamp, so a forecast shared by 10
 components costs one read, not ten. <code>reader.num_slots()</code> is the physical read count, and
 <code>reader.entry_slot(i)</code> says which slot an entry uses — group by slot to materialize each unique
 window only once on the Python side too:</p>
@@ -403,9 +403,9 @@ assert store.list_parents(child_id=7) == [43, 99]
 </code></pre>
 <p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
-<pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.nc + system.nc.sqlite can be copied
+<pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
-<p>Keep the two files together — the <code>.nc</code> and <code>.nc.sqlite</code> pair is a single logical store.</p>
+<p>Keep the two files together — the <code>.h5</code> and <code>.h5.sqlite</code> pair is a single logical store.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
 <p>The store's own exceptions inherit from <code>TimeSeriesError</code>, so you can catch broadly or narrowly:</p>
 <pre><code class="language-python">from infrastore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
@@ -466,7 +466,7 @@ store.add_time_series(...)   # spans appear on stderr
 <code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
 bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
-<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and HDF5 I/O</td></tr>
 </tbody></table>
 </div>
                     </main>

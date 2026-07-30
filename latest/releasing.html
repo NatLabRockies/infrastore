@@ -209,32 +209,32 @@ them together and tag the repo once per release, so every registry pins the same
 <code>infrastore-core</code> at the new version, then rejects <code>infrastore-proto</code> because its requirement still
 names the old one. Run <code>cargo update --workspace</code> after the edits so <code>Cargo.lock</code> moves too.</p>
 <p>The <code>crates-release</code> workflow refuses to publish if the tag does not match the workspace version.</p>
-<h2 id="netcdf-linkage"><a class="header" href="#netcdf-linkage">NetCDF linkage</a></h2>
+<h2 id="hdf5-linkage"><a class="header" href="#hdf5-linkage">HDF5 linkage</a></h2>
 <p>Every distribution channel — the Rust crates, the Python wheel, and <code>InfraStore_jll</code> — ships with
-the <code>vendored</code> feature: netcdf-c, HDF5, and zlib are compiled from source and linked statically.
+the <code>vendored</code> feature: HDF5 and zlib are compiled from source and linked statically.
 <code>pip install infrastore</code> and <code>cargo add infrastore-core</code> need no system libraries, only <code>cmake</code> and
 a C compiler at build time, and every channel is backed by the exact HDF5 version infrastore was
 tested against rather than whatever the target environment resolves.</p>
-<p>For the JLL this is a deliberate departure from Julia-ecosystem convention (linking
-<code>NetCDF_jll</code>/<code>HDF5_jll</code>), made for two reasons:</p>
+<p>For the JLL this is a deliberate departure from Julia-ecosystem convention (linking <code>HDF5_jll</code>),
+made for two reasons:</p>
 <ul>
 <li><strong>Format control.</strong> The store is a data artifact with a compatibility contract
 (<code>DATA_FORMAT_VERSION</code>); pinning the HDF5 that backs it removes an entire class of
 environment-dependent behavior. An <code>HDF5_jll</code> upgrade in a user's environment must not change how
 infrastore files are read or written.</li>
-<li><strong>No MPI dependency.</strong> <code>NetCDF_jll</code>/<code>HDF5_jll</code> are MPI-augmented and publish no serial variant, so
-linking them forces an MPI runtime dependency and a 17-triplet build matrix onto a library that
-never calls MPI — and propagates that dependency to <code>InfraStore.jl</code> and InfrastructureSystems.jl.</li>
+<li><strong>No MPI dependency.</strong> <code>HDF5_jll</code> is MPI-augmented and publishes no serial variant, so linking it
+forces an MPI runtime dependency and a 17-triplet build matrix onto a library that never calls MPI
+— and propagates that dependency to <code>InfraStore.jl</code> and InfrastructureSystems.jl.</li>
 </ul>
 <p>Two libhdf5 copies in one Julia process (ours plus HDF5.jl's) is safe here: the cdylib exports only
-its own <code>infrastore_*</code> symbols — the statically linked HDF5/netcdf symbols stay local, so nothing
-can cross-resolve. The one scenario that is genuinely hazardous, opening a live store's <code>.nc</code> file
+its own <code>infrastore_*</code> symbols — the statically linked HDF5 symbols stay local, so nothing can
+cross-resolve. The one scenario that is genuinely hazardous, opening a live store's <code>.h5</code> file
 directly with HDF5.jl/NCDatasets.jl while a <code>Store</code> handle is open, is explicitly unsupported.</p>
 <blockquote>
-<p><strong>Never set <code>HDF5_DIR</code> or <code>NETCDF_DIR</code> in CI.</strong> The vendored netcdf-c build forwards them to cmake
-as <code>HDF5_ROOT</code> while still requesting static libraries; against a shared-only install such as
-conda-forge's this fails with <code>Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)</code>.
-To build against system libraries, use <code>--no-default-features</code> instead.</p>
+<p><strong>Never set <code>HDF5_DIR</code> in CI.</strong> The vendored HDF5 build forwards it to cmake as <code>HDF5_ROOT</code> while
+still requesting static libraries; against a shared-only install such as conda-forge's this fails
+with <code>Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)</code>. To build against system
+libraries, use <code>--no-default-features</code> instead.</p>
 </blockquote>
 <h3 id="multiple-hdf5-copies-in-one-python-interpreter"><a class="header" href="#multiple-hdf5-copies-in-one-python-interpreter">Multiple HDF5 copies in one Python interpreter</a></h3>
 <p>The same hazard applies in reverse to the wheels, which carry a statically linked HDF5 while a
@@ -307,11 +307,11 @@ build all five.</li>
 <code>I/InfraStore/</code> and open a PR. Their CI builds every platform in the list and all must pass.
 Merging is done by Yggdrasil maintainers, so allow for review time.</li>
 </ol>
-<p>The recipe builds with the default <code>vendored</code> feature — see <a href="#netcdf-linkage">NetCDF linkage</a> for
-why the JLL statically links its own netcdf-c/HDF5/zlib instead of depending on
-<code>NetCDF_jll</code>/<code>HDF5_jll</code>. Expect Yggdrasil reviewers to ask about that; the rationale is written out
-in the recipe's header comment. <code>HDF5_DIR</code> must remain unset during the build: <code>hdf5-metno-sys</code> only
-takes its build-from-source path when the <code>static</code> feature is enabled and <code>HDF5_DIR</code> is absent.</p>
+<p>The recipe builds with the default <code>vendored</code> feature — see <a href="#hdf5-linkage">HDF5 linkage</a> for why
+the JLL statically links its own HDF5/zlib instead of depending on <code>HDF5_jll</code>. Expect Yggdrasil
+reviewers to ask about that; the rationale is written out in the recipe's header comment. <code>HDF5_DIR</code>
+must remain unset during the build: <code>hdf5-metno-sys</code> only takes its build-from-source path when the
+<code>static</code> feature is enabled and <code>HDF5_DIR</code> is absent.</p>
 <p>The recipe patches one thing in the source tree: it drops sha2's <code>asm</code> feature, because
 BinaryBuilder forbids forcing an arch via <code>-march</code> and the ARMv8 crypto kernels cannot be assembled
 there (x86-64 still detects SHA-NI at runtime).</p>
@@ -336,7 +336,7 @@ PR was retargeted before it merged — so the floor is <code>"0.2"</code>. Check
 assuming: a bound below the earliest published version resolves to nothing.</p>
 <p>JLL UUIDs are derived deterministically from the package name, so that value is already known —
 <code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>. (The same call reproduces the published UUIDs of
-<code>NetCDF_jll</code> and <code>HDF5_jll</code> exactly, which is how it was checked.)</p>
+<code>HDF5_jll</code> exactly, which is how it was checked.)</p>
 <p><strong>Step 2 — <code>julia/InfraStore.jl/src/lib.jl</code>.</strong> Replace <code>_jll_library_path</code> and <code>lib_path</code> with a
 direct import. <code>INFRASTORE_LIB</code> stays ahead of the JLL: that ordering is what lets a local
 <code>cargo build</code> shadow the released binary with no code change, and the CI job relies on it.</p>

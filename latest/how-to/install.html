@@ -189,10 +189,10 @@
 workspace build, see <a href="../getting-started/installation.html">Installation</a>.</p>
 <h2 id="1-install-system-libraries"><a class="header" href="#1-install-system-libraries">1. Install System Libraries</a></h2>
 <pre><code class="language-sh"># macOS
-brew install hdf5 netcdf protobuf
+brew install hdf5 protobuf
 
 # Debian / Ubuntu
-sudo apt-get install libhdf5-dev libnetcdf-dev protobuf-compiler
+sudo apt-get install libhdf5-dev protobuf-compiler
 </code></pre>
 <p>If the build fails with <code>Unable to locate HDF5 root directory and/or headers</code>, set <code>HDF5_DIR</code>:</p>
 <pre><code class="language-sh">export HDF5_DIR="$(brew --prefix hdf5)"          # macOS

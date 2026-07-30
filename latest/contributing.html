@@ -211,7 +211,7 @@ export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linu
 julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
 </code></pre>
 <h2 id="the-on-disk-format-is-a-contract"><a class="header" href="#the-on-disk-format-is-a-contract">The On-Disk Format Is a Contract</a></h2>
-<p>The NetCDF layout, the SQLite schema, and the <a href="./explanation/content-addressing.html">hashing rules</a>
+<p>The HDF5 layout, the SQLite schema, and the <a href="./explanation/content-addressing.html">hashing rules</a>
 together form the on-disk format, versioned by <code>DATA_FORMAT_VERSION</code>. Any backward-incompatible
 change to any of them must bump that version. The <code>hash_golden</code> test pins representative hashes; if
 it fails because you changed the hashing domain, that is a format-breaking change, not a test to

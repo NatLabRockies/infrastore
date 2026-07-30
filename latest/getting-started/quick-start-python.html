@@ -196,7 +196,7 @@ import numpy as np
 from infrastore import OwnerCategory, SingleTimeSeries, Store
 
 # `in_memory=True` means no filesystem I/O. Pass `path=` instead to write a
-# NetCDF file plus its SQLite catalog.
+# HDF5 file plus its SQLite catalog.
 store = Store.create(in_memory=True)
 
 # The name lives on the series object, not on `add_time_series`.
@@ -256,16 +256,16 @@ print(window.length)   # 6
 </code></pre>
 <h2 id="writing-to-disk"><a class="header" href="#writing-to-disk">Writing to Disk</a></h2>
 <p>Swap the constructor to persist:</p>
-<pre><code class="language-python">store = Store.create(path="system.nc")
+<pre><code class="language-python">store = Store.create(path="system.h5")
 # ... add_time_series ...
-store.flush()   # sync buffered NetCDF writes to disk
+store.flush()   # sync buffered HDF5 writes to disk
 </code></pre>
 <p>This produces two files that travel together:</p>
 <ul>
-<li><code>system.nc</code> — the NetCDF4 file holding the arrays.</li>
-<li><code>system.nc.sqlite</code> — the catalog holding the metadata associations.</li>
+<li><code>system.h5</code> — the HDF5 file holding the arrays.</li>
+<li><code>system.h5.sqlite</code> — the catalog holding the metadata associations.</li>
 </ul>
-<p>Reopen them later with <code>Store.open("system.nc", read_only=True)</code>.</p>
+<p>Reopen them later with <code>Store.open("system.h5", read_only=True)</code>.</p>
 <h2 id="next-steps"><a class="header" href="#next-steps">Next Steps</a></h2>
 <ul>
 <li>Work through the <a href="../guides/python.html">Python Developer Guide</a> for forecasts, bulk reads,

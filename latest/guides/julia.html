@@ -206,11 +206,11 @@ export INFRASTORE_LIB=$PWD/target/release/libinfrastore_ffi.dylib  # .so on Linu
 <pre><code class="language-julia"># In-memory.
 store = Store(in_memory=true)
 
-# On disk: writes system.nc and system.nc.sqlite.
-store = Store(in_memory=false, path="system.nc")
+# On disk: writes system.h5 and system.h5.sqlite.
+store = Store(in_memory=false, path="system.h5")
 
 # Reopen read-only.
-store = open_store("system.nc"; read_only=true)
+store = open_store("system.h5"; read_only=true)
 </code></pre>
 <p>The store is finalized automatically, but you can release it eagerly with <code>close!(store)</code>.</p>
 <h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
@@ -391,7 +391,7 @@ into identical windows).</p>
 <h3 id="shared-forecasts-are-read-once"><a class="header" href="#shared-forecasts-are-read-once">Shared forecasts are read once</a></h3>
 <p>Forecasts that share a backing array (deduplicated identical data, or several
 <code>DeterministicSingleTimeSeries</code> over one <code>SingleTimeSeries</code>) collapse to a single <strong>window slot</strong>.
-<code>forecast_read!</code> reads each slot from the <code>.nc</code> file once per timestamp, so a forecast shared by 10
+<code>forecast_read!</code> reads each slot from the <code>.h5</code> file once per timestamp, so a forecast shared by 10
 components costs one read, not ten. <code>forecast_num_slots(reader)</code> is the physical read count, and
 each <code>ForecastEntry.slot</code> says which slot an entry uses — group by <code>slot</code> to materialize each unique
 window only once:</p>
@@ -469,9 +469,9 @@ list_parents(store; child_id=7)                     # [43, 99]
 </code></pre>
 <p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
 <h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
-<pre><code class="language-julia">flush!(store)   # sync NetCDF + SQLite; afterwards system.nc + system.nc.sqlite can be copied
+<pre><code class="language-julia">flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
-<p>Keep the <code>.nc</code> and <code>.nc.sqlite</code> files together.</p>
+<p>Keep the <code>.h5</code> and <code>.h5.sqlite</code> files together.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
 <p>Errors subtype <code>InfraStore.TimeSeriesException</code>. The exception types are not exported, so reference
 them module-qualified. Catch broadly or narrowly:</p>
@@ -530,7 +530,7 @@ add_time_series!(store, ...)   # spans appear on stderr
 <code>RUST_LOG</code>). The filter syntax is the same as <code>RUST_LOG</code>: comma-separated <code>target=level</code> pairs, or a
 bare level such as <code>"debug"</code> to match everything. Useful targets:</p>
 <div class="table-wrapper"><table><thead><tr><th>Target</th><th>What it covers</th></tr></thead><tbody>
-<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and NetCDF I/O</td></tr>
+<tr><td><code>infrastore_core</code></td><td>All store operations — <code>add</code>, <code>get</code>, <code>remove</code> and HDF5 I/O</td></tr>
 </tbody></table>
 </div>
                     </main>

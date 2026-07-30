@@ -194,10 +194,10 @@
 </tbody></table>
 </div>
 <p>The Python wheels and the Julia binary (<code>InfraStore_jll</code>) are prebuilt and self-contained. The Rust
-crates build NetCDF, HDF5, and zlib from vendored sources and link them statically, so they need
-<code>cmake</code> and a C compiler but <strong>no system NetCDF or HDF5</strong>. The same vendored, statically linked
-stack backs every channel, so the HDF5 version behind the on-disk format is pinned by infrastore
-rather than by the target environment.</p>
+crates build HDF5 and zlib from vendored sources and link them statically, so they need <code>cmake</code> and
+a C compiler but <strong>no system HDF5</strong>. The same vendored, statically linked stack backs every channel,
+so the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
+environment.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
 <h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
 <p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia
@@ -205,13 +205,13 @@ bindings additionally need a Python interpreter (3.11+) or Julia (1.10+).</p>
 <pre><code class="language-sh">brew install cmake protobuf maturin              # macOS
 sudo apt-get install cmake protobuf-compiler     # Linux (Debian / Ubuntu)
 </code></pre>
-<p>The first build compiles netcdf-c and HDF5 from source — a few minutes — and then caches the result.</p>
+<p>The first build compiles HDF5 from source — a few minutes — and then caches the result.</p>
 <blockquote>
-<p><strong>Do not set <code>HDF5_DIR</code> or <code>NETCDF_DIR</code>.</strong> The vendored netcdf-c build forwards them to cmake as
-<code>HDF5_ROOT</code> while still requesting static libraries, which fails against a shared-only install. To
-build against system libraries instead, turn vendoring off with <code>--no-default-features</code> and
-install them (<code>brew install hdf5 netcdf</code> / <code>apt-get install libhdf5-dev libnetcdf-dev</code>).</p>
-<p>Because <code>netcdf-sys</code> declares <code>links = "netcdf"</code>, Cargo's feature unification makes the
+<p><strong>Do not set <code>HDF5_DIR</code>.</strong> The vendored build forwards it to cmake as <code>HDF5_ROOT</code> while still
+requesting static libraries, which fails against a shared-only install. To build against system
+libraries instead, turn vendoring off with <code>--no-default-features</code> and install them
+(<code>brew install hdf5</code> / <code>apt-get install libhdf5-dev</code>).</p>
+<p>Because <code>hdf5-metno-sys</code> declares <code>links = "hdf5"</code>, Cargo's feature unification makes the
 vendored-versus-system choice all-or-nothing across the whole dependency graph — an individual
 crate cannot opt out on its own.</p>
 </blockquote>
@@ -232,7 +232,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 <code>cargo build --workspace</code> can link the PyO3 cdylib without <code>maturin</code>. On Linux those flags are inert.</p>
 <h2 id="crates-in-the-workspace"><a class="header" href="#crates-in-the-workspace">Crates in the Workspace</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Crate</th><th>What it builds</th></tr></thead><tbody>
-<tr><td><code>infrastore-core</code></td><td>Types, NetCDF + SQLite storage, hashing, Rust API</td></tr>
+<tr><td><code>infrastore-core</code></td><td>Types, HDF5 + SQLite storage, hashing, Rust API</td></tr>
 <tr><td><code>infrastore-proto</code></td><td>Protobuf service definition + <code>tonic</code> codegen</td></tr>
 <tr><td><code>infrastore-server</code></td><td>gRPC server binary + Rust client</td></tr>
 <tr><td><code>infrastore-py</code></td><td>PyO3 bindings, <code>abi3-py311</code> wheel</td></tr>
