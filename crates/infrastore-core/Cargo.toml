@@ -36,7 +36,7 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-hdf5-metno = { version = "0.12.1", features = ["zlib"] }
+hdf5-metno = { version = "0.14.0", features = ["zlib"] }
 
 # `asm` selects hand-written SHA-256 kernels (and the ARMv8 crypto extensions
 # on aarch64), ~5x faster than the portable fallback for content hashing on
@@ -52,5 +52,5 @@ sha2 = { workspace = true }
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "user-hooks"] }
 # White-box store perturbation in `disk_roundtrip.rs` (attribute/byte edits
 # behind the recorded content hash).
-hdf5-metno = "0.12.1"
+hdf5-metno = "0.14.0"
 tempfile = "3"
