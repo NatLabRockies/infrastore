@@ -1199,34 +1199,22 @@ impl StorageBackend for Hdf5Backend {
             // tombstone until compact (HDF5 cannot reclaim the space in place, and
             // keeping re-adds of the same content a pure re-index).
             Location::Standalone { .. } => Ok(()),
+            // Packed: drop the column from the index and clear its hash
+            // companion so a reopen does not re-index it. The column's bytes
+            // stay in place as a tombstone until compact, exactly like a
+            // standalone dataset — zeroing them here would cost a whole-chunk
+            // read-modify-write per removal for no reachability change.
             Location::Packed { dataset, col } => {
-                let (length, hash_name, dtype, element_shape) = {
+                let hash_name = {
                     let state = inner.datasets.get_mut(&dataset).ok_or_else(|| {
                         TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
                     })?;
                     if col < state.columns.len() {
                         state.columns[col] = None;
                     }
-                    (
-                        state.length,
-                        state.hash_name.clone(),
-                        state.dtype,
-                        state.element_shape.clone(),
-                    )
+                    state.hash_name.clone()
                 };
-                inner.write_hash_row(&hash_name, col, None)?;
-                let row_elems: usize = element_shape.iter().product::<usize>().max(1);
-                let zeros = vec![0u8; length * row_elems * dtype.size()];
-                let ds = inner.dataset(&dataset)?;
-                let mut slice_shape = vec![length, 1];
-                slice_shape.extend_from_slice(&element_shape);
-                write_sel(
-                    &ds,
-                    dtype,
-                    &zeros,
-                    &slice_shape,
-                    packed_ranges(0..length, col, &element_shape),
-                )
+                inner.write_hash_row(&hash_name, col, None)
             }
         }
     }

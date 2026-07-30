@@ -554,6 +554,15 @@ impl MetadataStore {
             // `journal_mode` returns a row ("wal"); use `query_row` to consume
             // it — `execute` would report a misuse error.
             conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+            // NORMAL sync under WAL: commits stop fsyncing the WAL (the sync
+            // moves to checkpoints), which is the dominant cost of small
+            // single-op transactions — a per-series removal spends ~25% of its
+            // time in that fsync. WAL guarantees the database stays consistent
+            // either way; what NORMAL gives up is durability of the last few
+            // commits on an OS crash or power loss, which this store accepts:
+            // the artifact is rebuilt from serialized systems, and the prior
+            // metadata store held everything in process memory.
+            conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         }
         // `prepare_cached` keys on SQL text, and `MetadataFilter` renders a
         // distinct statement per combination of set predicates (times two, since
@@ -781,7 +790,7 @@ impl MetadataStore {
         let f_hash = features_hash(&key.features);
         let resolution_iso = key.resolution.map(period_to_iso);
         let interval_iso = key.interval.map(period_to_iso);
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare_cached(
             "SELECT id, data_hash FROM time_series_associations
              WHERE owner_id = ?1 AND owner_category = ?2 AND time_series_type = ?3 AND name = ?4
                AND ((?5 IS NULL AND resolution IS NULL) OR resolution = ?5)
@@ -805,10 +814,8 @@ impl MetadataStore {
 
         let mut out = Vec::with_capacity(rows.len());
         for (id, hash_bytes) in rows {
-            tx.execute(
-                "DELETE FROM time_series_associations WHERE id = ?1",
-                params![id],
-            )?;
+            tx.prepare_cached("DELETE FROM time_series_associations WHERE id = ?1")?
+                .execute(params![id])?;
             let mut h = [0u8; 32];
             if hash_bytes.len() == 32 {
                 h.copy_from_slice(&hash_bytes);
@@ -2181,11 +2188,9 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
 // `Store` layer where a tx is already in-flight for atomicity). Implemented as
 // helper free fns so we don't have two parallel Send/Sync wrappers.
 pub fn references_to_in_tx(tx: &Connection, data_hash: &[u8; 32]) -> Result<i64> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1",
-        params![data_hash.as_slice()],
-        |row| row.get(0),
-    )?;
+    let count: i64 = tx
+        .prepare_cached("SELECT COUNT(*) FROM time_series_associations WHERE data_hash = ?1")?
+        .query_row(params![data_hash.as_slice()], |row| row.get(0))?;
     Ok(count)
 }
 
@@ -2196,12 +2201,14 @@ pub fn typed_references_to_in_tx(
     data_hash: &[u8; 32],
     ts_type: TimeSeriesType,
 ) -> Result<i64> {
-    let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM time_series_associations
+    let count: i64 = tx
+        .prepare_cached(
+            "SELECT COUNT(*) FROM time_series_associations
          WHERE data_hash = ?1 AND time_series_type = ?2",
-        params![data_hash.as_slice(), ts_type.as_str()],
-        |row| row.get(0),
-    )?;
+        )?
+        .query_row(params![data_hash.as_slice(), ts_type.as_str()], |row| {
+            row.get(0)
+        })?;
     Ok(count)
 }
 
