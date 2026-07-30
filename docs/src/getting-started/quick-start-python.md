@@ -14,7 +14,7 @@ import numpy as np
 from infrastore import OwnerCategory, SingleTimeSeries, Store
 
 # `in_memory=True` means no filesystem I/O. Pass `path=` instead to write a
-# NetCDF file plus its SQLite catalog.
+# HDF5 file plus its SQLite catalog.
 store = Store.create(in_memory=True)
 
 # The name lives on the series object, not on `add_time_series`.
@@ -86,17 +86,17 @@ for m in store.list_time_series(owner_id=42):
 Swap the constructor to persist:
 
 ```python
-store = Store.create(path="system.nc")
+store = Store.create(path="system.h5")
 # ... add_time_series ...
-store.flush()   # sync buffered NetCDF writes to disk
+store.flush()   # sync buffered HDF5 writes to disk
 ```
 
 This produces two files that travel together:
 
-- `system.nc` — the NetCDF4 file holding the arrays.
-- `system.nc.sqlite` — the catalog holding the metadata associations.
+- `system.h5` — the HDF5 file holding the arrays.
+- `system.h5.sqlite` — the catalog holding the metadata associations.
 
-Reopen them later with `Store.open("system.nc", read_only=True)`.
+Reopen them later with `Store.open("system.h5", read_only=True)`.
 
 ## Next Steps
 

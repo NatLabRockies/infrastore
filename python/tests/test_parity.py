@@ -76,7 +76,7 @@ def test_every_dtype_round_trips_as_a_static_series():
 
 def test_every_dtype_round_trips_through_disk(tmp_path):
     """The same matrix, but persisted and reopened rather than in memory."""
-    path = tmp_path / "dtypes.nc"
+    path = tmp_path / "dtypes.h5"
     store = Store.create(path=str(path), in_memory=False)
     keys = {}
     expected = {}
@@ -244,7 +244,7 @@ def test_non_float64_forecast_dtypes():
 
 def test_forecast_persists_and_reopens(tmp_path):
     """Only statics were ever persisted from Python; forecasts stayed in memory."""
-    path = tmp_path / "forecasts.nc"
+    path = tmp_path / "forecasts.h5"
     H, C = 2, 3
     horizon, interval = timedelta(hours=2), timedelta(hours=1)
     det_data = np.arange(H * C, dtype=np.float64).reshape(H, C)
@@ -295,7 +295,7 @@ def test_forecast_persists_and_reopens(tmp_path):
 
 
 def test_non_finite_forecast_round_trips_through_disk(tmp_path):
-    path = tmp_path / "nonfinite_forecast.nc"
+    path = tmp_path / "nonfinite_forecast.h5"
     data = np.array([[np.nan, np.inf], [-np.inf, -0.0]], dtype=np.float64)
     store = Store.create(path=str(path), in_memory=False)
     key = _add(
@@ -635,7 +635,7 @@ def test_copy_time_series():
 def test_compact(tmp_path):
     """``compact`` reports the tombstones a delete left behind and leaves the
     surviving series readable."""
-    path = tmp_path / "compact.nc"
+    path = tmp_path / "compact.h5"
     store = Store.create(path=str(path), in_memory=False)
     keep_values = np.arange(4, dtype=np.float64)
     keep = _add(store, 1, _sts("keep", keep_values))
@@ -752,7 +752,7 @@ def test_time_series_counts_detailed():
 
 
 def test_verify_integrity_reports_ok_for_a_healthy_store(tmp_path):
-    path = tmp_path / "healthy.nc"
+    path = tmp_path / "healthy.h5"
     store = Store.create(path=str(path), in_memory=False)
     _add(store, 1, _sts("load", np.arange(4, dtype=np.float64)))
     store.flush()
@@ -824,7 +824,7 @@ def test_microsecond_datetimes_round_trip():
 
 
 def test_microsecond_datetimes_round_trip_through_disk(tmp_path):
-    path = tmp_path / "micro.nc"
+    path = tmp_path / "micro.h5"
     precise = datetime(2024, 1, 1, 0, 0, 0, 999999, tzinfo=timezone.utc)
     store = Store.create(path=str(path), in_memory=False)
     key = _add(store, 1, _sts("load", np.arange(4, dtype=np.float64), initial=precise))
@@ -899,7 +899,7 @@ def test_a_naive_datetime_is_rejected():
 
 
 def test_pre_1970_and_far_future_timestamps_round_trip(tmp_path):
-    path = tmp_path / "spans.nc"
+    path = tmp_path / "spans.h5"
     store = Store.create(path=str(path), in_memory=False)
     cases = {
         "pre_epoch": datetime(1900, 1, 1, tzinfo=timezone.utc),
@@ -943,7 +943,7 @@ def test_non_sequential_timestamps_keep_microsecond_spacing():
 
 
 def test_a_century_spanning_non_sequential_series_round_trips(tmp_path):
-    path = tmp_path / "century.nc"
+    path = tmp_path / "century.h5"
     timestamps = [
         datetime(1900, 1, 1, tzinfo=timezone.utc),
         datetime(1970, 1, 1, tzinfo=timezone.utc),

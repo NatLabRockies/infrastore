@@ -40,7 +40,7 @@ def open(cls, path: str, read_only: bool = False) -> Store: ...
 ```
 
 - `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
-- `create(path=...)` — writes `path` (NetCDF) and `path + ".sqlite"` (metadata).
+- `create(path=...)` — writes `path` (HDF5) and `path + ".sqlite"` (metadata).
 - `create(path=..., compression="none")` — store arrays uncompressed; `compression="deflate"` with a
   `compression_level` / `shuffle` of your choice tunes the filter. The policy persists with the
   store and is reused on later appends. An unknown `compression` or out-of-range level raises
@@ -493,7 +493,7 @@ for ts in reader.timestamps():
 
 **Window-read deduplication.** Forecasts that share one backing array and read plan — deduplicated
 identical data, or several `DeterministicSingleTimeSeries` over one `SingleTimeSeries` — collapse to
-a single _window slot_. `forecast_read` performs one backend (`.nc`) read per slot, not per entry,
+a single _window slot_. `forecast_read` performs one backend (`.h5`) read per slot, not per entry,
 so a forecast shared by N owners is read once per timestamp. `num_slots()` is that physical read
 count (`<= len(entries())`), and `entry_slot(i)` (0-based) identifies the slot backing entry `i`;
 entries that share data report the same slot. Group by slot to also materialize each unique window

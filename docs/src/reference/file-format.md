@@ -3,25 +3,31 @@
 A persisted store is a pair of files that must be kept together:
 
 ```text
-<name>.nc          # NetCDF4 — numerical arrays
-<name>.nc.sqlite   # SQLite  — metadata associations
+<name>.h5          # HDF5   — numerical arrays
+<name>.h5.sqlite   # SQLite — metadata associations
 ```
 
-The SQLite catalog path is the NetCDF path with `.sqlite` appended to the file name. This page is
-the authoritative description of both. For the rationale behind the split, see the
+The SQLite catalog path is the HDF5 path with `.sqlite` appended to the file name. This page is the
+authoritative description of both. For the rationale behind the split, see the
 [Storage Model](../explanation/storage-model.md).
+
+The array file is a **plain HDF5 file**, written directly against libhdf5 — not a NetCDF4 file.
+Earlier releases wrote it through netcdf-c; the layout below is unchanged, but the file no longer
+carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only files it wrote itself
+(see `storage_backend` below). The `.h5` extension is a convention — the store never inspects it.
 
 ## Format Version
 
-The NetCDF root carries two global attributes:
+The HDF5 root carries three global attributes:
 
 ```text
 data_format_version = "0.11.0"
 compression         = "deflate:3:shuffle"
+storage_backend     = "hdf5"
 ```
 
 `data_format_version` is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when
-the NetCDF layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md)
+the HDF5 layout, the SQLite schema, or the [hashing domain](../explanation/content-addressing.md)
 changes in a backward-incompatible way. A purely additive SQLite table does not qualify: it costs
 old readers nothing and old stores pick it up from the idempotent DDL on their first writable open.
 The [`associations`](#associations) table landed that way.
@@ -29,6 +35,12 @@ The [`associations`](#associations) table landed that way.
 `compression` records the filter policy the store was created with, so that appends made after
 reopening reuse the same filter. It is **not** part of the compatibility contract — see
 [Compression](#compression) below.
+
+`storage_backend` marks the file as one infrastore wrote. `Store::open` checks it before reading
+anything else and rejects a file that lacks it with `InvalidParameter` — this is what distinguishes
+an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
+netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
+no in-place migration.
 
 Opening a store whose recorded version differs from the version this build reads fails with
 `IncompatibleFormat`, naming both versions. Every bump is backward-incompatible by definition, so
@@ -55,7 +67,7 @@ owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baselin
 InfrastructureSystems.jl shipped with — the version that introduced `DATA_FORMAT_VERSION` itself;
 `0.3.0` switched the time unit from nanoseconds to milliseconds, renaming the SQLite `*_ns` columns
 to `*_ms` and encoding the packed dataset name's `{res}` field in milliseconds instead of whole
-seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode NetCDF layout below;
+seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode array layout below;
 `0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
@@ -74,36 +86,32 @@ with the bindings and the C ABI):
 A scalar-per-step series has an empty element shape; a per-step tuple (e.g. the 3 coefficients of a
 quadratic cost curve) has element shape `[3]`.
 
-## NetCDF Layout
+## HDF5 Layout
 
 Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
-<name>.nc
+<name>.h5
 ├── attribute  data_format_version = "0.11.0"
 ├── attribute  compression         = "deflate:3:shuffle"
+├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
     └── group  single/
-        ├── var  sts_{dtype}_{shape}_{length}_{res}      packed dataset  (length, cols, *element_shape)
-        ├── var  sts_{dtype}_{shape}_{length}_{res}_h    str  (cols,)     # per-column hex hashes
-        ├── var  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
-        ├── var  arr_{hex_hash}                          standalone array  [length, *element_shape]
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
+        ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+        ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
         └── ...
 ```
 
-Every dimension is private to the variable that owns it and is named after that variable, so
-`ncdump -h` shows one set of dimensions per dataset:
+Datasets carry **no dimension scales and no dimension names** — shape is read straight off the HDF5
+dataspace. (The netcdf-backed releases created a named dimension per axis, `{dataset}_t`,
+`{dataset}_c`, and so on; those objects are gone.) On open the backend recovers each packed
+dataset's column count from the second extent of its dataspace, which is how per-dataset widths
+round-trip.
 
-- A packed dataset `{dataset}` is dimensioned `({dataset}_t, {dataset}_c, {dataset}_e0, …)`:
-  `{dataset}_t` = `length` (the time axis), `{dataset}_c` = `cols` (the column axis), and one
-  `{dataset}_e{i}` per trailing axis, sized `element_shape[i]`. A scalar-per-step dataset has no
-  `_e{i}` dimensions.
-- Its hash companion `{dataset}_h` is dimensioned on `{dataset}_c` alone — one hash slot per column.
-- A standalone array `arr_{hex_hash}` is dimensioned `arr_{hex_hash}_d{i}`, one per axis of its full
-  shape `[length, *element_shape]`.
-
-`{dataset}_c` is load-bearing, not decorative: on open the backend recovers each packed dataset's
-column count from the length of its second dimension, which is how per-dataset widths round-trip.
+The hash companion `{dataset}_h` is a `(cols, 64)` array of `u8` holding each column's 64 lowercase
+hex characters as raw bytes — not an HDF5 string dataset. **An all-zero row marks a free slot.**
 
 ### Packed mode
 
@@ -180,13 +188,13 @@ regardless of the filter, so stores written with different settings stay mutuall
 
 ### Deletion and compaction
 
-- **Packed:** deletion writes an empty string to the column's hash slot and zero-fills the column's
-  data, so no stale values are readable through a reused slot. The slot becomes reusable by the next
-  compatible write. The dataset does not shrink.
-- **Standalone:** deletion drops the array from the in-memory index; the NetCDF variable lingers as
-  dead space (NetCDF cannot delete variables in place).
+- **Packed:** deletion zero-fills both the column's hash row and the column's data, so no stale
+  values are readable through a reused slot. The slot becomes reusable by the next compatible write.
+  The dataset does not shrink.
+- **Standalone:** deletion drops the array from the in-memory index; the HDF5 dataset lingers as
+  dead space (HDF5 cannot reclaim the space in place).
 - `compact()` reports reclaimable slots but does not physically resize datasets or remove dead
-  standalone variables in this release (netcdf-c cannot resize a dimension in place).
+  standalone datasets in this release (HDF5 cannot reclaim the space in place).
 - **Feature sets:** because they are shared, deleting an association never deletes its feature set;
   removing the last association that referenced one leaves it unreachable. `compact()` deletes
   unreachable sets and reports the row count as `feature_sets_reclaimed`. This is the one thing
@@ -221,7 +229,7 @@ One row per association between an owner and a stored array.
 | `dtype`             | TEXT    | Element dtype string (`NOT NULL DEFAULT 'f64'`)                          |
 | `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                              |
 | `ext`               | TEXT    | Opaque package-owned extension payload (JSON), verbatim; `NULL` if unset |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to a NetCDF column/variable          |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable           |
 | `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                       |
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
@@ -255,7 +263,7 @@ An empty feature map stores no rows.
 There is deliberately **no foreign key** to `time_series_associations` and **no cascade**: rows here
 are shared, so deleting one association must not delete a set another association still uses.
 Removing the last association that referenced a set instead leaves it unreachable — the same
-deletion semantics as the NetCDF side's unreachable standalone variables. `Store::compact` sweeps
+deletion semantics as the HDF5 side's unreachable standalone variables. `Store::compact` sweeps
 unreachable sets and reports the count as `feature_sets_reclaimed`; clearing a store drops them all
 outright.
 
@@ -346,7 +354,7 @@ CREATE TABLE schema_version (version INTEGER NOT NULL);
 
 A single-column table holding the catalog schema version. Creating the catalog inserts `version = 1`
 if the table is empty; `1` is the current value. This tracks the SQLite schema alone and is distinct
-from the NetCDF `data_format_version` attribute, which governs the artifact as a whole and is the
+from the HDF5 `data_format_version` attribute, which governs the artifact as a whole and is the
 value `open` validates.
 
 ### Indexes
@@ -385,21 +393,22 @@ carries no `data_format_version` change.
 - **Periods** (`resolution`, `horizon`, `interval`) are canonical **ISO-8601 duration strings** in
   SQLite (`PT1H`, `P1M`, `P1Y`), and the packed dataset name's `{res}` field uses the same encoding.
   Calendar periods (`Month`/`Quarter`/`Year`) are stored distinctly from fixed spans.
-- **Hashes** are raw 32-byte `BLOB`s in SQLite, lowercase hex in NetCDF (the `…_h` variable for
-  packed arrays, the `arr_` variable name for standalone arrays).
+- **Hashes** are raw 32-byte `BLOB`s in SQLite, lowercase hex in HDF5 (the `…_h` dataset for packed
+  arrays, the `arr_` dataset name for standalone arrays).
 - **`element_shape`** is the per-step shape only (the trailing axes); the time `length` is a
   separate column.
 
 ## Inspecting a Store by Hand
 
 ```sh
-ncdump -h system.nc                      # groups, variables, dtypes, shapes
-sqlite3 system.nc.sqlite '.schema'
-sqlite3 system.nc.sqlite \
+h5ls -r system.h5                        # groups, datasets, dtypes, shapes
+h5dump -A -n system.h5                   # root attributes and the object list
+sqlite3 system.h5.sqlite '.schema'
+sqlite3 system.h5.sqlite \
   'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_associations;'
 # Both association tables are absent in stores written before they existed.
-sqlite3 system.nc.sqlite 'SELECT * FROM supplemental_attribute_associations;'
-sqlite3 system.nc.sqlite 'SELECT * FROM parent_child_associations;'
+sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
+sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
 ```
 
 To map an association to its values: read its `data_hash`. For a packed array, hex-encode it and

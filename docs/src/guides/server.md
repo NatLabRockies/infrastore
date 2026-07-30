@@ -9,8 +9,8 @@ guide covers running the server and talking to it from Rust. For the wire contra
 ## When to Use It
 
 Use the server to fan out reads of an existing store to many clients or across the network — for
-example, serving a published dataset to analysis jobs. A single writer produces the `.nc` +
-`.nc.sqlite` pair locally; the server then reads it and answers queries. It never modifies the
+example, serving a published dataset to analysis jobs. A single writer produces the `.h5` +
+`.h5.sqlite` pair locally; the server then reads it and answers queries. It never modifies the
 files.
 
 ## Run the Server
@@ -24,7 +24,7 @@ files.
    port = 50051
 
    [data]
-   files = ["./system.nc"]   # the .nc.sqlite catalog must sit beside it
+   files = ["./system.h5"]   # the .h5.sqlite catalog must sit beside it
 
    [authentication]
    method = "none"

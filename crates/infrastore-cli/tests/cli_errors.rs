@@ -145,7 +145,7 @@ fn descriptor_json(overrides: &[(&str, &str)]) -> String {
 /// `(dir, store_path, descriptor_path)`.
 fn fixture(csv_body: &str, overrides: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "data.csv", csv_body);
     let descriptor = write(dir.path(), "d.json", &descriptor_json(overrides));
     (dir, store, descriptor)
@@ -353,7 +353,7 @@ fn a_malformed_timestamp_in_a_non_sequential_csv_is_rejected() {
 #[test]
 fn a_nonexistent_csv_path_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     // No data.csv is written.
     let descriptor = write(dir.path(), "d.json", &descriptor_json(&[]));
     let stderr = add_err(&store, &descriptor);
@@ -366,7 +366,7 @@ fn a_nonexistent_csv_path_is_rejected() {
 #[test]
 fn a_descriptor_with_no_csv_and_no_flag_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     let descriptor = write(dir.path(), "d.json", &descriptor_json(&[("csv", "null")]));
     let stderr = add_err(&store, &descriptor);
     assert!(
@@ -380,7 +380,7 @@ fn has_header_true_skips_the_first_row() {
     // `has_header` defaults to true but no test ever exercised that path: every
     // fixture sets it to false. A header row must be consumed, not parsed as data.
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "data.csv", "value\n1.5\n2.5\n3.5\n");
     let descriptor = write(
         dir.path(),
@@ -397,7 +397,7 @@ fn has_header_true_skips_the_first_row() {
 
     // With `has_header: false` the same file fails, because "value" is not an f64
     // — which is what makes the assertion above meaningful.
-    let store2 = dir.path().join("store2.nc");
+    let store2 = dir.path().join("store2.h5");
     let no_header = write(
         dir.path(),
         "d2.json",
@@ -509,7 +509,7 @@ fn each_type_reports_its_own_missing_required_field() {
 #[test]
 fn an_empty_root_array_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     let descriptor = write(dir.path(), "d.json", "[]");
     let stderr = add_err(&store, &descriptor);
     assert!(
@@ -522,7 +522,7 @@ fn an_empty_root_array_is_rejected() {
 fn a_root_scalar_descriptor_is_rejected() {
     for body in ["42", "\"a string\"", "true", "null"] {
         let dir = tempfile::tempdir().unwrap();
-        let store = dir.path().join("store.nc");
+        let store = dir.path().join("store.h5");
         let descriptor = write(dir.path(), "d.json", body);
         let stderr = add_err(&store, &descriptor);
         assert!(
@@ -535,7 +535,7 @@ fn a_root_scalar_descriptor_is_rejected() {
 #[test]
 fn malformed_json_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     for body in ["{", "{\"owner_id\": }", "{,}", "not json at all"] {
         let descriptor = write(dir.path(), "d.json", body);
         let stderr = add_err(&store, &descriptor);
@@ -549,7 +549,7 @@ fn malformed_json_is_rejected() {
 #[test]
 fn a_nonexistent_descriptor_path_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     let stderr = run_err(
         &store,
         &[
@@ -787,7 +787,7 @@ fn an_attribute_owned_series_can_be_added_and_listed() {
 #[test]
 fn transform_derives_a_dst_that_list_shows() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "t.csv", "1\n2\n3\n4\n5\n6\n7\n8\n");
     let descriptor = write(
         dir.path(),
@@ -835,7 +835,7 @@ fn transform_derives_a_dst_that_list_shows() {
 #[test]
 fn copy_shares_the_array_and_dry_run_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
     // --dry-run reports but does not write.
@@ -933,12 +933,12 @@ fn copy_shares_the_array_and_dry_run_changes_nothing() {
 #[test]
 fn persist_writes_a_readable_copy() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
-    let dest = dir.path().join("copy.nc");
+    let dest = dir.path().join("copy.h5");
     run(&store, &["persist", "--dest", dest.to_str().unwrap()]);
-    assert!(dest.exists(), "the destination .nc must exist");
+    assert!(dest.exists(), "the destination .h5 must exist");
     let mut sqlite = dest.clone().into_os_string();
     sqlite.push(".sqlite");
     assert!(
@@ -958,7 +958,7 @@ fn persist_writes_a_readable_copy() {
 #[test]
 fn compact_runs_and_reports() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     // Add a second series and remove it, leaving a reusable slot.
     write(dir.path(), "b.csv", "90\n91\n92\n93\n");
@@ -988,7 +988,7 @@ fn compact_runs_and_reports() {
 #[test]
 fn params_reports_forecast_parameters() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "f.csv", "1\n2\n3\n4\n5\n6\n");
     let descriptor = write(
         dir.path(),
@@ -1027,7 +1027,7 @@ fn params_reports_forecast_parameters() {
 
     // An empty store reports no parameters rather than failing.
     let empty_dir = tempfile::tempdir().unwrap();
-    let empty = empty_dir.path().join("empty.nc");
+    let empty = empty_dir.path().join("empty.h5");
     seed(empty_dir.path(), &empty); // statics only, no forecasts
     let out = run(&empty, &["-f", "json", "params"]);
     assert!(!out.trim().is_empty());
@@ -1036,7 +1036,7 @@ fn params_reports_forecast_parameters() {
 #[test]
 fn template_prints_a_usable_descriptor_for_every_type() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     for ts_type in [
         "single",
         "non_sequential",
@@ -1067,7 +1067,7 @@ fn template_prints_a_usable_descriptor_for_every_type() {
 #[test]
 fn clear_removes_everything_or_one_owner() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     write(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
@@ -1111,7 +1111,7 @@ fn clear_removes_everything_or_one_owner() {
 #[test]
 fn replace_owner_moves_series_and_dry_run_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
     // --dry-run reports the count without moving.
@@ -1173,7 +1173,7 @@ fn replace_owner_moves_series_and_dry_run_changes_nothing() {
 fn remove_without_all_removes_exactly_one_series() {
     // The non-`--all` path: a selector that resolves to one series.
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     write(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
@@ -1246,7 +1246,7 @@ fn export_then_add_reproduces_the_values() {
     // so the output is not directly re-addable as the same type. A caller must
     // either strip the timestamp column (below) or re-add as `non_sequential`.
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
     let original = run(
@@ -1264,7 +1264,7 @@ fn export_then_add_reproduces_the_values() {
 
     // Re-add as a `single` after stripping the timestamp column.
     write(dir.path(), "values.csv", &strip_timestamp_column(&exported));
-    let fresh = dir.path().join("fresh.nc");
+    let fresh = dir.path().join("fresh.h5");
     let descriptor = write(
         dir.path(),
         "re.json",
@@ -1284,7 +1284,7 @@ fn export_then_add_reproduces_the_values() {
     // The timestamped export re-adds directly as a `non_sequential` series,
     // which is the shape it is already in; timestamps and values both survive.
     write(dir.path(), "stamped.csv", &exported);
-    let ns_store = dir.path().join("ns.nc");
+    let ns_store = dir.path().join("ns.h5");
     let ns = write(
         dir.path(),
         "ns.json",
@@ -1316,7 +1316,7 @@ fn export_then_add_reproduces_the_values() {
 #[test]
 fn export_then_add_reproduces_a_non_f64_dtype() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(
         dir.path(),
         "i.csv",
@@ -1339,7 +1339,7 @@ fn export_then_add_reproduces_a_non_f64_dtype() {
     );
     write(dir.path(), "values.csv", &strip_timestamp_column(&exported));
 
-    let fresh = dir.path().join("fresh.nc");
+    let fresh = dir.path().join("fresh.h5");
     let re = write(
         dir.path(),
         "re.json",
@@ -1369,7 +1369,7 @@ fn export_then_add_reproduces_a_non_f64_dtype() {
 #[test]
 fn export_writes_one_file_per_series_into_a_directory() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     write(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
@@ -1408,7 +1408,7 @@ fn export_writes_one_file_per_series_into_a_directory() {
 #[test]
 fn export_of_a_forecast_round_trips() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "f.csv", "1\n2\n3\n4\n5\n6\n");
     let descriptor = write(
         dir.path(),
@@ -1448,7 +1448,7 @@ fn export_of_a_forecast_round_trips() {
 #[test]
 fn get_time_range_slices_the_series() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "t.csv", "10\n11\n12\n13\n14\n15\n16\n17\n");
     let descriptor = write(
         dir.path(),
@@ -1520,7 +1520,7 @@ fn get_time_range_slices_the_series() {
 #[test]
 fn get_limit_and_full_control_table_truncation() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     let body: String = (0..80).map(|i| format!("{i}\n")).collect();
     write(dir.path(), "big.csv", &body);
     let descriptor = write(
@@ -1572,7 +1572,7 @@ fn get_limit_and_full_control_table_truncation() {
 #[test]
 fn a_selector_matching_zero_or_several_series_reports_which() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     write(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
@@ -1601,7 +1601,7 @@ fn a_selector_matching_zero_or_several_series_reports_which() {
 #[test]
 fn glob_selector_edges() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     write(dir.path(), "g.csv", "1\n2\n3\n4\n");
     for (i, name) in ["wind_a", "wind_b", "solar", "Wind_c"].iter().enumerate() {
         let d = write(
@@ -1647,7 +1647,7 @@ fn glob_selector_edges() {
 #[test]
 fn the_infrastore_store_env_var_is_used_when_no_flag_is_given() {
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
     let output = Command::new(BIN)
@@ -1669,11 +1669,11 @@ fn the_infrastore_store_env_var_is_used_when_no_flag_is_given() {
 #[test]
 fn the_store_flag_beats_the_env_var() {
     let dir = tempfile::tempdir().unwrap();
-    let flagged = dir.path().join("flagged.nc");
+    let flagged = dir.path().join("flagged.h5");
     seed(dir.path(), &flagged);
 
     // A second store with different values, pointed at by the env var.
-    let env_store = dir.path().join("env.nc");
+    let env_store = dir.path().join("env.h5");
     write(dir.path(), "e.csv", "70\n71\n72\n73\n");
     let d = write(
         dir.path(),
@@ -1715,7 +1715,7 @@ fn no_store_at_all_is_an_error() {
 #[test]
 fn a_nonexistent_store_path_is_an_error_on_a_read_command() {
     let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("no_such_store.nc");
+    let missing = dir.path().join("no_such_store.h5");
     for args in [
         vec!["list"],
         vec!["stats"],
@@ -1737,7 +1737,7 @@ fn verify_exits_one_on_a_corrupt_store() {
     // detects. A healthy store exits 0; this one must exit exactly 1, since a
     // shell caller branches on that.
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     assert_eq!(exit_code(&store, &["verify"]), 0, "a healthy store exits 0");
 
@@ -1783,11 +1783,11 @@ fn verify_exits_one_on_a_corrupt_store() {
 #[test]
 fn verify_of_a_store_whose_catalog_was_corrupted_still_exits_zero() {
     // FINDING F3 (TEST_COVERAGE_PLAN.md §9): `verify_integrity` inspects only the
-    // NetCDF half, so a `data_hash` corrupted in the SQLite catalog is invisible
+    // HDF5 half, so a `data_hash` corrupted in the SQLite catalog is invisible
     // to `infrastore verify` even though every read of that key now fails. Pinned here
     // at the CLI level because that is where a user would look.
     let dir = tempfile::tempdir().unwrap();
-    let store = dir.path().join("store.nc");
+    let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
     let mut sqlite = store.clone().into_os_string();

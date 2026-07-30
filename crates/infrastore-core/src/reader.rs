@@ -1081,7 +1081,7 @@ mod tests {
     #[test]
     fn disk_override_matches_default() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
 
         let mut disk = Store::create(Some(&path), false).unwrap();
         populate(&mut disk);
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn override_handles_noncontiguous_high_columns() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
 
         // Four f64 scalar series -> columns 0,1,2,3 in add order.
@@ -1232,7 +1232,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut disk = Store::create(Some(&path), false).unwrap();
         populate(&mut disk);
         let mut mem = Store::create(None, true).unwrap();
@@ -1460,7 +1460,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut disk = Store::create(Some(&path), false).unwrap();
         populate(&mut disk);
         let mut mem = Store::create(None, true).unwrap();
@@ -1535,7 +1535,7 @@ mod tests {
     #[test]
     fn static_reader_matches_get_time_series_all_dtypes() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.nc");
+        let path = dir.path().join("s.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
         let length = 5usize;
         let res = Duration::hours(1);
@@ -1708,7 +1708,7 @@ mod tests {
     #[test]
     fn forecast_reader_matches_get_time_series_all_types() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f.nc");
+        let path = dir.path().join("f.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
         let res = Duration::hours(1);
         let ivl = Duration::hours(1);
@@ -1814,7 +1814,7 @@ mod tests {
     #[test]
     fn static_reader_spans_spilled_datasets() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("spill.nc");
+        let path = dir.path().join("spill.h5");
         let mut store = Store::create(Some(&path), false).unwrap();
         let res = Duration::hours(1);
         let length = 3usize;

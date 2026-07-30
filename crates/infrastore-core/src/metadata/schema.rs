@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
 -- There is deliberately NO foreign key to time_series_associations and NO
 -- cascade: rows here are shared, so deleting one association must not delete a
 -- set another association still uses. Deleting the last user of a set instead
--- leaves it unreachable, mirroring the NetCDF side's unreachable standalone
+-- leaves it unreachable, mirroring the HDF5 side's unreachable standalone
 -- variables. `Store::compact` sweeps unreachable sets.
 CREATE TABLE IF NOT EXISTS feature_sets (
     key               TEXT    NOT NULL,

@@ -378,7 +378,7 @@ fn metadata_and_data_json_round_trip() {
 // filtered delete, discovery, and copy all touch the *array* side as well as
 // the catalog — reclaiming a slot, re-resolving a shared hash — so their
 // in-memory result is not evidence about the persisted one. Each case below
-// re-runs through `common::for_each_backend_mut`, which for NetCDF flushes,
+// re-runs through `common::for_each_backend_mut`, which for HDF5 flushes,
 // closes, and reopens read-write before the mutation, so the state being
 // mutated came off disk.
 //
@@ -1152,7 +1152,7 @@ fn replace_owner_into_a_colliding_identity_is_a_duplicate() {
 #[test]
 fn replace_owner_is_rejected_on_a_read_only_store() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
         add_sts(&mut store, 1, "load", 10.0);
@@ -1175,7 +1175,7 @@ fn read_only_and_path_accessors_report_each_store_state() {
     assert_eq!(mem.file_path(), None);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     // 2. Created on disk: writable, path is the file it was created at.
     {
@@ -1200,7 +1200,7 @@ fn read_only_and_path_accessors_report_each_store_state() {
 #[test]
 fn a_read_only_store_rejects_every_write_entry_point() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = infrastore_core::create_store(Some(path.as_path()), false).unwrap();
         let key = add_sts(&mut store, 1, "load", 10.0);

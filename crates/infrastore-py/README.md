@@ -3,11 +3,11 @@
 Python bindings for [infrastore](https://github.com/NatLabRockies/infrastore) — time-series storage
 for power-systems and energy simulations.
 
-Numerical arrays are persisted in NetCDF4; the metadata associating each array with its owning
+Numerical arrays are persisted in HDF5; the metadata associating each array with its owning
 component lives in SQLite. Identical arrays are stored once and shared through content addressing.
 
-The wheels are self-contained: NetCDF, HDF5, and zlib are statically linked, so there are no system
-libraries to install.
+The wheels are self-contained: HDF5 and zlib are statically linked, so there are no system libraries
+to install.
 
 ## Install
 

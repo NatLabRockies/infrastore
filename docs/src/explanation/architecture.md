@@ -24,7 +24,7 @@ flowchart TB
         STORE["Store"]
         META["MetadataStore<br/>(SQLite)"]
         BACK["StorageBackend<br/>(trait)"]
-        NC["NetCdfBackend"]
+        NC["Hdf5Backend"]
         MEM["MemoryBackend"]
         STORE --> META
         STORE --> BACK
@@ -78,7 +78,7 @@ flowchart LR
     CALL["add_time_series(...)"] --> HASH["array_hash()"]
     HASH --> PUT["backend.put_array(hash, data)"]
     HASH --> INS["MetadataStore::insert(association)"]
-    PUT --> NC[("NetCDF4")]
+    PUT --> NC[("HDF5")]
     INS --> SQL[("SQLite")]
 
     style CALL fill:#4a9eff,color:#fff
@@ -93,10 +93,10 @@ The backend is chosen behind the [`StorageBackend`](../reference/rust-api.md#sto
 trait. v0 ships two implementations:
 
 - **`MemoryBackend`** — arrays in a hash map; selected when `in_memory = true`. No filesystem I/O.
-- **`NetCdfBackend`** — arrays in a NetCDF4 file; selected when a path is given.
+- **`Hdf5Backend`** — arrays in an HDF5 file; selected when a path is given.
 
 Because the seam is a trait, the metadata layer, the hashing, and every binding are identical no
-matter where the arrays live. Tests run against the memory backend; production uses NetCDF.
+matter where the arrays live. Tests run against the memory backend; production uses HDF5.
 
 ## Why Two Files
 
@@ -104,8 +104,8 @@ Numerical arrays and their descriptive metadata have different access patterns. 
 append-mostly, and read by content; metadata is small, frequently queried, and benefits from indexes
 and transactions. infrastore puts each where it is strongest:
 
-- **Arrays → NetCDF4.** Chunked, compressed, columnar storage that HDF5 tooling already understands.
-- **Metadata → SQLite.** A queryable, transactional catalog at `<path>.nc.sqlite`.
+- **Arrays → HDF5.** Chunked, compressed, columnar storage that the whole HDF5 ecosystem reads.
+- **Metadata → SQLite.** A queryable, transactional catalog at `<path>.h5.sqlite`.
 
 The [Storage Model](./storage-model.md) page covers the trade-offs and the consistency protocol that
 keeps the two files in agreement.
@@ -138,13 +138,13 @@ existence checks, integrity). It never writes. See [Language Bindings](./binding
 
 ## Concurrency
 
-Within a process, `NetCdfBackend` guards its NetCDF handle with a `Mutex`, so the storage backend
-itself is `Send + Sync`. The `Store` as a whole, however, is **`Send` but not `Sync`**: its
-`MetadataStore` wraps a single `rusqlite::Connection`, which is internally a `RefCell` and therefore
-cannot be shared between threads. In practice this means a `Store` can be **moved** to another
-thread, but sharing one across threads requires external synchronization — the gRPC server holds its
-store as an `Arc<Mutex<Store>>`, and the PyO3 binding marks the class `unsendable` so a Python
-`Store` stays on the thread that created it.
+Within a process, `Hdf5Backend` guards its HDF5 handle with a `Mutex`, so the storage backend itself
+is `Send + Sync`. The `Store` as a whole, however, is **`Send` but not `Sync`**: its `MetadataStore`
+wraps a single `rusqlite::Connection`, which is internally a `RefCell` and therefore cannot be
+shared between threads. In practice this means a `Store` can be **moved** to another thread, but
+sharing one across threads requires external synchronization — the gRPC server holds its store as an
+`Arc<Mutex<Store>>`, and the PyO3 binding marks the class `unsendable` so a Python `Store` stays on
+the thread that created it.
 
 `MetadataStore` uses transactions for atomic multi-row writes. The library does not coordinate
 multiple processes writing the same file concurrently — a single writer owns the files at a time.

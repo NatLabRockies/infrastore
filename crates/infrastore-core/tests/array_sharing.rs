@@ -146,7 +146,7 @@ fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
 #[test]
 fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mixed.nc");
+    let path = dir.path().join("mixed.h5");
 
     // Byte-identical data referenced by a packed (STS) key and a standalone
     // (NonSeq) key -> one content-addressed array with two competing layouts.

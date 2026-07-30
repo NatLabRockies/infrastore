@@ -36,9 +36,9 @@ impl Drop for ServerProcess {
     }
 }
 
-/// Build a small on-disk store and return its NetCDF path.
+/// Build a small on-disk store and return its HDF5 path.
 fn write_store(dir: &Path) -> PathBuf {
-    let path = dir.join("store.nc");
+    let path = dir.join("store.h5");
     let mut store = create_store(Some(path.as_path()), false).unwrap();
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
@@ -161,7 +161,7 @@ async fn channel(port: u16) -> Channel {
 #[test]
 fn a_nonexistent_store_file_exits_nonzero_with_a_useful_message() {
     let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("does_not_exist.nc");
+    let missing = dir.path().join("does_not_exist.h5");
     let config = write_config(dir.path(), &missing, free_port(), "none", &[]);
 
     let output = Command::new(BIN)

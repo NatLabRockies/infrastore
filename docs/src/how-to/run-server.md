@@ -6,10 +6,10 @@ Serve an existing store read-only over gRPC. For background and the Rust client,
 
 ## 1. Produce a Store on Disk
 
-Create the `.nc` + `.nc.sqlite` pair with any binding, then `flush()` it. For example, in Rust:
+Create the `.h5` + `.h5.sqlite` pair with any binding, then `flush()` it. For example, in Rust:
 
 ```rust
-let mut store = create_store(Some(Path::new("system.nc")), false)?;
+let mut store = create_store(Some(Path::new("system.h5")), false)?;
 // ... add_time_series ...
 store.flush()?;
 ```
@@ -23,7 +23,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./system.nc"]   # the ./system.nc.sqlite catalog must sit beside it
+files = ["./system.h5"]   # the ./system.h5.sqlite catalog must sit beside it
 
 [authentication]
 method = "none"

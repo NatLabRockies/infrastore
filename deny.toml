@@ -16,8 +16,7 @@ allow = [
     # sources pulled in by `infrastore-core`'s default `vendored` feature). It is a
     # BSD-3-Clause variant -- the text states it "is covered by the 3-clause BSD
     # License" -- but SPDX catalogs it under its own identifier, so it has to be
-    # allowed by name. The sibling `netcdf-src` crate needs no entry: its
-    # COPYRIGHT file is verbatim BSD-3-Clause, already allowed above.
+    # allowed by name.
     "HDF5",
     "ISC",
     "MIT",

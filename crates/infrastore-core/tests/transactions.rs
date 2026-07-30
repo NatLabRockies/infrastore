@@ -11,7 +11,7 @@
 //! data is still present.
 //!
 //! Both backends are exercised where the distinction matters: `MemoryBackend`
-//! drops array bytes on `remove_array`, while the NetCDF backend tombstones and
+//! drops array bytes on `remove_array`, while the HDF5 backend tombstones and
 //! leaves the variable until `compact`. Deferring frees is what keeps the two
 //! behaving identically under rollback.
 
@@ -64,7 +64,7 @@ fn each_backend(body: impl Fn(&mut Store, &str)) {
     }
     {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         body(&mut store, "disk");
     }
@@ -353,7 +353,7 @@ fn dst_guard_still_applies_inside_a_transaction() {
 #[test]
 fn compact_is_rejected_while_a_transaction_is_open() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let mut store = create_store(Some(path.as_path()), false).unwrap();
     store.begin_transaction().unwrap();
     assert!(store.compact().is_err());
@@ -372,7 +372,7 @@ fn commit_or_rollback_without_a_transaction_is_an_error() {
 #[test]
 fn a_read_only_store_cannot_begin_a_transaction() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         add(&mut store, 1, 0.0);
@@ -389,7 +389,7 @@ fn a_read_only_store_cannot_begin_a_transaction() {
 #[test]
 fn rollback_survives_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let k1 = add(&mut store, 1, 0.0);

@@ -7,7 +7,7 @@
 use infrastore_core::{Store, create_store, open_store};
 
 /// Run `populate` to write data, then `verify` to read it back, once per
-/// backend. For NetCDF the store is flushed, dropped, and reopened read-only
+/// backend. For HDF5 the store is flushed, dropped, and reopened read-only
 /// between the two phases, exercising the persisted format.
 ///
 /// `verify` receives the backend name (`"memory"` / `"disk"`) so assertion
@@ -20,10 +20,10 @@ pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&
         let state = populate(&mut store);
         verify(&store, &state, "memory");
     }
-    // NetCDF backend: persist, reopen read-only, then read.
+    // HDF5 backend: persist, reopen read-only, then read.
     {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let state = {
             let mut store = create_store(Some(path.as_path()), false).unwrap();
             let state = populate(&mut store);
@@ -38,7 +38,7 @@ pub fn for_each_backend<T>(populate: impl Fn(&mut Store) -> T, verify: impl Fn(&
 /// Like [`for_each_backend`], but `verify` gets a mutable store so it can
 /// exercise write-direction APIs (rename, remove, copy, ...).
 ///
-/// The NetCDF variant is flushed and reopened **read-write** before `verify`,
+/// The HDF5 variant is flushed and reopened **read-write** before `verify`,
 /// so the mutations run against a store whose state came off disk.
 #[allow(dead_code)]
 pub fn for_each_backend_mut<T>(
@@ -51,10 +51,10 @@ pub fn for_each_backend_mut<T>(
         let state = populate(&mut store);
         verify(&mut store, &state, "memory");
     }
-    // NetCDF backend: persist, reopen read-write, then mutate + read.
+    // HDF5 backend: persist, reopen read-write, then mutate + read.
     {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
         let state = {
             let mut store = create_store(Some(path.as_path()), false).unwrap();
             let state = populate(&mut store);

@@ -77,7 +77,7 @@ environment = { PATH = "$HOME/.cargo/bin:$PATH" }
 [tool.cibuildwheel.windows]
 # Rust is preinstalled on the GitHub Windows runner.
 before-all = "rustup default stable"
-# The extension has no external NetCDF/HDF5 DLLs left to bundle, but delvewheel
+# The extension has no external HDF5 DLLs left to bundle, but delvewheel
 # still vendors any other runtime DLLs the MSVC build pulls in.
 before-build = "pip install delvewheel"
 repair-wheel-command = "delvewheel repair -w {dest_dir} {wheel}"

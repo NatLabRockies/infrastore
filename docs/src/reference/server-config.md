@@ -15,7 +15,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./store.nc"]
+files = ["./store.h5"]
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys`; clients must send the
@@ -35,12 +35,12 @@ method = "none"
 
 ### `[data]`
 
-| Key     | Type            | Required | Description                          |
-| ------- | --------------- | -------- | ------------------------------------ |
-| `files` | array of string | yes      | NetCDF file paths to serve read-only |
+| Key     | Type            | Required | Description                        |
+| ------- | --------------- | -------- | ---------------------------------- |
+| `files` | array of string | yes      | HDF5 file paths to serve read-only |
 
 v0 serves a **single** file (the first entry). Multiple entries are reserved for a later milestone.
-The matching `<path>.sqlite` catalog must sit beside each NetCDF file. The server opens the store
+The matching `<path>.sqlite` catalog must sit beside each HDF5 file. The server opens the store
 read-only.
 
 ### `[authentication]`

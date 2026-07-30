@@ -1,7 +1,7 @@
 # Use the `infrastore` CLI
 
 `infrastore` loads time series from CSV files and inspects a store, talking directly to the on-disk
-`.nc` + `.nc.sqlite` pair (no gRPC server required). For the full command and descriptor reference,
+`.h5` + `.h5.sqlite` pair (no gRPC server required). For the full command and descriptor reference,
 see [CLI Reference](../reference/cli.md).
 
 ## 1. Build the Binary
@@ -62,10 +62,10 @@ silently ignored setting.
 ## 3. Add It to a Store
 
 ```sh
-infrastore --store demo.nc add --descriptor load.json
+infrastore --store demo.h5 add --descriptor load.json
 ```
 
-The store (`demo.nc` and its `demo.nc.sqlite` catalog) is created on first `add`. A descriptor may
+The store (`demo.h5` and its `demo.h5.sqlite` catalog) is created on first `add`. A descriptor may
 also be a JSON array of objects to add many series in one transaction. `--csv` overrides the
 descriptor's `csv` path, but only for a single-series descriptor: with an array of two or more
 objects it errors (`--csv cannot be used with an array descriptor`).
@@ -77,12 +77,12 @@ and `csv`. Only the read commands (`list`, `get`, `info`) honor it; `add`, `remo
 and `template` accept the flag but ignore it and print plain text.
 
 ```sh
-infrastore --store demo.nc list                                       # what's in the store
-infrastore --store demo.nc list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
-infrastore --store demo.nc get  --owner-id 42 --name load             # pretty table
-infrastore --store demo.nc -f csv  get  --owner-id 42 --name load     # round-trippable CSV
-infrastore --store demo.nc -f json info --owner-id 42 --name load     # metadata + stats
-infrastore --store demo.nc -f csv  export --dir out/                  # one file per series
+infrastore --store demo.h5 list                                       # what's in the store
+infrastore --store demo.h5 list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
+infrastore --store demo.h5 get  --owner-id 42 --name load             # pretty table
+infrastore --store demo.h5 -f csv  get  --owner-id 42 --name load     # round-trippable CSV
+infrastore --store demo.h5 -f json info --owner-id 42 --name load     # metadata + stats
+infrastore --store demo.h5 -f csv  export --dir out/                  # one file per series
 ```
 
 `export` is the bulk read-direction inverse of `add`: every series the selector matches is written
@@ -103,7 +103,7 @@ to disambiguate. Large series truncate in `table` output — pass `--limit N` or
 `--time-range START..END` on `get` takes two _timestamps_ (RFC3339 or epoch-ms), not a duration:
 
 ```sh
-infrastore --store demo.nc get --owner-id 42 --name load \
+infrastore --store demo.h5 get --owner-id 42 --name load \
   --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
 ```
 
@@ -141,15 +141,15 @@ must fit inside each one (`horizon / resolution` steps must not exceed its `leng
 6-row hourly `load` above, a 24-hour horizon fails and a 3-hour one works:
 
 ```sh
-infrastore --store demo.nc transform --horizon 3h --interval 1h
+infrastore --store demo.h5 transform --horizon 3h --interval 1h
 ```
 
 The derived series keeps the source's owner, name, and resolution, so `load` now matches two entries
 and a bare selector becomes ambiguous. Disambiguate with `--type`:
 
 ```sh
-infrastore --store demo.nc get --owner-id 42 --name load --type single
-infrastore --store demo.nc get --owner-id 42 --name load --type deterministic_single
+infrastore --store demo.h5 get --owner-id 42 --name load --type single
+infrastore --store demo.h5 get --owner-id 42 --name load --type deterministic_single
 ```
 
 ## Notes
@@ -159,4 +159,4 @@ infrastore --store demo.nc get --owner-id 42 --name load --type deterministic_si
 - Output is colored (green table headers) only when stdout is a terminal; it is plain when
   piped/redirected or when `NO_COLOR` is set, so `-f json`/`-f csv` stay clean for other tools.
 - `--log-level` (or `RUST_LOG`) controls logging; the default is quiet (`warn`).
-- The `.nc` and `.nc.sqlite` files are one artifact — move, copy, and delete them together.
+- The `.h5` and `.h5.sqlite` files are one artifact — move, copy, and delete them together.

@@ -162,7 +162,7 @@ end
 
 @testset "InfraStore.jl persistent round-trip" begin
     mktempdir() do dir
-        path = joinpath(dir, "store.nc")
+        path = joinpath(dir, "store.h5")
         let store = Store(in_memory=false, path=path)
             ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:12.0), "load")
             add_time_series!(store, 1, "Generator", Component, ts)
@@ -1038,7 +1038,7 @@ end
     for (compression, level, shuffle) in
         [(:none, 3, true), (:deflate, 9, false), (:deflate, 1, true)]
         mktempdir() do dir
-            path = joinpath(dir, "store.nc")
+            path = joinpath(dir, "store.h5")
             let store = Store(
                     in_memory=false,
                     path=path;
@@ -1091,7 +1091,7 @@ end
     @test get_path(Store(in_memory=true)) === nothing
 
     mktempdir() do dir
-        path = joinpath(dir, "store.nc")
+        path = joinpath(dir, "store.h5")
         store = Store(in_memory=false, path=path)
         try
             @test get_path(store) == path
@@ -1789,7 +1789,7 @@ end
 
     # persist! is exported and materializes an on-disk artifact.
     dir = mktempdir()
-    dest = joinpath(dir, "persisted.nc")
+    dest = joinpath(dir, "persisted.h5")
     persist!(store, dest)
     @test isfile(dest)
     reopened = open_store(dest; read_only=true)
@@ -1928,7 +1928,7 @@ end
         store, SupplementalAttributeAssociation(5, "Generator", 100, "GeographicInfo")
     )
     dir = mktempdir()
-    dest = joinpath(dir, "assoc.nc")
+    dest = joinpath(dir, "assoc.h5")
     persist!(store, dest)
     reopened = open_store(dest; read_only=true)
     @test list_parent_child_associations(reopened) == exported
@@ -1994,7 +1994,7 @@ end
 
 @testset "UInt64 and Int32 survive a disk round trip" begin
     mktempdir() do dir
-        path = joinpath(dir, "dtypes.nc")
+        path = joinpath(dir, "dtypes.h5")
         t0 = DateTime(2024, 1, 1)
         res = Hour(1)
         u = UInt64[0, 1, typemax(UInt64)]
@@ -2153,19 +2153,19 @@ end
 
 @testset "open_store failures raise mapped exception types" begin
     mktempdir() do dir
-        missing_path = joinpath(dir, "does_not_exist.nc")
+        missing_path = joinpath(dir, "does_not_exist.h5")
         # The catalog half is opened first, so a wholly absent store surfaces as
         # the generic mapped error rather than IOError. Pin the type, not just
         # "it throws".
         @test_throws InfraStore.TimeSeriesException open_store(missing_path; read_only=true)
 
         # A file that is not an HDF5 store at all.
-        junk = joinpath(dir, "junk.nc")
+        junk = joinpath(dir, "junk.h5")
         write(junk, "not an hdf5 file")
         @test_throws InfraStore.TimeSeriesException open_store(junk; read_only=true)
 
         # A directory is not a store either.
-        subdir = joinpath(dir, "adir.nc")
+        subdir = joinpath(dir, "adir.h5")
         mkdir(subdir)
         @test_throws InfraStore.TimeSeriesException open_store(subdir; read_only=true)
     end
@@ -2302,7 +2302,7 @@ end
 
 @testset "clear! and replace_owner! are rejected on a read-only store" begin
     mktempdir() do dir
-        path = joinpath(dir, "ro.nc")
+        path = joinpath(dir, "ro.h5")
         t0 = DateTime(2024, 1, 1)
         store = Store(in_memory=false, path=path)
         add_time_series!(
@@ -2471,7 +2471,7 @@ end
 
 @testset "pre-1970 and far-future timestamps round trip" begin
     mktempdir() do dir
-        path = joinpath(dir, "spans.nc")
+        path = joinpath(dir, "spans.h5")
         cases = [
             ("pre_epoch", DateTime(1900, 1, 1)),
             ("just_before", DateTime(1969, 12, 31, 23, 59, 59)),
@@ -2516,7 +2516,7 @@ end
 
 @testset "a century-spanning non-sequential series round trips" begin
     mktempdir() do dir
-        path = joinpath(dir, "century.nc")
+        path = joinpath(dir, "century.h5")
         timestamps = [
             DateTime(1900, 1, 1),
             DateTime(1969, 12, 31, 23, 59, 59),

@@ -108,7 +108,7 @@ for fan-out reads of an existing store. See the [gRPC Server guide](../guides/se
 ## CLI (`infrastore`)
 
 `infrastore-cli` builds the `infrastore` binary, a thin wrapper over the core `Store` for use from a
-terminal. Unlike the gRPC server it is **not** read-only: it opens the on-disk `.nc` + `.nc.sqlite`
+terminal. Unlike the gRPC server it is **not** read-only: it opens the on-disk `.h5` + `.h5.sqlite`
 pair directly and supports both reads and writes. Its shape:
 
 - **CSV in, store out.** Numeric values come from a CSV; the metadata that does not fit a flat grid
@@ -123,12 +123,12 @@ See the [Use the `infrastore` CLI how-to](../how-to/use-cli.md) and the
 
 ## What Every Binding Shares
 
-| Concern            | Single source of truth                                             |
-| ------------------ | ------------------------------------------------------------------ |
-| Types & validation | `infrastore-core` (`Store`, `TimeSeriesKey`, `Features`)           |
-| On-disk format     | `NetCdfBackend` + `MetadataStore` — identical regardless of caller |
-| Hashing            | `array_hash` / `features_hash` — the cross-language contract       |
-| Error taxonomy     | `TimeSeriesError`, re-projected into each language's idiom         |
+| Concern            | Single source of truth                                           |
+| ------------------ | ---------------------------------------------------------------- |
+| Types & validation | `infrastore-core` (`Store`, `TimeSeriesKey`, `Features`)         |
+| On-disk format     | `Hdf5Backend` + `MetadataStore` — identical regardless of caller |
+| Hashing            | `array_hash` / `features_hash` — the cross-language contract     |
+| Error taxonomy     | `TimeSeriesError`, re-projected into each language's idiom       |
 
 A file written by Python reads identically from Julia, Rust, or the server, because none of the
 bindings reimplement storage — they all funnel through the one core.

@@ -175,7 +175,7 @@ fn nanosecond_precision_timestamps_survive_the_catalog_round_trip() {
     assert_eq!(precise.timestamp_subsec_nanos(), 123_456_789);
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts_at("load", precise, Duration::hours(1)));
@@ -326,7 +326,7 @@ fn pre_1970_initial_timestamps_round_trip() {
     // A negative Unix timestamp. Anything that routes a timestamp through an
     // unsigned integer or a millisecond count would corrupt these.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let cases = [
         Utc.with_ymd_and_hms(1969, 12, 31, 23, 0, 0).unwrap(),
         Utc.with_ymd_and_hms(1900, 1, 1, 0, 0, 0).unwrap(),
@@ -420,7 +420,7 @@ fn a_century_spanning_non_sequential_series_round_trips() {
     let values: Vec<f64> = (0..timestamps.len()).map(|i| i as f64 * 10.0).collect();
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let series = NonSequentialTimeSeries::new(
@@ -474,7 +474,7 @@ fn non_sequential_timestamps_keep_sub_second_precision() {
     let values = vec![1.0f64, 2.0, 3.0, 4.0];
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let series = NonSequentialTimeSeries::new(
@@ -551,10 +551,10 @@ fn a_store_can_be_moved_to_another_thread() {
 #[test]
 fn a_second_read_only_handle_on_one_path_can_be_opened() {
     // Two handles on one on-disk store, in one process. PIN that a second
-    // read-only open succeeds alongside the first (the NetCDF side takes a
+    // read-only open succeeds alongside the first (the HDF5 side takes a
     // shared HDF5 lock, and SQLite readers do not exclude each other).
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));
@@ -582,7 +582,7 @@ fn a_read_only_handle_alongside_a_writable_one_is_pinned() {
     // platform-dependent — the point is that it either works or fails cleanly,
     // never corrupts.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = add(&mut store, 1, sts_at("load", t0(), Duration::hours(1)));

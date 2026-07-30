@@ -13,7 +13,7 @@ use super::{ArrayLayout, CompactionReport, IntegrityReport, StorageBackend};
 ///
 /// Used for `in_memory=true` stores and as the default test backend. Tracks a
 /// "tombstoned" set so the slot-reclamation behaviour can be exercised against
-/// the same surface as the NetCDF backend.
+/// the same surface as the HDF5 backend.
 #[derive(Debug, Default)]
 pub(crate) struct MemoryBackend {
     arrays: HashMap<[u8; 32], TypedArray>,

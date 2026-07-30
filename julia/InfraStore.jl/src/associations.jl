@@ -693,7 +693,7 @@ hash recorded alongside them. `0` means every array checked out.
 
 Checks the HDF5 half of the store only — the SQLite catalog is not inspected,
 so `0` does not mean the store as a whole is sound. A catalog that is corrupted,
-truncated, or paired with the wrong `.nc` file still returns `0`, while every read
+truncated, or paired with the wrong `.h5` file still returns `0`, while every read
 of the affected series throws. For catalog-side checks use
 [`check_static_consistency`] (per-resolution grid agreement) and [`compact!`]
 (which reports the unreachable arrays and feature sets a delete left behind — an
@@ -719,7 +719,7 @@ end
     flush!(store)
 
 Flush pending writes (HDF5 arrays + SQLite metadata) to disk. After this the
-on-disk `<path>.nc` and `<path>.sqlite` artifacts can be copied for persistence.
+on-disk `<path>.h5` and `<path>.sqlite` artifacts can be copied for persistence.
 """
 function flush!(store::Store)
     return _check(@ccall lib_path().infrastore_store_flush(store.handle::Ptr{Cvoid})::Int32)

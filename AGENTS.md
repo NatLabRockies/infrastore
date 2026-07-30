@@ -3,7 +3,7 @@
 ## Project Overview
 
 **infrastore** is a Rust library for managing time-series data in power-systems / energy
-simulations. Persistence is split between numerical arrays in NetCDF4 and metadata associations in
+simulations. Persistence is split between numerical arrays in HDF5 and metadata associations in
 SQLite. It exposes multiple bindings over a shared core:
 
 - **Native Rust** — `infrastore-core` public API
@@ -12,7 +12,7 @@ SQLite. It exposes multiple bindings over a shared core:
 - **Python** — `infrastore-py` via PyO3 (abi3-py311 wheel)
 - **Julia** — `infrastore-ffi` C ABI cdylib, wrapped by `julia/InfraStore.jl`
 - **CLI** — `infrastore-cli` (`infrastore` binary): loads time series from CSV + a descriptor JSON
-  and inspects a store, talking directly to the on-disk NetCDF + SQLite artifact (read+write; no
+  and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
   gRPC). Output uses a global `-f/--format table|json|csv`.
 
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
@@ -65,10 +65,10 @@ For detailed style guidelines, see `docs/style-guide.md`.
 
 ```
 crates/
-  infrastore-core/    # Types, NetCDF + SQLite storage, hashing, public Rust API
+  infrastore-core/    # Types, HDF5 + SQLite storage, hashing, public Rust API
     src/types/               #   array.rs (TypedArray/Dtype), key.rs, metadata.rs, period.rs,
                              #   time_series.rs
-    src/storage/             #   memory.rs, netcdf.rs (storage backends)
+    src/storage/             #   memory.rs, hdf5.rs (storage backends)
     src/metadata/            #   schema.rs (SQLite catalog schema)
     src/store.rs             #   Store: the top-level public API
     src/reader.rs            #   StaticReader / ForecastReader: columnar bulk-read surface
@@ -95,30 +95,26 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 ### Prerequisites
 
-NetCDF, HDF5, and zlib are built from vendored sources and linked statically by default, via the
-`vendored` feature that every crate enables (defined in `infrastore-core`, forwarded by the rest).
-The build therefore needs `cmake` and a C compiler rather than system NetCDF/HDF5, plus `protobuf`
-for the gRPC codegen:
+HDF5 and zlib are built from vendored sources and linked statically by default, via the `vendored`
+feature that every crate enables (defined in `infrastore-core`, forwarded by the rest). The build
+therefore needs `cmake` and a C compiler rather than a system HDF5, plus `protobuf` for the gRPC
+codegen:
 
 ```bash
 brew install cmake protobuf maturin                 # macOS
 sudo apt-get install cmake protobuf-compiler        # Linux (Debian/Ubuntu)
 ```
 
-The first build compiles netcdf-c and HDF5 from source (a few minutes), then caches the result.
+The first build compiles HDF5 from source (a few minutes), then caches the result.
 
-`--no-default-features` switches back to system libraries, which then need
-`brew install hdf5 netcdf` / `sudo apt-get install libhdf5-dev libnetcdf-dev`. Never set `HDF5_DIR`
-or `NETCDF_DIR` to work around a vendored build failure: they redirect the vendored netcdf-c build
-at an external HDF5 while still requesting static libraries, which fails. Because `netcdf-sys`
-declares `links = "netcdf"`, Cargo's feature unification makes vendored-vs-system all-or-nothing
-across the whole dependency graph.
+`--no-default-features` switches back to system libraries, which then need `brew install hdf5` /
+`sudo apt-get install libhdf5-dev`. Never set `HDF5_DIR` to work around a vendored build failure: it
+redirects the vendored build at an external HDF5 while still requesting static libraries, which
+fails. Because `hdf5-metno-sys` declares `links = "hdf5"`, Cargo's feature unification makes
+vendored-vs-system all-or-nothing across the whole dependency graph.
 
-On Windows, CI installs prebuilt `libnetcdf` and `hdf5` from conda-forge and sets `NETCDF_DIR`,
-`HDF5_DIR`, and `PKG_CONFIG_PATH` to the conda prefix's `Library` directory. Do not switch this back
-to `vcpkg install netcdf-c`: vcpkg builds the stack from source, which fetches libaec from
-gitlab.dkrz.de — an unmirrored host that rate-limits CI runners (HTTP 429) and has taken Windows CI
-down for hours at a time. Keep these requirements in mind when changing native dependencies.
+CI provisions no native libraries on any platform, Windows included — the vendored build covers all
+three. Keep these requirements in mind when changing native dependencies.
 
 The workspace cargo config (`.cargo/config.toml`) sets macOS linker flags so
 `cargo build --workspace` can link the PyO3 cdylib without `maturin`. On Linux and Windows those
@@ -156,7 +152,7 @@ hand-edit the header. Any change to an exported `extern "C"` function must:
 
 ```bash
 cp examples/server.toml my_server.toml
-# edit my_server.toml: point [data].files at your .nc, set [authentication]
+# edit my_server.toml: point [data].files at your .h5, set [authentication]
 cargo run -p infrastore-server -- --config my_server.toml
 ```
 
@@ -165,17 +161,21 @@ cargo run -p infrastore-server -- --config my_server.toml
 
 ## Storage Format
 
-- A persisted store is a NetCDF file plus a SQLite catalog at `<netcdf-path>.sqlite`. They are one
-  logical artifact and must be moved, copied, and deleted together.
+- A persisted store is an HDF5 file plus a SQLite catalog at `<store-path>.sqlite`. They are one
+  logical artifact and must be moved, copied, and deleted together. The file is written directly
+  against libhdf5 (via `hdf5-metno`), not through netcdf-c; the extension is conventionally `.h5`
+  but nothing enforces it. Identity comes from the root attribute `storage_backend = "hdf5"`, and
+  `Store::open` rejects a file that lacks it — including stores written by the removed netcdf
+  backend.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
-  contract. Any incompatible NetCDF layout, SQLite schema, dtype encoding, or hashing change must
-  bump it and update format documentation and compatibility tests.
+  contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
+  it and update format documentation and compatibility tests.
 - Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` with a companion
-  `<dataset>_h` hash variable. Standalone arrays use `arr_{hex_hash}`. See
-  `crates/infrastore-core/src/storage/netcdf.rs` for the implementation and
+  `<dataset>_h` hash dataset. Standalone arrays use `arr_{hex_hash}`. See
+  `crates/infrastore-core/src/storage/hdf5.rs` for the implementation and
   `docs/src/reference/file-format.md` for the user-facing specification; keep them synchronized.
-- Deletion creates reusable packed slots or unreachable standalone variables. Physical shrinking is
-  not available in NetCDF, and compaction behavior must remain explicit.
+- Deletion creates reusable packed slots or tombstoned standalone datasets. HDF5 cannot reclaim the
+  space in place, and compaction behavior must remain explicit.
 
 ## Conventions
 
@@ -190,5 +190,5 @@ cargo run -p infrastore-server -- --config my_server.toml
   binding and persistence round trip.
 - Do not manually edit generated artifacts. Besides the C header, protobuf output is generated by
   the proto crate's build script.
-- Keep changes scoped. Do not commit local virtual environments, Python caches, generated NetCDF
-  test data, or machine-specific library paths.
+- Keep changes scoped. Do not commit local virtual environments, Python caches, generated HDF5 test
+  data, or machine-specific library paths.

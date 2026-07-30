@@ -1,5 +1,5 @@
 //! `infrastore` — a command-line tool for loading and inspecting a infrastore store
-//! directly on disk (NetCDF + SQLite).
+//! directly on disk (HDF5 + SQLite).
 
 mod color;
 mod commands;
@@ -33,7 +33,7 @@ const HELP_STYLES: Styles = Styles::styled()
     styles = HELP_STYLES
 )]
 struct Cli {
-    /// Path to the NetCDF store file (.nc). The SQLite catalog is derived
+    /// Path to the HDF5 store file (.h5). The SQLite catalog is derived
     /// automatically. Falls back to the INFRASTORE_STORE environment variable.
     #[arg(long, global = true, env = "INFRASTORE_STORE")]
     store: Option<PathBuf>,
@@ -171,9 +171,9 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Persist the store to a new NetCDF + SQLite artifact.
+    /// Persist the store to a new HDF5 + SQLite artifact.
     Persist {
-        /// Destination `.nc` path.
+        /// Destination `.h5` path.
         #[arg(long)]
         dest: PathBuf,
     },
@@ -211,10 +211,10 @@ enum Commands {
     /// Verify stored array integrity; nonzero exit if errors are present.
     ///
     /// Recomputes each stored array's content hash and reports the ones that
-    /// disagree with the hash recorded alongside them. This checks the NetCDF
+    /// disagree with the hash recorded alongside them. This checks the HDF5
     /// half of the store only: the SQLite catalog is not inspected, so a clean
     /// report does not mean the store as a whole is sound. A catalog that is
-    /// corrupted, truncated, or paired with the wrong .nc file still verifies
+    /// corrupted, truncated, or paired with the wrong .h5 file still verifies
     /// clean here, while every read of the affected series fails.
     ///
     /// For catalog-side checks use `infrastore check-consistency` (per-resolution grid
@@ -408,7 +408,7 @@ fn run(cli: &Cli) -> Result<(), String> {
 fn require_store(cli: &Cli) -> Result<PathBuf, String> {
     cli.store
         .clone()
-        .ok_or_else(|| "missing --store <path.nc>".to_string())
+        .ok_or_else(|| "missing --store <path.h5>".to_string())
 }
 
 fn init_tracing(level: Option<&str>) {

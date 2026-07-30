@@ -1310,10 +1310,10 @@ impl PyStore {
 #[pymethods]
 impl PyStore {
     /// Create a new store. With `in_memory=True`, no filesystem I/O occurs;
-    /// otherwise a NetCDF file is created at `path` and a catalog SQLite file
+    /// otherwise an HDF5 file is created at `path` and a catalog SQLite file
     /// at `<path>.sqlite` holds metadata.
     ///
-    /// `compression` selects the NetCDF data-variable filter: `"deflate"`
+    /// `compression` selects the HDF5 data-variable filter: `"deflate"`
     /// (default) applies DEFLATE at `compression_level` (0–9) with optional
     /// byte `shuffle`; `"none"` disables compression. The setting is ignored
     /// for in-memory stores and is persisted so later appends reuse it.
@@ -1884,9 +1884,9 @@ impl PyStore {
     /// disagree with the hash recorded alongside them, as a dict
     /// `{"ok": bool, "errors": list[str]}`.
     ///
-    /// Checks the NetCDF half of the store only — the SQLite catalog is not
+    /// Checks the HDF5 half of the store only — the SQLite catalog is not
     /// inspected, so `ok` being True does not mean the store as a whole is sound.
-    /// A catalog that is corrupted, truncated, or paired with the wrong `.nc`
+    /// A catalog that is corrupted, truncated, or paired with the wrong `.h5`
     /// file still reports `ok`, while every read of the affected series raises.
     /// For catalog-side checks use `check_static_consistency` (per-resolution grid
     /// agreement) and `compact` (which reports the unreachable arrays and feature
@@ -2388,7 +2388,7 @@ impl PyStore {
         numpy_from_typed(py, &arr)
     }
 
-    /// Persist the store to a new NetCDF + SQLite artifact at `path`.
+    /// Persist the store to a new HDF5 + SQLite artifact at `path`.
     fn persist_to(&mut self, path: PathBuf) -> PyResult<()> {
         self.store_mut()?.persist_to(&path).map_err(map_err)
     }

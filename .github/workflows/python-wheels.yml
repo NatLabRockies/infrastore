@@ -1,9 +1,9 @@
 # Build (and, on tags, publish) the `infrastore` Python wheels.
 #
-# The PyO3 crate statically links netcdf-c + HDF5 + zlib, built from vendored
+# The PyO3 crate statically links HDF5 + zlib, built from vendored
 # sources by infrastore's default `vendored` feature, so cibuildwheel only has to
 # install Rust in `before-all` (see [tool.cibuildwheel] in pyproject.toml) and
-# the wheels carry no external NetCDF/HDF5 to repair in.
+# the wheels carry no external HDF5 to repair in.
 name: python-wheels
 
 on:
@@ -20,8 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS bundles Homebrew's HDF5/NetCDF, which are built for the runner's
-        # OS version; the wheel's deployment target must match or delocate rejects
+        # macOS bundles Homebrew's HDF5, which is built for the runner's OS
+        # version; the wheel's deployment target must match or delocate rejects
         # the libraries. Keep each macos-NN entry in sync with its runner image.
         include:
           - os: ubuntu-latest
@@ -33,10 +33,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      # No HDF5/NetCDF provisioning on any platform: the default `vendored`
+      # No HDF5 provisioning on any platform: the default `vendored`
       # feature builds them from source into the extension module. Do not
-      # reintroduce a step exporting HDF5_DIR/NETCDF_DIR -- they redirect the
-      # vendored netcdf-c build at an external HDF5 and break it. See test.yml.
+      # reintroduce a step exporting HDF5_DIR -- it redirects the
+      # vendored HDF5 build at an external HDF5 and breaks it. See test.yml.
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.0
         env:

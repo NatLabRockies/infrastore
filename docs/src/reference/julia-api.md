@@ -52,7 +52,7 @@ open_store(path::AbstractString; read_only::Bool=false) -> Store
 ```
 
 - `Store()` — in-memory store.
-- `Store(in_memory=false, path="system.nc")` — persists to `system.nc` plus `system.nc.sqlite`.
+- `Store(in_memory=false, path="system.h5")` — persists to `system.h5` plus `system.h5.sqlite`.
 - `compression=:none` stores arrays uncompressed; `:deflate` (default) applies DEFLATE at
   `compression_level` (0–9) with optional byte `shuffle`. The policy is persisted with the store and
   reused on later appends; it is ignored for in-memory stores. An unknown `compression` throws
@@ -642,7 +642,7 @@ end
 
 Forecasts that reference the **same backing array and read plan** — deduplicated identical data, or
 several `DeterministicSingleTimeSeries` over one `SingleTimeSeries` — collapse to a single _window
-slot_. `forecast_read!` performs one backend (`.nc`) read per slot, not per entry, so a forecast
+slot_. `forecast_read!` performs one backend (`.h5`) read per slot, not per entry, so a forecast
 shared by N owners is read once per timestamp. `forecast_num_slots(reader)` is that physical read
 count (`≤ length(forecast_entries(reader))`), and every `ForecastEntry.slot` (0-based) identifies
 the slot backing that entry; entries that share data report the same `slot`. Group entries by `slot`
@@ -678,7 +678,7 @@ get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct r
 get_compression(store) -> CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> Nothing
-flush!(store) -> Nothing          # sync to disk; afterwards .nc and .sqlite can be copied
+flush!(store) -> Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only

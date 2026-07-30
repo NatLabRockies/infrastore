@@ -1,6 +1,6 @@
 //! The single seam between the CLI and the store backend.
 //!
-//! Today this opens the on-disk NetCDF + SQLite artifact directly. A future
+//! Today this opens the on-disk HDF5 + SQLite artifact directly. A future
 //! `--endpoint` flag for the read-only gRPC server would be wired in here
 //! without touching the command handlers.
 

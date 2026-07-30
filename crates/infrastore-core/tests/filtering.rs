@@ -5,7 +5,7 @@
 //! Every case runs against both backends. Glob matching itself is pure SQLite
 //! and so cannot differ, but the filter feeds `build_static_reader` and
 //! `remove_by_filter`, whose array-side work does differ between the in-memory
-//! and NetCDF backends — and the persisted variant additionally proves the
+//! and HDF5 backends — and the persisted variant additionally proves the
 //! filter still selects the same rows after a catalog write/reopen cycle.
 
 use chrono::{DateTime, Duration, TimeZone, Utc};

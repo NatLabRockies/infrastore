@@ -98,7 +98,7 @@ Because arrays are shared, deleting an association cannot blindly delete its arr
 1. Deletes the matching association rows inside a SQLite transaction, collecting their
    `data_hash`es.
 2. For each freed hash, counts how many associations still reference it.
-3. Only frees the NetCDF column for hashes whose reference count has dropped to zero.
+3. Only frees the HDF5 column for hashes whose reference count has dropped to zero.
 
 This keeps shared arrays alive until the last referencing key is gone.
 
@@ -112,7 +112,7 @@ sweeps them in bulk. Concretely:
 - **No foreign key, no `ON DELETE CASCADE`.** A cascade would be actively wrong: rows are shared, so
   deleting one association must not delete a set another association still uses.
 - **Deleting the last user leaves the set unreachable**, rather than deleting it — the same
-  end-state as the NetCDF side's dead standalone variables, which also linger.
+  end-state as the HDF5 side's dead standalone variables, which also linger.
 - **`Store::compact` sweeps them.** It deletes every feature set no association references any more
   and reports the row count as `feature_sets_reclaimed`. This is the one thing compaction physically
   removes.
@@ -173,12 +173,12 @@ See [`verify_integrity`](../reference/rust-api.md#store).
 
 ### What it does not cover
 
-The check is scoped to the **array half** of the store. It reads what the NetCDF side knows about
-and rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about
-the arrays, not about the store as a whole. Three things fall outside it:
+The check is scoped to the **array half** of the store. It reads what the HDF5 side knows about and
+rehashes it; it never opens the SQLite catalog. A clean report is therefore a statement about the
+arrays, not about the store as a whole. Three things fall outside it:
 
 - a `data_hash` in the catalog that names no stored array — a truncated or corrupted catalog, or a
-  catalog paired with the wrong `.nc` file. Every read of the affected key fails, and
+  catalog paired with the wrong `.h5` file. Every read of the affected key fails, and
   `verify_integrity` reports nothing.
 - a catalog row whose `dtype`, `element_shape`, or `length` misdescribes the array it points at.
 - a missing catalog entirely. The two artifacts are one logical store, but nothing enforces that:
@@ -195,4 +195,4 @@ uniqueness.
 
 If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the [file format](../reference/file-format.md) is the one that matters: move, copy, and delete the
-`.nc` and its `.sqlite` together.
+`.h5` and its `.sqlite` together.

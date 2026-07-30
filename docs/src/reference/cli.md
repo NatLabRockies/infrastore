@@ -1,7 +1,7 @@
 # CLI Reference
 
 `infrastore-cli` builds the `infrastore` binary, which reads and writes a store directly on disk
-(NetCDF + SQLite). For a task-oriented walkthrough, see
+(HDF5 + SQLite). For a task-oriented walkthrough, see
 [Use the `infrastore` CLI](../how-to/use-cli.md).
 
 The CLI covers time series only. The
@@ -11,16 +11,16 @@ catalog file have no `infrastore` commands; reach them through the Rust, Python,
 ## Synopsis
 
 ```text
-infrastore [--store <PATH.nc>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
+infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 ```
 
 ### Global options
 
-| Option           | Description                                                                                                                        |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `--store <PATH>` | Path to the NetCDF store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable. |
-| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                                |
-| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                     |
+| Option           | Description                                                                                                                      |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `--store <PATH>` | Path to the HDF5 store file. The `<PATH>.sqlite` catalog is implicit. Falls back to the `INFRASTORE_STORE` environment variable. |
+| `-f`, `--format` | Output format: `table` (default), `json`, or `csv`.                                                                              |
+| `--log-level`    | Tracing filter; also read from `RUST_LOG`. Defaults to `warn`.                                                                   |
 
 `--store` (or `INFRASTORE_STORE`) is required by every command except `template` and `completions`.
 
@@ -45,7 +45,7 @@ prints a JSON descriptor. `export` requires `-f csv` or `-f json` (there is no t
 | `replace-owner`     | Reassign every series from one owner to another.                                |
 | `clear`             | Remove all series, or all for one owner (prompts unless `--force`).             |
 | `transform`         | Derive `DeterministicSingleTimeSeries` from stored `SingleTimeSeries`.          |
-| `persist`           | Write the store to a new NetCDF + SQLite artifact (`--dest`).                   |
+| `persist`           | Write the store to a new HDF5 + SQLite artifact (`--dest`).                     |
 | `compact`           | Reclaim reusable space (prompts unless `--force`); print the report.            |
 | `completions`       | Generate shell completions to stdout (bash/zsh/fish/…).                         |
 | `stats`             | Overall + detailed + per-type counts and distinct-array count.                  |
@@ -68,7 +68,7 @@ infrastore --store <PATH> copy    [SELECTOR...] --dst-owner-id <I> --dst-owner-t
 infrastore --store <PATH> replace-owner --old <I> --new <I> --owner-category <C> [--dry-run]
 infrastore --store <PATH> clear   [--owner-id <I> --owner-category <C>] [--force] [--dry-run]
 infrastore --store <PATH> transform --horizon <DUR> --interval <DUR> [--owner-category <C>] [--resolution <DUR>]
-infrastore --store <PATH> persist --dest <PATH.nc>
+infrastore --store <PATH> persist --dest <PATH.h5>
 infrastore --store <PATH> compact [--force]
 infrastore --store <PATH> stats
 infrastore completions <SHELL>
@@ -100,7 +100,7 @@ the selector must match exactly one series, which goes to stdout. CSV output car
 (see the CSV Layout section); JSON output is one structured object per series.
 
 `--dry-run` on `remove`, `clear`, `replace-owner`, `rename`, and `copy` prints what would change and
-exits without opening the store for writing. `add --compression` sets the NetCDF compression policy
+exits without opening the store for writing. `add --compression` sets the HDF5 compression policy
 for a store this command creates (`none`, `deflate`, or `deflate:LEVEL` with `--no-shuffle` to
 disable byte-shuffle); passing it for an existing store is an error, since the persisted policy
 governs.

@@ -7650,7 +7650,7 @@ mod abi_tests {
     #[test]
     fn create_add_flush_free_then_reopen_read_only() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("abi.nc");
+        let path = dir.path().join("abi.h5");
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
 
         // create on a real path
@@ -7828,7 +7828,7 @@ mod abi_tests {
         assert_eq!(len, 0);
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("persisted.nc");
+        let path = dir.path().join("persisted.h5");
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
         assert_eq!(
             unsafe { infrastore_store_persist(store, path_c.as_ptr()) },
@@ -7851,7 +7851,7 @@ mod abi_tests {
     #[test]
     fn opening_a_missing_path_reports_an_error_and_a_message() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("nope.nc");
+        let missing = dir.path().join("nope.h5");
         let path_c = CString::new(missing.to_str().unwrap()).unwrap();
         let mut store: *mut InfraStoreHandle = ptr::null_mut();
         let rc = unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut store) };
@@ -8206,7 +8206,7 @@ mod abi_tests {
         );
 
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("codes.nc");
+        let path = dir.path().join("codes.h5");
         let path_c = CString::new(path.to_str().unwrap()).unwrap();
 
         let mut store: *mut InfraStoreHandle = ptr::null_mut();

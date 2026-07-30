@@ -1,10 +1,10 @@
-//! Reference-counting coverage for **standalone** (`arr_{hash}`) NetCDF arrays —
+//! Reference-counting coverage for **standalone** (`arr_{hash}`) HDF5 arrays —
 //! the storage kind used by `NonSequentialTimeSeries` (plain standalone) and the
 //! dense forecasts `Deterministic` / `Probabilistic` / `Scenarios` (windowed
 //! standalone). The packed (`sts_*`) path is exercised in `round_trip.rs`,
 //! `api_additions.rs`, and `disk_roundtrip.rs`; standalone arrays reclaim
-//! differently (NetCDF cannot delete a variable, so the last-reference case
-//! leaves an unreachable variable rather than a reusable slot) and were
+//! differently (HDF5 cannot reclaim the space in place, so the last-reference
+//! case leaves a tombstoned dataset rather than a reusable slot) and were
 //! previously only checked at the reader-slot level, never through a delete.
 //!
 //! `count_array_references` deliberately tallies only `SingleTimeSeries` /
@@ -248,14 +248,15 @@ fn standalone_refcount_bool() {
 
 // --- On-disk persistence: a standalone array orphaned by a delete must stay
 // gone across flush + reopen, survivors must still read, and a fresh add after
-// the delete must round-trip. NetCDF cannot physically remove the variable, so
-// this guards the catalog side (the dropped hash never reappears) and that a
+// the delete must round-trip. HDF5 cannot reclaim the space in place, so the
+// dataset is left tombstoned until `compact`; this guards the catalog side (the
+// dropped hash never reappears) and that a
 // reopened store agrees on the distinct-array count. --------------------------
 
 #[test]
 fn standalone_orphan_persists_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("standalone.nc");
+    let path = dir.path().join("standalone.h5");
 
     // Three distinct standalone forecasts on disk.
     let k2_identity;

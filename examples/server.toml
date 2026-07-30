@@ -3,7 +3,7 @@ host = "0.0.0.0"
 port = 50051
 
 [data]
-files = ["./store.nc"]
+files = ["./store.h5"]
 
 [authentication]
 # "none" or "api_key". For api_key, populate `keys` and clients must send

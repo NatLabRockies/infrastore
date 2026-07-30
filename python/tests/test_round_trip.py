@@ -54,7 +54,7 @@ def test_in_memory_round_trip():
 
 
 def test_persistent_round_trip(tmp_path):
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     s = make_series(2024, 12, 1.0)
 
     store = Store.create(path=str(path), in_memory=False)
@@ -89,7 +89,7 @@ def test_persistent_round_trip(tmp_path):
 )
 def test_compression_round_trip(tmp_path, kwargs):
     """Each compression policy stores and reads back identical data."""
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     s = make_series(2024, 12, 1.0)
 
     store = Store.create(path=str(path), in_memory=False, **kwargs)
@@ -117,7 +117,7 @@ def test_get_compression_in_memory_is_none():
 
 
 def test_invalid_compression_rejected(tmp_path):
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     with pytest.raises(InvalidParameterError):
         Store.create(path=str(path), in_memory=False, compression="lz4")
     with pytest.raises(InvalidParameterError):
@@ -188,7 +188,7 @@ def test_time_range_slicing():
 
 
 def test_read_only_blocks_writes(tmp_path):
-    path = tmp_path / "store.nc"
+    path = tmp_path / "store.h5"
     store = Store.create(path=str(path), in_memory=False)
     store.add_time_series(1, "Generator", OwnerCategory.Component, make_series())
     store.flush()
@@ -290,7 +290,7 @@ def test_dtype_round_trip():
 
 def test_add_time_series_bulk(tmp_path):
     """Bulk add commits all series in one transaction and returns keys in order."""
-    path = tmp_path / "bulk.nc"
+    path = tmp_path / "bulk.h5"
     store = Store.create(path=str(path), in_memory=False)
     items = [
         {
@@ -315,7 +315,7 @@ def test_add_time_series_bulk(tmp_path):
 
 def test_bulk_read(tmp_path):
     """bulk_read returns a full series per key, in order, matching get_time_series."""
-    path = tmp_path / "bulkread.nc"
+    path = tmp_path / "bulkread.h5"
     store = Store.create(path=str(path), in_memory=False)
     items = [
         {

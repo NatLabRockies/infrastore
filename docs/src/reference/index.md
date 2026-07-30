@@ -5,7 +5,7 @@ when you already know what you want and need the precise shape of it. For narrat
 the [Developer Guides](../guides/index.md); for concepts, the [Explanation](../explanation/index.md)
 section.
 
-- [On-Disk File Format](./file-format.md) — The NetCDF4 layout and SQLite schema, byte for byte.
+- [On-Disk File Format](./file-format.md) — The HDF5 layout and SQLite schema, byte for byte.
 - [Rust API](./rust-api.md) — `infrastore-core` public types and `Store` methods.
 - [Python API](./python-api.md) — The `infrastore` module.
 - [Julia API](./julia-api.md) — The `InfraStore.jl` package.

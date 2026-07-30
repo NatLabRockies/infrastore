@@ -42,8 +42,8 @@ pub fn open_store(path: &Path, read_only: bool) -> Result<Store>
 ```
 
 - `create_store(None, true)` — in-memory store, no filesystem I/O.
-- `create_store(Some(path), false)` — creates `path` (NetCDF) and `path.sqlite` (metadata).
-- `create_store_with_compression(...)` — as above but with an explicit NetCDF compression policy.
+- `create_store(Some(path), false)` — creates `path` (HDF5) and `path.sqlite` (metadata).
+- `create_store_with_compression(...)` — as above but with an explicit HDF5 compression policy.
 - `open_store(path, read_only)` — opens an existing pair. `read_only = true` rejects all writes.
 
 `Store::create` / `Store::create_with_compression` / `Store::open` are the inherent-method
@@ -352,10 +352,10 @@ can be moved between threads, but sharing one requires external synchronization 
   caller can tell whether removing a `SingleTimeSeries` would orphan a
   `DeterministicSingleTimeSeries` derived from (and sharing) its array.
 - **`verify_integrity`** — Recomputes each stored array's hash and reports mismatches. Covers the
-  NetCDF half only: the SQLite catalog is not inspected, so an empty report does not mean the store
-  as a whole is sound. See
+  HDF5 half only: the SQLite catalog is not inspected, so an empty report does not mean the store as
+  a whole is sound. See
   [content addressing](../explanation/content-addressing.md#what-it-does-not-cover).
-- **`flush`** — Issues `nc_sync` so the files can be copied for persistence without closing.
+- **`flush`** — Issues `H5Fflush` so the files can be copied for persistence without closing.
 - **`persist_to`** — Writes both halves of the artifact to `path` and `<path>.sqlite`, overwriting
   existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
   (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
@@ -406,7 +406,7 @@ let key = store.add_time_series(
 ```
 
 Dense forecast arrays (`Deterministic` / `Probabilistic` / `Scenarios`) are stored as standalone
-NetCDF variables. A `DeterministicSingleTimeSeries` is **not** added directly: call
+HDF5 variables. A `DeterministicSingleTimeSeries` is **not** added directly: call
 `transform_single_time_series(horizon, interval, owner_category, resolution)` to derive one from
 every stored `SingleTimeSeries` (it shares the backing column-packed array, derives `count` from the
 series length, and dedups against that series).
@@ -1230,16 +1230,16 @@ pub enum TimeSeriesError {
 
 ## `StorageBackend` Trait
 
-The seam between `Store` and array storage. Implemented by `MemoryBackend` and `NetCdfBackend`. You
+The seam between `Store` and array storage. Implemented by `MemoryBackend` and `Hdf5Backend`. You
 rarely call it directly, but it documents the backend contract. It is **not** re-exported at the
 crate root — import it (and the backends) from the `storage` module:
 
 ```rust
-use infrastore_core::storage::{MemoryBackend, NetCdfBackend, StorageBackend};
+use infrastore_core::storage::{MemoryBackend, Hdf5Backend, StorageBackend};
 ```
 
 Every method below with a default is a performance override: the default is correct but naive, and
-`NetCdfBackend` implements a faster path (single hyperslab reads, whole-chunk block writes).
+`Hdf5Backend` implements a faster path (single hyperslab reads, whole-chunk block writes).
 
 ```rust
 pub trait StorageBackend: Send + Sync {
@@ -1264,7 +1264,7 @@ pub trait StorageBackend: Send + Sync {
     fn verify(&self) -> Result<IntegrityReport>;
     fn flush(&mut self) -> Result<()>;
 
-    // --- provided (overridden by NetCdfBackend) ---
+    // --- provided (overridden by Hdf5Backend) ---
 
     // Write a block of same-shaped packed arrays at once (the bulk-add write path).
     // The returned Vec is aligned to `hashes`: `true` where this call wrote new content.

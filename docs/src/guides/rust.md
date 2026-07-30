@@ -33,11 +33,11 @@ use infrastore_core::{create_store, open_store};
 // In-memory (tests, scratch work): no filesystem I/O.
 let mut store = create_store(None, true)?;
 
-// On disk: writes system.nc and system.nc.sqlite.
-let mut store = create_store(Some(Path::new("system.nc")), false)?;
+// On disk: writes system.h5 and system.h5.sqlite.
+let mut store = create_store(Some(Path::new("system.h5")), false)?;
 
 // Reopen later, read-only.
-let store = open_store(Path::new("system.nc"), /* read_only */ true)?;
+let store = open_store(Path::new("system.h5"), /* read_only */ true)?;
 ```
 
 ## Add a Series
@@ -416,10 +416,10 @@ Neither table is reachable over gRPC or the `infrastore` CLI.
 
 ## Persist to Disk
 
-The NetCDF backend buffers writes. Call `flush` before copying the files for backup:
+The HDF5 backend buffers writes. Call `flush` before copying the files for backup:
 
 ```rust
-store.flush()?;   // nc_sync; afterwards system.nc + system.nc.sqlite can be copied as a pair
+store.flush()?;   // H5Fflush; afterwards system.h5 + system.h5.sqlite can be copied as a pair
 ```
 
 `persist_to` writes the whole store to a new path — both halves of the artifact, `path` and
@@ -430,10 +430,10 @@ with `create_store(None, true)`:
 ```rust
 let mut store = create_store(None, true)?;   // in-memory
 // ... add series ...
-store.persist_to(Path::new("system.nc"))?;   // writes system.nc + system.nc.sqlite
+store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sqlite
 ```
 
-Always keep the `.nc` and `.nc.sqlite` files together — neither is usable alone.
+Always keep the `.h5` and `.h5.sqlite` files together — neither is usable alone.
 
 ## Error Handling
 

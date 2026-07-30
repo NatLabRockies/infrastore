@@ -2396,7 +2396,7 @@ impl Store {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(&sqlite_path);
         {
-            let mut nc = Hdf5Backend::create(path, self.compression())?;
+            let mut backend = Hdf5Backend::create(path, self.compression())?;
             // Plan each distinct array's layout before writing: packed is only
             // valid for arrays that every referencing association reads as a
             // series along axis 0 (SingleTimeSeries and its derived DST views).
@@ -2425,9 +2425,9 @@ impl Store {
             }
             for (hash, (layout, resolution)) in &plans {
                 let array = self.backend.get_array(hash)?;
-                nc.put_array(hash, &array, *resolution, *layout)?;
+                backend.put_array(hash, &array, *resolution, *layout)?;
             }
-            nc.flush()?;
+            backend.flush()?;
         }
         self.metadata.backup_to(&sqlite_path)?;
         Ok(())
@@ -2860,8 +2860,8 @@ fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>>
     Ok(Box::new(Hdf5Backend::open(path, read_only)?))
 }
 
-fn catalog_sqlite_path(nc_path: &Path) -> PathBuf {
-    let mut p = nc_path.to_path_buf();
+fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
+    let mut p = data_path.to_path_buf();
     let new_name = match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => format!("{name}.sqlite"),
         None => "metadata.sqlite".to_string(),

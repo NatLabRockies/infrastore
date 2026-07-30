@@ -22,7 +22,7 @@ fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
 #[test]
 fn persistent_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -66,8 +66,8 @@ fn persistent_round_trip() {
 #[test]
 fn on_disk_persist_copies_and_leaves_the_source_usable() {
     let dir = tempfile::tempdir().unwrap();
-    let src = dir.path().join("store.nc");
-    let dest = dir.path().join("copy.nc");
+    let src = dir.path().join("store.h5");
+    let dest = dir.path().join("copy.h5");
 
     let mut store = create_store(Some(src.as_path()), false).unwrap();
     store
@@ -82,9 +82,9 @@ fn on_disk_persist_copies_and_leaves_the_source_usable() {
         .unwrap();
 
     store.persist_to(&dest).unwrap();
-    assert!(dest.exists(), "the destination .nc must exist");
+    assert!(dest.exists(), "the destination .h5 must exist");
     assert!(
-        dir.path().join("copy.nc.sqlite").exists(),
+        dir.path().join("copy.h5.sqlite").exists(),
         "the companion catalog must be copied too"
     );
 
@@ -131,7 +131,7 @@ fn on_disk_persist_copies_and_leaves_the_source_usable() {
 #[test]
 fn in_memory_persist_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     {
         let mut store = create_store(None, true).unwrap(); // in-memory
@@ -172,7 +172,7 @@ fn in_memory_persist_round_trip() {
 #[test]
 fn in_memory_persist_preserves_forecast_window_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
 
     {
@@ -286,7 +286,7 @@ fn compression_policies_round_trip() {
         },
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("store.nc");
+        let path = dir.path().join("store.h5");
 
         {
             let mut store =
@@ -348,7 +348,7 @@ fn compression_policies_round_trip() {
 #[test]
 fn read_only_open_works_on_write_protected_files() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -367,7 +367,7 @@ fn read_only_open_works_on_write_protected_files() {
 
     // Write-protect both halves of the artifact, as on read-only media.
     let mut protected = Vec::new();
-    for file in [path.clone(), path.with_file_name("store.nc.sqlite")] {
+    for file in [path.clone(), path.with_file_name("store.h5.sqlite")] {
         let mut perms = std::fs::metadata(&file).unwrap().permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&file, perms).unwrap();
@@ -409,7 +409,7 @@ fn read_only_open_works_on_write_protected_files() {
 #[test]
 fn invalid_compression_level_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let err = create_store_with_compression(
         Some(path.as_path()),
         false,
@@ -424,7 +424,7 @@ fn invalid_compression_level_is_rejected() {
 #[test]
 fn deduplication_persists() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -456,7 +456,7 @@ fn deduplication_persists() {
 #[test]
 fn multiple_resolutions_separate_datasets() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -496,7 +496,7 @@ fn multiple_resolutions_separate_datasets() {
 #[test]
 fn time_range_slicing_through_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
@@ -542,7 +542,7 @@ fn spill_into_new_dataset_past_capacity() {
     use infrastore_core::storage::common::DEFAULT_COLS_PER_DATASET;
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     // Need DEFAULT + 1 distinct arrays of identical (length, resolution) so they
     // compete for the same dataset family. Single `add_time_series` calls take the
@@ -607,7 +607,7 @@ fn spill_into_new_dataset_past_capacity() {
 #[test]
 fn bulk_add_session_writes_block_and_round_trips() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bulk.nc");
+    let path = dir.path().join("bulk.h5");
 
     // A batch of distinct same-shape series plus one whose content duplicates an
     // earlier series (different owner) to exercise the block writer's dedup.
@@ -673,7 +673,7 @@ fn bulk_add_session_writes_block_and_round_trips() {
 #[test]
 fn bulk_add_dropped_without_commit_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("discard.nc");
+    let path = dir.path().join("discard.h5");
 
     let mut store = create_store(Some(path.as_path()), false).unwrap();
     {
@@ -698,7 +698,7 @@ fn bulk_add_dropped_without_commit_writes_nothing() {
 #[test]
 fn bulk_read_matches_get_time_series_across_types() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bulkread.nc");
+    let path = dir.path().join("bulkread.h5");
     let n = 30usize;
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
 
@@ -770,7 +770,7 @@ fn bulk_read_matches_get_time_series_across_types() {
 #[test]
 fn compact_reports_tombstones_and_slot_is_reused() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     let mut store = create_store(Some(path.as_path()), false).unwrap();
     // Three distinct arrays in the same family.
@@ -842,7 +842,7 @@ fn compact_reports_tombstones_and_slot_is_reused() {
 #[test]
 fn data_format_version_is_recorded() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     {
         let _ = create_store(Some(path.as_path()), false).unwrap();
@@ -860,7 +860,7 @@ fn data_format_version_is_recorded() {
 #[test]
 fn disk_roundtrips_multidim_element_tuples() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let resolution = Duration::hours(1);
@@ -911,7 +911,7 @@ fn golden_hash_pin() {
 #[test]
 fn non_sequential_persistent_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
     let timestamps = vec![
         initial,
@@ -952,7 +952,7 @@ fn non_sequential_persistent_round_trip() {
 #[test]
 fn opening_a_store_from_an_older_format_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         store
@@ -989,11 +989,11 @@ fn opening_a_store_from_an_older_format_is_rejected() {
 // version mismatches other than "older".
 // ---------------------------------------------------------------------------
 
-/// Build a small on-disk store and return `(dir, nc_path, key)`. The temp dir is
+/// Build a small on-disk store and return `(dir, h5_path, key)`. The temp dir is
 /// returned so the caller keeps it alive.
 fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = store
@@ -1012,8 +1012,8 @@ fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
     (dir, path, key)
 }
 
-fn sqlite_path_of(nc: &std::path::Path) -> std::path::PathBuf {
-    let mut p = nc.as_os_str().to_owned();
+fn sqlite_path_of(h5: &std::path::Path) -> std::path::PathBuf {
+    let mut p = h5.as_os_str().to_owned();
     p.push(".sqlite");
     std::path::PathBuf::from(p)
 }
@@ -1158,7 +1158,7 @@ fn opening_a_store_whose_sqlite_half_is_missing_read_only_errors() {
 #[test]
 fn opening_a_zero_byte_file_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
     std::fs::write(&path, b"").unwrap();
 
     let Err(err) = open_store(path.as_path(), true) else {
@@ -1179,7 +1179,7 @@ fn opening_a_truncated_file_is_rejected() {
     let (_dir, path, _key) = store_on_disk();
     let bytes = std::fs::read(&path).unwrap();
     let dir2 = tempfile::tempdir().unwrap();
-    let truncated = dir2.path().join("truncated.nc");
+    let truncated = dir2.path().join("truncated.h5");
     std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
 
     assert!(
@@ -1191,7 +1191,7 @@ fn opening_a_truncated_file_is_rejected() {
 #[test]
 fn opening_a_directory_as_a_store_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let subdir = dir.path().join("not_a_store.nc");
+    let subdir = dir.path().join("not_a_store.h5");
     std::fs::create_dir(&subdir).unwrap();
 
     let Err(err) = open_store(subdir.as_path(), true) else {
@@ -1203,7 +1203,7 @@ fn opening_a_directory_as_a_store_is_rejected() {
 #[test]
 fn opening_a_nonexistent_path_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("does_not_exist.nc");
+    let missing = dir.path().join("does_not_exist.h5");
     assert!(open_store(missing.as_path(), true).is_err());
 }
 
@@ -1236,7 +1236,7 @@ fn opening_a_store_with_no_format_attribute_is_rejected_as_unspecified() {
     // all before the format check.
     use std::str::FromStr;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("legacy.nc");
+    let path = dir.path().join("legacy.h5");
     {
         let f = hdf5_metno::File::create(&path).unwrap();
         let attr = f

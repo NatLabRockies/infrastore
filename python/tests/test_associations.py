@@ -472,7 +472,7 @@ class TestParentChildBulk:
 
 class TestPersistence:
     def test_both_tables_survive_persist_and_reopen(self, tmp_path):
-        path = tmp_path / "assoc.nc"
+        path = tmp_path / "assoc.h5"
         store = store_with_attachments(attached(1, 100), attached(2, 101))
         store.add_parent_child_associations([edge(1, 10), edge(2, 11)])
         store.persist_to(str(path))
@@ -487,7 +487,7 @@ class TestPersistence:
         reopened.close()
 
     def test_read_only_store_rejects_attachment_writes(self, tmp_path):
-        path = tmp_path / "attach_ro.nc"
+        path = tmp_path / "attach_ro.h5"
         store = Store.create(str(path))
         store.add_supplemental_attribute_association(attached(1, 100))
         store.close()
@@ -506,7 +506,7 @@ class TestPersistence:
         ro.close()
 
     def test_read_only_store_rejects_edge_writes(self, tmp_path):
-        path = tmp_path / "edge_ro.nc"
+        path = tmp_path / "edge_ro.h5"
         store = Store.create(str(path))
         store.add_parent_child_association(edge(1, 10))
         store.close()

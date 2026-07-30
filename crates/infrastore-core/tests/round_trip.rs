@@ -30,7 +30,7 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
     // 2024-01-15. Exercises the ISO-8601 dataset-name + SQLite encoding for
     // `Period::Months`, plus calendar-aware reader index math.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("monthly.nc");
+    let path = dir.path().join("monthly.h5");
     let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
     let values: Vec<f64> = (0..12).map(|i| 100.0 + i as f64).collect();
 
@@ -404,7 +404,7 @@ fn clear_by_owner() {
 fn read_only_blocks_writes() {
     use std::path::Path;
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.nc");
+    let path = dir.path().join("store.h5");
 
     // Create a writable store at `path` (catalog sqlite) and add a row.
     {

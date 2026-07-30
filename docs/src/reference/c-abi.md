@@ -535,7 +535,7 @@ once.
 
 A batch accumulates add requests client-side (no store I/O); `infrastore_store_add_batch` commits
 them all in **one** metadata transaction, which is much faster than per-item adds when ingesting
-many series. It is also the fast NetCDF write path: same-shaped `SingleTimeSeries` are packed into
+many series. It is also the fast HDF5 write path: same-shaped `SingleTimeSeries` are packed into
 batch-sized datasets so the timestamp-major chunks are filled whole rather than a column at a time.
 The `infrastore_batch_add_*` functions take the same arguments as their `infrastore_store_add_*`
 counterparts minus the store handle and `out_key`; data buffers are copied into the batch, so they
@@ -643,7 +643,7 @@ int32_t infrastore_store_begin_transaction(struct InfraStore *handle);
 int32_t infrastore_store_commit_transaction(struct InfraStore *handle);
 int32_t infrastore_store_rollback_transaction(struct InfraStore *handle);
 int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
-/* Persist the store's data to `path` (NetCDF) and `<path>.sqlite` (metadata),
+/* Persist the store's data to `path` (HDF5) and `<path>.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */

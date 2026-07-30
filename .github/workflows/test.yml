@@ -32,14 +32,14 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # No HDF5/NetCDF provisioning: the default `vendored` feature builds
-      # netcdf-c + HDF5 + zlib from source and links them statically, so the
+      # No HDF5 provisioning: the default `vendored` feature builds
+      # HDF5 + zlib from source and links them statically, so the
       # build needs only cmake and a C compiler, both preinstalled on the
       # GitHub runner images.
       #
-      # Do not reintroduce a step that exports HDF5_DIR or NETCDF_DIR. Those
-      # point the *vendored* netcdf-c build at an external HDF5 (it forwards
-      # them to cmake as HDF5_ROOT) while still asking for static libraries;
+      # Do not reintroduce a step that exports HDF5_DIR. It
+      # points the *vendored* HDF5 build at an external HDF5 (it forwards
+      # it to cmake as HDF5_ROOT) while still asking for static libraries;
       # against a shared-only install such as conda-forge's that fails with
       # "Could NOT find HDF5 (missing: HDF5_LIBRARIES HDF5_HL_LIBRARIES)".
       # To build against system libraries instead, turn the feature off with
@@ -93,7 +93,7 @@ jobs:
 
       # `cargo test` does not reach the PyO3 or C ABI surfaces, so the Python
       # and Julia suites run here too. Both reuse the build above rather than
-      # provisioning NetCDF/HDF5 of their own.
+      # provisioning HDF5 of their own.
       #
       # The extension is installed as a built wheel: `maturin develop` (what
       # CLAUDE.md documents for local work) requires an active virtualenv,
@@ -157,7 +157,7 @@ jobs:
       # Render both reports from the profiles all three suites just wrote.
       # `--ignore-filename-regex` drops the protobuf code infrastore-proto's build
       # script generates into target/; build scripts are themselves excluded
-      # unless --include-build-script is passed, so the vendored netcdf-c/HDF5
+      # unless --include-build-script is passed, so the vendored HDF5
       # build stays out of the numbers.
       #
       # `--remap-path-prefix` is deliberately absent: it only takes effect at

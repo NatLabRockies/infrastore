@@ -66,7 +66,7 @@ server serves forecast reads but does not accept writes. See [Forecasts](#foreca
 
 A `NonSequentialTimeSeries` pairs each value with an explicit UTC timestamp. Timestamps must be
 strictly increasing and their count must match the data length. Its values are stored as a
-standalone NetCDF array; timestamps are stored with the association metadata.
+standalone HDF5 array; timestamps are stored with the association metadata.
 
 ### `SingleTimeSeries`
 
@@ -113,8 +113,8 @@ itself never interprets it.
 ### Forecasts
 
 The four forecast types store their values as a content-addressed `TypedArray` in its **native
-shape** (the dense types as standalone NetCDF variables; a `DeterministicSingleTimeSeries` reuses
-its backing `SingleTimeSeries` array), while the windowing parameters live in metadata. A forecast
+shape** (the dense types as standalone HDF5 variables; a `DeterministicSingleTimeSeries` reuses its
+backing `SingleTimeSeries` array), while the windowing parameters live in metadata. A forecast
 association records `horizon` (the span each window covers), `interval` (the spacing between
 successive window start times), `count` (the number of windows), and — for `Probabilistic` — a
 `percentiles` vector.

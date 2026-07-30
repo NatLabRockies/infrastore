@@ -20,7 +20,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev libnetcdf-dev protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y libhdf5-dev protobuf-compiler
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2

@@ -1,7 +1,7 @@
 //! Tests for the forecast read path in `Store::get_time_series`.
 //!
 //! All cases run against BOTH backends via [`for_each_backend`]: the in-memory
-//! store, and a NetCDF store that is flushed, closed, and reopened read-only
+//! store, and an HDF5 store that is flushed, closed, and reopened read-only
 //! (exercising the persisted format).
 //!
 //! Dense forecasts (`Deterministic` / `Probabilistic` / `Scenarios`) are written
@@ -1590,7 +1590,7 @@ fn transform_single_time_series_on_a_monthly_grid() {
 fn forecast_reader_sweeps_a_monthly_grid() {
     let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("monthly_forecast.nc");
+    let path = dir.path().join("monthly_forecast.h5");
     {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         store
