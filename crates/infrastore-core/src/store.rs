@@ -1696,13 +1696,6 @@ impl Store {
             let total_len = src.length.ok_or_else(|| {
                 TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
             })?;
-            let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                TimeSeriesError::InvalidParameter(format!(
-                    "interval ({}) must be a positive integer multiple of resolution ({})",
-                    interval.to_iso8601(),
-                    resolution.to_iso8601()
-                ))
-            })?;
             let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
             if h == 0 || h > total_len {
                 return Err(TimeSeriesError::InvalidParameter(format!(
@@ -1711,16 +1704,39 @@ impl Store {
                     src.name
                 )));
             }
-            let count = (total_len - h) / interval_steps + 1;
-            // The requested interval is stored verbatim, including the
-            // single-window `interval == horizon` case: that is exactly how a
-            // directly-added single-window forecast is stored (clients that
-            // model such a forecast with an empty interval — e.g.
-            // InfrastructureSystems.jl's `Second(0)` — map it to the horizon on
-            // write and back on read), so a derived view must not use a
-            // different encoding for the same state or those clients cannot
-            // find it. The identity/idempotency check below uses the stored
-            // form.
+            // A zero interval is the explicit single-window request (the
+            // encoding InfrastructureSystems.jl writes for directly-added
+            // single-window forecasts): the one window must cover the whole
+            // series, so it is only accepted when the horizon spans it.
+            let count = if interval.is_zero() {
+                if h != total_len {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "a zero interval derives a single window covering the whole \
+                         series, but horizon ({h} steps) does not span SingleTimeSeries \
+                         length ({total_len}) for '{}'",
+                        src.name
+                    )));
+                }
+                1
+            } else {
+                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::InvalidParameter(format!(
+                        "interval ({}) must be zero or a positive integer multiple of \
+                         resolution ({})",
+                        interval.to_iso8601(),
+                        resolution.to_iso8601()
+                    ))
+                })?;
+                (total_len - h) / interval_steps + 1
+            };
+            // The requested interval is stored verbatim, including both
+            // single-window encodings — `interval == horizon` (clients that
+            // map the empty interval to the horizon on write and back on
+            // read) and the explicit zero interval
+            // (InfrastructureSystems.jl's `Second(0)`). A derived view keeps
+            // whichever encoding its client writes so that client can find it
+            // by the identity it wrote. The identity/idempotency check below
+            // uses the stored form.
             let src_key = AssociationIdentity {
                 owner_id: src.owner_id,
                 owner_category: src.owner_category,
