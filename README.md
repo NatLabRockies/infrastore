@@ -31,7 +31,9 @@ Under development, unstable API, integrating with parent packages
 - **Feature-tagged associations** — each association carries a map of typed features
   (`int`/`float`/`bool`/`str`), so several variants of a series can coexist under one owner.
 - **Columnar simulation readers** — `StaticReader` / `ForecastReader` serve the access pattern that
-  drives a simulation: every series' value at one timestamp.
+  drives a simulation: every series' value at one timestamp. `StaticReader` covers both static
+  types, sweeping a `SingleTimeSeries` grid or a cohort of `NonSequentialTimeSeries` sharing one
+  timestamp vector.
 - **Association catalogs** — `supplemental_attribute_associations` (component ↔ supplemental
   attribute) and `parent_child_associations` (directed component ↔ component edges) record
   relationships independently of time series, so consumers need not keep a SQLite database of their

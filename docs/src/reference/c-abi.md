@@ -461,12 +461,13 @@ length. `*_read` errors (never clamps) if `at_unix_ms` is off the reader's grid/
 
 ### StaticReader
 
-Reads every matching `SingleTimeSeries` at one timestamp, partitioned into `(dtype, element_shape)`
+Reads every matching static series at one timestamp, partitioned into `(dtype, element_shape)`
 groups; each group's values are one dense `[num_columns, *element_shape]` little-endian buffer whose
 column `j` is the key from `infrastore_static_reader_group_key(reader, group_idx, j, …)`.
 
 ```c
 int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
+                                     int32_t time_series_type,
                                      bool has_owner, int64_t owner_id,
                                      bool has_owner_category, int32_t owner_category,
                                      const char *name, const char *resolution,
@@ -474,8 +475,10 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
-                              int64_t *out_initial_ms, char **out_resolution,  /* free with infrastore_string_free */
+                              int64_t *out_initial_ms, char **out_resolution,  /* null, or free with infrastore_string_free */
                               uint64_t *out_length);
+int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderHandle *reader,
+                              int64_t *buf, uint64_t cap, uint64_t *out_len);  /* probe with buf=NULL, cap=0 */
 int32_t infrastore_static_reader_num_groups(const struct InfraStoreStaticReaderHandle *reader, uint64_t *out_n);
 int32_t infrastore_static_reader_group_info(const struct InfraStoreStaticReaderHandle *reader, uint64_t group_idx,
                                     int32_t *out_dtype, uint64_t *out_num_columns,
@@ -491,8 +494,14 @@ int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReade
 void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 ```
 
-All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
-and errors on divergence, so every column has a value at every valid timestamp (no presence mask).
+`time_series_type` picks the two shapes a reader can take. For `SingleTimeSeries` (`0`),
+`resolution` must be a non-empty ISO-8601 period — one resolution per reader — and all matched
+series must share one grid (`initial_timestamp` + `length`). For `NonSequentialTimeSeries` (`1`),
+`resolution` must be **null** (an irregular series has none) and all matched series must instead
+share one timestamp vector; `infrastore_static_reader_grid` then reports `*out_resolution` as null,
+and `infrastore_static_reader_timestamps` is how the timeline is read. Any other discriminant is
+rejected. Either way the build validates the uniformity and errors on divergence, so every column
+has a value at every valid timestamp (no presence mask).
 
 ### ForecastReader
 

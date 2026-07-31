@@ -3,9 +3,9 @@
 //!
 //! Two storage modes, both natively typed + fixed-dimension:
 //!
-//! * **Packed** (used for SingleTimeSeries and the underlying array of a
-//!   DeterministicSingleTimeSeries): many same-shaped arrays are column-packed
-//!   into a dataset `sts_{dtype}_{shape}_{length}_{res}` of shape
+//! * **Packed** (used for the static series — SingleTimeSeries, the underlying
+//!   array of a DeterministicSingleTimeSeries, and NonSequentialTimeSeries):
+//!   many same-shaped arrays are column-packed into one dataset of shape
 //!   `(length, cols, *element_shape)`, chunked `(1, cols, *element_shape)` — one
 //!   timestamp row across every column per chunk, so a read-by-timestamp gathers
 //!   one chunk. `cols` is sized per dataset to the batch that created it (capped
@@ -13,16 +13,18 @@
 //!   once full. A companion `{name}_h` dataset holds the per-column hex hash
 //!   (free slots are empty). Removal frees a slot.
 //!
-//! * **Standalone** (used for NonSequentialTimeSeries and native forecasts):
-//!   each array is its own typed multi-dim dataset `arr_{hexhash}` of shape
-//!   `[length, k1, ...]`. Irregular series are chunked as one whole-array chunk;
-//!   dense forecasts are chunked in bounded blocks along their count (window)
+//! * **Standalone** (used for native forecasts, and for an irregular series
+//!   whose time axis nothing else shares — see [`PackGroup`]): each array is its
+//!   own typed multi-dim dataset `arr_{hexhash}` of shape `[length, k1, ...]`.
+//!   Dense forecasts are chunked in bounded blocks along their count (window)
 //!   axis (see [`window_block_cols`]) so a single-window read decompresses one
-//!   block rather than the whole array.
+//!   block rather than the whole array; anything else takes one whole-array
+//!   chunk.
 //!
 //! `shape` encodes the element shape: `s` = scalar, `3` = `[3]`, `3x2` = `[3, 2]`.
 
 use crate::error::{Result, TimeSeriesError};
+use crate::hash::hash_hex;
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::period::Period;
 
@@ -103,8 +105,56 @@ pub(crate) const ROOT_GROUP: &str = "time_series";
 pub(crate) const SINGLE_GROUP: &str = "single";
 pub(crate) const HASH_SUFFIX: &str = "_h";
 pub(crate) const STANDALONE_PREFIX: &str = "arr_";
+/// Dataset prefix for a packed pool of `SingleTimeSeries` / DST arrays.
+pub(crate) const REGULAR_PREFIX: &str = "sts_";
+/// Dataset prefix for a packed pool of `NonSequentialTimeSeries` arrays.
+pub(crate) const IRREGULAR_PREFIX: &str = "nsts_";
 /// Global attribute recording the compression policy a store was created with.
 pub(crate) const COMPRESSION_ATTR: &str = "compression";
+
+/// What a packed pool is keyed by, beyond the `(dtype, element_shape, length)`
+/// every packed dataset already shares.
+///
+/// Column-packing is only meaningful for arrays that lie on a *common time
+/// axis*: the chunking is timestamp-major, so row `t` of the dataset is "every
+/// column at the same instant". For a regular series that axis is pinned by the
+/// resolution (plus the grid check the reader enforces); an irregular series
+/// carries its axis explicitly, and two of them share one exactly when their
+/// timestamp vectors are equal — which the catalog already answers, since it
+/// content-addresses those vectors (`timestamp_sets`). So the interned hash
+/// *is* the cohort key, and this enum is the two spellings of "which time axis".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PackGroup {
+    /// `SingleTimeSeries` and `DeterministicSingleTimeSeries`, grouped by the
+    /// resolution of their shared grid.
+    Regular(Period),
+    /// `NonSequentialTimeSeries`, grouped by the content hash of the explicit
+    /// timestamp vector every member of the cohort shares.
+    Irregular([u8; 32]),
+}
+
+impl PackGroup {
+    fn prefix(self) -> &'static str {
+        match self {
+            PackGroup::Regular(_) => REGULAR_PREFIX,
+            PackGroup::Irregular(_) => IRREGULAR_PREFIX,
+        }
+    }
+
+    /// The group's discriminating suffix in a dataset name. Neither spelling
+    /// contains `_`, which is what keeps the `splitn(4, '_')` parse below
+    /// unambiguous: an ISO-8601 duration is letters and digits, and a hash is
+    /// hex.
+    fn suffix(self) -> String {
+        match self {
+            PackGroup::Regular(resolution) => resolution.to_iso8601(),
+            // The full 64-hex hash, not a prefix of it: the name is parsed back
+            // into this key when the index is rebuilt at open, so a truncated
+            // form would let two distinct time axes collide into one pool.
+            PackGroup::Irregular(hash) => hash_hex(&hash),
+        }
+    }
+}
 
 pub(crate) fn encode_shape(element_shape: &[usize]) -> String {
     if element_shape.is_empty() {
@@ -134,16 +184,15 @@ pub(crate) fn dataset_base_name(
     dtype: Dtype,
     element_shape: &[usize],
     length: usize,
-    resolution: Period,
+    group: PackGroup,
 ) -> String {
-    // The resolution is the ISO-8601 duration (e.g. `PT1H`, `P1M`, `P1Y`); it
-    // contains no `_`, so the `splitn(4, '_')` parser below stays unambiguous.
     format!(
-        "sts_{}_{}_{}_{}",
+        "{}{}_{}_{}_{}",
+        group.prefix(),
         dtype.as_str(),
         encode_shape(element_shape),
         length,
-        resolution.to_iso8601()
+        group.suffix()
     )
 }
 
@@ -155,10 +204,25 @@ pub(crate) fn spill_name(base: &str, n: usize) -> String {
     }
 }
 
-pub(crate) fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, Period)> {
-    let core = name.strip_prefix("sts_").ok_or_else(|| {
-        TimeSeriesError::IntegrityError(format!("dataset {name} missing 'sts_' prefix"))
-    })?;
+/// Recover a packed dataset's identity from its name, inverting
+/// [`dataset_base_name`] (and tolerating the `__{n}` spill suffix). This is how
+/// the on-disk index is rebuilt at open, so every field a pool is keyed by has
+/// to survive the round trip.
+pub(crate) fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize, PackGroup)> {
+    // `nsts_` is tested first: `sts_` is not a prefix of it, but reading the
+    // longer name first keeps the intent obvious if either spelling changes.
+    let (core, irregular) = match name.strip_prefix(IRREGULAR_PREFIX) {
+        Some(core) => (core, true),
+        None => (
+            name.strip_prefix(REGULAR_PREFIX).ok_or_else(|| {
+                TimeSeriesError::IntegrityError(format!(
+                    "dataset {name} has neither a '{REGULAR_PREFIX}' nor an \
+                     '{IRREGULAR_PREFIX}' prefix"
+                ))
+            })?,
+            false,
+        ),
+    };
     let core = core.split("__").next().unwrap();
     let parts: Vec<&str> = core.splitn(4, '_').collect();
     if parts.len() != 4 {
@@ -172,9 +236,17 @@ pub(crate) fn parse_dataset_name(name: &str) -> Result<(Dtype, Vec<usize>, usize
     let length: usize = parts[2]
         .parse()
         .map_err(|_| TimeSeriesError::IntegrityError(format!("bad length in {name}")))?;
-    let resolution = Period::from_iso8601(parts[3])
-        .map_err(|_| TimeSeriesError::IntegrityError(format!("bad resolution in {name}")))?;
-    Ok((dtype, element_shape, length, resolution))
+    let group =
+        if irregular {
+            PackGroup::Irregular(hex_to_hash(parts[3]).map_err(|_| {
+                TimeSeriesError::IntegrityError(format!("bad timestamps hash in {name}"))
+            })?)
+        } else {
+            PackGroup::Regular(Period::from_iso8601(parts[3]).map_err(|_| {
+                TimeSeriesError::IntegrityError(format!("bad resolution in {name}"))
+            })?)
+        };
+    Ok((dtype, element_shape, length, group))
 }
 
 pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
@@ -195,6 +267,45 @@ pub(crate) fn hex_to_hash(s: &str) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dataset name is the only place a pool's identity is persisted, so a
+    /// name that does not parse back to the key that built it would silently
+    /// split (or merge) pools on reopen.
+    #[test]
+    fn every_pack_group_survives_the_dataset_name_round_trip() {
+        let hash = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+            0x0d, 0x0e, 0x0f, 0x10,
+        ];
+        for group in [
+            PackGroup::Regular(Period::from_iso8601("PT1H").unwrap()),
+            PackGroup::Regular(Period::from_iso8601("P1M").unwrap()),
+            PackGroup::Irregular(hash),
+        ] {
+            for element_shape in [vec![], vec![3], vec![3, 2]] {
+                let base = dataset_base_name(Dtype::F64, &element_shape, 24, group);
+                // Both the base name and a spilled sibling parse identically.
+                for name in [base.clone(), spill_name(&base, 2)] {
+                    assert_eq!(
+                        parse_dataset_name(&name).unwrap(),
+                        (Dtype::F64, element_shape.clone(), 24, group),
+                        "{name}"
+                    );
+                }
+            }
+        }
+        // The two pools never collide, even on identical dtype/shape/length.
+        let regular = dataset_base_name(
+            Dtype::F64,
+            &[],
+            24,
+            PackGroup::Regular(Period::from_iso8601("PT1H").unwrap()),
+        );
+        let irregular = dataset_base_name(Dtype::F64, &[], 24, PackGroup::Irregular(hash));
+        assert_ne!(regular, irregular);
+        assert!(!irregular.starts_with(REGULAR_PREFIX));
+    }
 
     #[test]
     fn window_block_cols_bounds_the_chunk_to_the_byte_budget() {

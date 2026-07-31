@@ -1336,6 +1336,70 @@ end
 
     # Off-grid read throws.
     @test_throws InfraStore.InvalidParameterError static_read!(r, t0 + Minute(30))
+
+    # A regular grid enumerates the same way an irregular timeline does.
+    @test static_timestamps(r) == [t0 + Hour(k) for k in 0:3]
+    @test grid.resolution == res
+end
+
+@testset "static reader over an irregular cohort" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2030, 1, 1)
+    # Three instants with no constant step between them; two components observe
+    # the same ones, so they share a time axis (and one packed dataset).
+    stamps = [t0, t0 + Minute(37), t0 + Hour(9)]
+    add_time_series!(
+        store,
+        2,
+        "Gen",
+        Component,
+        NonSequentialTimeSeries(stamps, [20.0, 21.0, 22.0], "outage"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Gen",
+        Component,
+        NonSequentialTimeSeries(stamps, [10.0, 11.0, 12.0], "outage"),
+    )
+
+    r = build_static_reader(store; time_series_type=NonSequentialTimeSeries)
+    grid = static_grid(r)
+    @test grid.length == 3
+    @test grid.initial_timestamp == t0
+    # No constant step to report; the instants come from `static_timestamps`.
+    @test grid.resolution === nothing
+    @test static_timestamps(r) == stamps
+
+    groups = static_groups(r)
+    @test length(groups) == 1
+    @test [key_info(k).owner_id for k in groups[1].keys] == [1, 2]
+
+    for (i, t) in enumerate(stamps)
+        static_read!(r, t)
+        @test static_values(r, 1) == [9.0 + i, 19.0 + i]
+    end
+
+    # Between two instants there is no value, so the read throws rather than
+    # picking a neighbour.
+    @test_throws InfraStore.InvalidParameterError static_read!(r, t0 + Minute(1))
+    # A resolution filter makes no sense for an irregular reader.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=NonSequentialTimeSeries, resolution=Hour(1)
+    )
+    # And a series on a different axis cannot join the cohort.
+    add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        NonSequentialTimeSeries(
+            [t0, t0 + Minute(38), t0 + Hour(9)], [1.0, 2.0, 3.0], "outage"
+        ),
+    )
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=NonSequentialTimeSeries
+    )
 end
 
 @testset "ForecastReader: windows incl. multidim element shape" begin

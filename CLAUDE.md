@@ -30,7 +30,9 @@ matching forecast object across the Rust core, Python, and Julia (the C ABI keep
 read-only gRPC server. Arrays are dtype-generic (`f64`/`f32`/`i64`/`i32`/`u64`/`bool` in every
 binding, including Python) and may have multidimensional per-timestep values. The columnar
 simulation readers (`StaticReader`/`ForecastReader`) are bound across the Rust core, C ABI, Julia,
-and Python. The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
+and Python; `StaticReader` covers both static types, sweeping either a `SingleTimeSeries` grid or a
+cohort of `NonSequentialTimeSeries` sharing one timestamp vector (its `resolution()` is `None` for
+the latter). The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
 name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_filter`,
 `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
 preserving `ext`, and serde on the core types) is available in the Rust core and threaded through
@@ -205,8 +207,11 @@ cargo run -p infrastore-server -- --config my_server.toml
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
   it and update format documentation and compatibility tests.
-- Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` with a companion
-  `<dataset>_h` hash dataset. Standalone arrays use `arr_{hex_hash}`. See
+- Packed arrays use datasets named `sts_{dtype}_{shape}_{length}_{resolution}` for regular series
+  and `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` for the irregular ones sharing a time axis,
+  each with a companion `<dataset>_h` hash dataset. Standalone arrays use `arr_{hex_hash}`. A
+  `NonSequentialTimeSeries`'s timestamps live in the content-addressed `timestamp_sets` catalog
+  table, keyed by the same hash that pools its array. See
   `crates/infrastore-core/src/storage/hdf5.rs` for the implementation and
   `docs/src/reference/file-format.md` for the user-facing specification; keep them synchronized.
 - Deletion creates reusable packed slots or tombstoned standalone datasets. HDF5 cannot reclaim the

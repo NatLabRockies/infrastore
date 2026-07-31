@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::period::Period;
 
 use crate::error::{Result, TimeSeriesError};
-use crate::hash::features_hash;
+use crate::hash::{features_hash, timestamps_hash};
 use crate::types::element_type::ElementType;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
 use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
@@ -384,13 +384,20 @@ pub struct MetadataFilter {
     pub features_hash: Option<[u8; 32]>,
 }
 
-/// Remembers which content-addressed feature sets a batch of inserts has already
-/// written, so each distinct set is written once per batch rather than once per
+/// Remembers which content-addressed sets a batch of inserts has already
+/// written, so each distinct one is written once per batch rather than once per
 /// row. Scoped to a single transaction: it records what *this* batch wrote, and
 /// carries no meaning once that transaction ends.
+///
+/// Two shared tables hang off an association row — its feature set and, for a
+/// `NonSequentialTimeSeries`, its timestamp vector — and both are written the
+/// same way, so one cache covers both. The timestamp half is what keeps a bulk
+/// add of ten thousand irregular series on one time axis from issuing ten
+/// thousand no-op `INSERT OR IGNORE`s of the same (potentially large) blob.
 #[derive(Debug, Default)]
-pub struct FeatureSetCache {
-    seen: HashSet<[u8; 32]>,
+pub struct SharedSetCache {
+    features: HashSet<[u8; 32]>,
+    timestamps: HashSet<[u8; 32]>,
 }
 
 /// The full identity of one stored association: everything the uniqueness
@@ -739,32 +746,29 @@ impl MetadataStore {
     /// Insert a metadata record + its features inside the supplied transaction.
     /// Returns the association id. Caller is responsible for committing.
     pub fn insert(tx: &Connection, meta: &TimeSeriesMetadata) -> Result<i64> {
-        Self::insert_batched(tx, meta, &mut FeatureSetCache::default())
+        Self::insert_batched(tx, meta, &mut SharedSetCache::default())
     }
 
-    /// [`Self::insert`], but reusing a caller-held [`FeatureSetCache`] across the
+    /// [`Self::insert`], but reusing a caller-held [`SharedSetCache`] across the
     /// rows of one batch.
     ///
-    /// Feature sets are content-addressed and shared, so in a batch that inserts
-    /// N rows over a handful of distinct sets, all but the first row per set
-    /// would issue `INSERT OR IGNORE` statements that write nothing. The cache
-    /// remembers which sets this batch has already written and skips the rest —
-    /// which is what stops a bulk add, and a transform, from scaling with the
-    /// number of features per series.
+    /// Feature sets and timestamp vectors are content-addressed and shared, so
+    /// in a batch that inserts N rows over a handful of distinct ones, all but
+    /// the first row per set would issue `INSERT OR IGNORE` statements that
+    /// write nothing. The cache remembers what this batch has already written
+    /// and skips the rest — which is what stops a bulk add, and a transform,
+    /// from scaling with the number of features (or timestamps) per series.
     pub fn insert_batched(
         tx: &Connection,
         meta: &TimeSeriesMetadata,
-        cache: &mut FeatureSetCache,
+        cache: &mut SharedSetCache,
     ) -> Result<i64> {
         let f_hash = features_hash(&meta.features);
         let initial_ts = meta.initial_timestamp.map(|t| t.to_rfc3339());
         let resolution_iso = meta.resolution.map(period_to_iso);
         let horizon_iso = meta.horizon.map(period_to_iso);
         let interval_iso = meta.interval.map(period_to_iso);
-        let timestamps_json = match &meta.timestamps {
-            Some(ts) => Some(serde_json::to_string(ts)?),
-            None => None,
-        };
+        let timestamps_hash = meta.timestamps.as_deref().map(timestamps_hash);
         let percentiles_json = match &meta.percentiles {
             Some(p) => Some(serde_json::to_string(p)?),
             None => None,
@@ -777,7 +781,7 @@ impl MetadataStore {
             "INSERT INTO time_series_associations
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
-              timestamps_json, units, percentiles_json,
+              timestamps_hash, units, percentiles_json,
               element_type, element_shape, ext, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                      ?16, ?17, ?18, ?19)",
@@ -795,7 +799,7 @@ impl MetadataStore {
             horizon_iso,
             interval_iso,
             meta.count.map(|c| c as i64),
-            timestamps_json,
+            timestamps_hash.map(|h| h.to_vec()),
             meta.units,
             percentiles_json,
             meta.element_type.to_string(),
@@ -819,11 +823,35 @@ impl MetadataStore {
 
         // `insert` on the cache returns true the first time this batch sees the
         // set; every later row carrying it is a no-op we can skip outright.
-        if cache.seen.insert(f_hash) {
+        if cache.features.insert(f_hash) {
             Self::insert_feature_set(tx, &f_hash, &meta.features)?;
+        }
+        if let (Some(hash), Some(timestamps)) = (timestamps_hash, meta.timestamps.as_deref())
+            && cache.timestamps.insert(hash)
+        {
+            Self::insert_timestamp_set(tx, &hash, timestamps)?;
         }
 
         Ok(id)
+    }
+
+    /// Record a timestamp vector under its content hash, if it is not already
+    /// stored. `OR IGNORE` for the same reason feature sets use it: equal hash
+    /// implies equal vector (SHA-256 of the canonical encoding), so an ignored
+    /// conflict cannot hide a *different* vector under the same hash.
+    fn insert_timestamp_set(
+        tx: &Connection,
+        hash: &[u8; 32],
+        timestamps: &[DateTime<Utc>],
+    ) -> Result<()> {
+        tx.prepare_cached(
+            "INSERT OR IGNORE INTO timestamp_sets (timestamps_hash, data) VALUES (?1, ?2)",
+        )?
+        .execute(params![
+            hash.as_slice(),
+            crate::timestamps::encode(timestamps)
+        ])?;
+        Ok(())
     }
 
     /// Record a feature set under its content hash, if it is not already stored.
@@ -872,6 +900,25 @@ impl MetadataStore {
             "DELETE FROM feature_sets
              WHERE features_hash NOT IN
                    (SELECT DISTINCT features_hash FROM time_series_associations)",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    /// The timestamp-vector counterpart of [`Self::sweep_orphan_feature_sets`]:
+    /// delete the vectors no association references any more. Removing the last
+    /// `NonSequentialTimeSeries` on a time axis leaves its vector behind (they
+    /// are shared, so deletion cannot cascade); this reclaims it.
+    ///
+    /// The `NOT IN` subquery must exclude NULLs explicitly: every non-irregular
+    /// row has a NULL `timestamps_hash`, and `x NOT IN (…NULL…)` is never true,
+    /// so without the guard a store holding any other type would sweep nothing.
+    pub fn sweep_orphan_timestamp_sets(tx: &Connection) -> Result<usize> {
+        let n = tx.execute(
+            "DELETE FROM timestamp_sets
+             WHERE timestamps_hash NOT IN
+                   (SELECT DISTINCT timestamps_hash FROM time_series_associations
+                    WHERE timestamps_hash IS NOT NULL)",
             [],
         )?;
         Ok(n)
@@ -1013,14 +1060,41 @@ impl MetadataStore {
             .filter_map(|bytes| bytes_to_hash32(&bytes))
             .collect::<Vec<_>>();
         tx.execute("DELETE FROM time_series_associations", [])?;
-        // Clearing the store empties it, so every feature set is unreachable by
-        // construction. Drop them here rather than leaving the whole catalog's
-        // worth of orphans for a compaction that a cleared store may never get.
+        // Clearing the store empties it, so every feature set and timestamp
+        // vector is unreachable by construction. Drop them here rather than
+        // leaving the whole catalog's worth of orphans for a compaction that a
+        // cleared store may never get.
         tx.execute("DELETE FROM feature_sets", [])?;
+        tx.execute("DELETE FROM timestamp_sets", [])?;
         Ok(hashes)
     }
 
     pub fn list(&self, filter: &MetadataFilter) -> Result<Vec<TimeSeriesMetadata>> {
+        Ok(self.list_inner(filter, true)?.0)
+    }
+
+    /// [`Self::list`] without hydrating timestamp vectors, paired with the
+    /// distinct vectors the matched rows reference.
+    ///
+    /// For the reader build path, which needs every row's identity and array but
+    /// not a per-row copy of the shared time axis. Hydrating would clone one
+    /// vector per row — a cohort of 50k irregular series on a year of hourly
+    /// timestamps is gigabytes of identical data — while the reader wants the
+    /// axis exactly once. The returned hashes name the cohorts *after* the
+    /// in-memory features filter has run, so a caller can insist on one.
+    pub fn list_timeline_cohorts(
+        &self,
+        filter: &MetadataFilter,
+    ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
+        self.list_inner(filter, false)
+    }
+
+    /// Shared body of [`Self::list`] and [`Self::list_timeline_cohorts`].
+    fn list_inner(
+        &self,
+        filter: &MetadataFilter,
+        hydrate_timestamps: bool,
+    ) -> Result<(Vec<TimeSeriesMetadata>, Vec<[u8; 32]>)> {
         let (where_clause, params_vec) = filter.to_sql();
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec
             .iter()
@@ -1030,7 +1104,7 @@ impl MetadataStore {
         let sql = format!(
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution, length, horizon,
-                    interval, count, timestamps_json, units, percentiles_json,
+                    interval, count, timestamps_hash, units, percentiles_json,
                     element_type, element_shape, ext
              FROM time_series_associations {where_clause}"
         );
@@ -1038,6 +1112,31 @@ impl MetadataStore {
         let rows: Vec<([u8; 32], MetaRow)> = stmt
             .query_map(param_refs.as_slice(), parse_meta_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Hydrate timestamp vectors the same way features are hydrated below,
+        // and for the same reason: they are content-addressed, so each DISTINCT
+        // vector is fetched and decoded once no matter how many matched rows
+        // share it. Skipped outright unless some row actually carries one —
+        // only `NonSequentialTimeSeries` does, so a store without them never
+        // runs this query at all — and skipped entirely for a caller that only
+        // wants to know *which* vectors are referenced.
+        let mut timestamps_by_hash: HashMap<[u8; 32], Vec<DateTime<Utc>>> = HashMap::new();
+        if hydrate_timestamps && rows.iter().any(|(_, r)| r.timestamps_hash.is_some()) {
+            let ts_sql = format!(
+                "SELECT ts.timestamps_hash, ts.data FROM timestamp_sets ts
+                 WHERE ts.timestamps_hash IN
+                       (SELECT timestamps_hash FROM time_series_associations {where_clause})"
+            );
+            let mut ts_stmt = self.conn.prepare_cached(&ts_sql)?;
+            let mut ts_rows = ts_stmt.query(param_refs.as_slice())?;
+            while let Some(row) = ts_rows.next()? {
+                let hash = bytes_to_hash32(&row.get::<_, Vec<u8>>(0)?).ok_or_else(|| {
+                    TimeSeriesError::IntegrityError("timestamps_hash is not 32 bytes".into())
+                })?;
+                timestamps_by_hash
+                    .insert(hash, crate::timestamps::decode(&row.get::<_, Vec<u8>>(1)?)?);
+            }
+        }
 
         // Hydrate features in one query rather than one per row. Because feature
         // sets are content-addressed, this fetches each DISTINCT set once, no
@@ -1069,6 +1168,13 @@ impl MetadataStore {
         }
 
         let mut out = Vec::with_capacity(rows.len());
+        // Distinct timestamp vectors among the *surviving* rows, in first-seen
+        // order. Collected here rather than by a second query so the in-memory
+        // features filter above is accounted for. The set is what tests
+        // membership — a store whose irregular series each have their own axis
+        // would make a linear scan of `cohorts` quadratic in the listing size.
+        let mut cohorts: Vec<[u8; 32]> = Vec::new();
+        let mut seen_cohorts: HashSet<[u8; 32]> = HashSet::new();
         for (f_hash, partial) in rows {
             // Cloned, not removed: many rows legitimately share one set.
             let features = by_hash.get(&f_hash).cloned().unwrap_or_default();
@@ -1078,9 +1184,48 @@ impl MetadataStore {
             {
                 continue;
             }
-            out.push(partial.into_metadata(features));
+            let timestamps = match partial.timestamps_hash {
+                None => None,
+                Some(hash) => {
+                    if seen_cohorts.insert(hash) {
+                        cohorts.push(hash);
+                    }
+                    if !hydrate_timestamps {
+                        None
+                    } else {
+                        // A row naming a vector the table does not hold is a
+                        // damaged catalog, not an empty timeline: the series
+                        // cannot be read at all without its timestamps, so say
+                        // so here rather than handing back a row that fails
+                        // obscurely later.
+                        Some(timestamps_by_hash.get(&hash).cloned().ok_or_else(|| {
+                            TimeSeriesError::IntegrityError(format!(
+                                "association '{}' (owner {}) references timestamp vector {}, \
+                                 which the catalog does not hold",
+                                partial.name,
+                                partial.owner_id,
+                                crate::hash::hash_hex(&hash)
+                            ))
+                        })?)
+                    }
+                }
+            };
+            out.push(partial.into_metadata(features, timestamps));
         }
-        Ok(out)
+        Ok((out, cohorts))
+    }
+
+    /// The timestamp vector stored under `hash`, decoded once.
+    ///
+    /// [`TimeSeriesError::NotFound`] if the catalog holds no such vector, which
+    /// for a hash read off an association row means the two are out of step.
+    pub fn timestamps_for_hash(&self, hash: &[u8; 32]) -> Result<Vec<DateTime<Utc>>> {
+        let data: Option<Vec<u8>> = self
+            .conn
+            .prepare_cached("SELECT data FROM timestamp_sets WHERE timestamps_hash = ?1")?
+            .query_row(params![hash.as_slice()], |r| r.get(0))
+            .optional()?;
+        crate::timestamps::decode(&data.ok_or(TimeSeriesError::NotFound)?)
     }
 
     /// The identity of every association of `ts_type` — paired with its stored
@@ -2208,7 +2353,9 @@ struct MetaRow {
     horizon: Option<Period>,
     interval: Option<Period>,
     count: Option<usize>,
-    timestamps: Option<Vec<DateTime<Utc>>>,
+    /// The row's `timestamps_hash` column; the vector itself is hydrated from
+    /// `timestamp_sets` by the caller, which batches that lookup across rows.
+    timestamps_hash: Option<[u8; 32]>,
     units: Option<String>,
     percentiles: Option<Vec<f64>>,
     element_type: crate::types::element_type::ElementType,
@@ -2217,7 +2364,11 @@ struct MetaRow {
 }
 
 impl MetaRow {
-    fn into_metadata(self, features: Features) -> TimeSeriesMetadata {
+    fn into_metadata(
+        self,
+        features: Features,
+        timestamps: Option<Vec<DateTime<Utc>>>,
+    ) -> TimeSeriesMetadata {
         TimeSeriesMetadata {
             owner_id: self.owner_id,
             owner_type: self.owner_type,
@@ -2231,7 +2382,7 @@ impl MetaRow {
             horizon: self.horizon,
             interval: self.interval,
             count: self.count,
-            timestamps: self.timestamps,
+            timestamps,
             features,
             units: self.units,
             percentiles: self.percentiles,
@@ -2259,7 +2410,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let horizon_iso: Option<String> = row.get(10)?;
     let interval_iso: Option<String> = row.get(11)?;
     let count: Option<i64> = row.get(12)?;
-    let timestamps_json: Option<String> = row.get(13)?;
+    let timestamps_hash: Option<Vec<u8>> = row.get(13)?;
     let units: Option<String> = row.get(14)?;
     let percentiles_json: Option<String> = row.get(15)?;
     let element_type_str: String = row.get(16)?;
@@ -2306,12 +2457,20 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
-    let timestamps = timestamps_json
-        .map(|s| serde_json::from_str::<Vec<DateTime<Utc>>>(&s))
-        .transpose()
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Text, Box::new(e))
-        })?;
+    let timestamps_hash = timestamps_hash
+        .map(|bytes| {
+            bytes_to_hash32(&bytes).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Blob,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "timestamps_hash must be 32 bytes",
+                    )),
+                )
+            })
+        })
+        .transpose()?;
 
     let percentiles = percentiles_json
         .map(|s| serde_json::from_str::<Vec<f64>>(&s))
@@ -2384,7 +2543,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             horizon,
             interval,
             count: count.map(|c| c as usize),
-            timestamps,
+            timestamps_hash,
             units,
             percentiles,
             element_type,

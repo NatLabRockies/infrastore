@@ -16,4 +16,12 @@
 /// 0.13.0 replaced the `dtype` column with `element_type`, which spells the
 /// *logical* element type (`ElementType`) and derives the physical dtype from
 /// it. Stores written by 0.12.0 have no such column and are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.13.0";
+///
+/// 0.14.0 moved a `NonSequentialTimeSeries`'s timestamps out of the association
+/// row. The `timestamps_json` TEXT column became a `timestamps_hash` BLOB
+/// resolving into the new content-addressed `timestamp_sets` table, whose blobs
+/// hold the compact encoding in `crate::timestamps`; and the arrays of
+/// irregular series are now column-packed into `nsts_…` datasets keyed by that
+/// same hash, instead of one standalone `arr_…` dataset each. Both halves of a
+/// 0.13.0 store are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.14.0";

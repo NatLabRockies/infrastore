@@ -66,27 +66,47 @@ was derived from and has exactly the same features, so `transform_single_time_se
 **zero** feature rows — it reuses the set the source series already stored, just as it reuses the
 source's array.
 
+## The Timestamps Hash
+
+A `NonSequentialTimeSeries` carries its timestamps explicitly, and those are content-addressed too,
+by `timestamps_hash`: a domain tag followed by the vector's canonical encoding — the same bytes the
+catalog stores, so the hash addresses the stored form rather than a second serialization of it. Two
+vectors hash equal exactly when they hold the same instants in the same order.
+
+Like the features hash, it does double duty:
+
+- **It keys the stored vector.** The `timestamp_sets` table is keyed by it, so a time axis shared by
+  a thousand irregular series is stored **once**. Sharing is again the common case, not the rare
+  one: irregular series in this domain sit on a schedule — outage windows, market intervals, event
+  times — that many components observe together.
+- **It is the cohort key of the packed array layout.** Column-packing is only meaningful for arrays
+  on a common time axis, since the chunking is timestamp-major; the interned hash is precisely the
+  answer to "do these two series share one?", so the arrays of a cohort pool into one
+  `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` dataset. This is what lets a `StaticReader`
+  sweep irregular series a timestamp at a time, exactly as it does regular ones.
+
 ## Deduplication on Write
 
-Both hashes deduplicate, by the same mechanism, on the same write.
+All three hashes deduplicate, by the same mechanism, on the same write.
 
 **The array.** `Store` hashes the array and asks the backend whether that hash is already present:
 
 - **Present** → the existing array is reused; no new array bytes are written. Only a new metadata
   association row is inserted.
-- **Absent** → the array is written. A packed array (`SingleTimeSeries`) goes into the first free
-  column of a compatible `sts_{dtype}_{shape}_{length}_{res}` dataset, recording its hash in the
-  companion hash variable; a standalone array (`NonSequentialTimeSeries`, dense forecasts) becomes a
-  new `arr_{hash}` variable.
+- **Absent** → the array is written. A packed array (either static type) goes into the first free
+  column of a compatible `sts_…` / `nsts_…` dataset, recording its hash in the companion hash
+  variable; a standalone array (a dense forecast, or an irregular series alone on its time axis)
+  becomes a new `arr_{hash}` variable.
 
-**The feature set.** The association insert (`MetadataStore::insert_batched`) writes the feature set
-under its hash with an `INSERT OR IGNORE`, so a set some other association already stored is a no-op
-— equal hash implies equal set, so an ignored conflict cannot hide a _different_ set behind the same
-hash. Within one batch a `FeatureSetCache` remembers the sets already written, so a bulk add issues
-one write per _distinct_ set rather than a no-op statement per row per feature. This is what keeps a
-transform flat in feature count instead of linear in it.
+**The feature set and the timestamp vector.** The association insert
+(`MetadataStore::insert_batched`) writes each under its hash with an `INSERT OR IGNORE`, so one some
+other association already stored is a no-op — equal hash implies equal content, so an ignored
+conflict cannot hide a _different_ set behind the same hash. Within one batch a `SharedSetCache`
+remembers what has already been written, so a bulk add issues one write per _distinct_ set rather
+than a no-op statement per row. This is what keeps a transform flat in feature count instead of
+linear in it, and a cohort of irregular series flat in timestamp count.
 
-So storage cost scales with the number of _distinct_ arrays and _distinct_ feature sets, while
+So storage cost scales with the number of _distinct_ arrays, feature sets, and time axes, while
 metadata cost scales with the number of _associations_. A profile shared by a thousand generators
 costs one array, one feature set, and a thousand small rows.
 
@@ -102,26 +122,27 @@ Because arrays are shared, deleting an association cannot blindly delete its arr
 
 This keeps shared arrays alive until the last referencing key is gone.
 
-### Feature sets are the deliberate exception
+### The shared catalog rows are the deliberate exception
 
-Feature sets are shared by the same mechanism but are **not** reference-counted, and the symmetry
-stops there. Counting references on every delete would make deletion pay for a scan the array side
-already pays for, to reclaim a handful of tiny rows; the schema instead accepts unreachable rows and
-sweeps them in bulk. Concretely:
+Feature sets and timestamp vectors are shared by the same mechanism but are **not**
+reference-counted, and the symmetry stops there. Counting references on every delete would make
+deletion pay for a scan the array side already pays for, to reclaim a handful of rows; the schema
+instead accepts unreachable rows and sweeps them in bulk. Concretely:
 
 - **No foreign key, no `ON DELETE CASCADE`.** A cascade would be actively wrong: rows are shared, so
   deleting one association must not delete a set another association still uses.
-- **Deleting the last user leaves the set unreachable**, rather than deleting it — the same
+- **Deleting the last user leaves the row unreachable**, rather than deleting it — the same
   end-state as the HDF5 side's dead standalone variables, which also linger.
-- **`Store::compact` sweeps them.** It deletes every feature set no association references any more
-  and reports the row count as `feature_sets_reclaimed`. This is the one thing compaction physically
-  removes.
-- **Clearing the whole store drops them all outright**, since a cleared store orphans every set by
+- **`Store::compact` sweeps them.** It deletes every feature set and every timestamp vector no
+  association references any more, reporting the row counts as `feature_sets_reclaimed` and
+  `timestamp_sets_reclaimed`. These are the only things compaction physically removes.
+- **Clearing the whole store drops them all outright**, since a cleared store orphans every row by
   construction and may never see a compaction.
 
-The practical consequence: an unreachable feature set is never _read_ (every lookup goes through an
-association's `features_hash`), so it costs bytes, not correctness — and a re-added association with
-the same features silently adopts the row that was still sitting there.
+The practical consequence: an unreachable row is never _read_ (every lookup goes through an
+association's `features_hash` or `timestamps_hash`), so it costs bytes, not correctness — and a
+re-added association with the same features or timestamps silently adopts the row that was still
+sitting there.
 
 ## Discovering Shared Series
 

@@ -418,8 +418,9 @@ class Store:
     # -- readers --
     def build_static_reader(
         self,
-        resolution: Period,
+        resolution: Period | None = None,
         *,
+        time_series_type: TimeSeriesType | str | None = None,
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,

@@ -8,11 +8,12 @@ use std::ops::Range;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
-use crate::types::period::Period;
 
 pub mod common;
 pub mod hdf5;
 pub mod memory;
+
+pub(crate) use common::PackGroup;
 
 // The concrete backends and the trait seam are internal: the public surface is
 // `Store`, which owns a boxed backend. (The `common` module stays `pub` so
@@ -137,6 +138,12 @@ pub struct CompactionReport {
     /// unreachable rows until a compaction sweeps them, exactly as deleted
     /// arrays leave unreachable HDF5 datasets behind.
     pub feature_sets_reclaimed: usize,
+    /// Content-addressed timestamp vectors in the SQLite catalog that no
+    /// association referenced any more, and were deleted. Shared and swept for
+    /// exactly the same reasons as `feature_sets_reclaimed`: removing the last
+    /// `NonSequentialTimeSeries` on a time axis leaves that axis behind as an
+    /// unreachable row until a compaction reclaims it.
+    pub timestamp_sets_reclaimed: usize,
 }
 
 /// The result of [`crate::Store::verify_integrity`]: one message per array whose
@@ -206,25 +213,44 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
     /// data is reused for content addressing) and `false` is returned; a write
     /// of new content returns `true`. The array's dtype + shape travel with it;
-    /// `resolution` keys the packed storage pool.
+    /// `group` names the time axis whose packed pool it joins, and is ignored
+    /// for the standalone layouts.
     ///
     /// `layout` selects the physical placement: [`ArrayLayout::Packed`]
-    /// column-packs with other same-shaped arrays (SingleTimeSeries / DST),
-    /// while the standalone variants store a self-contained multi-dimensional
-    /// variable (irregular series and native forecasts), differing only in how
-    /// the variable is chunked.
+    /// column-packs with the other arrays on `group`'s time axis, while the
+    /// standalone variants store a self-contained multi-dimensional variable
+    /// (native forecasts, and irregular series on an unshared axis), differing
+    /// only in how the variable is chunked.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution: Period,
+        group: PackGroup,
         layout: ArrayLayout,
     ) -> Result<bool>;
+
+    /// Whether a packed pool for `group` at this `(dtype, element_shape,
+    /// length)` already exists.
+    ///
+    /// The write path asks before packing an irregular series: a pool is a win
+    /// only once several columns share it (its timestamp-major chunking spreads
+    /// one array over `length` chunks), so a series whose time axis nothing else
+    /// uses is better off standalone. The default is `false` — a backend with no
+    /// packed representation has no pools to join.
+    fn has_pack_group(
+        &self,
+        _dtype: Dtype,
+        _element_shape: &[usize],
+        _length: usize,
+        _group: PackGroup,
+    ) -> bool {
+        false
+    }
 
     /// Insert a block of same-shaped packed arrays in one operation.
     ///
     /// `hashes[i]` is the content hash of `arrays[i]`; every array must share one
-    /// `(dtype, element_shape, length)` and the given `resolution` (the caller —
+    /// `(dtype, element_shape, length)` and the given `group` (the caller —
     /// the buffered bulk-add — guarantees this by grouping). Hashes already
     /// stored, and duplicates within the block, are written only once (content
     /// addressing); the returned `Vec<bool>` is aligned to `hashes` and is `true`
@@ -239,12 +265,12 @@ pub(crate) trait StorageBackend: Send + Sync {
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<Vec<bool>> {
         hashes
             .iter()
             .zip(arrays)
-            .map(|(hash, data)| self.put_array(hash, data, resolution, ArrayLayout::Packed))
+            .map(|(hash, data)| self.put_array(hash, data, group, ArrayLayout::Packed))
             .collect()
     }
 

@@ -11,6 +11,7 @@ import pytest
 from infrastore import (
     Deterministic,
     InvalidParameterError,
+    NonSequentialTimeSeries,
     OwnerCategory,
     SingleTimeSeries,
     Store,
@@ -140,6 +141,65 @@ def test_static_reader():
     # Off-grid raises the concrete type, not just "something".
     with pytest.raises(InvalidParameterError):
         store.static_read(reader, _t0() + timedelta(minutes=30))
+
+    assert grid["time_series_type"] == "SingleTimeSeries"
+
+
+def test_static_reader_over_an_irregular_cohort():
+    """Irregular series sharing one timestamp vector read columnar too: the
+    cohort is a real timeline, just an explicit one."""
+    store = Store.create(in_memory=True)
+    # Three instants with no constant step between them.
+    stamps = [_t0(), _t0() + timedelta(minutes=37), _t0() + timedelta(hours=9)]
+    for owner, base in ((2, 20.0), (1, 10.0)):
+        data = np.arange(len(stamps), dtype=np.float64) + base
+        store.add_time_series(
+            owner_id=owner,
+            owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=NonSequentialTimeSeries(stamps, data, "outage"),
+        )
+
+    reader = store.build_static_reader(
+        time_series_type=TimeSeriesType.NonSequentialTimeSeries
+    )
+    grid = reader.grid()
+    assert grid["time_series_type"] == "NonSequentialTimeSeries"
+    assert grid["length"] == 3
+    # No constant step to report; the instants themselves are the timeline.
+    assert grid["resolution"] is None
+    assert reader.timestamps() == stamps
+
+    for index, at in enumerate(stamps):
+        store.static_read(reader, at)
+        np.testing.assert_array_equal(
+            reader.group_values(0), np.array([10.0 + index, 20.0 + index])
+        )
+
+    # Between two instants there is no value to read.
+    with pytest.raises(InvalidParameterError):
+        store.static_read(reader, _t0() + timedelta(minutes=1))
+    # An irregular series has no resolution, so filtering on one is refused.
+    with pytest.raises(InvalidParameterError):
+        store.build_static_reader(
+            timedelta(hours=1),
+            time_series_type=TimeSeriesType.NonSequentialTimeSeries,
+        )
+    # And a series on a different axis cannot join the cohort.
+    store.add_time_series(
+        owner_id=3,
+        owner_type="Generator",
+        owner_category=OwnerCategory.Component,
+        time_series=NonSequentialTimeSeries(
+            [_t0(), _t0() + timedelta(minutes=38), _t0() + timedelta(hours=9)],
+            np.array([1.0, 2.0, 3.0]),
+            "outage",
+        ),
+    )
+    with pytest.raises(InvalidParameterError):
+        store.build_static_reader(
+            time_series_type=TimeSeriesType.NonSequentialTimeSeries
+        )
 
 
 def test_forecast_reader():

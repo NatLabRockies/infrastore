@@ -1,4 +1,4 @@
-//! Canonical SHA-256 hashing for arrays and feature maps.
+//! Canonical SHA-256 hashing for arrays, feature maps, and timestamp vectors.
 //!
 //! Stability of these hashes is part of the public on-disk contract. Any change
 //! here that perturbs a stored hash is a format-breaking change and must bump
@@ -6,6 +6,7 @@
 //! the SHA-256 of one fixed array as a tripwire; it does not cover every dtype,
 //! shape, or the feature-map domain, so it is not a substitute for that rule.
 
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::types::array::{Dtype, TypedArray};
@@ -119,6 +120,26 @@ pub fn features_hash(features: &Features) -> [u8; 32] {
     out
 }
 
+/// Compute the canonical content hash for an explicit timestamp vector.
+///
+/// Domain: the canonical encoding from [`crate::timestamps`], which is exactly
+/// what the `timestamp_sets` row holds — so the hash addresses the stored bytes
+/// rather than a second, parallel serialization of the same values. Two vectors
+/// hash equal iff they hold the same timestamps in the same order.
+///
+/// This is what lets many `NonSequentialTimeSeries` share one stored time axis,
+/// and it doubles as the cohort key the packed on-disk layout groups their
+/// arrays by (see [`crate::storage::common`]).
+pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"timestamps\0");
+    hasher.update(crate::timestamps::encode(timestamps));
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 /// Hex-encode a 32-byte hash for storage in TEXT columns / HDF5 hash datasets.
 pub fn hash_hex(hash: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
@@ -196,6 +217,23 @@ mod tests {
         b.insert("model_year".into(), FeatureValue::Int(2030));
 
         assert_eq!(features_hash(&a), features_hash(&b));
+    }
+
+    #[test]
+    fn timestamps_hash_addresses_the_vector() {
+        use chrono::{Duration, TimeZone};
+        let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        let a: Vec<DateTime<Utc>> = (0..4).map(|k| t0 + Duration::hours(k)).collect();
+        let b = a.clone();
+        assert_eq!(timestamps_hash(&a), timestamps_hash(&b));
+        // Order is part of the identity, and so is an empty vector's emptiness.
+        let mut reversed = a.clone();
+        reversed.reverse();
+        assert_ne!(timestamps_hash(&a), timestamps_hash(&reversed));
+        assert_ne!(timestamps_hash(&a), timestamps_hash(&[]));
+        // Domain separation: a timestamp vector never collides with a feature
+        // set or an array, whatever the payload bytes.
+        assert_ne!(timestamps_hash(&[]), features_hash(&Features::new()));
     }
 
     #[test]

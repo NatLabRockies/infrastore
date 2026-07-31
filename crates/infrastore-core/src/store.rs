@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, ParentChildAssociation,
-    ParentChildFilter, SeriesFamily, SupplementalAttributeAssociation, SupplementalAttributeFilter,
+    AssociationIdentity, MetadataFilter, MetadataStore, ParentChildAssociation, ParentChildFilter,
+    SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
     SupplementalAttributeSummaryRow, TypeMatch, references_to_in_tx, typed_references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
-    MemoryBackend, StorageBackend,
+    MemoryBackend, PackGroup, StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
 use crate::types::element_type::ElementType;
@@ -525,22 +525,31 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
 
+        // Derive (and validate) every item's parts before writing anything, so a
+        // bad request part-way through the batch cannot leave an array behind.
+        let mut parts: Vec<RequestParts> = items
+            .iter()
+            .map(build_request_parts)
+            .collect::<Result<_>>()?;
+        resolve_irregular_layouts(&*self.backend, &items, &mut parts);
+
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.savepoint()?;
         let mut keys = Vec::with_capacity(items.len());
-        // Feature sets are shared, and a batch typically spans only a handful of
-        // distinct ones; write each once rather than once per item.
-        let mut feature_sets = FeatureSetCache::default();
+        // Feature sets and timestamp vectors are shared, and a batch typically
+        // spans only a handful of distinct ones; write each once rather than
+        // once per item.
+        let mut shared_sets = SharedSetCache::default();
 
-        for item in &items {
+        for (item, part) in items.iter().zip(parts) {
             let RequestParts {
                 hash,
-                resolution,
+                group,
                 layout,
                 meta,
                 key,
-            } = build_request_parts(item)?;
+            } = part;
             let data = request_array(item);
 
             let already_present = self.backend.contains(&hash)?;
@@ -551,12 +560,12 @@ impl Store {
                 already_present,
                 "backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution, layout)?;
+            self.backend.put_array(&hash, data, group, layout)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
 
-            match insert_association(&tx, &meta, &mut feature_sets) {
+            match insert_association(&tx, &meta, &mut shared_sets) {
                 Ok(()) => {
                     keys.push(key);
                 }
@@ -611,42 +620,37 @@ impl Store {
         }
 
         // Derive parts (validates + hashes) for every item, aligned to `items`.
-        let parts: Vec<RequestParts> = items
+        let mut parts: Vec<RequestParts> = items
             .iter()
             .map(build_request_parts)
             .collect::<Result<_>>()?;
+        resolve_irregular_layouts(&*self.backend, &items, &mut parts);
         let mut staged_hashes: Vec<[u8; 32]> = Vec::new();
 
-        // Group packed inputs by (dtype, element_shape, length, resolution); each
-        // group is written as one or more batch-sized blocks. Standalone inputs
-        // (irregular series and dense forecasts) keep the per-array path.
-        let mut packed_groups: HashMap<(Dtype, Vec<usize>, usize, Period), Vec<usize>> =
-            HashMap::new();
+        // Group packed inputs by their pool — `(dtype, element_shape, length)`
+        // plus the time axis — and write each as one or more batch-sized blocks.
+        // Standalone inputs (dense forecasts, and irregular series on an
+        // unshared axis) keep the per-array path.
+        let mut packed_groups: HashMap<PoolKey, Vec<usize>> = HashMap::new();
         for (i, p) in parts.iter().enumerate() {
             let array = request_array(&items[i]);
             if p.layout.is_packed() {
                 packed_groups
-                    .entry((
-                        array.dtype,
-                        array.element_shape().to_vec(),
-                        array.length(),
-                        p.resolution,
-                    ))
+                    .entry(pool_key(array, p.group))
                     .or_default()
                     .push(i);
             } else {
                 let already = self.backend.contains(&p.hash)?;
-                self.backend
-                    .put_array(&p.hash, array, p.resolution, p.layout)?;
+                self.backend.put_array(&p.hash, array, p.group, p.layout)?;
                 if !already {
                     staged_hashes.push(p.hash);
                 }
             }
         }
-        for (group, idxs) in &packed_groups {
+        for (pool, idxs) in &packed_groups {
             let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
             let arrays: Vec<&TypedArray> = idxs.iter().map(|&i| request_array(&items[i])).collect();
-            let written = self.backend.put_packed_block(&hashes, &arrays, group.3)?;
+            let written = self.backend.put_packed_block(&hashes, &arrays, pool.3)?;
             for (j, &i) in idxs.iter().enumerate() {
                 if written[j] {
                     staged_hashes.push(parts[i].hash);
@@ -656,9 +660,9 @@ impl Store {
 
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.savepoint()?;
-        let mut feature_sets = FeatureSetCache::default();
+        let mut shared_sets = SharedSetCache::default();
         for p in &parts {
-            if let Err(e) = insert_association(&tx, &p.meta, &mut feature_sets) {
+            if let Err(e) = insert_association(&tx, &p.meta, &mut shared_sets) {
                 drop(tx);
                 for staged in &staged_hashes {
                     let _ = self.backend.remove_array(staged);
@@ -1294,37 +1298,83 @@ impl Store {
             .collect()
     }
 
-    /// Build a [`StaticReader`] over the `SingleTimeSeries` matching `filter`.
+    /// Build a [`StaticReader`] over the static series matching `filter`.
     ///
-    /// The filter must pin a resolution (one resolution per reader). All matched
-    /// series must share one grid (`initial_timestamp` + `length`); this is
-    /// validated here and errors on divergence, which is what lets the per-read
-    /// path skip presence checks. The reader is then driven with
-    /// [`Self::static_read`]. See [`crate::reader`].
+    /// Every column in a reader must share one timeline, so which type the
+    /// filter names decides what has to hold:
+    ///
+    /// * `SingleTimeSeries` (the default): the filter must pin a resolution —
+    ///   one resolution per reader — and every matched series must share one
+    ///   grid (`initial_timestamp` + `length`).
+    /// * `NonSequentialTimeSeries`: every matched series must lie on one
+    ///   *timestamp vector*. Irregular series carry no resolution, so a
+    ///   resolution filter is rejected rather than silently matching nothing.
+    ///   The cohort is resolved from the catalog's interned vectors, which is
+    ///   also what pools those arrays on disk — so a reader over a cohort reads
+    ///   each timestamp as one packed hyperslab, exactly as for a regular grid.
+    ///
+    /// Divergence is an error either way, which is what lets the per-read path
+    /// skip presence checks. Drive the reader with [`Self::static_read`]. See
+    /// [`crate::reader`].
     pub fn build_static_reader(&self, mut filter: ListFilter) -> Result<StaticReader> {
-        if filter.resolution.is_none() {
-            return Err(TimeSeriesError::InvalidParameter(
-                "build_static_reader requires a resolution filter (one resolution per reader)"
-                    .into(),
-            ));
-        }
-        // SingleTimeSeries-only; accept an explicit matching type, reject others.
-        match filter.time_series_type {
-            None | Some(TimeSeriesType::SingleTimeSeries) => {
-                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
+        let ts_type = filter
+            .time_series_type
+            .unwrap_or(TimeSeriesType::SingleTimeSeries);
+        filter.time_series_type = Some(ts_type);
+        match ts_type {
+            TimeSeriesType::SingleTimeSeries => {
+                if filter.resolution.is_none() {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "build_static_reader requires a resolution filter for SingleTimeSeries \
+                         (one resolution per reader)"
+                            .into(),
+                    ));
+                }
+                let rows = self.list_time_series(filter)?;
+                let timeline = crate::reader::regular_timeline(&rows)?;
+                crate::reader::build_groups(timeline, rows)
             }
-            Some(other) => {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "build_static_reader handles SingleTimeSeries only; got {}",
-                    other.as_str()
-                )));
+            TimeSeriesType::NonSequentialTimeSeries => {
+                if filter.resolution.is_some() {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "build_static_reader takes no resolution filter for \
+                         NonSequentialTimeSeries: an irregular series has none, so the filter \
+                         would match nothing. Its timeline is the timestamp vector its cohort \
+                         shares."
+                            .into(),
+                    ));
+                }
+                // Rows without their (identical, per-row) timestamp copies, plus
+                // the distinct vectors they reference: one cohort is the whole
+                // requirement, and the vector itself is then decoded once.
+                let (rows, cohorts) = self.metadata.list_timeline_cohorts(&filter.into())?;
+                let hash = match cohorts.as_slice() {
+                    [hash] => *hash,
+                    [] => {
+                        return Err(TimeSeriesError::InvalidParameter(
+                            "build_static_reader: no NonSequentialTimeSeries match the filter"
+                                .into(),
+                        ));
+                    }
+                    many => {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "StaticReader requires a uniform timeline; the {} matched \
+                             NonSequentialTimeSeries lie on {} different timestamp vectors. \
+                             Narrow the filter (by name, owner, or features) to one of them.",
+                            rows.len(),
+                            many.len()
+                        )));
+                    }
+                };
+                let timestamps = self.metadata.timestamps_for_hash(&hash)?;
+                crate::reader::build_groups(crate::reader::Timeline::Irregular { timestamps }, rows)
             }
+            other => Err(TimeSeriesError::InvalidParameter(format!(
+                "build_static_reader handles the static types (SingleTimeSeries / \
+                 NonSequentialTimeSeries); got {}",
+                other.as_str()
+            ))),
         }
-        let rows = self.list_time_series(filter)?;
-        let (initial, resolution, length, groups) = crate::reader::build_groups(rows)?;
-        Ok(StaticReader::from_parts(
-            initial, resolution, length, groups,
-        ))
     }
 
     /// Read the value of every series in `reader` at timestamp `at`, filling the
@@ -1840,7 +1890,7 @@ impl Store {
         // feature set, and sources overwhelmingly share sets with each other, so
         // the feature-set writes collapse to a handful regardless of how many
         // series are transformed.
-        let mut feature_sets = FeatureSetCache::default();
+        let mut feature_sets = SharedSetCache::default();
         for meta in &new_metas {
             if let Err(e) = MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
                 drop(tx);
@@ -2382,6 +2432,7 @@ impl Store {
         let mut report = self.backend.compact()?;
         let tx = self.metadata.savepoint()?;
         report.feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
+        report.timestamp_sets_reclaimed = MetadataStore::sweep_orphan_timestamp_sets(&tx)?;
         tx.commit()?;
         Ok(report)
     }
@@ -2483,36 +2534,45 @@ impl Store {
             let mut backend = Hdf5Backend::create(path, self.compression())?;
             // Plan each distinct array's layout before writing: packed is only
             // valid for arrays that every referencing association reads as a
-            // series along axis 0 (SingleTimeSeries and its derived DST views).
-            // Dense forecasts and non-sequential series must stay standalone —
-            // the forecast window read path rejects packed arrays.
-            let mut plans: HashMap<[u8; 32], (ArrayLayout, Period)> = HashMap::new();
-            for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
-                let layout = array_layout_for(key.time_series_type());
-                // The resolution only groups the packed on-disk layout; reads
-                // locate arrays by content hash, so the fallback for
-                // resolution-less (non-sequential) series is harmless.
-                let resolution = key
-                    .resolution()
-                    .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
+            // series along axis 0 (the static types). Dense forecasts must stay
+            // standalone — the forecast window read path rejects packed arrays.
+            let mut plans: HashMap<[u8; 32], ArrayPlan> = HashMap::new();
+            for meta in self.list_time_series(ListFilter::default())? {
+                let plan = ArrayPlan {
+                    layout: array_layout_for(meta.time_series_type),
+                    pool: pool_key_of(&meta),
+                };
                 plans
-                    .entry(hash)
+                    .entry(meta.data_hash)
                     // A hash shared across keys must use a standalone layout if
                     // any referencing key is standalone (the window read rejects
                     // packed); the first non-packed layout wins and sticks.
-                    .and_modify(|(l, _)| {
-                        if l.is_packed() {
-                            *l = layout;
+                    .and_modify(|existing| {
+                        if existing.layout.is_packed() {
+                            existing.layout = plan.layout;
                         }
                     })
-                    .or_insert((layout, resolution));
+                    .or_insert(plan);
             }
-            for (hash, (layout, resolution)) in &plans {
+            // Same bet as the write path: a pool only pays once several arrays
+            // share it, and here the whole store is in hand, so cohort sizes are
+            // exact rather than batch-local.
+            let mut cohort: HashMap<PoolKey, usize> = HashMap::new();
+            for plan in plans.values().filter(|p| p.layout.is_packed()) {
+                *cohort.entry(plan.pool.clone()).or_default() += 1;
+            }
+            for (hash, plan) in &plans {
+                let mut layout = plan.layout;
+                if matches!(plan.pool.3, PackGroup::Irregular(_))
+                    && cohort.get(&plan.pool).copied().unwrap_or(0) < 2
+                {
+                    layout = ArrayLayout::Standalone;
+                }
                 let element_type = self.metadata.element_type_for_hash(hash)?;
                 let array = self
                     .backend
                     .get_array(hash, element_type.physical_dtype())?;
-                backend.put_array(hash, &array, *resolution, *layout)?;
+                backend.put_array(hash, &array, plan.pool.3, layout)?;
             }
             backend.flush()?;
         }
@@ -2597,14 +2657,25 @@ impl Drop for BulkAdd<'_> {
 /// block-write path ([`Store::bulk_add`]).
 struct RequestParts {
     hash: [u8; 32],
-    resolution: Period,
+    /// The packed pool this array belongs in — its resolution for a regular
+    /// series, its interned timestamp vector for an irregular one. Carried even
+    /// when `layout` is standalone (where the backend ignores it), so the write
+    /// paths can group by it before deciding.
+    group: PackGroup,
     layout: ArrayLayout,
     meta: TimeSeriesMetadata,
     key: TimeSeriesKey,
 }
 
-/// The physical storage layout for a time-series type's backing array. The
-/// count-axis choices for dense forecasts mirror the forecast reader's
+/// The physical storage layout for a time-series type's backing array.
+///
+/// Both static types pack: their arrays are read a timestamp at a time across
+/// every series, which is exactly what the timestamp-major packed chunking
+/// serves. They differ only in what pools them — see [`PackGroup`] — and an
+/// irregular series can still be demoted to standalone when nothing shares its
+/// time axis (see [`resolve_irregular_layouts`]).
+///
+/// The count-axis choices for dense forecasts mirror the forecast reader's
 /// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
 /// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
 /// axis the windows lie along.
@@ -2613,7 +2684,7 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
         TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {
             ArrayLayout::Packed
         }
-        TimeSeriesType::NonSequentialTimeSeries => ArrayLayout::Standalone,
+        TimeSeriesType::NonSequentialTimeSeries => ArrayLayout::Packed,
         TimeSeriesType::Deterministic => ArrayLayout::StandaloneWindowed { count_axis: 1 },
         TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => {
             ArrayLayout::StandaloneWindowed { count_axis: 2 }
@@ -2622,20 +2693,20 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
 }
 
 /// Derive the [`RequestParts`] for one request, validating where required
-/// (`NonSequentialTimeSeries` timestamps). `SingleTimeSeries` is packed; every
-/// other type is stored standalone.
+/// (`NonSequentialTimeSeries` timestamps). The static types are packed; the
+/// forecasts are stored standalone.
 fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     // Every write funnels through here (per-column adds and buffered bulk adds
     // alike), which makes it the one place the reserved-feature-name rule has
     // to hold.
     validate_features(&item.features)?;
     let element_type = resolve_element_type(item)?;
-    let (hash, resolution, layout, meta, key) = match &item.data {
+    let (hash, group, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
             let hash = array_hash(&single.data);
             (
                 hash,
-                single.resolution,
+                PackGroup::Regular(single.resolution),
                 array_layout_for(TimeSeriesType::SingleTimeSeries),
                 TimeSeriesMetadata {
                     owner_id: item.owner_id,
@@ -2674,9 +2745,10 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
             let hash = array_hash(&non_sequential.data);
             (
                 hash,
-                // Non-sequential series are stored standalone, so the
-                // resolution (which keys the packed pool) is unused.
-                Period::Months(0),
+                // An irregular series has no resolution to pool by; its cohort
+                // is every series on the same explicit time axis, which the
+                // catalog already content-addresses.
+                PackGroup::Irregular(crate::hash::timestamps_hash(&non_sequential.timestamps)),
                 array_layout_for(TimeSeriesType::NonSequentialTimeSeries),
                 TimeSeriesMetadata {
                     owner_id: item.owner_id,
@@ -2714,7 +2786,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         // [`Store::transform_single_time_series`].
         TimeSeriesData::Deterministic(det) => (
             array_hash(&det.data),
-            det.resolution,
+            PackGroup::Regular(det.resolution),
             array_layout_for(TimeSeriesType::Deterministic),
             forecast_metadata(
                 item,
@@ -2742,7 +2814,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         ),
         TimeSeriesData::Probabilistic(prob) => (
             array_hash(&prob.data),
-            prob.resolution,
+            PackGroup::Regular(prob.resolution),
             array_layout_for(TimeSeriesType::Probabilistic),
             forecast_metadata(
                 item,
@@ -2770,7 +2842,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         ),
         TimeSeriesData::Scenarios(scen) => (
             array_hash(&scen.data),
-            scen.resolution,
+            PackGroup::Regular(scen.resolution),
             array_layout_for(TimeSeriesType::Scenarios),
             forecast_metadata(
                 item,
@@ -2799,11 +2871,94 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     };
     Ok(RequestParts {
         hash,
-        resolution,
+        group,
         layout,
         meta,
         key,
     })
+}
+
+/// What a packed pool is keyed by: the array's physical shape plus the time
+/// axis it lies on. Two arrays land in the same HDF5 dataset iff these match.
+type PoolKey = (Dtype, Vec<usize>, usize, PackGroup);
+
+/// One distinct array's placement, as planned by [`Store::persist_to`] before it
+/// rewrites an in-memory store to disk.
+struct ArrayPlan {
+    layout: ArrayLayout,
+    pool: PoolKey,
+}
+
+/// The pool a stored row's array belongs to, read off its catalog metadata.
+///
+/// An irregular row is pooled by its timestamp vector and a regular one by its
+/// resolution. A row with neither — a shape no static or forecast type produces
+/// — takes an arbitrary resolution: it can only be standalone, where the group
+/// is ignored, and reads locate arrays by content hash regardless.
+fn pool_key_of(meta: &TimeSeriesMetadata) -> PoolKey {
+    let group = match (&meta.timestamps, meta.resolution) {
+        (Some(timestamps), _) => PackGroup::Irregular(crate::hash::timestamps_hash(timestamps)),
+        (None, Some(resolution)) => PackGroup::Regular(resolution),
+        (None, None) => PackGroup::Regular(Period::fixed(chrono::Duration::nanoseconds(1))),
+    };
+    (
+        meta.element_type.physical_dtype(),
+        meta.element_shape.clone(),
+        meta.length.unwrap_or(0),
+        group,
+    )
+}
+
+fn pool_key(array: &TypedArray, group: PackGroup) -> PoolKey {
+    (
+        array.dtype,
+        array.element_shape().to_vec(),
+        array.length(),
+        group,
+    )
+}
+
+/// Settle each irregular request's layout, demoting the ones whose time axis
+/// nothing else shares back to standalone.
+///
+/// Packing is what makes a timestamp-major sweep across components cheap, and it
+/// is the right default for irregular series precisely because they tend to
+/// arrive in cohorts on one event timeline. But it is a bet that the pool will
+/// be more than one column wide: a packed dataset spreads a single array across
+/// `length` chunks, so a cohort of one pays far more per-chunk overhead than the
+/// one standalone dataset it replaces. This settles the bet from what is
+/// knowable at write time — how many requests in this batch share the axis, plus
+/// whether the store already holds a pool for it.
+///
+/// Getting it "wrong" costs space, never correctness: reads resolve an array by
+/// content hash and handle either layout, and a group can hold columns of both
+/// (see `Hdf5Backend::read_index_locked`). So a cohort that arrives one series
+/// at a time simply leaves its first member standalone and packs the rest.
+fn resolve_irregular_layouts(
+    backend: &dyn StorageBackend,
+    items: &[AddRequest],
+    parts: &mut [RequestParts],
+) {
+    let mut in_batch: HashMap<PoolKey, usize> = HashMap::new();
+    for (item, part) in items.iter().zip(parts.iter()) {
+        if matches!(part.group, PackGroup::Irregular(_)) {
+            *in_batch
+                .entry(pool_key(request_array(item), part.group))
+                .or_default() += 1;
+        }
+    }
+    for (item, part) in items.iter().zip(parts.iter_mut()) {
+        if !matches!(part.group, PackGroup::Irregular(_)) {
+            continue;
+        }
+        let array = request_array(item);
+        let key = pool_key(array, part.group);
+        let shared = in_batch.get(&key).copied().unwrap_or(0) > 1
+            || backend.has_pack_group(key.0, &key.1, key.2, key.3);
+        if !shared {
+            part.layout = ArrayLayout::Standalone;
+        }
+    }
 }
 
 /// The value array backing a request, regardless of time-series type.
@@ -2825,7 +2980,7 @@ fn request_array(item: &AddRequest) -> &TypedArray {
 fn insert_association(
     tx: &rusqlite::Connection,
     meta: &TimeSeriesMetadata,
-    cache: &mut FeatureSetCache,
+    cache: &mut SharedSetCache,
 ) -> Result<()> {
     let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
         crate::metadata::forecast_family_conflict(

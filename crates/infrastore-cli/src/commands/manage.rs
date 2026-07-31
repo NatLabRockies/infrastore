@@ -329,6 +329,7 @@ pub fn compact(
             "slots_reclaimed": report.slots_reclaimed,
             "datasets_dropped": report.datasets_dropped,
             "feature_sets_reclaimed": report.feature_sets_reclaimed,
+            "timestamp_sets_reclaimed": report.timestamp_sets_reclaimed,
         }))?,
         _ => {
             let headers = vec!["Metric".to_string(), "Value".to_string()];
@@ -344,6 +345,10 @@ pub fn compact(
                 vec![
                     "feature_sets_reclaimed".to_string(),
                     report.feature_sets_reclaimed.to_string(),
+                ],
+                vec![
+                    "timestamp_sets_reclaimed".to_string(),
+                    report.timestamp_sets_reclaimed.to_string(),
                 ],
             ];
             if format == crate::output::Format::Csv {

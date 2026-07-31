@@ -65,7 +65,7 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
     let mut reader = store
         .build_static_reader(ListFilter::new().resolution(Period::Months(1)))
         .unwrap();
-    assert_eq!(reader.resolution(), Period::Months(1));
+    assert_eq!(reader.resolution(), Some(Period::Months(1)));
     store
         .static_read(
             &mut reader,
@@ -908,4 +908,117 @@ fn static_consistency_is_checked_per_resolution() {
         .unwrap();
     assert_eq!(ok.len(), 1);
     assert_eq!(ok[0].length, 8);
+}
+
+/// Timestamp vectors are content-addressed and shared, exactly like feature
+/// sets: a cohort of irregular series on one time axis stores that axis once,
+/// and it is reclaimed only when the last of them goes.
+#[test]
+fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
+    let mut store = create_store(None, true).unwrap();
+    let stamps: Vec<_> = (0..64)
+        .map(|k| {
+            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7 + k % 3)
+        })
+        .collect();
+
+    let mut keys = Vec::new();
+    for owner in 1..=8i64 {
+        let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
+        let ns = NonSequentialTimeSeries::new(
+            stamps.clone(),
+            TypedArray::from_f64(vec![values.len()], &values),
+            "outage",
+        )
+        .unwrap();
+        keys.push(
+            store
+                .add_time_series(
+                    owner,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::NonSequentialTimeSeries(ns),
+                    Features::new(),
+                )
+                .unwrap(),
+        );
+    }
+
+    // Every series reads back its own copy of the shared axis.
+    for key in &keys {
+        match store.get_time_series(key.identity(), None).unwrap() {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        }
+    }
+
+    // Still referenced by all eight, so there is nothing to sweep; and removing
+    // seven of them leaves the axis alive for the eighth.
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+    for key in &keys[..7] {
+        store.remove_time_series(key.identity()).unwrap();
+    }
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+    match store.get_time_series(keys[7].identity(), None).unwrap() {
+        TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    }
+
+    // The last reference goes: now the vector is unreachable and one row is
+    // swept. Idempotent afterwards, like the feature-set sweep.
+    store.remove_time_series(keys[7].identity()).unwrap();
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 1);
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+}
+
+/// The size guard behind interning: a catalog holding many irregular series on
+/// one long time axis must scale with the *number of distinct axes*, not with
+/// rows × timestamps. Storing the vector inline as RFC3339 JSON (24 bytes per
+/// timestamp, as this store used to) would put ~2.4 MB in the catalog here.
+#[test]
+fn the_catalog_does_not_scale_with_rows_times_timestamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let sqlite = infrastore_core::catalog_sqlite_path(&path);
+    let stamps: Vec<_> = (0..2_000)
+        .map(|k| Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 5))
+        .collect();
+
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut bulk = store.bulk_add();
+        for owner in 1..=50i64 {
+            let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
+            let ns = NonSequentialTimeSeries::new(
+                stamps.clone(),
+                TypedArray::from_f64(vec![values.len()], &values),
+                "outage",
+            )
+            .unwrap();
+            bulk.push(infrastore_core::AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(ns),
+            ));
+        }
+        bulk.commit().unwrap();
+        store.flush().unwrap();
+    }
+
+    let bytes = std::fs::metadata(&sqlite).unwrap().len();
+    assert!(
+        bytes < 400_000,
+        "50 series on one 2000-point axis put {bytes} bytes in the catalog; the axis should be \
+         stored once, not once per row"
+    );
+
+    // And it still reads back intact.
+    let store = open_store(path.as_path(), true).unwrap();
+    let keys = store.list_keys(ListFilter::new()).unwrap();
+    assert_eq!(keys.len(), 50);
+    match store.get_time_series(keys[0].identity(), None).unwrap() {
+        TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    }
 }

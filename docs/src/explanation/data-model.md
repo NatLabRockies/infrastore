@@ -70,8 +70,16 @@ server serves forecast reads but does not accept writes. See [Forecasts](#foreca
 ### `NonSequentialTimeSeries`
 
 A `NonSequentialTimeSeries` pairs each value with an explicit UTC timestamp. Timestamps must be
-strictly increasing and their count must match the data length. Its values are stored as a
-standalone HDF5 array; timestamps are stored with the association metadata.
+strictly increasing and their count must match the data length.
+
+The timestamp vector is stored in the catalog, **content-addressed and shared**: series sampled at
+the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
+between them rather than one each. That shared vector is also the series' _cohort_: the values of
+every series on it are column-packed into one timestamp-major HDF5 dataset, exactly as
+`SingleTimeSeries` at one resolution are, so a [`StaticReader`](../reference/rust-api.md#readers)
+can sweep them a timestamp at a time. A series alone on its time axis keeps a standalone array
+instead — packing only pays once a cohort is several columns wide. See the
+[storage model](./storage-model.md) for the layout.
 
 ### `SingleTimeSeries`
 

@@ -6721,20 +6721,33 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 
 // ---- StaticReader ---------------------------------------------------------
 
-/// Build a [`InfraStoreStaticReaderHandle`] over the SingleTimeSeries matching the
-/// filter. `resolution` must be a non-empty ISO-8601 period (one resolution per reader); the
-/// matched series must share one grid (`initial_timestamp` + `length`).
+/// Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
+/// filter.
+///
+/// `time_series_type` is a `TimeSeriesType` discriminant and selects the two
+/// shapes a reader can take:
+///
+/// * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
+///   one resolution per reader — and the matched series must share one grid
+///   (`initial_timestamp` + `length`).
+/// * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
+///   series has none); the matched series must instead share one timestamp
+///   vector, which is also what pools their arrays on disk. Read that timeline
+///   with `infrastore_static_reader_timestamps`.
+///
+/// Any other discriminant is rejected.
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` / `features_json` must be null
-/// or valid null-terminated UTF-8. `out_reader` must be valid for writing one
-/// pointer; the returned handle must be freed exactly once with
+/// `handle` must be a live store handle. `name` / `resolution` / `features_json`
+/// must be null or valid null-terminated UTF-8. `out_reader` must be valid for
+/// writing one pointer; the returned handle must be freed exactly once with
 /// `infrastore_static_reader_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_static_reader(
     handle: *const InfraStoreHandle,
+    time_series_type: i32,
     has_owner: bool,
     owner_id: i64,
     has_owner_category: bool,
@@ -6756,6 +6769,13 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
         set_error("out_reader is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
+    let ts_type = match resolve_requested_type_from_int(time_series_type) {
+        Some(t) => t,
+        None => {
+            set_error(format!("invalid time_series_type {time_series_type}"));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
     let filter = match unsafe {
         reader_filter(
             has_owner,
@@ -6770,6 +6790,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
         Ok(f) => f,
         Err(c) => return c,
     };
+    let filter = filter.time_series_type(ts_type);
     let reader = match store.inner.build_static_reader(filter) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
@@ -6780,15 +6801,20 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     INFRASTORE_OK
 }
 
-/// Read the reader's master grid: `initial_timestamp` (unix ms), `resolution`
-/// (an owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
-/// timestamps on the grid.
+/// Read the reader's timeline: `initial_timestamp` (unix ms), `resolution` (an
+/// owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
+/// timestamps on it.
+///
+/// `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+/// irregular timeline has no constant step, so read it with
+/// `infrastore_static_reader_timestamps` instead.
 ///
 /// # Safety
 ///
 /// `reader` must be a live static-reader handle. Each out pointer must be valid
-/// for writing one value. On success `*out_resolution` is an owned C string the
-/// caller must free exactly once with [`infrastore_string_free`].
+/// for writing one value. On success `*out_resolution` is either null or an
+/// owned C string the caller must free exactly once with
+/// [`infrastore_string_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_static_reader_grid(
     reader: *const InfraStoreStaticReaderHandle,
@@ -6817,9 +6843,55 @@ pub unsafe extern "C" fn infrastore_static_reader_grid(
     };
     unsafe {
         *out_initial_ms = initial;
-        *out_resolution = period_cstr(reader.inner.resolution());
+        *out_resolution = opt_period_cstr(reader.inner.resolution());
         *out_length = reader.inner.length() as u64;
     }
+    INFRASTORE_OK
+}
+
+/// Every timestamp on the reader's timeline, in order, as unix milliseconds.
+///
+/// Probe-then-fetch: call with `buf` null and `cap` 0 to learn the length
+/// (always reported through `out_len`), then again with a buffer that size. This
+/// is how a caller reads an irregular timeline, whose instants
+/// `infrastore_static_reader_grid` cannot describe; it works for a regular grid
+/// too, where they are `initial_timestamp + k · resolution`.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_len` must be valid for
+/// writing one `u64`; when non-null, `buf` must be valid for writing `cap`
+/// `i64` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_static_reader_timestamps(
+    reader: *const InfraStoreStaticReaderHandle,
+    buf: *mut i64,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let mut millis = Vec::with_capacity(reader.inner.length());
+    for t in reader.inner.timestamps() {
+        match datetime_to_unix_ms(t) {
+            Some(ms) => millis.push(ms),
+            None => {
+                set_error("a timeline timestamp is out of i64 millisecond range");
+                return INFRASTORE_ERR_INTEGRITY;
+            }
+        }
+    }
+    unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
     INFRASTORE_OK
 }
 
@@ -7471,6 +7543,7 @@ mod reader_ffi_tests {
         let rc = unsafe {
             infrastore_store_build_static_reader(
                 &handle,
+                0, // SingleTimeSeries
                 false,
                 0,
                 false,
@@ -8178,6 +8251,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     ptr::null(),
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -8200,6 +8274,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -8731,6 +8806,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -8800,6 +8876,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,

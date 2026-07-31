@@ -5,9 +5,8 @@ use std::ops::Range;
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::types::array::{Dtype, TypedArray};
-use crate::types::period::Period;
 
-use super::{ArrayLayout, CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBackend};
 
 /// Pure in-memory storage backend.
 ///
@@ -31,7 +30,7 @@ impl StorageBackend for MemoryBackend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        _resolution: Period,
+        _group: PackGroup,
         _layout: ArrayLayout,
     ) -> Result<bool> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.
@@ -102,6 +101,7 @@ impl StorageBackend for MemoryBackend {
             // The catalog is not the backend's to sweep; `Store::compact` fills
             // this in after the array side is done.
             feature_sets_reclaimed: 0,
+            timestamp_sets_reclaimed: 0,
         })
     }
 

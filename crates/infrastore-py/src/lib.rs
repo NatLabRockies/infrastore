@@ -1067,10 +1067,11 @@ fn numpy_from_parts<'py>(
 
 // ---- StaticReader / ForecastReader ----------------------------------------
 
-/// A prepared columnar reader over the `SingleTimeSeries` sharing one grid.
-/// Build with `Store.build_static_reader`, drive with
-/// `Store.static_read`, then read a group's buffer with
-/// `group_values`.
+/// A prepared columnar reader over the static series sharing one timeline —
+/// a grid of one resolution for `SingleTimeSeries`, or one explicit timestamp
+/// vector for `NonSequentialTimeSeries`. Build with
+/// `Store.build_static_reader`, drive with `Store.static_read`, then read a
+/// group's buffer with `group_values`.
 #[pyclass(name = "StaticReader", module = "infrastore", unsendable)]
 pub struct PyStaticReader {
     inner: core_lib::StaticReader,
@@ -1078,15 +1079,23 @@ pub struct PyStaticReader {
 
 #[pymethods]
 impl PyStaticReader {
-    /// The reader's shared grid: `{"initial_timestamp": rfc3339 str,
-    /// "resolution": ISO-8601 str, "length": int}`.
+    /// The reader's shared timeline: `{"time_series_type": str,
+    /// "initial_timestamp": rfc3339 str, "resolution": ISO-8601 str | None,
+    /// "length": int}`.
+    ///
+    /// `resolution` is `None` for a `NonSequentialTimeSeries` reader: an
+    /// irregular timeline has no constant step, so walk `timestamps()` instead.
     fn grid<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
+        d.set_item("time_series_type", self.inner.time_series_type().as_str())?;
         d.set_item(
             "initial_timestamp",
             self.inner.initial_timestamp().to_rfc3339(),
         )?;
-        d.set_item("resolution", self.inner.resolution().to_iso8601())?;
+        d.set_item(
+            "resolution",
+            self.inner.resolution().map(|r| r.to_iso8601()),
+        )?;
         d.set_item("length", self.inner.length())?;
         Ok(d)
     }
@@ -1115,16 +1124,20 @@ impl PyStaticReader {
             .collect()
     }
 
-    /// Every timestamp on the reader's grid, in order.
+    /// Every timestamp on the reader's timeline, in order.
     fn timestamps(&self) -> Vec<DateTime<Utc>> {
         self.inner.timestamps().collect()
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "StaticReader(initial_timestamp={}, resolution={}, length={}, groups={}, columns={})",
+            "StaticReader({}, initial_timestamp={}, resolution={}, length={}, groups={}, \
+             columns={})",
+            self.inner.time_series_type().as_str(),
             self.inner.initial_timestamp(),
-            self.inner.resolution().to_iso8601(),
+            self.inner
+                .resolution()
+                .map_or_else(|| "None".to_string(), |r| r.to_iso8601()),
             self.inner.length(),
             self.inner.groups().len(),
             self.inner
@@ -1902,6 +1915,7 @@ impl PyStore {
         d.set_item("slots_reclaimed", r.slots_reclaimed)?;
         d.set_item("datasets_dropped", r.datasets_dropped)?;
         d.set_item("feature_sets_reclaimed", r.feature_sets_reclaimed)?;
+        d.set_item("timestamp_sets_reclaimed", r.timestamp_sets_reclaimed)?;
         Ok(d)
     }
 
@@ -1981,14 +1995,20 @@ impl PyStore {
 
     // ---- Readers ----------------------------------------------------------
 
-    /// Build a `StaticReader` over the `SingleTimeSeries` matching the filter.
-    /// A `resolution` is required (one resolution per reader); all matched series
-    /// must share one grid. Drive it with `static_read`.
-    #[pyo3(signature = (resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
+    /// Build a `StaticReader` over the static series matching the filter.
+    ///
+    /// For `SingleTimeSeries` (the default) a `resolution` is required — one
+    /// resolution per reader — and all matched series must share one grid. For
+    /// `time_series_type="NonSequentialTimeSeries"` pass no resolution (an
+    /// irregular series has none): all matched series must instead lie on one
+    /// timestamp vector, which is also what pools their arrays on disk. Drive it
+    /// with `static_read`.
+    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
-        resolution: Bound<'_, PyAny>,
+        resolution: Option<Bound<'_, PyAny>>,
+        time_series_type: Option<&Bound<'_, PyAny>>,
         owner_id: Option<i64>,
         owner_category: Option<PyOwnerCategory>,
         owner_type: Option<String>,
@@ -2000,10 +2020,10 @@ impl PyStore {
             owner_id,
             owner_category,
             owner_type,
-            None,
+            time_series_type,
             name,
             name_glob,
-            Some(resolution),
+            resolution,
             None,
             features,
         )?;

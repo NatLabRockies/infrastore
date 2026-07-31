@@ -11,12 +11,14 @@ pub mod types;
 pub mod version;
 
 // Implementation-detail modules. The intended public surface is the root
-// re-exports below; these modules hold the catalog store and hashing internals
-// (`MetadataStore`, `MetadataFilter`, the association identity/family types, the
-// feature-set cache, the transaction-taking free functions, and the hashing
-// helpers), which are not part of the supported API.
+// re-exports below; these modules hold the catalog store, hashing, and
+// timestamp-encoding internals (`MetadataStore`, `MetadataFilter`, the
+// association identity/family types, the shared-set cache, the
+// transaction-taking free functions, the hashing helpers, and the canonical
+// timestamp codec), which are not part of the supported API.
 pub(crate) mod hash;
 pub(crate) mod metadata;
+pub(crate) mod timestamps;
 
 pub use codec::{
     DecodedValues, LinearFunction, QuadraticFunction, StepFunction, XyPoint, decode, encode,

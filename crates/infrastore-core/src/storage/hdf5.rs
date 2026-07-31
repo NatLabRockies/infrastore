@@ -2,8 +2,10 @@
 //!
 //! Layout (shared policy in [`super::common`]): packed
 //! `sts_{dtype}_{shape}_{length}_{res}` datasets for SingleTimeSeries/DST
-//! arrays, one standalone `arr_{hexhash}` dataset per irregular series or
-//! dense forecast, written through libhdf5 via `hdf5-metno`.
+//! arrays and `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` datasets for the
+//! NonSequentialTimeSeries sharing one time axis, plus one standalone
+//! `arr_{hexhash}` dataset per dense forecast (and per irregular series whose
+//! time axis nothing else shares), written through libhdf5 via `hdf5-metno`.
 //!
 //! This backend replaced a netcdf-c–driven one with the same logical layout.
 //! The motivation was netcdf-c's define-mode semantics: every new variable
@@ -39,13 +41,12 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
 use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
-use crate::types::period::Period;
 use crate::version::DATA_FORMAT_VERSION;
 
 use super::common::{
-    COMPRESSION_ATTR, HASH_SUFFIX, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX, dataset_base_name,
-    element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
-    standalone_chunks,
+    COMPRESSION_ATTR, HASH_SUFFIX, PackGroup, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX,
+    dataset_base_name, element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols,
+    spill_name, standalone_chunks,
 };
 use super::{ArrayLocation, CompactionReport, IntegrityReport, StorageBackend};
 
@@ -335,7 +336,7 @@ impl DatasetState {
     }
 }
 
-type DatasetGroupKey = (Dtype, Vec<usize>, usize, Period);
+type DatasetGroupKey = (Dtype, Vec<usize>, usize, PackGroup);
 
 pub(crate) struct Hdf5Backend {
     inner: Mutex<Inner>,
@@ -442,7 +443,7 @@ impl Hdf5Backend {
                 continue;
             }
 
-            let (dtype, element_shape, length, resolution) = parse_dataset_name(&name)?;
+            let (dtype, element_shape, length, group) = parse_dataset_name(&name)?;
             let hash_name = format!("{name}{HASH_SUFFIX}");
             let hash_ds = single.dataset(&hash_name).map_err(|_| {
                 TimeSeriesError::IntegrityError(format!("missing hash dataset {hash_name}"))
@@ -471,7 +472,7 @@ impl Hdf5Backend {
             }
             inner
                 .dataset_groups
-                .entry((dtype, element_shape.clone(), length, resolution))
+                .entry((dtype, element_shape.clone(), length, group))
                 .or_default()
                 .push(name.clone());
             inner.datasets.insert(
@@ -523,9 +524,9 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<String> {
-        let key = (dtype, element_shape.to_vec(), length, resolution);
+        let key = (dtype, element_shape.to_vec(), length, group);
         let mut spill_count = 0;
         if let Some(names) = self.dataset_groups.get(&key) {
             spill_count = names.len();
@@ -537,9 +538,9 @@ impl Inner {
                 }
             }
         }
-        let base = dataset_base_name(dtype, element_shape, length, resolution);
+        let base = dataset_base_name(dtype, element_shape, length, group);
         let new_name = spill_name(&base, spill_count);
-        self.create_packed_dataset(&new_name, dtype, element_shape, length, resolution, None)?;
+        self.create_packed_dataset(&new_name, dtype, element_shape, length, group, None)?;
         Ok(new_name)
     }
 
@@ -549,7 +550,7 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution: Period,
+        group: PackGroup,
         requested_cols: Option<usize>,
     ) -> Result<()> {
         let cols = resolve_dataset_cols(requested_cols, dtype, element_shape);
@@ -591,7 +592,7 @@ impl Inner {
         );
         let group = self
             .dataset_groups
-            .entry((dtype, element_shape.to_vec(), length, resolution))
+            .entry((dtype, element_shape.to_vec(), length, group))
             .or_default();
         let pos = group
             .binary_search_by(|n| n.as_str().cmp(name))
@@ -610,13 +611,12 @@ impl Inner {
     }
 
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
-    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution: Period) -> Result<()> {
+    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, group: PackGroup) -> Result<()> {
         let length = data.length();
         let element_shape = data.element_shape().to_vec();
         let dtype = data.dtype;
 
-        let dataset_name =
-            self.ensure_writable_dataset(dtype, &element_shape, length, resolution)?;
+        let dataset_name = self.ensure_writable_dataset(dtype, &element_shape, length, group)?;
         let (col_index, hash_name) = {
             let state = self.datasets.get(&dataset_name).expect("dataset ensured");
             let col = state.first_free().ok_or_else(|| {
@@ -660,7 +660,7 @@ impl Inner {
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<Vec<bool>> {
         let mut written = vec![false; hashes.len()];
 
@@ -680,7 +680,7 @@ impl Inner {
         let element_shape = new[0].2.element_shape().to_vec();
         let length = new[0].2.length();
         let block = element_block_bytes(dtype, &element_shape);
-        let group_key = (dtype, element_shape.clone(), length, resolution);
+        let group_key = (dtype, element_shape.clone(), length, group);
 
         let mut start = 0;
         while start < new.len() {
@@ -688,17 +688,10 @@ impl Inner {
             let width = resolve_dataset_cols(Some(remaining), dtype, &element_shape);
             let seg = &new[start..start + width];
 
-            let base = dataset_base_name(dtype, &element_shape, length, resolution);
+            let base = dataset_base_name(dtype, &element_shape, length, group);
             let spill_count = self.dataset_groups.get(&group_key).map_or(0, Vec::len);
             let name = spill_name(&base, spill_count);
-            self.create_packed_dataset(
-                &name,
-                dtype,
-                &element_shape,
-                length,
-                resolution,
-                Some(width),
-            )?;
+            self.create_packed_dataset(&name, dtype, &element_shape, length, group, Some(width))?;
             let hash_name = format!("{name}{HASH_SUFFIX}");
 
             // Interleave the segment's arrays into one row-major
@@ -1143,7 +1136,7 @@ impl StorageBackend for Hdf5Backend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution: Period,
+        group: PackGroup,
         layout: ArrayLayout,
     ) -> Result<bool> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
@@ -1152,7 +1145,7 @@ impl StorageBackend for Hdf5Backend {
             return Ok(false);
         }
         match layout {
-            ArrayLayout::Packed => inner.put_packed(hash, data, resolution)?,
+            ArrayLayout::Packed => inner.put_packed(hash, data, group)?,
             ArrayLayout::Standalone => inner.put_standalone(hash, data, None)?,
             ArrayLayout::StandaloneWindowed { count_axis } => {
                 inner.put_standalone(hash, data, Some(count_axis))?
@@ -1166,11 +1159,24 @@ impl StorageBackend for Hdf5Backend {
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<Vec<bool>> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
         inner.ensure_writable()?;
-        inner.put_packed_block(hashes, arrays, resolution)
+        inner.put_packed_block(hashes, arrays, group)
+    }
+
+    fn has_pack_group(
+        &self,
+        dtype: Dtype,
+        element_shape: &[usize],
+        length: usize,
+        group: PackGroup,
+    ) -> bool {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner
+            .dataset_groups
+            .contains_key(&(dtype, element_shape.to_vec(), length, group))
     }
 
     #[tracing::instrument(skip(self, hash))]
@@ -1286,6 +1292,7 @@ impl StorageBackend for Hdf5Backend {
             slots_reclaimed: reclaimed,
             datasets_dropped: 0,
             feature_sets_reclaimed: 0,
+            timestamp_sets_reclaimed: 0,
         })
     }
 
@@ -1342,6 +1349,7 @@ mod tests {
     use super::*;
     use crate::hash::array_hash;
     use crate::types::array::TypedArray;
+    use crate::types::period::Period;
 
     fn f64_array(shape: Vec<usize>, seed: f64) -> TypedArray {
         let n: usize = shape.iter().product();
@@ -1349,8 +1357,14 @@ mod tests {
         TypedArray::from_f64(shape, &vals)
     }
 
-    fn res() -> Period {
-        Period::from_iso8601("PT1H").unwrap()
+    /// The packed pool every regular-series test writes into.
+    fn res() -> PackGroup {
+        PackGroup::Regular(Period::from_iso8601("PT1H").unwrap())
+    }
+
+    /// A distinct irregular pool, keyed by a stand-in timestamp-vector hash.
+    fn cohort(tag: u8) -> PackGroup {
+        PackGroup::Irregular([tag; 32])
     }
 
     #[test]
@@ -1407,6 +1421,78 @@ mod tests {
         for (i, a) in arrays.iter().enumerate() {
             assert_eq!(buf[i * elem..(i + 1) * elem], a.bytes[5 * elem..6 * elem]);
         }
+    }
+
+    /// Irregular series pool by their timestamp-vector hash, so two cohorts at
+    /// the same dtype/shape/length are distinct datasets — and each is a real
+    /// packed pool, with columns addressable at one timestamp.
+    #[test]
+    fn irregular_cohorts_pack_separately_and_survive_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![8], 0.0);
+        let b = f64_array(vec![8], 100.0);
+        // Same shape and length as the pair above, but a different time axis.
+        let c = f64_array(vec![8], 200.0);
+        let (ha, hb, hc) = (array_hash(&a), array_hash(&b), array_hash(&c));
+
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_packed_block(&[ha, hb], &[&a, &b], cohort(1))
+            .unwrap();
+        be.put_array(&hc, &c, cohort(2), ArrayLayout::Packed)
+            .unwrap();
+        assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(1)));
+        assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(2)));
+        // A cohort nothing has written yet, and the regular pool at the same
+        // dtype/shape/length, are both absent: the pools cannot bleed together.
+        assert!(!be.has_pack_group(Dtype::F64, &[], 8, cohort(3)));
+        assert!(!be.has_pack_group(Dtype::F64, &[], 8, res()));
+
+        let dataset_of = |be: &Hdf5Backend, hash| match be.locate(&hash).unwrap() {
+            ArrayLocation::Packed { dataset, column } => (dataset, column),
+            other => panic!("expected a packed location, got {other:?}"),
+        };
+        let (ds_a, col_a) = dataset_of(&be, ha);
+        let (ds_b, col_b) = dataset_of(&be, hb);
+        let (ds_c, _) = dataset_of(&be, hc);
+        assert_eq!(ds_a, ds_b, "one cohort shares one dataset");
+        assert_ne!(col_a, col_b, "and each member gets its own column");
+        assert_ne!(ds_a, ds_c, "distinct time axes never share a dataset");
+        assert!(ds_a.contains("nsts_f64_s_8_"));
+
+        // The cohort's columns are gathered at one timestamp in a single read —
+        // the whole point of packing them.
+        let mut buf = Vec::new();
+        be.read_index_into(&[ha, hb], Dtype::F64, 5, &mut buf)
+            .unwrap();
+        assert_eq!(buf[..8], a.bytes[5 * 8..6 * 8]);
+        assert_eq!(buf[8..], b.bytes[5 * 8..6 * 8]);
+        drop(be);
+
+        // Reopen: the pools are rebuilt from the dataset names, so a later add
+        // joins the same cohort rather than starting a parallel one.
+        let mut be = Hdf5Backend::open(&path, false).unwrap();
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(1)));
+        let d = f64_array(vec![8], 300.0);
+        let hd = array_hash(&d);
+        be.put_array(&hd, &d, cohort(1), ArrayLayout::Packed)
+            .unwrap();
+        // The block write sized that first dataset to its batch, so it is full
+        // and this add spills — into a sibling of the *same* pool, which is what
+        // the rebuilt index has to get right.
+        let spilled = dataset_of(&be, hd).0;
+        assert_ne!(spilled, ds_a);
+        let leaf = |path: &str| path.rsplit('/').next().unwrap().to_string();
+        assert_eq!(
+            parse_dataset_name(&leaf(&spilled)).unwrap(),
+            (Dtype::F64, vec![], 8, cohort(1))
+        );
+        assert!(
+            be.verify(&[(ha, Dtype::F64), (hb, Dtype::F64), (hd, Dtype::F64)])
+                .unwrap()
+                .ok()
+        );
     }
 
     /// `bool` and `u8` are the same byte on disk and the HDF5 type descriptor

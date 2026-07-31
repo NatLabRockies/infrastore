@@ -2254,18 +2254,31 @@ void infrastore_buffer_free_i64(int64_t *ptr, uint64_t len);
 int32_t infrastore_last_error_message(char *buf, uint64_t buf_len, uint64_t *needed);
 
 /**
- * Build a [`InfraStoreStaticReaderHandle`] over the SingleTimeSeries matching the
- * filter. `resolution` must be a non-empty ISO-8601 period (one resolution per reader); the
- * matched series must share one grid (`initial_timestamp` + `length`).
+ * Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
+ * filter.
+ *
+ * `time_series_type` is a `TimeSeriesType` discriminant and selects the two
+ * shapes a reader can take:
+ *
+ * * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
+ *   one resolution per reader — and the matched series must share one grid
+ *   (`initial_timestamp` + `length`).
+ * * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
+ *   series has none); the matched series must instead share one timestamp
+ *   vector, which is also what pools their arrays on disk. Read that timeline
+ *   with `infrastore_static_reader_timestamps`.
+ *
+ * Any other discriminant is rejected.
  *
  * # Safety
  *
- * `handle` must be a live store handle. `name` / `features_json` must be null
- * or valid null-terminated UTF-8. `out_reader` must be valid for writing one
- * pointer; the returned handle must be freed exactly once with
+ * `handle` must be a live store handle. `name` / `resolution` / `features_json`
+ * must be null or valid null-terminated UTF-8. `out_reader` must be valid for
+ * writing one pointer; the returned handle must be freed exactly once with
  * `infrastore_static_reader_free`.
  */
 int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
+                                             int32_t time_series_type,
                                              bool has_owner,
                                              int64_t owner_id,
                                              bool has_owner_category,
@@ -2276,20 +2289,45 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              struct InfraStoreStaticReaderHandle **out_reader);
 
 /**
- * Read the reader's master grid: `initial_timestamp` (unix ms), `resolution`
- * (an owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
- * timestamps on the grid.
+ * Read the reader's timeline: `initial_timestamp` (unix ms), `resolution` (an
+ * owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
+ * timestamps on it.
+ *
+ * `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+ * irregular timeline has no constant step, so read it with
+ * `infrastore_static_reader_timestamps` instead.
  *
  * # Safety
  *
  * `reader` must be a live static-reader handle. Each out pointer must be valid
- * for writing one value. On success `*out_resolution` is an owned C string the
- * caller must free exactly once with [`infrastore_string_free`].
+ * for writing one value. On success `*out_resolution` is either null or an
+ * owned C string the caller must free exactly once with
+ * [`infrastore_string_free`].
  */
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
                                       int64_t *out_initial_ms,
                                       char **out_resolution,
                                       uint64_t *out_length);
+
+/**
+ * Every timestamp on the reader's timeline, in order, as unix milliseconds.
+ *
+ * Probe-then-fetch: call with `buf` null and `cap` 0 to learn the length
+ * (always reported through `out_len`), then again with a buffer that size. This
+ * is how a caller reads an irregular timeline, whose instants
+ * `infrastore_static_reader_grid` cannot describe; it works for a regular grid
+ * too, where they are `initial_timestamp + k · resolution`.
+ *
+ * # Safety
+ *
+ * `reader` must be a live static-reader handle. `out_len` must be valid for
+ * writing one `u64`; when non-null, `buf` must be valid for writing `cap`
+ * `i64` values.
+ */
+int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderHandle *reader,
+                                            int64_t *buf,
+                                            uint64_t cap,
+                                            uint64_t *out_len);
 
 /**
  * Number of columnar groups in the reader.

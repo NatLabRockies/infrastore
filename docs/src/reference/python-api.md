@@ -398,18 +398,19 @@ forecast.scenario_count -> int
 
 `get_time_series` returns one whole series or forecast. For the simulation access pattern — _walk
 every timestamp and, at each, read the value of every matching series_ — use a **reader** instead. A
-reader is built once over a filter, pins one resolution, and reuses its output buffers so a tight
-loop allocates almost nothing. There are two: `StaticReader` for `SingleTimeSeries`, and
-`ForecastReader` for forecasts. Both share the lifecycle: build → inspect the layout once →
-`*_read(when)` in a loop → pull values per group/entry.
+reader is built once over a filter, pins one timeline, and reuses its output buffers so a tight loop
+allocates almost nothing. There are two: `StaticReader` for the static types, and `ForecastReader`
+for forecasts. Both share the lifecycle: build → inspect the layout once → `*_read(when)` in a loop
+→ pull values per group/entry.
 
 The builders and drivers live on `Store`:
 
 ```python
 def build_static_reader(
     self,
-    resolution: timedelta | str,
+    resolution: timedelta | str | None = None,
     *,
+    time_series_type: TimeSeriesType | None = None,   # default: SingleTimeSeries
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
@@ -434,30 +435,37 @@ def build_forecast_reader(
 def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
 ```
 
-`resolution` is required on both builders (one resolution per reader). `static_read` /
-`forecast_read` fill the reader's buffers in place and return `None`; passing a `when` that is off
-the reader's grid or timeline raises `InvalidParameterError`.
+`resolution` is required on `build_forecast_reader`, and on `build_static_reader` for
+`SingleTimeSeries` (one resolution per reader). It must be **omitted** for
+`time_series_type=TimeSeriesType.NonSequentialTimeSeries`: an irregular series has no resolution, so
+its timeline is the timestamp vector its cohort shares instead. `static_read` / `forecast_read` fill
+the reader's buffers in place and return `None`; passing a `when` that is off the reader's timeline
+raises `InvalidParameterError`.
 
 ### `StaticReader`
 
-Reads the value of every matching `SingleTimeSeries` at one timestamp. Results are **columnar**:
-series are partitioned into `(dtype, element_shape)` groups, and each group's values come back as
-one dense `(num_columns, *element_shape)` numpy array.
+Reads the value of every matching static series at one timestamp. Results are **columnar**: series
+are partitioned into `(dtype, element_shape)` groups, and each group's values come back as one dense
+`(num_columns, *element_shape)` numpy array.
 
 ```python
 class StaticReader:
-    def grid(self) -> dict: ...     # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "length": int}
+    def grid(self) -> dict: ...     # {"time_series_type": str, "initial_timestamp": rfc3339 str, "resolution": ISO str | None, "length": int}
     def groups(self) -> list[dict]: ...  # each: {"dtype": str, "element_type": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
-    def timestamps(self) -> list[datetime]: ...   # every timestamp on the grid, in order
+    def timestamps(self) -> list[datetime]: ...   # every timestamp on the timeline, in order
     def group_values(self, index: int) -> numpy.ndarray: ...  # last read of group `index`
 ```
 
-All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
-and raises on divergence, so there is no presence mask — every column has a value at every valid
-timestamp. `group_values(i)` returns a `(num_columns, *element_shape)` array whose column `j`
-corresponds to `groups()[i]["keys"][j]`; it is empty until the first `static_read`.
+All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
+`SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
+raises on divergence, so there is no presence mask — every column has a value at every valid
+timestamp. `grid()["resolution"]` is `None` for an irregular reader; `timestamps()` is the timeline
+either way, so a read loop written against it works unchanged for both. `group_values(i)` returns a
+`(num_columns, *element_shape)` array whose column `j` corresponds to `groups()[i]["keys"][j]`; it
+is empty until the first `static_read`.
 
 ```python
+# For irregular series: build_static_reader(time_series_type=TimeSeriesType.NonSequentialTimeSeries)
 reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()
 groups = reader.groups()
