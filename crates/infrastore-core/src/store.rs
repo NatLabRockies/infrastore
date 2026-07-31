@@ -2833,20 +2833,17 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
 
-        let rewritten = (|| -> Result<u64> {
+        let rewritten = (|| -> Result<()> {
             let mut backend = Hdf5Backend::create(&tmp, self.compression())?;
             self.materialize_into(&mut backend)?;
             backend.flush()?;
             drop(backend);
-            Ok(std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0))
+            Ok(())
         })();
-        let bytes_after = match rewritten {
-            Ok(len) => len,
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-        };
+        if let Err(e) = rewritten {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
 
         // HDF5 keeps a byte-range lock on an open file, so the live handle has
         // to go before the original is replaced (required on Windows, correct
@@ -2865,6 +2862,12 @@ impl Store {
         self.backend = open_backend(&path, self.read_only)?;
         renamed?;
 
+        // The `stat` after, taken on the replaced file rather than on the temp
+        // copy, so it pairs with `bytes_before` on the same path. Both stats
+        // fall back the same way: a failure to size a file reports nothing
+        // reclaimed. Defaulting this one to 0 instead would credit the caller
+        // with having reclaimed the entire file.
+        let bytes_after = std::fs::metadata(&path).map_or(bytes_before, |m| m.len());
         let after = self.backend.stats();
         Ok(CompactionReport {
             slots_reclaimed: before.free_packed_slots,
