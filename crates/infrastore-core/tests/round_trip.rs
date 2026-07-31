@@ -1088,3 +1088,95 @@ fn the_catalog_does_not_scale_with_rows_times_timestamps() {
         other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
     }
 }
+
+/// More distinct time axes than the catalog's decode memo can hold, read in an
+/// order that churns it. Each series must come back on *its own* axis: a memo
+/// that returned another vector for a hash would corrupt every irregular read
+/// that hit it, and only a working-set-exceeding test can catch that.
+#[test]
+fn many_distinct_time_axes_survive_the_decode_memo() {
+    let mut store = create_store(None, true).unwrap();
+    let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    // Deliberately more than the memo's capacity, each axis distinct in both
+    // spacing and extent so a mix-up cannot go unnoticed.
+    let axes: Vec<Vec<_>> = (1..=9i64)
+        .map(|a| {
+            (0..(3 + a))
+                .map(|k| t0 + Duration::minutes(a * 13 + k * a))
+                .collect()
+        })
+        .collect();
+
+    let mut keys = Vec::new();
+    for (i, stamps) in axes.iter().enumerate() {
+        // Two series per axis, so the shared-axis path is exercised as well.
+        for owner in 0..2i64 {
+            let values: Vec<f64> = (0..stamps.len())
+                .map(|k| (i * 100) as f64 + owner as f64 + k as f64)
+                .collect();
+            let ns = NonSequentialTimeSeries::new(
+                stamps.clone(),
+                TypedArray::from_f64(vec![values.len()], &values),
+                "outage",
+            )
+            .unwrap();
+            keys.push((
+                i,
+                owner,
+                store
+                    .add_time_series(
+                        i as i64 * 10 + owner,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::NonSequentialTimeSeries(ns),
+                        Features::new(),
+                    )
+                    .unwrap(),
+            ));
+        }
+    }
+
+    let check =
+        |store: &infrastore_core::Store, i: usize, owner: i64, key: &KeyIdentity| match store
+            .get_time_series(key, None)
+            .unwrap()
+        {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => {
+                assert_eq!(ns.timestamps, axes[i], "axis {i}");
+                assert_eq!(
+                    ns.data.to_f64_vec().unwrap()[0],
+                    (i * 100) as f64 + owner as f64
+                );
+            }
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        };
+
+    // Forwards, then backwards (worst case for a recency-ordered memo), then
+    // interleaved with a repeatedly-read hot axis.
+    for (i, owner, key) in &keys {
+        check(&store, *i, *owner, key.identity());
+    }
+    for (i, owner, key) in keys.iter().rev() {
+        check(&store, *i, *owner, key.identity());
+    }
+    for (i, owner, key) in &keys {
+        check(&store, 0, 0, keys[0].2.identity());
+        check(&store, *i, *owner, key.identity());
+    }
+
+    // And through the bulk path, which resolves them all in one call.
+    let identities: Vec<KeyIdentity> = keys.iter().map(|(_, _, k)| k.identity().clone()).collect();
+    let refs: Vec<&KeyIdentity> = identities.iter().collect();
+    for (series, (i, owner, _)) in store.bulk_read(&refs).unwrap().iter().zip(&keys) {
+        match series {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => {
+                assert_eq!(ns.timestamps, axes[*i], "axis {i} via bulk_read");
+                assert_eq!(
+                    ns.data.to_f64_vec().unwrap()[0],
+                    (*i * 100) as f64 + *owner as f64
+                );
+            }
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        }
+    }
+}
