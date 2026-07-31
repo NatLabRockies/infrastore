@@ -623,14 +623,29 @@ int32_t infrastore_store_get_compression(const struct InfraStore *handle,
 int32_t infrastore_store_verify(const struct InfraStore *handle, uint64_t *out_error_count);
 
 /**
- * Compact the store.
+ * Compact the store and return what it reclaimed as a JSON object
+ * `{"slots_reclaimed": <u64>, "datasets_dropped": <u64>,
+ * "feature_sets_reclaimed": <u64>, "timestamp_sets_reclaimed": <u64>,
+ * "bytes_reclaimed": <u64>}`.
+ *
+ * For an on-disk store this **rewrites the HDF5 file**: the arrays the catalog
+ * still references are written into a sibling file which then replaces the
+ * original, so removed data actually leaves the file. The store keeps working
+ * across the swap (its file handle is reopened on the new file). It assumes
+ * this process is the file's only user — see `Store::compact` in the Rust core.
+ *
+ * Returns the JSON through `out_json` as an **owned** allocation the caller
+ * releases with `infrastore_string_free`; `out_len` is its byte length. Unlike
+ * the fixed-size read-only queries this cannot use probe-then-fetch: the call
+ * mutates the store, so it must run exactly once.
  *
  * # Safety
  *
  * `handle` must be a live mutable store handle and must not be used concurrently for the duration
- * of the call.
+ * of the call — the underlying file is replaced part-way through. `out_json` and `out_len` must
+ * each be valid for writing one pointer / one `u64`.
  */
-int32_t infrastore_store_compact(struct InfraStore *handle);
+int32_t infrastore_store_compact(struct InfraStore *handle, char **out_json, uint64_t *out_len);
 
 /**
  * Begin a transaction spanning subsequent operations on `handle`, so that adds,

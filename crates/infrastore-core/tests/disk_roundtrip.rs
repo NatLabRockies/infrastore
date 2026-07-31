@@ -1,14 +1,14 @@
 //! On-disk (HDF5) persistence integration tests.
 //!
 //! These exercise the on-disk format and slot map: write to a real store file,
-//! close, reopen, and verify what comes back. Also covers the spill-on-1001
-//! and compaction tombstone behaviours documented in the spec.
+//! close, reopen, and verify what comes back. Also covers the spill-on-1001 and
+//! compaction (rewrite-and-replace) behaviours documented in the spec.
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
     Compression, Deterministic, Features, ListFilter, NonSequentialTimeSeries, OwnerCategory,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesKey, TimeSeriesType, TypedArray,
-    create_store, create_store_with_compression, open_store,
+    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesKey,
+    TimeSeriesType, TypedArray, create_store, create_store_with_compression, open_store,
 };
 
 fn series(initial_year: i32, length: usize, base: f64) -> SingleTimeSeries {
@@ -749,7 +749,7 @@ fn bulk_read_matches_get_time_series_across_types() {
 }
 
 #[test]
-fn compact_reports_tombstones_and_slot_is_reused() {
+fn compact_rewrites_the_file_and_reports_reclaimed_slots() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
 
@@ -795,8 +795,14 @@ fn compact_reports_tombstones_and_slot_is_reused() {
     // pre-allocated at MAX_COLS, so it'll actually report MAX_COLS-2.)
     let report = store.compact().unwrap();
     assert!(report.slots_reclaimed >= 1);
+    // The rewrite is the file, not a report: the survivors still read, and the
+    // dropped array is still gone.
+    assert!(matches!(
+        store.get_time_series(k1.identity(), None),
+        Err(TimeSeriesError::NotFound)
+    ));
 
-    // Adding a new array should reuse the freed column slot.
+    // Adding a new array after the rewrite still works.
     let s4 = series(2024, 8, 500.0);
     store
         .add_time_series(
@@ -1399,5 +1405,393 @@ fn discriminant_columns_are_stored_as_integer_codes() {
             "DeterministicSingleTimeSeries".to_string(),
             "SingleTimeSeries".to_string()
         ]
+    );
+}
+
+// --- Compaction: the HDF5 file is rewritten from the catalog's live set -----
+//
+// HDF5 cannot return freed space to the filesystem in place, so `compact`
+// materializes the live arrays into a sibling file and renames it over the
+// original. These cover what that is supposed to buy (a smaller file, the
+// unreachable datasets gone), what it must not cost (every stored type reads
+// back identically), and the mechanics around the temp file.
+
+/// A standalone forecast big enough that dropping it moves the file size
+/// needle well past HDF5's own metadata noise.
+fn bulky_forecast(base: f64) -> Deterministic {
+    let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    let (horizon, count) = (48usize, 400usize);
+    let values: Vec<f64> = (0..horizon * count).map(|i| base + i as f64).collect();
+    Deterministic::new(
+        t0,
+        Duration::hours(1),
+        Duration::hours(horizon as i64),
+        Duration::hours(1),
+        count,
+        TypedArray::from_f64(vec![horizon, count], &values),
+        "fc",
+    )
+    .unwrap()
+}
+
+#[test]
+fn compact_reports_the_shrink_a_caller_can_measure() {
+    // Regression: `compact` opens with a flush, and HDF5 *does* hand back
+    // blocks a removal freed at the end of the file, truncating as it flushes.
+    // Sizing the file after that flush credited the call with nothing for space
+    // it had just reclaimed — a report of 0 bytes on a file that visibly
+    // shrank. The report has to match what the caller sees: stat, compact,
+    // stat.
+    //
+    // The shape that produces it: a bulk-written packed pool (sized to the
+    // batch, so a small hash companion) with the standalone forecast last in
+    // the file, and no flush between the removal and the compaction — so the
+    // truncation lands inside `compact` rather than before it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    {
+        let mut bulk = store.bulk_add();
+        bulk.add(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
+            Features::new(),
+        );
+        bulk.commit().unwrap();
+    }
+    let drop_me = store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(bulky_forecast(0.0)),
+            Features::new(),
+        )
+        .unwrap();
+    store.remove_time_series(drop_me.identity()).unwrap();
+
+    // Exactly what a caller does: size it, compact, size it again.
+    let before = std::fs::metadata(&path).unwrap().len();
+    let report = store.compact().unwrap();
+    let after = std::fs::metadata(&path).unwrap().len();
+
+    assert!(after < before, "file did not shrink: {before} -> {after}");
+    assert_eq!(
+        report.bytes_reclaimed,
+        before - after,
+        "report disagrees with the observed shrink ({before} -> {after})"
+    );
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+#[test]
+fn compact_shrinks_the_file_after_a_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+
+    let keep = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
+            Features::new(),
+        )
+        .unwrap();
+    let drop_me = store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(bulky_forecast(0.0)),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    store.remove_time_series(drop_me.identity()).unwrap();
+    store.flush().unwrap();
+    // Removal unlinks the dataset but HDF5 keeps the space: the file is no
+    // smaller until it is rewritten.
+    let before = std::fs::metadata(&path).unwrap().len();
+
+    let report = store.compact().unwrap();
+    let after = std::fs::metadata(&path).unwrap().len();
+
+    assert!(
+        after < before,
+        "compact did not shrink the file: {before} -> {after}"
+    );
+    assert_eq!(report.bytes_reclaimed, before - after);
+    assert!(report.bytes_reclaimed > 0);
+    // The survivor is intact and the store is still usable in place.
+    let got = store.get_time_series(keep.identity(), None).unwrap();
+    assert_eq!(
+        got.as_single().unwrap().data.to_f64_vec().unwrap(),
+        (0..24).map(|i| 1.0 + i as f64).collect::<Vec<_>>()
+    );
+    assert!(store.verify_integrity().unwrap().ok());
+    assert!(!repack_temp_of(&path).exists(), "temp file left behind");
+}
+
+#[test]
+fn compact_preserves_every_stored_time_series_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    // SingleTimeSeries (packed), plus the DST derived from it.
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                t0,
+                Duration::hours(1),
+                TypedArray::from_f64(vec![24], &(0..24).map(|i| i as f64).collect::<Vec<_>>()),
+                "load",
+            )),
+            Features::new(),
+        )
+        .unwrap();
+    store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(2),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    // NonSequentialTimeSeries (irregular axis).
+    store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(
+                NonSequentialTimeSeries::new(
+                    vec![t0, t0 + Duration::minutes(7), t0 + Duration::days(3)],
+                    TypedArray::from_f64(vec![3], &[1.5, 2.5, 3.5]),
+                    "events",
+                )
+                .unwrap(),
+            ),
+            Features::new(),
+        )
+        .unwrap();
+    // Deterministic, Probabilistic, Scenarios (standalone, windowed).
+    store
+        .add_time_series(
+            3,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Deterministic(bulky_forecast(1000.0)),
+            Features::new(),
+        )
+        .unwrap();
+    store
+        .add_time_series(
+            4,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Probabilistic(
+                Probabilistic::new(
+                    t0,
+                    Duration::hours(1),
+                    Duration::hours(2),
+                    Duration::hours(1),
+                    3,
+                    vec![10.0, 90.0],
+                    TypedArray::from_f64(
+                        vec![2, 2, 3],
+                        &(0..12).map(|i| i as f64).collect::<Vec<_>>(),
+                    ),
+                    "prob",
+                )
+                .unwrap(),
+            ),
+            Features::new(),
+        )
+        .unwrap();
+    store
+        .add_time_series(
+            5,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::Scenarios(
+                Scenarios::new(
+                    t0,
+                    Duration::hours(1),
+                    Duration::hours(2),
+                    Duration::hours(1),
+                    3,
+                    4,
+                    TypedArray::from_f64(
+                        vec![4, 2, 3],
+                        &(0..24).map(|i| i as f64).collect::<Vec<_>>(),
+                    ),
+                    "scen",
+                )
+                .unwrap(),
+            ),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    // Snapshot every key's data, compact, and demand it back byte for byte.
+    let keys: Vec<TimeSeriesKey> = store.list_keys(ListFilter::default()).unwrap();
+    assert_eq!(keys.len(), 6, "expected one key per stored type: {keys:?}");
+    let before: Vec<TimeSeriesData> = keys
+        .iter()
+        .map(|k| store.get_time_series(k.identity(), None).unwrap())
+        .collect();
+
+    store.compact().unwrap();
+
+    for (key, want) in keys.iter().zip(&before) {
+        let got = store.get_time_series(key.identity(), None).unwrap();
+        assert_eq!(&got, want, "mismatch after compact for {key:?}");
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+
+    // And again after a close/reopen, which re-derives the index from the
+    // rewritten file's links.
+    drop(store);
+    let store = open_store(path.as_path(), false).unwrap();
+    for (key, want) in keys.iter().zip(&before) {
+        let got = store.get_time_series(key.identity(), None).unwrap();
+        assert_eq!(&got, want, "mismatch after reopen for {key:?}");
+    }
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+#[test]
+fn compact_is_idempotent_and_safe_with_no_dead_space() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let key = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    // Nothing has been removed, so there is no dead space to reclaim.
+    let first = store.compact().unwrap();
+    assert_eq!(first.datasets_dropped, 0);
+    assert_eq!(first.feature_sets_reclaimed, 0);
+    assert_eq!(first.timestamp_sets_reclaimed, 0);
+    let size = std::fs::metadata(&path).unwrap().len();
+
+    // A second compaction has nothing left to do and must not disturb the file.
+    let second = store.compact().unwrap();
+    assert_eq!(second.datasets_dropped, 0);
+    assert_eq!(second.bytes_reclaimed, 0);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    assert_eq!(got.as_single().unwrap().length, 24);
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// The sibling path `Store::compact` builds its rewritten file at.
+fn repack_temp_of(h5: &std::path::Path) -> std::path::PathBuf {
+    let mut p = h5.as_os_str().to_owned();
+    p.push(".repack");
+    std::path::PathBuf::from(p)
+}
+
+#[test]
+fn compact_clears_a_stale_repack_temp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
+            Features::new(),
+        )
+        .unwrap();
+    store.flush().unwrap();
+
+    // What a compaction interrupted between the rewrite and the rename leaves
+    // behind. It is not a valid store file; the next compaction must clear it
+    // rather than trip over it.
+    let tmp = repack_temp_of(&path);
+    std::fs::write(&tmp, b"leftover from a crashed compaction").unwrap();
+
+    store.compact().unwrap();
+    assert!(!tmp.exists(), "stale temp file survived a compaction");
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+#[test]
+fn compact_drops_a_dataset_the_catalog_does_not_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 24, 1.0)),
+                Features::new(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    // Stand in for what a store written before removal unlinked its datasets
+    // leaves behind — or what an interrupted bulk add orphans: a standalone
+    // array in the file that no catalog row names. The backend indexes it as
+    // live on open (it re-derives the index from the file's links), so only the
+    // catalog-driven rewrite can tell that nothing can reach it.
+    let orphan = format!("arr_{}", "ab".repeat(32));
+    {
+        let f = hdf5_metno::File::open_rw(&path).unwrap();
+        let single = f.group("time_series/single").unwrap();
+        single
+            .new_dataset::<f64>()
+            .shape([8])
+            .create(orphan.as_str())
+            .unwrap()
+            .write_raw(&[1.0f64; 8])
+            .unwrap();
+    }
+
+    let mut store = open_store(path.as_path(), false).unwrap();
+    let report = store.compact().unwrap();
+    assert!(
+        report.datasets_dropped >= 1,
+        "unreferenced dataset was not dropped: {report:?}"
+    );
+    drop(store);
+
+    let f = hdf5_metno::File::open(&path).unwrap();
+    let names = f
+        .group("time_series/single")
+        .unwrap()
+        .member_names()
+        .unwrap();
+    assert!(
+        !names.contains(&orphan),
+        "unreferenced dataset survived the rewrite: {names:?}"
     );
 }

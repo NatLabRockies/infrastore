@@ -214,8 +214,11 @@ cargo run -p infrastore-server -- --config my_server.toml
   table, keyed by the same hash that pools its array. See
   `crates/infrastore-core/src/storage/hdf5.rs` for the implementation and
   `docs/src/reference/file-format.md` for the user-facing specification; keep them synchronized.
-- Deletion creates reusable packed slots or tombstoned standalone datasets. HDF5 cannot reclaim the
-  space in place, and compaction behavior must remain explicit.
+- Deletion frees a packed column (slot reusable, hash row and column data zero-filled) or unlinks a
+  standalone dataset. HDF5 cannot return the space in place, so the file only shrinks when
+  `Store::compact` rewrites it: an on-disk compaction materializes the catalog's live arrays into a
+  sibling `<store>.h5.repack` and renames it over the original, assuming a single writer. Compaction
+  behavior must remain explicit.
 
 ## Conventions
 

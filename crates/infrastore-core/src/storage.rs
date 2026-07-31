@@ -128,15 +128,30 @@ impl Compression {
     }
 }
 
+/// What a [`crate::Store::compact`] reclaimed, across both halves of the
+/// artifact.
+///
+/// For an on-disk store compaction rewrites the HDF5 file from the catalog's
+/// live set and swaps the rewritten copy over the original, so these counts
+/// describe things that existed in the old file and do not exist in the new
+/// one. An in-memory store has no file to rewrite: only `slots_reclaimed` (its
+/// tombstone count) and the two catalog sweeps are meaningful there, and
+/// `bytes_reclaimed` / `datasets_dropped` stay zero.
 #[derive(Debug, Default, Clone)]
 pub struct CompactionReport {
+    /// Reusable packed-column slots that a removal had freed in the old file.
+    /// The rewrite lays the live columns out contiguously, so none of them
+    /// survive into the new one.
     pub slots_reclaimed: usize,
+    /// Datasets present in the old file and absent from the new one: arrays no
+    /// catalog row references any more (leftovers from an interrupted bulk add,
+    /// or tombstones written by a version that did not unlink on removal), plus
+    /// packed pools the rewrite could fold into fewer datasets.
     pub datasets_dropped: usize,
     /// Content-addressed feature sets in the SQLite catalog that no association
     /// referenced any more, and were deleted. Feature sets are shared, so
     /// removing an association cannot cascade-delete them; they accumulate as
-    /// unreachable rows until a compaction sweeps them, exactly as deleted
-    /// arrays leave unreachable HDF5 datasets behind.
+    /// unreachable rows until a compaction sweeps them.
     pub feature_sets_reclaimed: usize,
     /// Content-addressed timestamp vectors in the SQLite catalog that no
     /// association referenced any more, and were deleted. Shared and swept for
@@ -144,6 +159,21 @@ pub struct CompactionReport {
     /// `NonSequentialTimeSeries` on a time axis leaves that axis behind as an
     /// unreachable row until a compaction reclaims it.
     pub timestamp_sets_reclaimed: usize,
+    /// How much smaller the HDF5 file got, in bytes (saturating: a rewrite that
+    /// happened to grow the file reports 0). Always 0 for an in-memory store.
+    pub bytes_reclaimed: u64,
+}
+
+/// Physical counts a backend can report about itself, used by
+/// [`crate::Store::compact`] to describe what a rewrite removed. The in-memory
+/// backend has no such structure and reports zeros.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackendStats {
+    /// Packed columns currently marked free (a removal cleared them).
+    pub free_packed_slots: usize,
+    /// Datasets holding array data — packed pools plus standalone arrays. Hash
+    /// companions are bookkeeping, not data, and are not counted.
+    pub data_datasets: usize,
 }
 
 /// The result of [`crate::Store::verify_integrity`]: one message per array whose
@@ -392,7 +422,19 @@ pub(crate) trait StorageBackend: Send + Sync {
     }
 
     /// Reclaim space from removed arrays.
+    ///
+    /// This is the in-memory backend's whole compaction story. An on-disk store
+    /// is compacted by [`crate::Store::compact`] instead, which rewrites the
+    /// file from the catalog's live set — the backend cannot do that on its own
+    /// because liveness lives in the catalog, not in the file.
     fn compact(&mut self) -> Result<CompactionReport>;
+
+    /// Physical counts describing the backend's current state, for the
+    /// before/after arithmetic in a compaction report. The default reports
+    /// zeros, which is correct for a backend with no on-disk structure.
+    fn stats(&self) -> BackendStats {
+        BackendStats::default()
+    }
 
     /// Validate that each `(hash, dtype)` the caller names reads back and
     /// rehashes to its recorded hash.

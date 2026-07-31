@@ -723,28 +723,51 @@ def test_copy_time_series():
 
 
 def test_compact(tmp_path):
-    """``compact`` reports the tombstones a delete left behind and leaves the
-    surviving series readable."""
+    """``compact`` rewrites the file so a delete actually reclaims space, and
+    leaves the surviving series readable."""
     path = tmp_path / "compact.h5"
     store = Store.create(path=str(path), in_memory=False)
     keep_values = np.arange(4, dtype=np.float64)
     keep = _add(store, 1, _sts("keep", keep_values))
-    drop = _add(store, 2, _sts("drop", np.arange(4, dtype=np.float64) + 100))
+    # Big enough that dropping it moves the file size past HDF5 metadata noise.
+    H, C = 48, 400
+    bulk = np.arange(H * C, dtype=np.float64).reshape(H, C)
+    drop = _add(
+        store,
+        2,
+        Deterministic(
+            T0, RES_1H, timedelta(hours=H), timedelta(hours=1), C, bulk, "drop"
+        ),
+    )
     store.flush()
 
     store.remove_time_series(drop)
+    store.flush()
+    # HDF5 cannot hand the freed space back in place: the file only shrinks
+    # once compact rewrites it.
+    before = path.stat().st_size
     report = store.compact()
-    # Whatever shape the report takes, the surviving data must be intact.
-    assert report is not None
+    after = path.stat().st_size
+
+    assert set(report) == {
+        "slots_reclaimed",
+        "datasets_dropped",
+        "feature_sets_reclaimed",
+        "timestamp_sets_reclaimed",
+        "bytes_reclaimed",
+    }
+    assert after < before
+    assert report["bytes_reclaimed"] == before - after > 0
+
     np.testing.assert_array_equal(
         np.asarray(store.get_time_series(keep).data), keep_values
     )
     assert store.verify_integrity() == {"ok": True, "errors": []}
 
-    # An in-memory store can be compacted too.
+    # An in-memory store can be compacted too; it has no file to shrink.
     mem = Store.create(in_memory=True)
     _add(mem, 1, _sts("load", np.arange(4, dtype=np.float64)))
-    assert mem.compact() is not None
+    assert mem.compact()["bytes_reclaimed"] == 0
 
 
 def test_count_array_references_and_num_distinct_arrays():

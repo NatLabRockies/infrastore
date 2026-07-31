@@ -1835,20 +1835,52 @@ pub unsafe extern "C" fn infrastore_store_verify(
     }
 }
 
-/// Compact the store.
+/// Compact the store and return what it reclaimed as a JSON object
+/// `{"slots_reclaimed": <u64>, "datasets_dropped": <u64>,
+/// "feature_sets_reclaimed": <u64>, "timestamp_sets_reclaimed": <u64>,
+/// "bytes_reclaimed": <u64>}`.
+///
+/// For an on-disk store this **rewrites the HDF5 file**: the arrays the catalog
+/// still references are written into a sibling file which then replaces the
+/// original, so removed data actually leaves the file. The store keeps working
+/// across the swap (its file handle is reopened on the new file). It assumes
+/// this process is the file's only user — see `Store::compact` in the Rust core.
+///
+/// Returns the JSON through `out_json` as an **owned** allocation the caller
+/// releases with `infrastore_string_free`; `out_len` is its byte length. Unlike
+/// the fixed-size read-only queries this cannot use probe-then-fetch: the call
+/// mutates the store, so it must run exactly once.
 ///
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle and must not be used concurrently for the duration
-/// of the call.
+/// of the call — the underlying file is replaced part-way through. `out_json` and `out_len` must
+/// each be valid for writing one pointer / one `u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn infrastore_store_compact(handle: *mut InfraStoreHandle) -> i32 {
+pub unsafe extern "C" fn infrastore_store_compact(
+    handle: *mut InfraStoreHandle,
+    out_json: *mut *mut c_char,
+    out_len: *mut u64,
+) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
-    match store.inner.compact() {
-        Ok(_) => INFRASTORE_OK,
-        Err(e) => map_core_error(e),
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
     }
+    let report = match store.inner.compact() {
+        Ok(r) => r,
+        Err(e) => return map_core_error(e),
+    };
+    let json = serde_json::json!({
+        "slots_reclaimed": report.slots_reclaimed as u64,
+        "datasets_dropped": report.datasets_dropped as u64,
+        "feature_sets_reclaimed": report.feature_sets_reclaimed as u64,
+        "timestamp_sets_reclaimed": report.timestamp_sets_reclaimed as u64,
+        "bytes_reclaimed": report.bytes_reclaimed,
+    })
+    .to_string();
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// Begin a transaction spanning subsequent operations on `handle`, so that adds,
@@ -8469,6 +8501,52 @@ mod abi_tests {
         }
     }
 
+    #[test]
+    fn compact_returns_a_report_and_leaves_the_store_usable() {
+        let store = abi_create_in_memory();
+        let (rc, key) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
+        assert_eq!(rc, INFRASTORE_OK);
+
+        let mut out: *mut c_char = ptr::null_mut();
+        let mut len: u64 = 0;
+        assert_eq!(
+            unsafe { infrastore_store_compact(store, &mut out, &mut len) },
+            INFRASTORE_OK
+        );
+        assert!(!out.is_null());
+        let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        assert_eq!(json.len() as u64, len);
+        unsafe { infrastore_string_free(out) };
+
+        let report: Value = serde_json::from_str(&json).unwrap();
+        for field in [
+            "slots_reclaimed",
+            "datasets_dropped",
+            "feature_sets_reclaimed",
+            "timestamp_sets_reclaimed",
+            "bytes_reclaimed",
+        ] {
+            assert!(
+                report.get(field).and_then(Value::as_u64).is_some(),
+                "missing {field} in {json}"
+            );
+        }
+        // An in-memory store has no file to shrink.
+        assert_eq!(report["bytes_reclaimed"].as_u64(), Some(0));
+
+        // The handle still works after the call.
+        let mut n = 0i64;
+        assert_eq!(
+            unsafe { infrastore_store_num_distinct_arrays(store, &mut n) },
+            INFRASTORE_OK
+        );
+        assert_eq!(n, 1);
+        unsafe {
+            infrastore_key_free(key);
+            infrastore_store_free(store);
+        }
+    }
+
     // ---- Invalid UTF-8 -----------------------------------------------------
 
     #[test]
@@ -8671,10 +8749,13 @@ mod abi_tests {
             unsafe { infrastore_store_remove(ro, missing) },
             INFRASTORE_ERR_READ_ONLY
         );
+        let mut report: *mut c_char = ptr::null_mut();
+        let mut report_len: u64 = 0;
         assert_eq!(
-            unsafe { infrastore_store_compact(ro) },
+            unsafe { infrastore_store_compact(ro, &mut report, &mut report_len) },
             INFRASTORE_ERR_READ_ONLY
         );
+        assert!(report.is_null());
 
         unsafe {
             infrastore_key_free(missing);

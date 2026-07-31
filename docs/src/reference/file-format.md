@@ -230,14 +230,36 @@ regardless of the filter, so stores written with different settings stay mutuall
 - **Packed:** deletion zero-fills both the column's hash row and the column's data, so no stale
   values are readable through a reused slot. The slot becomes reusable by the next compatible write.
   The dataset does not shrink.
-- **Standalone:** deletion drops the array from the in-memory index; the HDF5 dataset lingers as
-  dead space (HDF5 cannot reclaim the space in place).
-- `compact()` reports reclaimable slots but does not physically resize datasets or remove dead
-  standalone datasets in this release (HDF5 cannot reclaim the space in place).
+- **Standalone:** deletion unlinks the HDF5 dataset. The object is unreachable immediately and stays
+  gone across a reopen, but the space it occupied is not returned to the filesystem until a
+  compaction (HDF5 cannot reclaim space in place). Re-adding the same content therefore rewrites the
+  dataset rather than re-indexing it.
 - **Feature sets and timestamp vectors:** because both are shared, deleting an association never
   deletes either; removing the last association that referenced one leaves it unreachable.
   `compact()` deletes unreachable rows and reports the counts as `feature_sets_reclaimed` and
-  `timestamp_sets_reclaimed`. These are the only things compaction physically removes.
+  `timestamp_sets_reclaimed`.
+
+`compact()` on an on-disk store **rewrites the `.h5` file**, because that is the only way HDF5 gives
+the freed space back:
+
+1. The catalog is swept of unreachable feature sets and timestamp vectors, then read for the live
+   set — the catalog, not the file, is what makes an array live.
+2. Every live array is written into a fresh file at `<store>.h5.repack`, sibling to the original so
+   the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
+   their cohort width rather than the growth-sized width an incremental write reserves.
+3. The store's HDF5 handle is closed, the temp file is renamed over the original, and the store
+   reopens on the result. A crash before the rename leaves the original untouched plus a stray
+   `.repack` file, which the next compaction deletes.
+
+What the new file therefore lacks: freed packed slots, unreferenced datasets (an interrupted bulk
+add's leftovers, or tombstones left by a store written before deletion unlinked), and the slack in
+over-wide packed pools. The `.sqlite` half is not touched — arrays are content-addressed, so a
+different physical layout is invisible to it — and `data_format_version` is unchanged, because the
+rewrite emits the same format.
+
+Compaction assumes the process running it is the file's only user. On Unix another process holding
+the file open keeps reading the pre-compaction inode; on Windows its lock makes the rename fail, and
+the error surfaces with the compacting store still open on the original file.
 
 ## SQLite Schema
 

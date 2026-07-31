@@ -292,6 +292,29 @@ struct CompressionSettings
     shuffle::Bool
 end
 
+"""
+    CompactionReport
+
+What a [`compact!`](@ref) reclaimed, across both halves of the store.
+
+For an on-disk store compaction rewrites the `.h5` file from the catalog's live
+set, so these count things that were in the old file and are not in the new one:
+`slots_reclaimed` are packed-column slots a removal had freed,
+`datasets_dropped` are datasets nothing referenced any more, and
+`bytes_reclaimed` is how much smaller the file got. `feature_sets_reclaimed` and
+`timestamp_sets_reclaimed` are the catalog's orphaned content-addressed rows.
+
+An in-memory store has no file to rewrite: `bytes_reclaimed` and
+`datasets_dropped` are always `0` there.
+"""
+struct CompactionReport
+    slots_reclaimed::Int
+    datasets_dropped::Int
+    feature_sets_reclaimed::Int
+    timestamp_sets_reclaimed::Int
+    bytes_reclaimed::Int
+end
+
 # The result types are compared and hashed by value. Julia's default `==` for an
 # immutable struct is `===`-based, which would compare the `Vector` / `Dict`
 # fields above by identity, so `==`, a matching `hash`, and a field-labelled
@@ -313,6 +336,7 @@ const _RESULT_TYPES = (
     :StaticGrid,
     :ForecastTimeline,
     :CompressionSettings,
+    :CompactionReport,
 )
 
 # 32-byte content hashes read as hex; everything else uses its own `repr`.

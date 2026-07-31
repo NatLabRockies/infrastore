@@ -102,6 +102,8 @@ impl StorageBackend for MemoryBackend {
             // this in after the array side is done.
             feature_sets_reclaimed: 0,
             timestamp_sets_reclaimed: 0,
+            // Nothing on disk to shrink.
+            bytes_reclaimed: 0,
         })
     }
 

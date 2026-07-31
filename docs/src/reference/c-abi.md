@@ -652,7 +652,11 @@ int32_t infrastore_store_get_resolutions(const struct InfraStore *handle,
 int32_t infrastore_store_get_compression(const struct InfraStore *handle, uint8_t *out_kind,
                                  uint8_t *out_level, bool *out_shuffle);
 int32_t infrastore_store_verify(const struct InfraStore *handle, uint64_t *out_error_count);
-int32_t infrastore_store_compact(struct InfraStore *handle);
+/* Compacts and returns the report as a JSON object {slots_reclaimed, datasets_dropped,
+   feature_sets_reclaimed, timestamp_sets_reclaimed, bytes_reclaimed}. Owned allocation:
+   free with infrastore_string_free. On an on-disk store this rewrites the .h5 file and
+   replaces it, so the call must run exactly once (no probe-then-fetch). */
+int32_t infrastore_store_compact(struct InfraStore *handle, char **out_json, uint64_t *out_len);
 int32_t infrastore_store_flush(struct InfraStore *handle);
 /* Cross-operation transactions. Adds, removals, and transforms between a begin and
    its matching commit either all take effect or none do; removals are reversible

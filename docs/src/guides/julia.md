@@ -292,7 +292,9 @@ end
 ```julia
 counts = get_counts(store)        # TimeSeriesCounts: components_with_time_series, static_time_series, forecasts
 nerr   = verify_integrity(store)  # 0 == arrays intact (catalog not checked)
-compact!(store)
+report = compact!(store)          # CompactionReport; rewrites the .h5 from the live set, so a
+                                  # delete actually shrinks the file. Nothing else may have the
+                                  # store open while it runs.
 ```
 
 ## Associations

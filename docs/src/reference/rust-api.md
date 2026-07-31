@@ -280,6 +280,9 @@ impl Store {
     ) -> Result<usize>;
     pub fn count_parent_child_associations(&self, filter: &ParentChildFilter) -> Result<i64>;
 
+    // Reclaims both halves. On an on-disk store this rewrites the .h5 file from
+    // the catalog's live set and replaces it, so a delete actually shrinks the
+    // store; assumes this process is the file's only user.
     pub fn compact(&mut self) -> Result<CompactionReport>;
     pub fn verify_integrity(&self) -> Result<IntegrityReport>;
     pub fn flush(&mut self) -> Result<()>;
@@ -1211,10 +1214,12 @@ pub struct ForecastSummaryRow {
     pub window_count: Option<i64>,
     pub count: i64,
 }
-pub struct CompactionReport {
+pub struct CompactionReport {   // on-disk compaction rewrites the .h5; see the file-format reference
     pub slots_reclaimed: usize,
     pub datasets_dropped: usize,
     pub feature_sets_reclaimed: usize,
+    pub timestamp_sets_reclaimed: usize,
+    pub bytes_reclaimed: u64,   // how much smaller the file got; 0 for an in-memory store
 }
 pub struct IntegrityReport { pub errors: Vec<String> }  // .ok() == errors.is_empty()
 pub struct ForecastParameters {
@@ -1289,7 +1294,8 @@ pub trait StorageBackend: Send + Sync {
     fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()>;   // no-op if absent
     fn contains(&self, hash: &[u8; 32]) -> Result<bool>;
-    fn compact(&mut self) -> Result<CompactionReport>;
+    fn compact(&mut self) -> Result<CompactionReport>;   // in-memory path only; `Store::compact`
+                                                        // rewrites the file for an on-disk store
     fn verify(&self) -> Result<IntegrityReport>;
     fn flush(&mut self) -> Result<()>;
 

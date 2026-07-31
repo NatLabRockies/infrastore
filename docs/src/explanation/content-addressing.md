@@ -132,10 +132,12 @@ instead accepts unreachable rows and sweeps them in bulk. Concretely:
 - **No foreign key, no `ON DELETE CASCADE`.** A cascade would be actively wrong: rows are shared, so
   deleting one association must not delete a set another association still uses.
 - **Deleting the last user leaves the row unreachable**, rather than deleting it — the same
-  end-state as the HDF5 side's dead standalone variables, which also linger.
+  end-state as the HDF5 side's freed packed slots and unlinked datasets, whose space also lingers
+  until a compaction.
 - **`Store::compact` sweeps them.** It deletes every feature set and every timestamp vector no
   association references any more, reporting the row counts as `feature_sets_reclaimed` and
-  `timestamp_sets_reclaimed`. These are the only things compaction physically removes.
+  `timestamp_sets_reclaimed`. On an on-disk store the same call then rewrites the `.h5` file, so the
+  array side is reclaimed too.
 - **Clearing the whole store drops them all outright**, since a cleared store orphans every row by
   construction and may never see a compaction.
 
@@ -209,10 +211,10 @@ arrays, not about the store as a whole. Three things fall outside it:
 This is a deliberate scope rather than an oversight: the array side is where silent bit-level
 corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
 checks — `check_static_consistency` for per-resolution grid agreement, and `compact` for the
-unreachable arrays and feature sets a delete leaves behind (an expected state, documented in the
-[file format](../reference/file-format.md), not corruption). SQLite also enforces a good deal
-itself: the `NOT NULL` and `CHECK` constraints, and the two unique indexes that guarantee identity
-uniqueness.
+unreachable arrays and feature sets a delete leaves behind, which it reclaims and reports (an
+expected state, documented in the [file format](../reference/file-format.md), not corruption).
+SQLite also enforces a good deal itself: the `NOT NULL` and `CHECK` constraints, and the two unique
+indexes that guarantee identity uniqueness.
 
 If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the [file format](../reference/file-format.md) is the one that matters: move, copy, and delete the

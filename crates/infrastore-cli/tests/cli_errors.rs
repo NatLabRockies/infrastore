@@ -1014,6 +1014,22 @@ fn compact_runs_and_reports() {
 
     let out = run(&store, &["-f", "json", "compact", "--force"]);
     assert!(!out.trim().is_empty(), "compact must print a report");
+    let report: serde_json::Value = serde_json::from_str(&out).expect("compact prints json");
+    for field in [
+        "slots_reclaimed",
+        "datasets_dropped",
+        "feature_sets_reclaimed",
+        "timestamp_sets_reclaimed",
+        "bytes_reclaimed",
+    ] {
+        assert!(
+            report
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "compact report is missing {field}: {report}"
+        );
+    }
 
     // The surviving series is intact and the store still verifies.
     let out = run(

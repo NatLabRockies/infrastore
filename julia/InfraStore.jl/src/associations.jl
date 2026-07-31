@@ -696,8 +696,8 @@ so `0` does not mean the store as a whole is sound. A catalog that is corrupted,
 truncated, or paired with the wrong `.h5` file still returns `0`, while every read
 of the affected series throws. For catalog-side checks use
 [`check_static_consistency`] (per-resolution grid agreement) and [`compact!`]
-(which reports the unreachable arrays and feature sets a delete left behind — an
-expected state, not corruption).
+(which reclaims the unreachable arrays and feature sets a delete left behind, and
+reports what went — an expected state, not corruption).
 """
 function verify_integrity(store::Store)
     out = Ref{UInt64}(0)
@@ -709,9 +709,37 @@ function verify_integrity(store::Store)
     return Int(out[])
 end
 
+"""
+    compact!(store) -> CompactionReport
+
+Reclaim space in both halves of the store and report what went.
+
+For an on-disk store this **rewrites the `.h5` file**: the arrays the catalog
+still references are written into a sibling file which then replaces the
+original. HDF5 cannot hand freed space back in place, so this is what makes a
+removal actually shrink the store. The store stays usable across the swap.
+
+The rewrite assumes this process is the file's only user. Another process
+holding the store open keeps reading the pre-compaction file on Unix; on Windows
+its lock makes the replacement fail and `compact!` throws with the store still
+open on the original file.
+
+An in-memory store has no file to rewrite; there this just drops the backend's
+tombstone bookkeeping and sweeps the catalog.
+"""
 function compact!(store::Store)
-    return _check(
-        @ccall lib_path().infrastore_store_compact(store.handle::Ptr{Cvoid})::Int32
+    json = _owned_str(
+        (out_json, out_len) -> @ccall lib_path().infrastore_store_compact(
+            store.handle::Ptr{Cvoid}, out_json::Ref{Ptr{Cchar}}, out_len::Ref{UInt64}
+        )::Int32
+    )
+    obj = JSON.parse(json)
+    return CompactionReport(
+        Int(obj["slots_reclaimed"]),
+        Int(obj["datasets_dropped"]),
+        Int(obj["feature_sets_reclaimed"]),
+        Int(obj["timestamp_sets_reclaimed"]),
+        Int(obj["bytes_reclaimed"]),
     )
 end
 

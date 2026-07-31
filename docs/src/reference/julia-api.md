@@ -10,19 +10,19 @@ using InfraStore
 
 Exported names (types first, then functions):
 
-`AddBatch`, `ArrayGroupRow`, `ArrayReferenceCounts`, `Component`, `CompressionSettings`,
-`Deterministic`, `DeterministicSingleTimeSeries`, `ForecastEntry`, `ForecastParameters`,
-`ForecastReader`, `ForecastSummaryRow`, `ForecastTimeline`, `KeyInfo`, `KeyRow`,
-`NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `Probabilistic`, `Scenarios`,
-`SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`, `StaticSummaryRow`, `Store`,
-`SupplementalAttribute`, `SupplementalAttributeAssociation`, `SupplementalAttributeSummaryRow`,
-`SupplementalAttributeTypeCount`, `TimeSeriesCounts`, `TimeSeriesCountsDetailed`, `TimeSeriesKey`,
-`TimeSeriesMetadata`, `TimeSeriesTypeCount`, `add_parent_child_association!`,
-`add_parent_child_associations!`, `add_supplemental_attribute_association!`,
-`add_supplemental_attribute_associations!`, `add_time_series!`, `add_time_series_bulk!`,
-`build_forecast_reader`, `build_static_reader`, `bulk_read`, `check_static_consistency`, `clear!`,
-`close!`, `compact!`, `copy_time_series!`, `count_array_references`,
-`count_components_with_attributes`, `count_parent_child_associations`,
+`AddBatch`, `ArrayGroupRow`, `ArrayReferenceCounts`, `CompactionReport`, `Component`,
+`CompressionSettings`, `Deterministic`, `DeterministicSingleTimeSeries`, `ForecastEntry`,
+`ForecastParameters`, `ForecastReader`, `ForecastSummaryRow`, `ForecastTimeline`, `KeyInfo`,
+`KeyRow`, `NonSequentialTimeSeries`, `OwnerCategory`, `ParentChildAssociation`, `Probabilistic`,
+`Scenarios`, `SingleTimeSeries`, `StaticGrid`, `StaticGroup`, `StaticReader`, `StaticSummaryRow`,
+`Store`, `SupplementalAttribute`, `SupplementalAttributeAssociation`,
+`SupplementalAttributeSummaryRow`, `SupplementalAttributeTypeCount`, `TimeSeriesCounts`,
+`TimeSeriesCountsDetailed`, `TimeSeriesKey`, `TimeSeriesMetadata`, `TimeSeriesTypeCount`,
+`add_parent_child_association!`, `add_parent_child_associations!`,
+`add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
+`add_time_series!`, `add_time_series_bulk!`, `build_forecast_reader`, `build_static_reader`,
+`bulk_read`, `check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
+`count_array_references`, `count_components_with_attributes`, `count_parent_child_associations`,
 `count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
 `flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
 `forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
@@ -220,6 +220,7 @@ than absent, so no field is silently dropped by the addressing path taken.
 | `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`                                                                   |
 | `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`                                                                                            |
 | `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                          |
+| `CompactionReport`                | `compact!`                                | `slots_reclaimed`, `datasets_dropped`, `feature_sets_reclaimed`, `timestamp_sets_reclaimed`, `bytes_reclaimed`                                    |
 
 `StaticGrid` is shared by `static_grid` (a reader's timeline) and `check_static_consistency` (one
 per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for
@@ -685,7 +686,8 @@ check_static_consistency(store; resolution=nothing) -> Vector{StaticGrid}  # one
 get_resolutions(store; time_series_type=nothing) -> Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
 get_compression(store) -> CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
-compact!(store) -> Nothing
+compact!(store) -> CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
+                                      # .h5 file from the live set and replaces it (single writer)
 flush!(store) -> Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.

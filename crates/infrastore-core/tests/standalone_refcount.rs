@@ -247,10 +247,10 @@ fn standalone_refcount_bool() {
 
 // --- On-disk persistence: a standalone array orphaned by a delete must stay
 // gone across flush + reopen, survivors must still read, and a fresh add after
-// the delete must round-trip. HDF5 cannot reclaim the space in place, so the
-// dataset is left tombstoned until `compact`; this guards the catalog side (the
-// dropped hash never reappears) and that a
-// reopened store agrees on the distinct-array count. --------------------------
+// the delete must round-trip. The delete unlinks the dataset (HDF5 still cannot
+// hand the space back to the filesystem — only `compact`'s rewrite does that),
+// so this guards both halves: the dropped hash never reappears in the catalog,
+// and a reopened store agrees on the distinct-array count. --------------------
 
 #[test]
 fn standalone_orphan_persists_across_reopen() {
