@@ -75,8 +75,15 @@ fn removing_the_last_sts_backing_a_dst_is_refused() {
 
     // Derive a single DST view sharing the STS's array.
     let derived = store
-        .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
-        .unwrap();
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .transformed;
     assert_eq!(derived, 1);
 
     let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
@@ -110,7 +117,13 @@ fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
     let mut store = create_store(None, true).unwrap();
     let sts_key = add_sts(&mut store, 5);
     store
-        .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
         .unwrap();
     let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
     let dst_key = store

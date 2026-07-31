@@ -87,7 +87,7 @@ fn add_forecast(
                 )
                 .unwrap();
             store
-                .transform_single_time_series(horizon, interval, None, None)
+                .transform_single_time_series(horizon, interval, None, None, Default::default())
                 .unwrap();
             return TimeSeriesKey::Forecast(ForecastTimeSeriesKey::new(
                 owner,
@@ -1144,7 +1144,7 @@ fn deterministic_and_dst_are_mutually_exclusive() {
         )
         .unwrap();
     let err = store
-        .transform_single_time_series(horizon, interval, None, None)
+        .transform_single_time_series(horizon, interval, None, None, Default::default())
         .unwrap_err();
     assert!(
         matches!(&err, TimeSeriesError::InvalidParameter(msg)
@@ -1195,8 +1195,10 @@ fn transform_honors_owner_category_and_resolution_filters() {
             interval,
             Some(OwnerCategory::Component),
             Some(hourly.into()),
+            Default::default(),
         )
-        .unwrap();
+        .unwrap()
+        .transformed;
     assert_eq!(
         n, 1,
         "only the hourly component should transform; the daily component and the \
@@ -1210,8 +1212,10 @@ fn transform_honors_owner_category_and_resolution_filters() {
             interval,
             Some(OwnerCategory::Component),
             Some(hourly.into()),
+            Default::default(),
         )
-        .unwrap();
+        .unwrap()
+        .transformed;
     assert_eq!(
         again, 0,
         "re-running the same transform should derive nothing"
@@ -1225,8 +1229,10 @@ fn transform_honors_owner_category_and_resolution_filters() {
             interval,
             Some(OwnerCategory::SupplementalAttribute),
             Some(hourly.into()),
+            Default::default(),
         )
-        .unwrap();
+        .unwrap()
+        .transformed;
     assert_eq!(
         attrs, 1,
         "the supplemental attribute should transform on its own pass"
@@ -1273,20 +1279,34 @@ fn transform_rejects_horizon_change_at_same_interval() {
 
     assert_eq!(
         store
-            .transform_single_time_series(Duration::hours(2), interval, None, None)
-            .unwrap(),
+            .transform_single_time_series(
+                Duration::hours(2),
+                interval,
+                None,
+                None,
+                Default::default()
+            )
+            .unwrap()
+            .transformed,
         1
     );
     // Same horizon + interval: idempotent no-op.
     assert_eq!(
         store
-            .transform_single_time_series(Duration::hours(2), interval, None, None)
-            .unwrap(),
+            .transform_single_time_series(
+                Duration::hours(2),
+                interval,
+                None,
+                None,
+                Default::default()
+            )
+            .unwrap()
+            .transformed,
         0
     );
     // Different horizon at the same interval: hard error.
     let err = store
-        .transform_single_time_series(Duration::hours(3), interval, None, None)
+        .transform_single_time_series(Duration::hours(3), interval, None, None, Default::default())
         .unwrap_err();
     assert!(
         matches!(&err, TimeSeriesError::InvalidParameter(msg)
@@ -1296,8 +1316,15 @@ fn transform_rejects_horizon_change_at_same_interval() {
     // Different interval: a distinct view, derived alongside the first.
     assert_eq!(
         store
-            .transform_single_time_series(Duration::hours(3), Duration::hours(2), None, None)
-            .unwrap(),
+            .transform_single_time_series(
+                Duration::hours(3),
+                Duration::hours(2),
+                None,
+                None,
+                Default::default()
+            )
+            .unwrap()
+            .transformed,
         1
     );
 }
@@ -1526,8 +1553,15 @@ fn transform_single_time_series_on_a_monthly_grid() {
         .unwrap();
 
     let n = store
-        .transform_single_time_series(Period::Months(3), Period::Months(1), None, None)
-        .unwrap();
+        .transform_single_time_series(
+            Period::Months(3),
+            Period::Months(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .transformed;
     assert_eq!(n, 1, "one series transformed");
 
     let dst_keys = store
@@ -1730,19 +1764,37 @@ fn non_positive_forecast_periods_are_rejected_through_the_add_path() {
         .unwrap();
     assert!(
         store
-            .transform_single_time_series(Duration::zero(), Duration::hours(1), None, None)
+            .transform_single_time_series(
+                Duration::zero(),
+                Duration::hours(1),
+                None,
+                None,
+                Default::default()
+            )
             .is_err(),
         "a zero horizon must be rejected"
     );
     assert!(
         store
-            .transform_single_time_series(Duration::hours(2), Duration::zero(), None, None)
+            .transform_single_time_series(
+                Duration::hours(2),
+                Duration::zero(),
+                None,
+                None,
+                Default::default()
+            )
             .is_err(),
         "a zero interval must be rejected"
     );
     assert!(
         store
-            .transform_single_time_series(Duration::hours(-2), Duration::hours(1), None, None)
+            .transform_single_time_series(
+                Duration::hours(-2),
+                Duration::hours(1),
+                None,
+                None,
+                Default::default()
+            )
             .is_err(),
         "a negative horizon must be rejected"
     );
@@ -1922,8 +1974,9 @@ fn single_window_transform_stores_the_requested_interval_and_stays_idempotent() 
     // horizon spans the whole series => one window.
     assert_eq!(
         store
-            .transform_single_time_series(horizon, horizon, None, None)
-            .unwrap(),
+            .transform_single_time_series(horizon, horizon, None, None, Default::default())
+            .unwrap()
+            .transformed,
         1
     );
     let key = store
@@ -1946,8 +1999,9 @@ fn single_window_transform_stores_the_requested_interval_and_stays_idempotent() 
     // Re-running with the same arguments derives nothing new.
     assert_eq!(
         store
-            .transform_single_time_series(horizon, horizon, None, None)
-            .unwrap(),
+            .transform_single_time_series(horizon, horizon, None, None, Default::default())
+            .unwrap()
+            .transformed,
         0
     );
 }
@@ -1977,8 +2031,9 @@ fn single_window_transform_at_a_smaller_interval_keeps_it() {
         .unwrap();
     assert_eq!(
         store
-            .transform_single_time_series(horizon, interval, None, None)
-            .unwrap(),
+            .transform_single_time_series(horizon, interval, None, None, Default::default())
+            .unwrap()
+            .transformed,
         1
     );
     let key = store
@@ -1992,4 +2047,350 @@ fn single_window_transform_at_a_smaller_interval_keeps_it() {
     let det = got.as_deterministic().unwrap();
     assert_eq!(det.count, 1);
     assert_eq!(det.interval, Period::from(interval));
+}
+
+// ---------------------------------------------------------------------------
+// TransformPolicy: the rules InfrastructureSystems.jl opts into.
+//
+// Every test above runs with `TransformPolicy::default()` — the permissive
+// behavior. These cover the opted-in rules, which are what moved out of the
+// InfrastructureSystems.jl per-series validation loop and into the core.
+// ---------------------------------------------------------------------------
+
+/// Add one `SingleTimeSeries` of `len` hourly points starting at `initial`.
+fn add_hourly_sts(
+    store: &mut Store,
+    owner: i64,
+    name: &str,
+    initial: chrono::DateTime<Utc>,
+    resolution: Duration,
+    len: usize,
+) {
+    let vals: Vec<f64> = (0..len).map(|i| i as f64).collect();
+    store
+        .add_time_series(
+            owner,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution,
+                f64_arr(vec![len], &vals),
+                name,
+            )),
+            Features::new(),
+        )
+        .unwrap();
+}
+
+fn is_policy() -> infrastore_core::TransformPolicy {
+    infrastore_core::TransformPolicy {
+        dry_run: false,
+        normalize_single_window: true,
+        require_uniform_forecast_grid: true,
+    }
+}
+
+/// Under `normalize_single_window` a single-window request is stored as the
+/// zero interval instead of verbatim — the encoding IS looks views up by. The
+/// case is reported either way.
+#[test]
+fn normalize_single_window_stores_the_zero_interval() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let horizon = Duration::hours(8);
+    let mut store = create_store(None, true).unwrap();
+    add_hourly_sts(&mut store, 1, "load", initial, Duration::hours(1), 8);
+
+    let outcome = store
+        .transform_single_time_series(horizon, horizon, None, None, is_policy())
+        .unwrap();
+    assert_eq!(outcome.transformed, 1);
+    assert_eq!(outcome.sources, 1);
+    assert!(
+        outcome.interval_normalized,
+        "the horizon spans the series, so this is the single-window case"
+    );
+    assert_eq!(
+        outcome.interval,
+        Period::zero(),
+        "IS stores the single-window interval as zero, not verbatim"
+    );
+
+    let key = store
+        .list_keys(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let det = store
+        .get_time_series(key.identity(), None)
+        .unwrap()
+        .as_deterministic()
+        .unwrap()
+        .clone();
+    assert_eq!(det.count, 1);
+    assert_eq!(det.interval, Period::zero());
+}
+
+/// An interval longer than the horizon would leave gaps between windows. The
+/// permissive policy derives it anyway (the historical core behavior); IS's
+/// policy is not what rejects it — the check is unconditional.
+#[test]
+fn an_interval_longer_than_the_horizon_is_rejected() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    add_hourly_sts(&mut store, 1, "load", initial, Duration::hours(1), 24);
+
+    let err = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(6),
+            None,
+            None,
+            is_policy(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, infrastore_core::TimeSeriesError::InvalidParameter(m)
+            if m.contains("longer than the horizon")),
+        "got {err:?}"
+    );
+}
+
+/// `require_uniform_forecast_grid` rejects a transform whose derived grid
+/// disagrees with a forecast already stored at the same (resolution, interval).
+/// This is the check that was `check_params_compatibility` in IS.
+#[test]
+fn uniform_grid_policy_rejects_a_count_mismatch_with_a_stored_forecast() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let horizon = Duration::hours(4);
+    let interval = Duration::hours(1);
+    let mut store = create_store(None, true).unwrap();
+
+    // A real Deterministic with 2 windows.
+    add_forecast(
+        &mut store,
+        1,
+        "existing",
+        TimeSeriesType::Deterministic,
+        initial,
+        resolution,
+        horizon,
+        interval,
+        2,
+        f64_arr(vec![4, 2], &[0.0; 8]),
+        None,
+    );
+    // An STS long enough to derive many more than 2 windows.
+    add_hourly_sts(&mut store, 2, "load", initial, resolution, 24);
+
+    let err = store
+        .transform_single_time_series(horizon, interval, None, None, is_policy())
+        .unwrap_err();
+    assert!(
+        matches!(&err, infrastore_core::TimeSeriesError::InvalidParameter(m)
+            if m.contains("does not match the stored forecast count")),
+        "got {err:?}"
+    );
+
+    // The permissive policy allows exactly this — it is a client rule, not a
+    // storage invariant.
+    store
+        .transform_single_time_series(horizon, interval, None, None, Default::default())
+        .unwrap();
+}
+
+/// Two resolutions that derive different window counts would produce two
+/// forecast grids. IS forbids that; the default policy allows it.
+#[test]
+fn uniform_grid_policy_rejects_resolutions_that_derive_different_counts() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    // 24 hourly points and 24 two-hourly points: same horizon, different counts.
+    add_hourly_sts(&mut store, 1, "hourly", initial, Duration::hours(1), 24);
+    add_hourly_sts(&mut store, 2, "two_hourly", initial, Duration::hours(2), 24);
+
+    let err = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(2),
+            None,
+            None,
+            is_policy(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, infrastore_core::TimeSeriesError::InvalidParameter(m)
+            if m.contains("different window")),
+        "got {err:?}"
+    );
+
+    let outcome = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(2),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.transformed, 2,
+        "the permissive policy derives each resolution on its own grid"
+    );
+}
+
+/// Series at one resolution that disagree on `(initial_timestamp, length)` are
+/// rejected before anything is written — the grid check that replaced IS's
+/// per-series count/initial-timestamp loop. This one is unconditional: it is a
+/// property of the static data, not a client rule.
+#[test]
+fn a_divergent_static_grid_is_rejected() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let mut store = create_store(None, true).unwrap();
+    add_hourly_sts(&mut store, 1, "a", initial, resolution, 24);
+    add_hourly_sts(&mut store, 2, "b", initial, resolution, 12);
+
+    let err = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            is_policy(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, infrastore_core::TimeSeriesError::IntegrityError(m)
+            if m.contains("more than one")),
+        "got {err:?}"
+    );
+    assert_eq!(
+        store
+            .list_keys(
+                ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries)
+            )
+            .unwrap()
+            .len(),
+        0,
+        "nothing is written when the grid check fails"
+    );
+}
+
+/// An empty store reports zero sources rather than erroring, so the caller can
+/// tell "nothing to do" from "something was wrong".
+#[test]
+fn a_store_with_no_single_time_series_reports_zero_sources() {
+    let mut store = create_store(None, true).unwrap();
+    let outcome = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            is_policy(),
+        )
+        .unwrap();
+    assert_eq!(outcome.sources, 0);
+    assert_eq!(outcome.transformed, 0);
+    assert!(!outcome.interval_normalized);
+}
+
+/// The grid check is scoped to the transform's owner category, so a
+/// supplemental attribute on a different grid does not fail a component-only
+/// transform.
+#[test]
+fn the_grid_check_is_scoped_to_the_owner_category() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let resolution = Duration::hours(1);
+    let mut store = create_store(None, true).unwrap();
+    add_hourly_sts(&mut store, 1, "component", initial, resolution, 24);
+    let vals: Vec<f64> = (0..12).map(|i| i as f64).collect();
+    store
+        .add_time_series(
+            9,
+            "Outage",
+            OwnerCategory::SupplementalAttribute,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution,
+                f64_arr(vec![12], &vals),
+                "attr",
+            )),
+            Features::new(),
+        )
+        .unwrap();
+
+    let outcome = store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            Some(OwnerCategory::Component),
+            None,
+            is_policy(),
+        )
+        .unwrap();
+    assert_eq!(
+        outcome.transformed, 1,
+        "the attribute's divergent grid is out of scope for a component transform"
+    );
+}
+
+/// A dry run answers "would this transform succeed?" — every check runs, the
+/// verdict is reported, and nothing is written.
+#[test]
+fn a_dry_run_validates_without_writing() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    add_hourly_sts(&mut store, 1, "load", initial, Duration::hours(1), 24);
+
+    let policy = infrastore_core::TransformPolicy {
+        dry_run: true,
+        ..is_policy()
+    };
+    let outcome = store
+        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None, policy)
+        .unwrap();
+    assert_eq!(
+        outcome.transformed, 1,
+        "reports the count a committing run would produce"
+    );
+    assert_eq!(outcome.sources, 1);
+    assert_eq!(
+        store
+            .list_keys(
+                ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries)
+            )
+            .unwrap()
+            .len(),
+        0,
+        "a dry run writes nothing"
+    );
+
+    // A failing transform still fails as a dry run, before any write.
+    let err = store
+        .transform_single_time_series(Duration::hours(4), Duration::hours(6), None, None, policy)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        infrastore_core::TimeSeriesError::InvalidParameter(_)
+    ));
+
+    // And the committing run still works afterwards.
+    assert_eq!(
+        store
+            .transform_single_time_series(
+                Duration::hours(4),
+                Duration::hours(1),
+                None,
+                None,
+                is_policy(),
+            )
+            .unwrap()
+            .transformed,
+        1
+    );
 }

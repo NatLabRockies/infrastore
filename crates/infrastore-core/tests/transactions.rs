@@ -335,7 +335,13 @@ fn dst_guard_still_applies_inside_a_transaction() {
     let mut store = create_store(None, true).unwrap();
     let k1 = add(&mut store, 1, 0.0);
     store
-        .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
         .unwrap();
 
     store.begin_transaction().unwrap();

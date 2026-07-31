@@ -35,7 +35,8 @@ pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, Windo
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
-    TimeSeriesCounts, TimeSeriesCountsDetailed, catalog_sqlite_path,
+    TimeSeriesCounts, TimeSeriesCountsDetailed, TransformOutcome, TransformPolicy,
+    catalog_sqlite_path,
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},

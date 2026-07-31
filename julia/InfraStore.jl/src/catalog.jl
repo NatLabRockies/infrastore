@@ -234,8 +234,12 @@ function _filter_args(
 end
 
 # Run one JSON-returning catalog-filter FFI export (`fname`) with the shared
-# filter arguments, via probe-then-fetch. The exports share one C signature, so
-# the symbol is resolved at runtime (`dlsym`) and called through the pointer.
+# filter arguments. The exports share one C signature, so the symbol is resolved
+# at runtime (`dlsym`) and called through the pointer.
+#
+# These return an owned string rather than following the probe-then-fetch
+# convention: a listing's size scales with the catalog, and probe-then-fetch
+# would run the query and serialize every row twice, once per call.
 function _filter_list_json(
     fname::Symbol,
     store::Store;
@@ -251,8 +255,8 @@ function _filter_list_json(
     (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
         owner_id, owner_category, time_series_type, name, resolution, interval, features
     )
-    return _probe(
-        (buf, cap, out_len) -> @ccall $fptr(
+    return _owned_str(
+        (out_json, out_len) -> @ccall $fptr(
             store.handle::Ptr{Cvoid},
             has_owner::Bool,
             owner_arg::Int64,
@@ -264,8 +268,7 @@ function _filter_list_json(
             resolution_iso::Cstring,
             interval_iso::Cstring,
             features_json::Cstring,
-            buf::Ptr{UInt8},
-            cap::UInt64,
+            out_json::Ref{Ptr{Cchar}},
             out_len::Ref{UInt64},
         )::Int32
     )

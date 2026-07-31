@@ -43,6 +43,13 @@
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**
+ * Buffer size a caller must provide for
+ * `infrastore_store_transform_single_time_series`'s `out_interval`. An
+ * ISO-8601 period is far shorter than this; the slack is deliberate.
+ */
+#define INTERVAL_BUF_LEN 64
+
+/**
  * Accumulates pending add requests for a single all-or-nothing
  * `infrastore_store_add_batch` call. Building the batch performs no store I/O.
  */
@@ -1273,20 +1280,52 @@ void infrastore_bulk_result_free(struct InfraStoreBulkReadHandle *result);
 
 /**
  * Derive `DeterministicSingleTimeSeries` forecasts from the stored
- * `SingleTimeSeries` associations (see `Store::transform_single_time_series`).
- * Writes the number of series transformed to `*out_count`.
+ * `SingleTimeSeries` associations (see `Store::transform_single_time_series`,
+ * which performs the whole of the eligibility validation).
+ *
+ * Writes the number of series transformed to `*out_count`. The remaining
+ * out-parameters report the rest of the `TransformOutcome` and may each be
+ * null if the caller does not need them:
+ *
+ * - `out_sources` — `SingleTimeSeries` matched before idempotent skips; zero
+ *   means there was nothing to transform.
+ * - `out_interval` — the ISO-8601 interval actually stored, NUL-terminated.
+ *   Unlike the listing exports this takes no probe pass: an ISO period is
+ *   bounded, so the caller passes a fixed buffer of `INTERVAL_BUF_LEN` bytes.
+ * - `out_interval_normalized` — non-zero when the request described a single
+ *   window (see `normalize_single_window`).
+ *
+ * The two policy flags are `TransformPolicy` (see the core docs); both false
+ * is the permissive default, and InfrastructureSystems.jl passes both true:
+ *
+ * - `normalize_single_window` selects the single-window encoding: non-zero
+ *   stores the zero interval (what InfrastructureSystems.jl looks up by), zero
+ *   stores the requested interval verbatim.
+ * - `require_uniform_forecast_grid` requires every resolution in scope, and
+ *   any forecast already stored at the same `(resolution, interval)`, to agree
+ *   on the derived window `count` and `initial_timestamp`.
+ * - `dry_run` runs every check and reports what would happen without writing.
+ *   `*out_count` is then the count a committing run would produce. Legal
+ *   against a read-only store.
  *
  * # Safety
  *
  * `handle` must be a live mutable store handle and `out_count` must be valid
- * for writing one `u64`.
+ * for writing one `u64`. Each non-null optional out-parameter must be valid
+ * for writing its type.
  */
 int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
                                                       const char *horizon,
                                                       const char *interval,
                                                       int32_t owner_category,
                                                       const char *resolution,
-                                                      uint64_t *out_count);
+                                                      bool normalize_single_window,
+                                                      bool require_uniform_forecast_grid,
+                                                      bool dry_run,
+                                                      uint64_t *out_count,
+                                                      uint64_t *out_sources,
+                                                      char *out_interval,
+                                                      bool *out_interval_normalized);
 
 /**
  * Fetch a forecast by attributes and return the full data array plus metadata.
@@ -1508,10 +1547,11 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  * - `features_json` (a JSON object; null or empty = no feature filter; matches as
  *   a subset, i.e. a key whose features include all the given ones)
  *
- * Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
- * learn the byte length via `out_len`, then call again with a buffer of at
- * least `len + 1` bytes. The string is NUL-terminated and truncated to `cap`;
- * `out_len` is always the untruncated byte length.
+ * Returns the JSON through `out_json` as an **owned** allocation the caller
+ * releases with `infrastore_string_free`; `out_len` is its byte length. A
+ * listing's size scales with the catalog, so this deliberately does not use the
+ * probe-then-fetch convention the fixed-size outputs use — that would run the
+ * query and serialize the rows twice.
  *
  * # Safety
  *
@@ -1531,15 +1571,14 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    const char *resolution,
                                    const char *interval,
                                    const char *features_json,
-                                   char *buf,
-                                   uint64_t cap,
+                                   char **out_json,
                                    uint64_t *out_len);
 
 /**
  * List full time-series metadata rows as a JSON array (see `metadata_to_map`
  * for the per-row shape: the key fields plus `data_hash`, `dtype`,
  * `element_shape`, `percentiles`, `units`, and `ext`). Filters and the
- * probe-then-fetch buffer convention match `infrastore_store_list_keys`.
+ * owned-string return (freed with `infrastore_string_free`) match `infrastore_store_list_keys`.
  *
  * # Safety
  *
@@ -1556,13 +1595,12 @@ int32_t infrastore_store_list_time_series(const struct InfraStore *handle,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
-                                          char *buf,
-                                          uint64_t cap,
+                                          char **out_json,
                                           uint64_t *out_len);
 
 /**
  * List the distinct series names matching the filter as a JSON array of strings
- * (sorted). Filters and the probe-then-fetch convention match
+ * (sorted). Filters and the owned-string return match
  * `infrastore_store_list_keys`.
  *
  * # Safety
@@ -1580,13 +1618,12 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     const char *resolution,
                                     const char *interval,
                                     const char *features_json,
-                                    char *buf,
-                                    uint64_t cap,
+                                    char **out_json,
                                     uint64_t *out_len);
 
 /**
  * List the distinct owner types matching the filter as a JSON array of strings
- * (sorted). Filters and the probe-then-fetch convention match
+ * (sorted). Filters and the owned-string return match
  * `infrastore_store_list_keys`.
  *
  * # Safety
@@ -1604,8 +1641,7 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
-                                          char *buf,
-                                          uint64_t cap,
+                                          char **out_json,
                                           uint64_t *out_len);
 
 /**
@@ -1688,7 +1724,7 @@ int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
  * share a stored array share their `data_hash`, so a caller can group time
  * series by their underlying data in one query (no per-row metadata fetch).
  *
- * Filters and the probe-then-fetch buffer convention are identical to
+ * Filters and the owned-string return are identical to
  * `infrastore_store_list_keys`.
  *
  * # Safety
@@ -1709,8 +1745,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            const char *resolution,
                                            const char *interval,
                                            const char *features_json,
-                                           char *buf,
-                                           uint64_t cap,
+                                           char **out_json,
                                            uint64_t *out_len);
 
 /**

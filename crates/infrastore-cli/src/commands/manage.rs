@@ -78,8 +78,15 @@ pub fn transform(
     let resolution = resolution.map(parse::parse_period).transpose()?;
     let mut store = store_access::open_writable(store_path)?;
     let n = store
-        .transform_single_time_series(horizon, interval, owner_category, resolution)
-        .map_err(|e| e.to_string())?;
+        .transform_single_time_series(
+            horizon,
+            interval,
+            owner_category,
+            resolution,
+            Default::default(),
+        )
+        .map_err(|e| e.to_string())?
+        .transformed;
     store.flush().map_err(|e| e.to_string())?;
     println!(
         "{}",

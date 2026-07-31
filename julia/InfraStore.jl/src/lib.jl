@@ -151,19 +151,41 @@ function _check(code::Int32)
     end
 end
 
-# ---- Probe-then-fetch ------------------------------------------------------
+# ---- Fixed-size and catalog-sized string returns ----------------------------
 
-# Every JSON-returning export uses the same two-call protocol: a null buffer
+# Exports whose output has a bounded size use a two-call protocol: a null buffer
 # reports the required length, then a buffer of that size receives the body.
 # `ccall_once(buf, capacity, out_len)` performs one call; Julia requires a
 # `ccall` symbol to be a literal, so each call site passes a closure naming its
 # own export. The `+ 1` leaves room for the trailing NUL the Rust side appends.
+#
+# Note what this costs: the Rust side retains nothing between the two calls, so
+# it runs the whole operation — query included — once per call. That is fine for
+# a path or a metadata row, and emphatically not fine for a listing over a large
+# catalog, which is why those use `_owned_str` below.
 function _probe(ccall_once)
     out_len = Ref{UInt64}(0)
     _check(ccall_once(C_NULL, UInt64(0), out_len))
     buf = Vector{UInt8}(undef, Int(out_len[]) + 1)
     _check(ccall_once(buf, UInt64(length(buf)), out_len))
     return String(buf[1:Int(out_len[])])
+end
+
+# Exports whose output scales with the catalog hand back an owned allocation
+# instead, so the query runs and the rows serialize exactly once.
+# `ccall_once(out_json, out_len)` performs the single call; the buffer is
+# released with `infrastore_string_free` even if decoding throws.
+function _owned_str(ccall_once)
+    out_json = Ref{Ptr{Cchar}}(C_NULL)
+    out_len = Ref{UInt64}(0)
+    _check(ccall_once(out_json, out_len))
+    ptr = out_json[]
+    ptr == C_NULL && return ""
+    try
+        return unsafe_string(Ptr{UInt8}(ptr), Int(out_len[]))
+    finally
+        @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+    end
 end
 
 # ---- Tracing ---------------------------------------------------------------

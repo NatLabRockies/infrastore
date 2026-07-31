@@ -1867,16 +1867,19 @@ impl MetadataStore {
     pub fn distinct_single_grids(
         &self,
         resolution: Option<Period>,
+        owner_category: Option<OwnerCategory>,
     ) -> Result<Vec<(Period, DateTime<Utc>, i64)>> {
         let res_iso = resolution.map(period_to_iso);
+        let category = owner_category.map(|c| c.code());
         let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT resolution, initial_timestamp, length
              FROM time_series_associations
              WHERE time_series_type = ?1 AND (?2 IS NULL OR resolution = ?2)
+               AND (?3 IS NULL OR owner_category = ?3)
              ORDER BY resolution",
         )?;
         let rows = stmt.query_map(
-            params![TimeSeriesType::SingleTimeSeries.code(), res_iso],
+            params![TimeSeriesType::SingleTimeSeries.code(), res_iso, category],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,

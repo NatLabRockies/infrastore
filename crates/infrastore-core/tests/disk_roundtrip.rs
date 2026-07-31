@@ -1325,7 +1325,13 @@ fn discriminant_columns_are_stored_as_integer_codes() {
             )
             .unwrap();
         store
-            .transform_single_time_series(Duration::hours(4), Duration::hours(2), None, None)
+            .transform_single_time_series(
+                Duration::hours(4),
+                Duration::hours(2),
+                None,
+                None,
+                Default::default(),
+            )
             .unwrap();
     }
 

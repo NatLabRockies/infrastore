@@ -1235,7 +1235,13 @@ fn a_read_only_store_rejects_every_write_entry_point() {
     ));
     assert!(is_ro(
         store
-            .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+            .transform_single_time_series(
+                Duration::hours(2),
+                Duration::hours(1),
+                None,
+                None,
+                Default::default()
+            )
             .map(|_| ())
     ));
 

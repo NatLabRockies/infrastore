@@ -507,7 +507,7 @@ end
         store, 400, "Generator", Component, SingleTimeSeries(t0, res, underlying, "dst")
     )
 
-    n = transform_single_time_series!(store, hor, ivl)
+    n = transform_single_time_series!(store, hor, ivl).transformed
     @test n == 1
 
     # Asking for `Deterministic` resolves the stored DST: the transform is a
@@ -2985,7 +2985,7 @@ end
 
     # A transform-derived DST is addressable by its own type, and through the
     # family sentinel alongside it.
-    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 1
     dst = get_metadata(DeterministicSingleTimeSeries, store, 1, Component, "a")
     @test dst.time_series_type == DeterministicSingleTimeSeries
     @test get_metadata(Deterministic, store, 1, Component, "a") == dst
@@ -3055,7 +3055,7 @@ end
     # A transform-derived DST stays a DST through a copy (a read-then-write
     # round trip would flatten it into a dense Deterministic). Both stored
     # SingleTimeSeries — "a" and the copy renamed onto the Bus — transform.
-    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 2
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 2
     copy_time_series!(
         DeterministicSingleTimeSeries,
         store,
@@ -3158,7 +3158,7 @@ end
     )
 
     # The family sentinel picks whichever concrete type is stored.
-    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 1
     @test key_info(
         get_time_series_key(Deterministic, store, 1, Component, "a"; resolution=res)
     ).time_series_type == DeterministicSingleTimeSeries
@@ -3337,4 +3337,72 @@ end
     b = only(bulk_read(store, [kp]))
     @test b.units === nothing
     @test b.ext === nothing
+end
+
+@testset "transform_single_time_series! reports its full outcome" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    add_time_series!(
+        store, 500, "Generator", Component,
+        SingleTimeSeries(t0, res, Float64[i for i in 0:7], "load"),
+    )
+
+    out = transform_single_time_series!(store, Hour(4), Hour(2))
+    @test out isa InfraStore.TransformOutcome
+    @test out.transformed == 1
+    @test out.sources == 1
+    @test out.interval == Hour(2)
+    @test !out.interval_normalized
+
+    # An empty store distinguishes "nothing to do" from "everything skipped".
+    empty_store = Store(in_memory=true)
+    empty_out = transform_single_time_series!(empty_store, Hour(4), Hour(2))
+    @test empty_out.sources == 0
+    @test empty_out.transformed == 0
+end
+
+@testset "transform policy flags select the client contract" begin
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    vals = Float64[i for i in 0:7]
+
+    # normalize_single_window: a horizon spanning the series is stored as the
+    # zero interval rather than verbatim.
+    verbatim = Store(in_memory=true)
+    add_time_series!(
+        verbatim, 600, "Generator", Component, SingleTimeSeries(t0, res, vals, "load")
+    )
+    out = transform_single_time_series!(verbatim, Hour(8), Hour(8))
+    @test out.interval_normalized
+    @test out.interval == Hour(8)
+
+    normalized = Store(in_memory=true)
+    add_time_series!(
+        normalized, 600, "Generator", Component, SingleTimeSeries(t0, res, vals, "load")
+    )
+    out = transform_single_time_series!(
+        normalized, Hour(8), Hour(8); normalize_single_window=true
+    )
+    @test out.interval_normalized
+    @test out.interval == Second(0)
+
+    # require_uniform_forecast_grid: two resolutions deriving different counts
+    # are one grid too many for InfrastructureSystems.jl, but fine by default.
+    mixed() = begin
+        s = Store(in_memory=true)
+        add_time_series!(
+            s, 1, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), Float64[i for i in 0:23], "hourly"),
+        )
+        add_time_series!(
+            s, 2, "Generator", Component,
+            SingleTimeSeries(t0, Hour(2), Float64[i for i in 0:23], "two_hourly"),
+        )
+        s
+    end
+    @test transform_single_time_series!(mixed(), Hour(4), Hour(2)).transformed == 2
+    @test_throws InfraStore.InvalidParameterError transform_single_time_series!(
+        mixed(), Hour(4), Hour(2); require_uniform_forecast_grid=true
+    )
 end

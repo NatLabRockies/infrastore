@@ -186,6 +186,287 @@ pub struct ForecastParameters {
     pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// How a caller wants [`Store::transform_single_time_series`] to run: the rules
+/// it applies on top of the eligibility checks everyone gets, plus whether to
+/// commit.
+///
+/// The two rules encode a *client's* contract rather than a storage invariant:
+/// the store itself is happy to hold forecasts on more than one grid, and both
+/// single-window interval encodings are legal. InfrastructureSystems.jl is
+/// stricter on both counts, so it opts in. `Default` is the permissive,
+/// committing behavior.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TransformPolicy {
+    /// Run every check and report what *would* happen, writing nothing. The
+    /// returned [`TransformOutcome::transformed`] is the count a committing run
+    /// would produce. This is how a caller answers "would this transform
+    /// succeed?" without a trial-and-rollback.
+    pub dry_run: bool,
+    /// Store a single-window request (an interval equal to a horizon that spans
+    /// the whole series) as the zero interval rather than verbatim. The
+    /// interval is part of the association identity, so this decides which form
+    /// later lookups must use.
+    pub normalize_single_window: bool,
+    /// Require the derived grid to match any forecast already stored at the
+    /// same `(resolution, interval)`, and require every resolution in scope to
+    /// derive the same `count` and `initial_timestamp` — i.e. one system, one
+    /// forecast grid.
+    pub require_uniform_forecast_grid: bool,
+}
+
+/// Outcome of [`Store::transform_single_time_series`].
+///
+/// `interval` is the interval actually stored, which differs from the
+/// requested one when a single-window request was normalized (see
+/// `interval_normalized`). Bindings that surface a warning for that case read
+/// it off this struct rather than re-deriving the condition.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TransformOutcome {
+    /// `DeterministicSingleTimeSeries` rows written.
+    pub transformed: usize,
+    /// `SingleTimeSeries` the filter matched, before idempotent skips. Zero
+    /// means there was nothing to transform.
+    pub sources: usize,
+    /// The stored interval, after single-window normalization.
+    pub interval: Period,
+    /// True when the requested `interval` equalled the horizon and that horizon
+    /// spanned the whole series, so the interval was normalized to zero.
+    pub interval_normalized: bool,
+}
+
+/// The window parameters `transform_single_time_series` will write, derived
+/// once per resolution from the catalog's distinct static grids.
+///
+/// This is the entirety of the transform's parameter validation. It is built
+/// from one `DISTINCT` query, so its cost scales with the number of distinct
+/// resolutions in the store — not the number of series — which is what lets the
+/// transform validate a 100,000-series store without listing it.
+struct TransformPlan {
+    /// What to write for each resolution in scope. Sources are looked up here
+    /// instead of recomputing, and under a permissive policy resolutions may
+    /// legitimately differ.
+    by_resolution: HashMap<Period, GridPlan>,
+    /// The first resolution's parameters — the representative used for the
+    /// outcome and, under `require_uniform_forecast_grid`, the values every
+    /// other resolution was checked against.
+    interval: Period,
+    count: usize,
+    interval_normalized: bool,
+    horizon: Period,
+    initial_timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// One resolution's derived window parameters.
+#[derive(Debug, Clone, Copy)]
+struct GridPlan {
+    interval: Period,
+    count: usize,
+}
+
+impl TransformPlan {
+    /// Derive the plan, or `None` when no `SingleTimeSeries` is in scope.
+    ///
+    /// `horizon` and `interval` are the requested values and are already known
+    /// to be regular periods.
+    fn derive(
+        grids: &[StaticConsistency],
+        horizon: Period,
+        requested_interval: Period,
+        policy: TransformPolicy,
+    ) -> Result<Option<Self>> {
+        let Some(first) = grids.first() else {
+            return Ok(None);
+        };
+
+        let mut by_resolution = HashMap::with_capacity(grids.len());
+        let mut agreed: Option<(Period, usize)> = None;
+        let mut interval_normalized = false;
+
+        for grid in grids {
+            // The wording matches what InfrastructureSystems.jl raised before
+            // this check moved into the store; `compute_h`'s own message is not
+            // appended, as it restates the same two periods.
+            let h = compute_h(horizon, grid.resolution).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "horizon {} is not evenly divisible by resolution {}",
+                    horizon.to_iso8601(),
+                    grid.resolution.to_iso8601()
+                ))
+            })?;
+            if h > grid.length {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "horizon {} ({h} steps) exceeds the SingleTimeSeries length ({}) \
+                     at resolution {}",
+                    horizon.to_iso8601(),
+                    grid.length,
+                    grid.resolution.to_iso8601()
+                )));
+            }
+
+            // A horizon that spans the whole series leaves no room for a second
+            // window, so a request to step by exactly one horizon means "one
+            // window". Both encodings are legal and the caller chose one; the
+            // case is reported either way so callers can warn.
+            let single_window = grid.length == h && requested_interval == horizon;
+            let (interval, normalized) = if single_window {
+                let stored = if policy.normalize_single_window {
+                    Period::zero()
+                } else {
+                    requested_interval
+                };
+                (stored, true)
+            } else {
+                // Mixed period kinds have no ordering; `divide_into` below
+                // rejects them with a message naming the real problem.
+                if requested_interval.same_kind(&horizon)
+                    && period_ms(requested_interval) > period_ms(horizon)
+                {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "interval {} is longer than the horizon {}, which would leave \
+                         gaps between windows",
+                        requested_interval.to_iso8601(),
+                        horizon.to_iso8601()
+                    )));
+                }
+                (requested_interval, false)
+            };
+            interval_normalized |= normalized;
+
+            let count = if interval.is_zero() {
+                // A zero interval is the explicit single-window request (the
+                // encoding InfrastructureSystems.jl writes for directly-added
+                // single-window forecasts): the one window must cover the whole
+                // series. Normalization above only produces a zero interval when
+                // it already does, so this only rejects an explicit request.
+                if h != grid.length {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "a zero interval derives a single window covering the whole \
+                         series, but horizon {} ({h} steps) does not span the \
+                         SingleTimeSeries length ({}) at resolution {}",
+                        horizon.to_iso8601(),
+                        grid.length,
+                        grid.resolution.to_iso8601()
+                    )));
+                }
+                1
+            } else {
+                let interval_steps = grid.resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::InvalidParameter(format!(
+                        "interval {} must be zero or a positive integer multiple of \
+                         resolution {}",
+                        interval.to_iso8601(),
+                        grid.resolution.to_iso8601()
+                    ))
+                })?;
+                (grid.length - h) / interval_steps + 1
+            };
+
+            // Under `require_uniform_forecast_grid` one transform produces one
+            // forecast grid, so resolutions deriving different window counts or
+            // starts are rejected rather than silently written. Without it the
+            // store is happy to hold both, and each resolution keeps its own.
+            match agreed {
+                None => agreed = Some((interval, count)),
+                Some((agreed_interval, agreed_count)) if policy.require_uniform_forecast_grid => {
+                    if agreed_interval != interval || agreed_count != count {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "transform would produce forecasts with different window \
+                             parameters per resolution: {} gives count {} at interval {}, \
+                             {} gives count {} at interval {}",
+                            first.resolution.to_iso8601(),
+                            agreed_count,
+                            agreed_interval.to_iso8601(),
+                            grid.resolution.to_iso8601(),
+                            count,
+                            interval.to_iso8601(),
+                        )));
+                    }
+                    if grid.initial_timestamp != first.initial_timestamp {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "transform is not supported when SingleTimeSeries have \
+                             different initial timestamps: {} at resolution {} vs {} at \
+                             resolution {}",
+                            first.initial_timestamp,
+                            first.resolution.to_iso8601(),
+                            grid.initial_timestamp,
+                            grid.resolution.to_iso8601(),
+                        )));
+                    }
+                }
+                Some(_) => {}
+            }
+            by_resolution.insert(grid.resolution, GridPlan { interval, count });
+        }
+
+        let (interval, count) = agreed.expect("grids is non-empty");
+        Ok(Some(TransformPlan {
+            by_resolution,
+            interval,
+            count,
+            interval_normalized,
+            horizon,
+            initial_timestamp: first.initial_timestamp,
+        }))
+    }
+
+    /// The derived parameters for a source's resolution.
+    fn for_resolution(&self, resolution: Period) -> Result<GridPlan> {
+        self.by_resolution.get(&resolution).copied().ok_or_else(|| {
+            // The grid query and the source listing use the same filters, so a
+            // miss means the catalog changed underneath the transform.
+            TimeSeriesError::IntegrityError(format!(
+                "no static grid was derived for resolution {}",
+                resolution.to_iso8601()
+            ))
+        })
+    }
+
+    /// Reject a plan that disagrees with a forecast already in the store. A
+    /// default (all-`None`) `ForecastParameters` means nothing is stored at this
+    /// `(resolution, interval)`, so there is nothing to disagree with.
+    fn check_compatible_with(&self, existing: &ForecastParameters) -> Result<()> {
+        let Some(existing_count) = existing.count else {
+            return Ok(());
+        };
+        if existing_count != self.count {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "derived forecast count {} does not match the stored forecast count {}",
+                self.count, existing_count
+            )));
+        }
+        if let Some(ts) = existing.initial_timestamp
+            && ts != self.initial_timestamp
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "derived forecast initial_timestamp {} does not match the stored \
+                 forecast initial_timestamp {ts}",
+                self.initial_timestamp
+            )));
+        }
+        if let Some(h) = existing.horizon
+            && h != self.horizon
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "derived forecast horizon {} does not match the stored forecast \
+                 horizon {}",
+                self.horizon.to_iso8601(),
+                h.to_iso8601()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Milliseconds in a regular period. `Months` has no fixed millisecond span, so
+/// it maps to its month count — callers compare only same-kind periods, having
+/// rejected irregular ones up front.
+fn period_ms(p: Period) -> i64 {
+    match p {
+        Period::Fixed(d) => d.num_milliseconds(),
+        Period::Months(m) => m as i64,
+    }
+}
+
 /// Bookkeeping for an open cross-operation transaction (see
 /// [`Store::begin_transaction`]).
 ///
@@ -1726,19 +2007,74 @@ impl Store {
     /// `(length - horizon_steps) / interval_steps + 1`.
     ///
     /// All-or-nothing: if any series is too short to fit a single horizon window
-    /// or has an incompatible `interval`, nothing is committed. Returns the
-    /// number of series transformed.
+    /// or has an incompatible `interval`, nothing is committed.
+    ///
+    /// Every eligibility rule lives here rather than in the callers. Beyond the
+    /// per-series checks, the window parameters are validated once per
+    /// *resolution* off the catalog's distinct static grids (see
+    /// [`Store::check_static_consistency`]), which is what makes the whole
+    /// validation independent of how many series are stored:
+    ///
+    /// - every `SingleTimeSeries` at a resolution must share one
+    ///   `(initial_timestamp, length)` grid;
+    /// - a requested `interval` equal to a horizon that spans the whole series
+    ///   describes a single window. There are two legal encodings for that and
+    ///   the interval is part of the association identity, so the caller picks:
+    ///   `policy.normalize_single_window` stores it as the zero interval (what
+    ///   InfrastructureSystems.jl looks up by), while `false` stores the
+    ///   requested interval verbatim. Either way the case is reported via
+    ///   [`TransformOutcome::interval_normalized`];
+    /// - an `interval` longer than the horizon is rejected — it would leave gaps
+    ///   between windows;
+    /// - every resolution in scope must agree on the derived `count` and
+    ///   `initial_timestamp`, so one transform yields one forecast grid;
+    /// - that grid must match any forecast already in the store at the same
+    ///   `(resolution, interval)`.
     pub fn transform_single_time_series(
         &mut self,
         horizon: impl Into<Period>,
         interval: impl Into<Period>,
         owner_category: Option<OwnerCategory>,
         resolution: Option<Period>,
-    ) -> Result<usize> {
-        if self.read_only {
+        policy: TransformPolicy,
+    ) -> Result<TransformOutcome> {
+        // A dry run writes nothing, so it is legal against a read-only store —
+        // which is exactly where a caller wants to ask "would this work?".
+        if self.read_only && !policy.dry_run {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let (horizon, interval) = (horizon.into(), interval.into());
+        let (horizon, requested_interval) = (horizon.into(), interval.into());
+
+        // Validate the window parameters against the distinct static grids —
+        // one `DISTINCT` query returning a row per resolution — instead of
+        // per series. `horizon`/`interval` eligibility and the derived `count`
+        // depend only on `(resolution, initial_timestamp, length)`, so this is
+        // O(resolutions) no matter how many series are stored, and it doubles
+        // as the per-resolution grid-uniformity check.
+        let grids = self.static_grids(resolution, owner_category)?;
+        let Some(plan) = TransformPlan::derive(&grids, horizon, requested_interval, policy)? else {
+            // No SingleTimeSeries in scope: nothing to do, and nothing to fail.
+            return Ok(TransformOutcome {
+                transformed: 0,
+                sources: 0,
+                interval: requested_interval,
+                interval_normalized: false,
+            });
+        };
+        let interval = plan.interval;
+
+        // Under the uniform-grid policy the derived grid must also match any
+        // forecast already stored at the same (resolution, interval): one
+        // system holds one forecast grid, so a transform that would produce a
+        // second one is rejected before any write.
+        if policy.require_uniform_forecast_grid {
+            for (&res, grid) in &plan.by_resolution {
+                let existing_params =
+                    self.get_forecast_parameters(Some(res), Some(grid.interval))?;
+                plan.check_compatible_with(&existing_params)?;
+            }
+        }
+
         // Push the owner-category and resolution restrictions into SQL rather
         // than listing every SingleTimeSeries and discarding the misses: a store
         // whose components are transformed one resolution at a time should not
@@ -1766,7 +2102,6 @@ impl Store {
         // stored `features_hash` column directly: the identity test needs the
         // hash, not the features themselves, so this skips hydrating (and
         // re-hashing) the features of every forecast already in the store.
-        let interval_iso = interval.to_iso8601();
         let existing_dst: HashMap<AssociationIdentity, Option<Period>> = self
             .metadata
             .list_identities(TimeSeriesType::DeterministicSingleTimeSeries)?
@@ -1806,57 +2141,26 @@ impl Store {
                     src.name
                 )));
             }
+            // No per-series arithmetic: `TransformPlan` already validated the
+            // horizon and derived the window parameters from the catalog's
+            // distinct grids, which cover exactly these sources. Re-deriving
+            // them here would be a `divide_into` per series for an answer
+            // already known.
             let resolution = required_resolution(src, "transform_single_time_series")?;
-            let total_len = src.length.ok_or_else(|| {
-                TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-            })?;
-            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
-            if h == 0 || h > total_len {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "horizon ({h} steps) exceeds SingleTimeSeries length ({total_len}) \
-                     for '{}'",
-                    src.name
-                )));
-            }
-            // A zero interval is the explicit single-window request (the
-            // encoding InfrastructureSystems.jl writes for directly-added
-            // single-window forecasts): the one window must cover the whole
-            // series, so it is only accepted when the horizon spans it.
-            let count = if interval.is_zero() {
-                if h != total_len {
-                    return Err(TimeSeriesError::InvalidParameter(format!(
-                        "a zero interval derives a single window covering the whole \
-                         series, but horizon ({h} steps) does not span SingleTimeSeries \
-                         length ({total_len}) for '{}'",
-                        src.name
-                    )));
-                }
-                1
-            } else {
-                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                    TimeSeriesError::InvalidParameter(format!(
-                        "interval ({}) must be zero or a positive integer multiple of \
-                         resolution ({})",
-                        interval.to_iso8601(),
-                        resolution.to_iso8601()
-                    ))
-                })?;
-                (total_len - h) / interval_steps + 1
-            };
-            // The requested interval is stored verbatim, including both
-            // single-window encodings — `interval == horizon` (clients that
-            // map the empty interval to the horizon on write and back on
-            // read) and the explicit zero interval
-            // (InfrastructureSystems.jl's `Second(0)`). A derived view keeps
-            // whichever encoding its client writes so that client can find it
-            // by the identity it wrote. The identity/idempotency check below
-            // uses the stored form.
+            let GridPlan { interval, count } = plan.for_resolution(resolution)?;
+            // The interval is stored in whichever single-window encoding the
+            // caller's policy selected — verbatim (`interval == horizon`, for
+            // clients that map the empty interval to the horizon on write and
+            // back on read) or the explicit zero interval
+            // (InfrastructureSystems.jl's `Second(0)`). It is part of the
+            // identity, so the stored form is what later lookups must use, and
+            // the idempotency check below uses it too.
             let src_key = AssociationIdentity {
                 owner_id: src.owner_id,
                 owner_category: src.owner_category,
                 name: src.name.clone(),
                 resolution: src_resolution_iso,
-                interval: Some(interval_iso.clone()),
+                interval: Some(interval.to_iso8601()),
                 features_hash: src_features_hash,
             };
             if let Some(existing_horizon) = existing_dst.get(&src_key) {
@@ -1890,6 +2194,17 @@ impl Store {
             });
         }
 
+        if policy.dry_run {
+            // Every check has run against the rows that would be written; the
+            // caller only wanted the verdict.
+            return Ok(TransformOutcome {
+                transformed: new_metas.len(),
+                sources: sources.len(),
+                interval,
+                interval_normalized: plan.interval_normalized,
+            });
+        }
+
         let tx = self.metadata.savepoint()?;
         // One cache for the whole batch: every derived row shares its source's
         // feature set, and sources overwhelmingly share sets with each other, so
@@ -1903,7 +2218,12 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(new_metas.len())
+        Ok(TransformOutcome {
+            transformed: new_metas.len(),
+            sources: sources.len(),
+            interval,
+            interval_normalized: plan.interval_normalized,
+        })
     }
 
     /// True iff an association with exactly this key identity exists.
@@ -2068,7 +2388,22 @@ impl Store {
         &self,
         resolution: Option<Period>,
     ) -> Result<Vec<StaticConsistency>> {
-        let rows = self.metadata.distinct_single_grids(resolution)?;
+        self.static_grids(resolution, None)
+    }
+
+    /// [`Self::check_static_consistency`] scoped to one owner category.
+    ///
+    /// `transform_single_time_series` needs this: it derives forecasts for one
+    /// category, so a supplemental attribute's series on a different grid must
+    /// not fail a component-only transform.
+    fn static_grids(
+        &self,
+        resolution: Option<Period>,
+        owner_category: Option<OwnerCategory>,
+    ) -> Result<Vec<StaticConsistency>> {
+        let rows = self
+            .metadata
+            .distinct_single_grids(resolution, owner_category)?;
         let mut out: Vec<StaticConsistency> = Vec::with_capacity(rows.len());
         for (res, ts, len) in rows {
             // Rows arrive ordered by resolution, so a divergent grid shows up

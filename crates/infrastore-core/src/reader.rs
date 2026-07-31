@@ -1758,7 +1758,13 @@ mod tests {
             add_det(store, 2, "gen", 2, 5, vec![], &det);
             // Derive a DST view for owner 1 from its SingleTimeSeries.
             store
-                .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+                .transform_single_time_series(
+                    Duration::hours(2),
+                    Duration::hours(1),
+                    None,
+                    None,
+                    Default::default(),
+                )
                 .unwrap();
         };
 
@@ -2080,7 +2086,13 @@ mod tests {
         // DST owner 7: underlying length (count-1)*interval_steps + H = 3*1 + 2 = 5.
         add_f64(&mut store, 7, "load", &distinct(7000.0, 5));
         store
-            .transform_single_time_series(Duration::hours(h as i64), ivl, None, None)
+            .transform_single_time_series(
+                Duration::hours(h as i64),
+                ivl,
+                None,
+                None,
+                Default::default(),
+            )
             .unwrap();
 
         for ts_type in [

@@ -1557,7 +1557,9 @@ impl PyStore {
                 interval,
                 owner_category.map(Into::into),
                 resolution,
+                Default::default(),
             )
+            .map(|outcome| outcome.transformed)
             .map_err(map_err)
     }
 

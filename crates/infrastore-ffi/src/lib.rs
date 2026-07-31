@@ -227,6 +227,35 @@ pub unsafe extern "C" fn infrastore_string_free(s: *mut c_char) {
     }
 }
 
+/// Hand a produced string to the caller as an owned allocation, to be released
+/// with `infrastore_string_free`.
+///
+/// This is the convention for outputs whose size scales with the data — a
+/// listing over a large catalog runs to tens of megabytes. The alternative, a
+/// probe-then-fetch pair of calls with a caller-sized buffer, would execute the
+/// query and serialize the result *twice*, since neither pass can retain
+/// anything for the other.
+///
+/// # Safety
+///
+/// `out` and `out_len` must be valid for writing one pointer and one `u64`.
+unsafe fn write_owned_str_out(s: String, out: *mut *mut c_char, out_len: *mut u64) -> i32 {
+    // The payload is JSON, which never contains an interior NUL, so this only
+    // fails on a genuine encoding bug.
+    let len = s.len() as u64;
+    match std::ffi::CString::new(s) {
+        Ok(c) => unsafe {
+            *out = c.into_raw();
+            *out_len = len;
+            INFRASTORE_OK
+        },
+        Err(e) => {
+            set_error(format!("result contained an interior NUL: {e}"));
+            INFRASTORE_ERR_INTERNAL
+        }
+    }
+}
+
 // ---- Store create / open / free ------------------------------------------
 
 /// Create a time-series store and return an owning handle through `out`.
@@ -3747,22 +3776,60 @@ pub unsafe extern "C" fn infrastore_bulk_result_free(result: *mut InfraStoreBulk
     }
 }
 
+/// Buffer size a caller must provide for
+/// `infrastore_store_transform_single_time_series`'s `out_interval`. An
+/// ISO-8601 period is far shorter than this; the slack is deliberate.
+pub const INTERVAL_BUF_LEN: u64 = 64;
+
 /// Derive `DeterministicSingleTimeSeries` forecasts from the stored
-/// `SingleTimeSeries` associations (see `Store::transform_single_time_series`).
-/// Writes the number of series transformed to `*out_count`.
+/// `SingleTimeSeries` associations (see `Store::transform_single_time_series`,
+/// which performs the whole of the eligibility validation).
+///
+/// Writes the number of series transformed to `*out_count`. The remaining
+/// out-parameters report the rest of the `TransformOutcome` and may each be
+/// null if the caller does not need them:
+///
+/// - `out_sources` — `SingleTimeSeries` matched before idempotent skips; zero
+///   means there was nothing to transform.
+/// - `out_interval` — the ISO-8601 interval actually stored, NUL-terminated.
+///   Unlike the listing exports this takes no probe pass: an ISO period is
+///   bounded, so the caller passes a fixed buffer of `INTERVAL_BUF_LEN` bytes.
+/// - `out_interval_normalized` — non-zero when the request described a single
+///   window (see `normalize_single_window`).
+///
+/// The two policy flags are `TransformPolicy` (see the core docs); both false
+/// is the permissive default, and InfrastructureSystems.jl passes both true:
+///
+/// - `normalize_single_window` selects the single-window encoding: non-zero
+///   stores the zero interval (what InfrastructureSystems.jl looks up by), zero
+///   stores the requested interval verbatim.
+/// - `require_uniform_forecast_grid` requires every resolution in scope, and
+///   any forecast already stored at the same `(resolution, interval)`, to agree
+///   on the derived window `count` and `initial_timestamp`.
+/// - `dry_run` runs every check and reports what would happen without writing.
+///   `*out_count` is then the count a committing run would produce. Legal
+///   against a read-only store.
 ///
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle and `out_count` must be valid
-/// for writing one `u64`.
+/// for writing one `u64`. Each non-null optional out-parameter must be valid
+/// for writing its type.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
     handle: *mut InfraStoreHandle,
     horizon: *const c_char,
     interval: *const c_char,
     owner_category: i32,
     resolution: *const c_char,
+    normalize_single_window: bool,
+    require_uniform_forecast_grid: bool,
+    dry_run: bool,
     out_count: *mut u64,
+    out_sources: *mut u64,
+    out_interval: *mut c_char,
+    out_interval_normalized: *mut bool,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -3793,12 +3860,34 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
         Ok(i) => i,
         Err(c) => return c,
     };
+    let policy = core_lib::TransformPolicy {
+        dry_run,
+        normalize_single_window,
+        require_uniform_forecast_grid,
+    };
     match store
         .inner
-        .transform_single_time_series(horizon, interval, category, resolution)
+        .transform_single_time_series(horizon, interval, category, resolution, policy)
     {
-        Ok(n) => {
-            unsafe { *out_count = n as u64 };
+        Ok(outcome) => {
+            unsafe {
+                *out_count = outcome.transformed as u64;
+                if !out_sources.is_null() {
+                    *out_sources = outcome.sources as u64;
+                }
+                if !out_interval_normalized.is_null() {
+                    *out_interval_normalized = outcome.interval_normalized;
+                }
+                if !out_interval.is_null() {
+                    let mut written = 0u64;
+                    write_str_out(
+                        &outcome.interval.to_iso8601(),
+                        out_interval,
+                        INTERVAL_BUF_LEN,
+                        &raw mut written,
+                    );
+                }
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -4728,10 +4817,11 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// - `features_json` (a JSON object; null or empty = no feature filter; matches as
 ///   a subset, i.e. a key whose features include all the given ones)
 ///
-/// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
-/// learn the byte length via `out_len`, then call again with a buffer of at
-/// least `len + 1` bytes. The string is NUL-terminated and truncated to `cap`;
-/// `out_len` is always the untruncated byte length.
+/// Returns the JSON through `out_json` as an **owned** allocation the caller
+/// releases with `infrastore_string_free`; `out_len` is its byte length. A
+/// listing's size scales with the catalog, so this deliberately does not use the
+/// probe-then-fetch convention the fixed-size outputs use — that would run the
+/// query and serialize the rows twice.
 ///
 /// # Safety
 ///
@@ -4753,14 +4843,13 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4785,14 +4874,13 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
         Err(e) => return map_core_error(e),
     };
     let json = keys_to_json(&keys);
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// List full time-series metadata rows as a JSON array (see `metadata_to_map`
 /// for the per-row shape: the key fields plus `data_hash`, `dtype`,
 /// `element_shape`, `percentiles`, `units`, and `ext`). Filters and the
-/// probe-then-fetch buffer convention match `infrastore_store_list_keys`.
+/// owned-string return (freed with `infrastore_string_free`) match `infrastore_store_list_keys`.
 ///
 /// # Safety
 ///
@@ -4811,14 +4899,13 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4847,12 +4934,11 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
         .map(|m| Value::Object(metadata_to_map(m)))
         .collect();
     let json = Value::Array(arr).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// List the distinct series names matching the filter as a JSON array of strings
-/// (sorted). Filters and the probe-then-fetch convention match
+/// (sorted). Filters and the owned-string return match
 /// `infrastore_store_list_keys`.
 ///
 /// # Safety
@@ -4872,14 +4958,13 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4904,12 +4989,11 @@ pub unsafe extern "C" fn infrastore_store_list_names(
         Err(e) => return map_core_error(e),
     };
     let json = Value::Array(names.into_iter().map(Value::from).collect()).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// List the distinct owner types matching the filter as a JSON array of strings
-/// (sorted). Filters and the probe-then-fetch convention match
+/// (sorted). Filters and the owned-string return match
 /// `infrastore_store_list_keys`.
 ///
 /// # Safety
@@ -4929,14 +5013,13 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4961,8 +5044,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
         Err(e) => return map_core_error(e),
     };
     let json = Value::Array(types.into_iter().map(Value::from).collect()).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// Remove every time series matching the filter in one all-or-nothing
@@ -5234,7 +5316,7 @@ unsafe fn build_list_filter(
 /// share a stored array share their `data_hash`, so a caller can group time
 /// series by their underlying data in one query (no per-row metadata fetch).
 ///
-/// Filters and the probe-then-fetch buffer convention are identical to
+/// Filters and the owned-string return are identical to
 /// `infrastore_store_list_keys`.
 ///
 /// # Safety
@@ -5257,14 +5339,13 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -5289,8 +5370,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
         Err(e) => return map_core_error(e),
     };
     let json = keys_with_hash_to_json(&rows);
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// Free the key-handle array returned by `infrastore_store_get_time_series_keys`.
@@ -5667,8 +5747,10 @@ pub unsafe extern "C" fn infrastore_store_replace_owner(
 // arguments, the same way `features_json` already does: a filter has four
 // optional fields, two of which are string lists, and spreading that over eight
 // arguments is unreadable from the caller side. Result sets come back through
-// the probe-then-fetch JSON convention used by the other list-returning exports,
-// so no new deallocator is introduced.
+// the probe-then-fetch JSON convention. These association listings are bounded
+// by one owner's edges rather than by the whole catalog, so the convention's
+// double execution is not the cost here that it is for the time-series listings
+// (`infrastore_store_list_keys` and friends), which return owned strings.
 
 /// Parse a filter from a JSON object, or the default (match-everything) filter
 /// from a null or empty string. Unknown fields are rejected so a typo in a
@@ -8359,7 +8441,7 @@ mod abi_tests {
             INFRASTORE_ERR_NULL_POINTER
         );
 
-        // -- buffer op (probe-then-fetch with a null out_len)
+        // -- listing op (owned-string return with a null out_len)
         assert_eq!(
             unsafe {
                 infrastore_store_list_keys(
@@ -8375,7 +8457,6 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null_mut(),
-                    0,
                     ptr::null_mut(),
                 )
             },

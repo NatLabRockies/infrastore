@@ -714,7 +714,13 @@ fn copy_time_series_preserves_deterministic_single_type() {
         .unwrap();
     // Derive the DeterministicSingleTimeSeries view over the stored SingleTimeSeries.
     store
-        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
         .unwrap();
 
     let dst_src = store
@@ -888,8 +894,15 @@ fn transform_reuses_the_sources_feature_set() {
             .unwrap();
     }
     let n = store
-        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
-        .unwrap();
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .transformed;
     assert_eq!(n, 5);
 
     // Every DST shares its source's set, so no set is orphaned and each derived
