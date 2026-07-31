@@ -198,9 +198,12 @@
 </code></pre>
 <p><code>infrastore.__version__</code> reports the wheel version.</p>
 <blockquote>
-<p><strong>Array dtypes.</strong> The binding accepts and returns NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>,
-<code>int32</code>, <code>uint64</code>, or <code>bool</code>; whatever dtype is given round-trips unchanged. Multi-dimensional
-arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
+<p><strong>Array dtypes.</strong> The binding accepts and returns NumPy arrays of <code>float64</code>, <code>float32</code>, the signed
+and unsigned integer widths (<code>int64</code>/<code>int32</code>/<code>int16</code>/<code>int8</code>/<code>uint64</code>/<code>uint32</code>/<code>uint16</code>/<code>uint8</code>),
+or <code>bool</code>; whatever dtype is given round-trips unchanged. What those elements <em>mean</em> is the
+association's <code>element_type</code> (see <a href="./element-types.html">Element types</a>), declared with the
+<code>element_type=</code> keyword on <code>add_time_series</code> and decoded with <code>decode_element_values</code>.
+Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
 </blockquote>
 <h2 id="store"><a class="header" href="#store"><code>Store</code></a></h2>
 <h3 id="constructors"><a class="header" href="#constructors">Constructors</a></h3>
@@ -407,8 +410,7 @@ SQLite catalog, so <code>ok</code> is not a statement about the store as a whole
 <code>timedelta</code> or an ISO 8601 duration string for <code>resolution</code>; the getter always returns the ISO
 string. <code>name</code> is a required association attribute (the same array may be stored under different
 names). It is read off the object by <code>add_time_series</code> and populated on <code>get_time_series</code>. The
-array's dtype (one of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, <code>bool</code>) and per-step element
-shape are preserved through a round-trip.</p>
+array's <code>element_type</code> and per-step element shape are preserved through a round-trip.</p>
 <h2 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h2>
 <pre><code class="language-python">NonSequentialTimeSeries(
     timestamps: list[datetime],
@@ -525,15 +527,16 @@ forecast.name              -&gt; str
 <h2 id="readers"><a class="header" href="#readers">Readers</a></h2>
 <p><code>get_time_series</code> returns one whole series or forecast. For the simulation access pattern — <em>walk
 every timestamp and, at each, read the value of every matching series</em> — use a <strong>reader</strong> instead. A
-reader is built once over a filter, pins one resolution, and reuses its output buffers so a tight
-loop allocates almost nothing. There are two: <code>StaticReader</code> for <code>SingleTimeSeries</code>, and
-<code>ForecastReader</code> for forecasts. Both share the lifecycle: build → inspect the layout once →
-<code>*_read(when)</code> in a loop → pull values per group/entry.</p>
+reader is built once over a filter, pins one timeline, and reuses its output buffers so a tight loop
+allocates almost nothing. There are two: <code>StaticReader</code> for the static types, and <code>ForecastReader</code>
+for forecasts. Both share the lifecycle: build → inspect the layout once → <code>*_read(when)</code> in a loop
+→ pull values per group/entry.</p>
 <p>The builders and drivers live on <code>Store</code>:</p>
 <pre><code class="language-python">def build_static_reader(
     self,
-    resolution: timedelta | str,
+    resolution: timedelta | str | None = None,
     *,
+    time_series_type: TimeSeriesType | None = None,   # default: SingleTimeSeries
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
@@ -557,24 +560,31 @@ def build_forecast_reader(
 ) -&gt; ForecastReader: ...
 def forecast_read(self, reader: ForecastReader, when: datetime) -&gt; None: ...
 </code></pre>
-<p><code>resolution</code> is required on both builders (one resolution per reader). <code>static_read</code> /
-<code>forecast_read</code> fill the reader's buffers in place and return <code>None</code>; passing a <code>when</code> that is off
-the reader's grid or timeline raises <code>InvalidParameterError</code>.</p>
+<p><code>resolution</code> is required on <code>build_forecast_reader</code>, and on <code>build_static_reader</code> for
+<code>SingleTimeSeries</code> (one resolution per reader). It must be <strong>omitted</strong> for
+<code>time_series_type=TimeSeriesType.NonSequentialTimeSeries</code>: an irregular series has no resolution, so
+its timeline is the timestamp vector its cohort shares instead. <code>static_read</code> / <code>forecast_read</code> fill
+the reader's buffers in place and return <code>None</code>; passing a <code>when</code> that is off the reader's timeline
+raises <code>InvalidParameterError</code>.</p>
 <h3 id="staticreader"><a class="header" href="#staticreader"><code>StaticReader</code></a></h3>
-<p>Reads the value of every matching <code>SingleTimeSeries</code> at one timestamp. Results are <strong>columnar</strong>:
-series are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as
-one dense <code>(num_columns, *element_shape)</code> numpy array.</p>
+<p>Reads the value of every matching static series at one timestamp. Results are <strong>columnar</strong>: series
+are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as one dense
+<code>(num_columns, *element_shape)</code> numpy array.</p>
 <pre><code class="language-python">class StaticReader:
-    def grid(self) -&gt; dict: ...     # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "length": int}
-    def groups(self) -&gt; list[dict]: ...  # each: {"dtype": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
-    def timestamps(self) -&gt; list[datetime]: ...   # every timestamp on the grid, in order
+    def grid(self) -&gt; dict: ...     # {"time_series_type": str, "initial_timestamp": rfc3339 str, "resolution": ISO str | None, "length": int}
+    def groups(self) -&gt; list[dict]: ...  # each: {"dtype": str, "element_type": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
+    def timestamps(self) -&gt; list[datetime]: ...   # every timestamp on the timeline, in order
     def group_values(self, index: int) -&gt; numpy.ndarray: ...  # last read of group `index`
 </code></pre>
-<p>All matched series must share one grid (<code>initial_timestamp</code> + <code>length</code>); the build validates this
-and raises on divergence, so there is no presence mask — every column has a value at every valid
-timestamp. <code>group_values(i)</code> returns a <code>(num_columns, *element_shape)</code> array whose column <code>j</code>
-corresponds to <code>groups()[i]["keys"][j]</code>; it is empty until the first <code>static_read</code>.</p>
-<pre><code class="language-python">reader = store.build_static_reader(timedelta(hours=1))
+<p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
+<code>SingleTimeSeries</code>, one timestamp vector for <code>NonSequentialTimeSeries</code>. The build validates this and
+raises on divergence, so there is no presence mask — every column has a value at every valid
+timestamp. <code>grid()["resolution"]</code> is <code>None</code> for an irregular reader; <code>timestamps()</code> is the timeline
+either way, so a read loop written against it works unchanged for both. <code>group_values(i)</code> returns a
+<code>(num_columns, *element_shape)</code> array whose column <code>j</code> corresponds to <code>groups()[i]["keys"][j]</code>; it
+is empty until the first <code>static_read</code>.</p>
+<pre><code class="language-python"># For irregular series: build_static_reader(time_series_type=TimeSeriesType.NonSequentialTimeSeries)
+reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()
 groups = reader.groups()
 start = datetime.fromisoformat(grid["initial_timestamp"])

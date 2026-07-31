@@ -252,19 +252,27 @@ writes reuse the same filter. Compression is a storage detail only — arrays de
 regardless of the filter, so stores written with different settings stay mutually readable and the
 data-format version is unaffected. In-memory stores ignore the setting.</li>
 </ul>
-<p><strong>Standalone mode</strong> holds <code>NonSequentialTimeSeries</code> and the dense forecast arrays (<code>Deterministic</code>,
-<code>Probabilistic</code>, <code>Scenarios</code>). Each is its own typed, multi-dimensional variable <code>arr_{hex_hash}</code> —
-no column packing and no companion hash (the variable name carries the hash). Irregular series are
-shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts are shaped
-<code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and chunked
-in bounded blocks along the <code>count</code> (window) axis, so reading one forecast window decompresses a
-single block rather than the whole array. The <code>ForecastReader</code> caches a block at a time to match.</p>
+<p>Packed mode holds every <strong>static</strong> series. <code>SingleTimeSeries</code> (and the array behind a
+<code>DeterministicSingleTimeSeries</code>) pool by resolution into <code>sts_…</code> datasets; <code>NonSequentialTimeSeries</code>
+pool by their <em>timestamp vector</em> into <code>nsts_…</code> datasets, because the chunking is timestamp-major and
+so only means something for arrays on a common time axis. An irregular series carries that axis
+explicitly, and the catalog already content-addresses it, so the interned hash is the cohort key —
+which is what lets a <code>StaticReader</code> sweep irregular series the same way it sweeps regular ones.</p>
+<p><strong>Standalone mode</strong> holds the dense forecast arrays (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>)
+and any <code>NonSequentialTimeSeries</code> alone on its time axis — a pool spreads one array over <code>length</code>
+chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
+<code>arr_{hex_hash}</code> — no column packing and no companion hash (the variable name carries the hash).
+Lone irregular series are shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts are
+shaped <code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and
+chunked in bounded blocks along the <code>count</code> (window) axis, so reading one forecast window
+decompresses a single block rather than the whole array. The <code>ForecastReader</code> caches a block at a
+time to match.</p>
 <p>The <a href="../reference/file-format.html#hdf5-layout">file-format reference</a> gives the precise naming and
 dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
 same physical shape — the type, timestamps, and windowing parameters all live in metadata.</p>
 <h2 id="the-metadata-side-sqlite"><a class="header" href="#the-metadata-side-sqlite">The Metadata Side: SQLite</a></h2>
-<p>The catalog holds five tables. The first three describe time series; the last two record
-relationships between catalog entities and have nothing to do with time series at all.</p>
+<p>The catalog holds six tables. The first four describe time series; the last two record relationships
+between catalog entities and have nothing to do with time series at all.</p>
 <ul>
 <li><strong><code>time_series_associations</code></strong> — one row per
 <code>(owner_id, owner_category, time_series_type, name, resolution, interval, features)</code> association,

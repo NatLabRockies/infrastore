@@ -244,8 +244,15 @@ dense forecasts goes through the generic <code>add_time_series</code> (a <code>D
 server serves forecast reads but does not accept writes. See <a href="#forecasts">Forecasts</a> below.</p>
 <h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
 <p>A <code>NonSequentialTimeSeries</code> pairs each value with an explicit UTC timestamp. Timestamps must be
-strictly increasing and their count must match the data length. Its values are stored as a
-standalone HDF5 array; timestamps are stored with the association metadata.</p>
+strictly increasing and their count must match the data length.</p>
+<p>The timestamp vector is stored in the catalog, <strong>content-addressed and shared</strong>: series sampled at
+the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
+between them rather than one each. That shared vector is also the series' <em>cohort</em>: the values of
+every series on it are column-packed into one timestamp-major HDF5 dataset, exactly as
+<code>SingleTimeSeries</code> at one resolution are, so a <a href="../reference/rust-api.html#readers"><code>StaticReader</code></a>
+can sweep them a timestamp at a time. A series alone on its time axis keeps a standalone array
+instead — packing only pays once a cohort is several columns wide. See the
+<a href="./storage-model.html">storage model</a> for the layout.</p>
 <h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
 <p>A <code>SingleTimeSeries</code> is an <code>initial_timestamp</code>, a <code>resolution</code> (a <a href="#periods">period</a>), and an array
 of values:</p>
@@ -273,12 +280,13 @@ month. Periods are encoded as ISO-8601 duration strings (<code>PT1H</code>, <cod
 every binding (the Python/gRPC surfaces accept a <code>timedelta</code>/duration for fixed periods and an
 ISO-8601 string for either kind, and return the ISO-8601 string).</p>
 <h3 id="typed-n-dimensional-arrays"><a class="header" href="#typed-n-dimensional-arrays">Typed, N-dimensional arrays</a></h3>
-<p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>,
+<p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, the integer widths,
 or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first axis is time; the trailing axes are a fixed
 <strong>per-step element shape</strong>, so a step can hold a scalar (empty element shape) or a small tuple — for
-example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The optional <code>ext</code>
-payload travels with the metadata so a binding can reconstruct its domain object on read; the store
-itself never interprets it.</p>
+example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The association's
+<code>element_type</code> says what those elements mean and how a ragged value (a piecewise curve, say) is
+packed into a fixed-width row — see <a href="../reference/element-types.html">Element types</a>. The optional
+<code>ext</code> payload travels alongside for a binding's own use; the store never interprets it.</p>
 <h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
 <p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
 shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
@@ -367,11 +375,19 @@ is a metadata concept; the array is shared by <a href="./content-addressing.html
 <ul>
 <li><strong><code>units</code></strong> — a free-form, end-user-facing label such as <code>"MW"</code>. No dimensional analysis is
 performed.</li>
-<li><strong><code>ext</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically JSON, e.g.
-<code>{"function_type":"QuadraticFunctionData"}</code>) that a binding writes and reads to reconstruct a
-domain object. The store never parses or interprets it, and end users are not expected to set it.</li>
+<li><strong><code>ext</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically JSON) that a
+binding writes and reads for its own purposes. The store never parses or interprets it, and end
+users are not expected to set it. Element typing does <em>not</em> live here: that is <code>element_type</code>
+below, a first-class column the store owns and validates.</li>
+<li><strong><code>element_type</code></strong> — what the array's elements <em>mean</em>, in the store's own language-neutral
+vocabulary: a dtype spelling (<code>f64</code>, <code>i64</code>, …) for plain numbers, else <code>tuple(N,dtype)</code> or one of
+the function-data kinds (<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>,
+<code>piecewise_step</code>). It supersedes a separate physical <code>dtype</code>: the dtype of the stored bytes is
+derived from it. Unlike <code>units</code> and <code>ext</code> it is <em>not</em> inert — the write path validates the array's
+dtype and per-step shape against it. See <a href="../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p>These are recorded in metadata and returned on read, but they do not affect identity or storage.</p>
+<p><code>units</code> and <code>ext</code> are recorded in metadata and returned on read, but they do not affect identity or
+storage.</p>
 <h2 id="associations-between-entities"><a class="header" href="#associations-between-entities">Associations Between Entities</a></h2>
 <p>Beyond owning time series, catalog entities can be related to each other. The catalog records two
 such relationships, in two separate tables, because they are not the same kind of thing: attaching

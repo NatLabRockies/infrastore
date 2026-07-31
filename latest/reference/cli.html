@@ -382,7 +382,7 @@ The CSV holds only numbers (plus a leading timestamp column for <code>non_sequen
 <tr><td><code>owner_category</code></td><td>optional</td><td><code>component</code> (default) or <code>supplemental_attribute</code>.</td></tr>
 <tr><td><code>name</code></td><td>all</td><td></td></tr>
 <tr><td><code>type</code></td><td>all</td><td>One of the five writable types.</td></tr>
-<tr><td><code>dtype</code></td><td>all</td><td><code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>, <code>bool</code>.</td></tr>
+<tr><td><code>element_type</code></td><td>all</td><td><code>f64</code>/<code>f32</code>/<code>i64</code>/…, <code>tuple(N,f64)</code>, or a function-data kind.</td></tr>
 <tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
 <tr><td><code>has_header</code></td><td>optional</td><td>Skip the first CSV row. Default <code>true</code>.</td></tr>
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>

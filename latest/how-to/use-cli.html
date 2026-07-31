@@ -195,9 +195,9 @@ cargo build -p infrastore-cli --release
 </code></pre>
 <p>The examples below assume <code>infrastore</code> is on your <code>PATH</code> (or use <code>./target/debug/infrastore</code>).</p>
 <h2 id="2-describe-the-data"><a class="header" href="#2-describe-the-data">2. Describe the Data</a></h2>
-<p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type, dtype,
-resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print a starting
-point for any type with <code>template</code>:</p>
+<p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
+element_type, resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print
+a starting point for any type with <code>template</code>:</p>
 <pre><code class="language-sh">infrastore template single &gt; load.json       # print an example descriptor to edit
 </code></pre>
 <p>Edit it to point at your data and metadata:</p>
@@ -207,7 +207,7 @@ point for any type with <code>template</code>:</p>
   "owner_category": "component",
   "name": "load",
   "type": "single",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
   "has_header": true,
@@ -253,7 +253,7 @@ to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly 
 <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, and destructive commands (<code>remove</code>,
 <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>) accept <code>--dry-run</code> to preview their effect.</p>
 <p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
-over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when <code>dtype</code>
+over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when the dtype
 is <code>bool</code>, and always <code>num_elements</code>. The stats are the only part that reads the array —
 <code>--no-stats</code> skips it for a purely catalog-side query.</p>
 <p><code>list</code> shows every field that is part of a series' identity, features included, so two series that

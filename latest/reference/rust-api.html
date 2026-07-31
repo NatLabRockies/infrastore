@@ -610,16 +610,15 @@ timestamp-oriented access pattern — <em>walk the timeline and read every serie
 resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
 nothing. The reader is a passive plan: it does not borrow the <code>Store</code>, so reads go through
 <code>Store::static_read</code> / <code>Store::forecast_read</code>, which fill the buffers; the caller then walks the
-groups/entries. There are two: <a href="#staticreader-and-staticgroup"><code>StaticReader</code></a> for
-<code>SingleTimeSeries</code> and <a href="#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code></a> for
-forecasts.</p>
+groups/entries. There are two: <a href="#staticreader-and-staticgroup"><code>StaticReader</code></a> for the static types
+and <a href="#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code></a> for forecasts.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// Static: value of every SingleTimeSeries at one timestamp, columnar.
 let mut reader = store.build_static_reader(ListFilter::new().resolution(res))?;
-for k in 0..reader.length() {
-    // Grid point k: initial + k·resolution (calendar-aware, hence `Period::add_to`).
-    let at = reader.resolution().add_to(reader.initial_timestamp(), k as i64).unwrap();
+// `timestamps()` walks the timeline whichever kind it is, so the loop below is
+// identical for an irregular reader.
+for at in reader.timestamps().collect::&lt;Vec&lt;_&gt;&gt;() {
     store.static_read(&amp;mut reader, at)?;
     for group in reader.groups() {
         let bytes = group.values();        // [num_columns, *element_shape], row-major LE
@@ -643,8 +642,19 @@ for k in 0..reader.count() {
     }
 }
 <span class="boring">}</span></code></pre></pre>
-<p><code>build_static_reader</code> requires the filter to pin a resolution and that all matched series share one
-grid (<code>initial_timestamp</code> + <code>length</code>) — validated at build, so there is no presence mask.
+<p><code>build_static_reader</code> covers both static types, and which one the filter names decides what must
+hold. For <code>SingleTimeSeries</code> (the default) the filter must pin a resolution and all matched series
+must share one grid (<code>initial_timestamp</code> + <code>length</code>). For <code>NonSequentialTimeSeries</code> it must pin <em>no</em>
+resolution — an irregular series has none — and all matched series must instead lie on one timestamp
+vector, the same cohort that pools their arrays on disk:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut reader = store.build_static_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::NonSequentialTimeSeries),
+)?;
+assert!(reader.resolution().is_none());     // no constant step to report
+<span class="boring">}</span></code></pre></pre>
+<p>Either way the uniformity is validated at build, so there is no presence mask.
 <code>build_forecast_reader</code> requires a forecast type and a resolution; a <code>Deterministic</code> reader is
 abstract (also matches <code>DeterministicSingleTimeSeries</code>), and all matched forecasts must share one
 window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). <code>static_read</code> / <code>forecast_read</code> error
@@ -839,6 +849,9 @@ forecast type, <code>None</code> for the static types); <code>resolution</code> 
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
+    pub element_type: ElementType,   // never optional; see below
+    pub units: Option&lt;String&gt;,
+    pub ext: Option&lt;String&gt;,
 }
 
 impl SingleTimeSeries {
@@ -846,9 +859,20 @@ impl SingleTimeSeries {
         initial_timestamp: DateTime&lt;Utc&gt;, resolution: impl Into&lt;Period&gt;, data: TypedArray,
         name: impl Into&lt;String&gt;,
     ) -&gt; Self;
+    pub fn with_element_type(self, element_type: ElementType) -&gt; Self;
+    pub fn with_units(self, units: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_ext(self, ext: impl Into&lt;String&gt;) -&gt; Self;
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>length</code> is derived from the array's first axis (<code>data.length()</code>) by <code>new</code>.</p>
+<p>The three descriptors travel on the series rather than on the write request, so a read returns what
+a write declared. <code>element_type</code> is <strong>not</strong> an <code>Option</code>: <code>new</code> resolves it to <code>Scalar(data.dtype)</code> —
+what an ordinary numeric series is — and <code>with_element_type</code> replaces it. There is deliberately no
+"undeclared" spelling, because it would be a second way to say <code>Scalar(dtype)</code> and a series written
+that way would not compare equal to the same series read back. The consequence to know: replacing
+<code>data</code> on an already-built series without updating <code>element_type</code> is a mismatch the store rejects on
+write (<code>InvalidParameter</code>) rather than silently re-deriving one — build the series again instead.
+The other four series types follow the same pattern.</p>
 <h3 id="typedarray-and-dtype"><a class="header" href="#typedarray-and-dtype"><code>TypedArray</code> and <code>Dtype</code></a></h3>
 <p>The storage array type: an element <code>dtype</code>, an N-dimensional <code>shape</code> <code>[length, k1, k2, …]</code> (first
 axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.</p>
@@ -1003,16 +1027,19 @@ impl Scenarios {
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="staticreader-and-staticgroup"><a class="header" href="#staticreader-and-staticgroup"><code>StaticReader</code> and <code>StaticGroup</code></a></h3>
-<p>The columnar <code>SingleTimeSeries</code> reader (see <a href="#readers">Readers</a>). <code>Period</code> is the crate's resolution
+<p>The columnar static-series reader (see <a href="#readers">Readers</a>). <code>Period</code> is the crate's resolution
 type. <code>values()</code> is empty until the first <code>Store::static_read</code>.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>impl StaticReader {
+    pub fn time_series_type(&amp;self) -&gt; TimeSeriesType;  // which static type, hence which timeline
     pub fn initial_timestamp(&amp;self) -&gt; DateTime&lt;Utc&gt;;
-    pub fn resolution(&amp;self) -&gt; Period;
-    pub fn length(&amp;self) -&gt; usize;            // grid points; valid timestamps initial + k·resolution
+    pub fn resolution(&amp;self) -&gt; Option&lt;Period&gt;;        // None for NonSequentialTimeSeries
+    pub fn length(&amp;self) -&gt; usize;                     // timeline points
     pub fn groups(&amp;self) -&gt; &amp;[StaticGroup];
     pub fn index_at(&amp;self, at: DateTime&lt;Utc&gt;) -&gt; Result&lt;usize&gt;;
+    pub fn timestamp_at(&amp;self, index: usize) -&gt; Result&lt;DateTime&lt;Utc&gt;&gt;;
+    pub fn timestamps(&amp;self) -&gt; impl Iterator&lt;Item = DateTime&lt;Utc&gt;&gt; + '_;
 }
 
 impl StaticGroup {
@@ -1435,7 +1462,7 @@ pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../reference/file-format.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../reference/element-types.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -1449,7 +1476,7 @@ pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../reference/file-format.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../reference/element-types.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

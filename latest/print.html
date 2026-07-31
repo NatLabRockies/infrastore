@@ -836,8 +836,15 @@ dense forecasts goes through the generic <code>add_time_series</code> (a <code>D
 server serves forecast reads but does not accept writes. See <a href="explanation/data-model.html#forecasts">Forecasts</a> below.</p>
 <h3 id="nonsequentialtimeseries"><a class="header" href="#nonsequentialtimeseries"><code>NonSequentialTimeSeries</code></a></h3>
 <p>A <code>NonSequentialTimeSeries</code> pairs each value with an explicit UTC timestamp. Timestamps must be
-strictly increasing and their count must match the data length. Its values are stored as a
-standalone HDF5 array; timestamps are stored with the association metadata.</p>
+strictly increasing and their count must match the data length.</p>
+<p>The timestamp vector is stored in the catalog, <strong>content-addressed and shared</strong>: series sampled at
+the same instants — an outage schedule, a set of event times, a market timeline — hold one copy
+between them rather than one each. That shared vector is also the series' <em>cohort</em>: the values of
+every series on it are column-packed into one timestamp-major HDF5 dataset, exactly as
+<code>SingleTimeSeries</code> at one resolution are, so a <a href="explanation/../reference/rust-api.html#readers"><code>StaticReader</code></a>
+can sweep them a timestamp at a time. A series alone on its time axis keeps a standalone array
+instead — packing only pays once a cohort is several columns wide. See the
+<a href="explanation/./storage-model.html">storage model</a> for the layout.</p>
 <h3 id="singletimeseries"><a class="header" href="#singletimeseries"><code>SingleTimeSeries</code></a></h3>
 <p>A <code>SingleTimeSeries</code> is an <code>initial_timestamp</code>, a <code>resolution</code> (a <a href="explanation/data-model.html#periods">period</a>), and an array
 of values:</p>
@@ -865,12 +872,13 @@ month. Periods are encoded as ISO-8601 duration strings (<code>PT1H</code>, <cod
 every binding (the Python/gRPC surfaces accept a <code>timedelta</code>/duration for fixed periods and an
 ISO-8601 string for either kind, and return the ISO-8601 string).</p>
 <h3 id="typed-n-dimensional-arrays"><a class="header" href="#typed-n-dimensional-arrays">Typed, N-dimensional arrays</a></h3>
-<p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>,
+<p>Every series' values are a <strong><code>TypedArray</code></strong>: an element <code>dtype</code> (<code>f64</code>, <code>f32</code>, the integer widths,
 or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first axis is time; the trailing axes are a fixed
 <strong>per-step element shape</strong>, so a step can hold a scalar (empty element shape) or a small tuple — for
-example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The optional <code>ext</code>
-payload travels with the metadata so a binding can reconstruct its domain object on read; the store
-itself never interprets it.</p>
+example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The association's
+<code>element_type</code> says what those elements mean and how a ragged value (a piecewise curve, say) is
+packed into a fixed-width row — see <a href="explanation/../reference/element-types.html">Element types</a>. The optional
+<code>ext</code> payload travels alongside for a binding's own use; the store never interprets it.</p>
 <h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
 <p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
 shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
@@ -959,11 +967,19 @@ is a metadata concept; the array is shared by <a href="explanation/./content-add
 <ul>
 <li><strong><code>units</code></strong> — a free-form, end-user-facing label such as <code>"MW"</code>. No dimensional analysis is
 performed.</li>
-<li><strong><code>ext</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically JSON, e.g.
-<code>{"function_type":"QuadraticFunctionData"}</code>) that a binding writes and reads to reconstruct a
-domain object. The store never parses or interprets it, and end users are not expected to set it.</li>
+<li><strong><code>ext</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically JSON) that a
+binding writes and reads for its own purposes. The store never parses or interprets it, and end
+users are not expected to set it. Element typing does <em>not</em> live here: that is <code>element_type</code>
+below, a first-class column the store owns and validates.</li>
+<li><strong><code>element_type</code></strong> — what the array's elements <em>mean</em>, in the store's own language-neutral
+vocabulary: a dtype spelling (<code>f64</code>, <code>i64</code>, …) for plain numbers, else <code>tuple(N,dtype)</code> or one of
+the function-data kinds (<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>,
+<code>piecewise_step</code>). It supersedes a separate physical <code>dtype</code>: the dtype of the stored bytes is
+derived from it. Unlike <code>units</code> and <code>ext</code> it is <em>not</em> inert — the write path validates the array's
+dtype and per-step shape against it. See <a href="explanation/../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p>These are recorded in metadata and returned on read, but they do not affect identity or storage.</p>
+<p><code>units</code> and <code>ext</code> are recorded in metadata and returned on read, but they do not affect identity or
+storage.</p>
 <h2 id="associations-between-entities"><a class="header" href="#associations-between-entities">Associations Between Entities</a></h2>
 <p>Beyond owning time series, catalog entities can be related to each other. The catalog records two
 such relationships, in two separate tables, because they are not the same kind of thing: attaching
@@ -1077,19 +1093,27 @@ writes reuse the same filter. Compression is a storage detail only — arrays de
 regardless of the filter, so stores written with different settings stay mutually readable and the
 data-format version is unaffected. In-memory stores ignore the setting.</li>
 </ul>
-<p><strong>Standalone mode</strong> holds <code>NonSequentialTimeSeries</code> and the dense forecast arrays (<code>Deterministic</code>,
-<code>Probabilistic</code>, <code>Scenarios</code>). Each is its own typed, multi-dimensional variable <code>arr_{hex_hash}</code> —
-no column packing and no companion hash (the variable name carries the hash). Irregular series are
-shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts are shaped
-<code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and chunked
-in bounded blocks along the <code>count</code> (window) axis, so reading one forecast window decompresses a
-single block rather than the whole array. The <code>ForecastReader</code> caches a block at a time to match.</p>
+<p>Packed mode holds every <strong>static</strong> series. <code>SingleTimeSeries</code> (and the array behind a
+<code>DeterministicSingleTimeSeries</code>) pool by resolution into <code>sts_…</code> datasets; <code>NonSequentialTimeSeries</code>
+pool by their <em>timestamp vector</em> into <code>nsts_…</code> datasets, because the chunking is timestamp-major and
+so only means something for arrays on a common time axis. An irregular series carries that axis
+explicitly, and the catalog already content-addresses it, so the interned hash is the cohort key —
+which is what lets a <code>StaticReader</code> sweep irregular series the same way it sweeps regular ones.</p>
+<p><strong>Standalone mode</strong> holds the dense forecast arrays (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>)
+and any <code>NonSequentialTimeSeries</code> alone on its time axis — a pool spreads one array over <code>length</code>
+chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
+<code>arr_{hex_hash}</code> — no column packing and no companion hash (the variable name carries the hash).
+Lone irregular series are shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts are
+shaped <code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and
+chunked in bounded blocks along the <code>count</code> (window) axis, so reading one forecast window
+decompresses a single block rather than the whole array. The <code>ForecastReader</code> caches a block at a
+time to match.</p>
 <p>The <a href="explanation/../reference/file-format.html#hdf5-layout">file-format reference</a> gives the precise naming and
 dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
 same physical shape — the type, timestamps, and windowing parameters all live in metadata.</p>
 <h2 id="the-metadata-side-sqlite"><a class="header" href="#the-metadata-side-sqlite">The Metadata Side: SQLite</a></h2>
-<p>The catalog holds five tables. The first three describe time series; the last two record
-relationships between catalog entities and have nothing to do with time series at all.</p>
+<p>The catalog holds six tables. The first four describe time series; the last two record relationships
+between catalog entities and have nothing to do with time series at all.</p>
 <ul>
 <li><strong><code>time_series_associations</code></strong> — one row per
 <code>(owner_id, owner_category, time_series_type, name, resolution, interval, features)</code> association,
@@ -1191,8 +1215,8 @@ the mechanism that lets many <a href="explanation/./data-model.html#keys">keys</
 <p><code>array_hash</code> produces a deterministic 32-byte digest from a
 <a href="explanation/./data-model.html#typed-n-dimensional-arrays"><code>TypedArray</code></a>. The hashed byte stream is, in order:</p>
 <ol>
-<li>A <strong>dtype tag</strong>: the dtype name (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>, <code>bool</code>) followed by a NUL
-byte.</li>
+<li>A <strong>dtype tag</strong>: the dtype name (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>i16</code>, <code>i8</code>, <code>u64</code>, <code>u32</code>, <code>u16</code>,
+<code>u8</code>, <code>bool</code>) followed by a NUL byte.</li>
 <li>The <strong>shape</strong>: the rank as a little-endian <code>u64</code>, then each dimension as a little-endian <code>u64</code>.</li>
 <li>The <strong>elements</strong> in row-major order. Float dtypes canonicalize <code>NaN</code> to a single quiet-<code>NaN</code> bit
 pattern before hashing; integer and <code>bool</code> bytes are hashed verbatim.</li>
@@ -1241,24 +1265,42 @@ sharpest example is a <code>DeterministicSingleTimeSeries</code>: it is a view o
 was derived from and has exactly the same features, so <code>transform_single_time_series</code> writes
 <strong>zero</strong> feature rows — it reuses the set the source series already stored, just as it reuses the
 source's array.</p>
+<h2 id="the-timestamps-hash"><a class="header" href="#the-timestamps-hash">The Timestamps Hash</a></h2>
+<p>A <code>NonSequentialTimeSeries</code> carries its timestamps explicitly, and those are content-addressed too,
+by <code>timestamps_hash</code>: a domain tag followed by the vector's canonical encoding — the same bytes the
+catalog stores, so the hash addresses the stored form rather than a second serialization of it. Two
+vectors hash equal exactly when they hold the same instants in the same order.</p>
+<p>Like the features hash, it does double duty:</p>
+<ul>
+<li><strong>It keys the stored vector.</strong> The <code>timestamp_sets</code> table is keyed by it, so a time axis shared by
+a thousand irregular series is stored <strong>once</strong>. Sharing is again the common case, not the rare
+one: irregular series in this domain sit on a schedule — outage windows, market intervals, event
+times — that many components observe together.</li>
+<li><strong>It is the cohort key of the packed array layout.</strong> Column-packing is only meaningful for arrays
+on a common time axis, since the chunking is timestamp-major; the interned hash is precisely the
+answer to "do these two series share one?", so the arrays of a cohort pool into one
+<code>nsts_{dtype}_{shape}_{length}_{timestamps_hash}</code> dataset. This is what lets a <code>StaticReader</code>
+sweep irregular series a timestamp at a time, exactly as it does regular ones.</li>
+</ul>
 <h2 id="deduplication-on-write"><a class="header" href="#deduplication-on-write">Deduplication on Write</a></h2>
-<p>Both hashes deduplicate, by the same mechanism, on the same write.</p>
+<p>All three hashes deduplicate, by the same mechanism, on the same write.</p>
 <p><strong>The array.</strong> <code>Store</code> hashes the array and asks the backend whether that hash is already present:</p>
 <ul>
 <li><strong>Present</strong> → the existing array is reused; no new array bytes are written. Only a new metadata
 association row is inserted.</li>
-<li><strong>Absent</strong> → the array is written. A packed array (<code>SingleTimeSeries</code>) goes into the first free
-column of a compatible <code>sts_{dtype}_{shape}_{length}_{res}</code> dataset, recording its hash in the
-companion hash variable; a standalone array (<code>NonSequentialTimeSeries</code>, dense forecasts) becomes a
-new <code>arr_{hash}</code> variable.</li>
+<li><strong>Absent</strong> → the array is written. A packed array (either static type) goes into the first free
+column of a compatible <code>sts_…</code> / <code>nsts_…</code> dataset, recording its hash in the companion hash
+variable; a standalone array (a dense forecast, or an irregular series alone on its time axis)
+becomes a new <code>arr_{hash}</code> variable.</li>
 </ul>
-<p><strong>The feature set.</strong> The association insert (<code>MetadataStore::insert_batched</code>) writes the feature set
-under its hash with an <code>INSERT OR IGNORE</code>, so a set some other association already stored is a no-op
-— equal hash implies equal set, so an ignored conflict cannot hide a <em>different</em> set behind the same
-hash. Within one batch a <code>FeatureSetCache</code> remembers the sets already written, so a bulk add issues
-one write per <em>distinct</em> set rather than a no-op statement per row per feature. This is what keeps a
-transform flat in feature count instead of linear in it.</p>
-<p>So storage cost scales with the number of <em>distinct</em> arrays and <em>distinct</em> feature sets, while
+<p><strong>The feature set and the timestamp vector.</strong> The association insert
+(<code>MetadataStore::insert_batched</code>) writes each under its hash with an <code>INSERT OR IGNORE</code>, so one some
+other association already stored is a no-op — equal hash implies equal content, so an ignored
+conflict cannot hide a <em>different</em> set behind the same hash. Within one batch a <code>SharedSetCache</code>
+remembers what has already been written, so a bulk add issues one write per <em>distinct</em> set rather
+than a no-op statement per row. This is what keeps a transform flat in feature count instead of
+linear in it, and a cohort of irregular series flat in timestamp count.</p>
+<p>So storage cost scales with the number of <em>distinct</em> arrays, feature sets, and time axes, while
 metadata cost scales with the number of <em>associations</em>. A profile shared by a thousand generators
 costs one array, one feature set, and a thousand small rows.</p>
 <h2 id="deletion-is-reference-counted"><a class="header" href="#deletion-is-reference-counted">Deletion is Reference-Counted</a></h2>
@@ -1271,25 +1313,26 @@ costs one array, one feature set, and a thousand small rows.</p>
 <li>Only frees the HDF5 column for hashes whose reference count has dropped to zero.</li>
 </ol>
 <p>This keeps shared arrays alive until the last referencing key is gone.</p>
-<h3 id="feature-sets-are-the-deliberate-exception"><a class="header" href="#feature-sets-are-the-deliberate-exception">Feature sets are the deliberate exception</a></h3>
-<p>Feature sets are shared by the same mechanism but are <strong>not</strong> reference-counted, and the symmetry
-stops there. Counting references on every delete would make deletion pay for a scan the array side
-already pays for, to reclaim a handful of tiny rows; the schema instead accepts unreachable rows and
-sweeps them in bulk. Concretely:</p>
+<h3 id="the-shared-catalog-rows-are-the-deliberate-exception"><a class="header" href="#the-shared-catalog-rows-are-the-deliberate-exception">The shared catalog rows are the deliberate exception</a></h3>
+<p>Feature sets and timestamp vectors are shared by the same mechanism but are <strong>not</strong>
+reference-counted, and the symmetry stops there. Counting references on every delete would make
+deletion pay for a scan the array side already pays for, to reclaim a handful of rows; the schema
+instead accepts unreachable rows and sweeps them in bulk. Concretely:</p>
 <ul>
 <li><strong>No foreign key, no <code>ON DELETE CASCADE</code>.</strong> A cascade would be actively wrong: rows are shared, so
 deleting one association must not delete a set another association still uses.</li>
-<li><strong>Deleting the last user leaves the set unreachable</strong>, rather than deleting it — the same
+<li><strong>Deleting the last user leaves the row unreachable</strong>, rather than deleting it — the same
 end-state as the HDF5 side's dead standalone variables, which also linger.</li>
-<li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set no association references any more
-and reports the row count as <code>feature_sets_reclaimed</code>. This is the one thing compaction physically
-removes.</li>
-<li><strong>Clearing the whole store drops them all outright</strong>, since a cleared store orphans every set by
+<li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set and every timestamp vector no
+association references any more, reporting the row counts as <code>feature_sets_reclaimed</code> and
+<code>timestamp_sets_reclaimed</code>. These are the only things compaction physically removes.</li>
+<li><strong>Clearing the whole store drops them all outright</strong>, since a cleared store orphans every row by
 construction and may never see a compaction.</li>
 </ul>
-<p>The practical consequence: an unreachable feature set is never <em>read</em> (every lookup goes through an
-association's <code>features_hash</code>), so it costs bytes, not correctness — and a re-added association with
-the same features silently adopts the row that was still sitting there.</p>
+<p>The practical consequence: an unreachable row is never <em>read</em> (every lookup goes through an
+association's <code>features_hash</code> or <code>timestamps_hash</code>), so it costs bytes, not correctness — and a
+re-added association with the same features or timestamps silently adopts the row that was still
+sitting there.</p>
 <h2 id="discovering-shared-series"><a class="header" href="#discovering-shared-series">Discovering Shared Series</a></h2>
 <p>Sharing is observable on read, not just an internal write optimization. Every metadata row carries
 its array's <code>data_hash</code>, so a caller can group series by that hash to learn which ones resolve to
@@ -1376,7 +1419,7 @@ why the APIs look the way they do, how errors propagate, and what each layer own
 importable as <code>infrastore</code>. The binding:</p>
 <ul>
 <li>Converts Python <code>datetime</code>/<code>timedelta</code> to <code>chrono</code> types and NumPy arrays (any shape) to
-<code>TypedArray</code>s at the boundary, supporting the full dtype set (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>,
+<code>TypedArray</code>s at the boundary, supporting the full dtype set (<code>f64</code>, <code>f32</code>, the integer widths,
 <code>bool</code>).</li>
 <li>Translates the typed <code>TimeSeriesError</code> variants into a Python exception hierarchy rooted at
 <code>TimeSeriesError</code> (<code>NotFoundError</code>, <code>DuplicateTimeSeriesError</code>, <code>InvalidParameterError</code>,
@@ -1995,7 +2038,7 @@ forecasts. (Full signatures: <a href="guides/../reference/python-api.html#reader
 series must share one grid (<code>initial_timestamp</code> + <code>length</code>), validated at build.</p>
 <pre><code class="language-python">reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()               # {"initial_timestamp", "resolution", "length"}
-groups = reader.groups()           # each: {"dtype", "element_shape", "keys"}
+groups = reader.groups()           # each: {"dtype", "element_type", "element_shape", "keys"}
 for ts in reader.timestamps():
     store.static_read(reader, ts)
     for i, g in enumerate(groups):
@@ -3012,9 +3055,9 @@ cargo build -p infrastore-cli --release
 </code></pre>
 <p>The examples below assume <code>infrastore</code> is on your <code>PATH</code> (or use <code>./target/debug/infrastore</code>).</p>
 <h2 id="2-describe-the-data"><a class="header" href="#2-describe-the-data">2. Describe the Data</a></h2>
-<p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type, dtype,
-resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print a starting
-point for any type with <code>template</code>:</p>
+<p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
+element_type, resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print
+a starting point for any type with <code>template</code>:</p>
 <pre><code class="language-sh">infrastore template single &gt; load.json       # print an example descriptor to edit
 </code></pre>
 <p>Edit it to point at your data and metadata:</p>
@@ -3024,7 +3067,7 @@ point for any type with <code>template</code>:</p>
   "owner_category": "component",
   "name": "load",
   "type": "single",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
   "has_header": true,
@@ -3070,7 +3113,7 @@ to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly 
 <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, and destructive commands (<code>remove</code>,
 <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>) accept <code>--dry-run</code> to preview their effect.</p>
 <p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
-over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when <code>dtype</code>
+over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when the dtype
 is <code>bool</code>, and always <code>num_elements</code>. The stats are the only part that reads the array —
 <code>--no-stats</code> skips it for a purely catalog-side query.</p>
 <p><code>list</code> shows every field that is part of a series' identity, features included, so two series that
@@ -3160,6 +3203,8 @@ the <a href="reference/../guides/index.html">Developer Guides</a>; for concepts,
 section.</p>
 <ul>
 <li><a href="reference/./file-format.html">On-Disk File Format</a> — The HDF5 layout and SQLite schema, byte for byte.</li>
+<li><a href="reference/./element-types.html">Element Types</a> — What <code>element_type</code> means, the row layouts it names, and the
+conformance corpus every binding's codec is tested against.</li>
 <li><a href="reference/./rust-api.html">Rust API</a> — <code>infrastore-core</code> public types and <code>Store</code> methods.</li>
 <li><a href="reference/./python-api.html">Python API</a> — The <code>infrastore</code> module.</li>
 <li><a href="reference/./julia-api.html">Julia API</a> — The <code>InfraStore.jl</code> package.</li>
@@ -3181,7 +3226,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries three global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.12.0"
+<pre><code class="language-text">data_format_version = "0.14.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 </code></pre>
@@ -3202,18 +3247,24 @@ no in-place migration.</p>
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from TEXT names to small INTEGER codes —
-see <a href="reference/file-format.html#discriminant-encoding">Discriminant encoding</a> below; <code>0.11.0</code> renamed the metadata column
-<code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension payload (typically JSON) the store
-stores verbatim and never interprets; <code>0.10.0</code> replaced the per-association <code>features</code> table with
-the content-addressed <code>feature_sets</code> table below, so a feature map is stored once and shared by
-every association that uses it — dropping the <code>association_id</code> foreign key and its
-<code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to timestamp-major
-<code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to the writing
-batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
-<code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts of one
-variable that differ only by interval are now distinct series — widening both unique indexes (the
-<code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
+<p>(<code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association row: the
+<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
+content-addressed <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
+axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
+<code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
+<em>logical</em> element type and derives the physical dtype from it — see
+<a href="reference/./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
+TEXT names to small INTEGER codes — see <a href="reference/file-format.html#discriminant-encoding">Discriminant encoding</a> below;
+<code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
+payload (typically JSON) the store stores verbatim and never interprets; <code>0.10.0</code> replaced the
+per-association <code>features</code> table with the content-addressed <code>feature_sets</code> table below, so a feature
+map is stored once and shared by every association that uses it — dropping the <code>association_id</code>
+foreign key and its <code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to
+timestamp-major <code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to
+the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
+writes; <code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts
+of one variable that differ only by interval are now distinct series — widening both unique indexes
+(the <code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
 <code>resolution</code>/<code>horizon</code>/<code>interval</code> calendar-aware <a href="reference/../explanation/data-model.html">periods</a>: they are
 now encoded as ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) rather than integer
 milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
@@ -3230,19 +3281,33 @@ seconds; <code>0.2.0</code> introduced typed, multi-dimensional arrays and the t
 <p>Every stored array is a <strong><code>TypedArray</code></strong>: an element <code>dtype</code>, a <code>shape</code> <code>[length, k1, k2, …]</code> whose
 first axis is time and whose trailing axes are a fixed per-step element shape, and the raw
 row-major, little-endian element bytes. The supported dtypes and their stable integer codes (shared
-with the bindings and the C ABI):</p>
+with the bindings and the C ABI). Codes 0–5 are the original set and never move; new widths are
+appended:</p>
 <div class="table-wrapper"><table><thead><tr><th>Code</th><th>dtype</th><th>Width</th><th>Code</th><th>dtype</th><th>Width</th></tr></thead><tbody>
-<tr><td>0</td><td><code>f64</code></td><td>8</td><td>3</td><td><code>i32</code></td><td>4</td></tr>
-<tr><td>1</td><td><code>f32</code></td><td>4</td><td>4</td><td><code>u64</code></td><td>8</td></tr>
-<tr><td>2</td><td><code>i64</code></td><td>8</td><td>5</td><td><code>bool</code></td><td>1</td></tr>
+<tr><td>0</td><td><code>f64</code></td><td>8</td><td>6</td><td><code>i16</code></td><td>2</td></tr>
+<tr><td>1</td><td><code>f32</code></td><td>4</td><td>7</td><td><code>i8</code></td><td>1</td></tr>
+<tr><td>2</td><td><code>i64</code></td><td>8</td><td>8</td><td><code>u32</code></td><td>4</td></tr>
+<tr><td>3</td><td><code>i32</code></td><td>4</td><td>9</td><td><code>u16</code></td><td>2</td></tr>
+<tr><td>4</td><td><code>u64</code></td><td>8</td><td>10</td><td><code>u8</code></td><td>1</td></tr>
+<tr><td>5</td><td><code>bool</code></td><td>1</td><td></td><td></td><td></td></tr>
 </tbody></table>
 </div>
 <p>A scalar-per-step series has an empty element shape; a per-step tuple (e.g. the 3 coefficients of a
 quadratic cost curve) has element shape <code>[3]</code>.</p>
+<p>The <em>dtype</em> says how wide an element is. What those elements <strong>mean</strong> — and how a ragged piecewise
+curve is packed into a fixed-width row — is the association's <code>element_type</code>; see
+<a href="reference/./element-types.html">Element types</a>. The dtype above is derived from it.</p>
+<p>The HDF5 file does <strong>not</strong> describe its own element typing, and is not meant to: <code>bool</code> and <code>u8</code> are
+the same byte on disk, and nothing in a dataspace says whether three <code>f64</code>s are a quadratic curve or
+three independent samples. Every read takes the dtype from the catalog's <code>element_type</code> instead. The
+two artifacts are one logical store — an <code>.h5</code> without its <code>.sqlite</code> is not readable in any case —
+so this removes a second, weaker source of truth rather than adding a dependency. Where a backend
+does know a dtype independently (a packed dataset's name encodes it), the catalog's value is checked
+against it and a mismatch is an integrity error.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.12.0"
+├── attribute  data_format_version = "0.14.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -3250,6 +3315,8 @@ quadratic cost curve) has element shape <code>[3]</code>.</p>
         ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
         ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
         ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
+        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
         ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
         └── ...
 </code></pre>
@@ -3261,18 +3328,27 @@ round-trip.</p>
 <p>The hash companion <code>{dataset}_h</code> is a <code>(cols, 64)</code> array of <code>u8</code> holding each column's 64 lowercase
 hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero row marks a free slot.</strong></p>
 <h3 id="packed-mode"><a class="header" href="#packed-mode">Packed mode</a></h3>
-<p>Used for <strong><code>SingleTimeSeries</code></strong> and the underlying array of a <strong><code>DeterministicSingleTimeSeries</code></strong>.
-Many arrays that share a <code>(dtype, element_shape, length, resolution)</code> are column-packed into one
-dataset:</p>
+<p>Used for every <strong>static</strong> series: <code>SingleTimeSeries</code>, the underlying array of a
+<code>DeterministicSingleTimeSeries</code>, and <code>NonSequentialTimeSeries</code>. Many arrays that share a
+<code>(dtype, element_shape, length)</code> <strong>and a time axis</strong> are column-packed into one dataset:</p>
 <div class="table-wrapper"><table><thead><tr><th>Element</th><th>Meaning</th></tr></thead><tbody>
-<tr><td><code>sts_</code></td><td>Prefix for packed <code>SingleTimeSeries</code> datasets</td></tr>
+<tr><td><code>sts_</code></td><td>Prefix for a packed <code>SingleTimeSeries</code> / DST pool</td></tr>
+<tr><td><code>nsts_</code></td><td>Prefix for a packed <code>NonSequentialTimeSeries</code> cohort</td></tr>
 <tr><td><code>{dtype}</code></td><td>Element dtype string (<code>f64</code>, <code>i64</code>, …)</td></tr>
 <tr><td><code>{shape}</code></td><td>Element shape: <code>s</code> = scalar, <code>3</code> = <code>[3]</code>, <code>3x2</code> = <code>[3, 2]</code></td></tr>
 <tr><td><code>{length}</code></td><td>Number of timesteps (size of the time axis)</td></tr>
-<tr><td><code>{res}</code></td><td>Resolution as an ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>; no <code>_</code>)</td></tr>
+<tr><td><code>{res}</code></td><td><code>sts_</code> only: resolution as an ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>; no <code>_</code>)</td></tr>
+<tr><td><code>{tshash}</code></td><td><code>nsts_</code> only: 64 hex chars, the timestamp vector's content hash</td></tr>
 <tr><td><code>__{n}</code></td><td>Spill suffix; absent for the first dataset, <code>__1</code>, <code>__2</code>, … after</td></tr>
 </tbody></table>
 </div>
+<p>The trailing element is what pins the <strong>time axis</strong>, which is what makes packing meaningful at all:
+the chunking is timestamp-major, so row <code>t</code> of a dataset is "every column at the same instant". A
+regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
+two of them share one exactly when their timestamp vectors are equal — which the catalog already
+answers by content-addressing those vectors (see <a href="reference/file-format.html#timestamp_sets"><code>timestamp_sets</code></a>). The full
+64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
+rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.</p>
 <p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(1, cols, *element_shape)</code>,
 so one HDF5 chunk holds a single timestamp across every column — making a read across series by
 timestamp one chunk, and a buffered bulk write fill whole chunks. <code>cols</code> is chosen per dataset: a
@@ -3292,14 +3368,17 @@ incremental writes fill a default-width dataset — the next write creates a spi
 then <code>…__2</code>, and so on.</li>
 </ul>
 <h3 id="standalone-mode"><a class="header" href="#standalone-mode">Standalone mode</a></h3>
-<p>Used for <strong><code>NonSequentialTimeSeries</code></strong> and the dense forecast arrays (<strong><code>Deterministic</code></strong>,
-<strong><code>Probabilistic</code></strong>, <strong><code>Scenarios</code></strong>). Each array is its own typed, multi-dimensional variable named
-<code>arr_{hex_hash}</code> in the <code>time_series/single</code> group. There is no column packing and no companion hash
-variable — the variable name carries the hash.</p>
+<p>Used for the dense forecast arrays (<strong><code>Deterministic</code></strong>, <strong><code>Probabilistic</code></strong>, <strong><code>Scenarios</code></strong>), and
+for a <strong><code>NonSequentialTimeSeries</code></strong> whose time axis nothing else shares. Each array is its own
+typed, multi-dimensional variable named <code>arr_{hex_hash}</code> in the <code>time_series/single</code> group. There is
+no column packing and no companion hash variable — the variable name carries the hash.</p>
 <ul>
-<li><strong><code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
-whole-array chunk. It stores its explicit, strictly-increasing timestamps in the association's
-<code>timestamps_json</code> metadata field, not in the array.</li>
+<li><strong>A lone <code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
+whole-array chunk. It stores its explicit, strictly-increasing timestamps in the catalog, not in
+the array. Packing is only a win once a cohort is several columns wide — a packed dataset spreads
+one array over <code>length</code> chunks — so a series alone on its time axis stays standalone. Whether a
+given array is packed or standalone is a write-time choice with no effect on reads (they resolve
+by content hash and handle either), and one cohort can hold columns of both.</li>
 <li><strong>Dense forecasts</strong> are shaped <code>[H, count, *element_shape]</code> (<code>Deterministic</code>),
 <code>[num_percentiles, H, count, *element_shape]</code> (<code>Probabilistic</code>), or
 <code>[num_scenarios, H, count, *element_shape]</code> (<code>Scenarios</code>), where <code>count</code> is the number of forecast
@@ -3336,10 +3415,10 @@ The dataset does not shrink.</li>
 dead space (HDF5 cannot reclaim the space in place).</li>
 <li><code>compact()</code> reports reclaimable slots but does not physically resize datasets or remove dead
 standalone datasets in this release (HDF5 cannot reclaim the space in place).</li>
-<li><strong>Feature sets:</strong> because they are shared, deleting an association never deletes its feature set;
-removing the last association that referenced one leaves it unreachable. <code>compact()</code> deletes
-unreachable sets and reports the row count as <code>feature_sets_reclaimed</code>. This is the one thing
-compaction physically removes.</li>
+<li><strong>Feature sets and timestamp vectors:</strong> because both are shared, deleting an association never
+deletes either; removing the last association that referenced one leaves it unreachable.
+<code>compact()</code> deletes unreachable rows and reports the counts as <code>feature_sets_reclaimed</code> and
+<code>timestamp_sets_reclaimed</code>. These are the only things compaction physically removes.</li>
 </ul>
 <h2 id="sqlite-schema"><a class="header" href="#sqlite-schema">SQLite Schema</a></h2>
 <p>The catalog database is created with <code>PRAGMA foreign_keys = ON</code> and the following DDL (idempotent —
@@ -3359,10 +3438,10 @@ compaction physically removes.</li>
 <tr><td><code>horizon</code></td><td>TEXT</td><td>ISO-8601 forecast horizon; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>interval</code></td><td>TEXT</td><td>ISO-8601 forecast interval; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>count</code></td><td>INTEGER</td><td>Forecast window count; <code>NULL</code> for non-forecasts</td></tr>
-<tr><td><code>timestamps_json</code></td><td>TEXT</td><td>JSON array of RFC 3339 timestamps (<code>NonSequentialTimeSeries</code>)</td></tr>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the timestamp vector (<code>NonSequentialTimeSeries</code>)</td></tr>
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
-<tr><td><code>dtype</code></td><td>TEXT</td><td>Element dtype string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
+<tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
 <tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
 <tr><td><code>ext</code></td><td>TEXT</td><td>Opaque package-owned extension payload (JSON), verbatim; <code>NULL</code> if unset</td></tr>
 <tr><td><code>data_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the array; links to an HDF5 column/variable</td></tr>
@@ -3398,6 +3477,47 @@ Removing the last association that referenced a set instead leaves it unreachabl
 deletion semantics as the HDF5 side's unreachable standalone variables. <code>Store::compact</code> sweeps
 unreachable sets and reports the count as <code>feature_sets_reclaimed</code>; clearing a store drops them all
 outright.</p>
+<h3 id="timestamp_sets"><a class="header" href="#timestamp_sets"><code>timestamp_sets</code></a></h3>
+<p>The explicit timestamp vector of a <code>NonSequentialTimeSeries</code>, content-addressed exactly as feature
+sets are. The association row carries only the 32-byte <code>timestamps_hash</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of <code>data</code>; <code>PRIMARY KEY</code></td></tr>
+<tr><td><code>data</code></td><td>BLOB</td><td>The vector in the compact encoding below</td></tr>
+</tbody></table>
+</div>
+<p>Three things this buys, in descending order of how much they matter:</p>
+<ul>
+<li><strong>The vector is stored once per distinct time axis.</strong> Irregular series in a power-systems model
+overwhelmingly share one — event times, an outage schedule, a market timeline — so a thousand
+components sampled at the same instants hold one copy between them.</li>
+<li><strong>The association table stays narrow.</strong> The vector used to live inline as an RFC 3339 JSON array
+(24 bytes per timestamp, ~210 KB for a year of hourly data), which pushed those rows into SQLite
+overflow pages and made every scan-shaped catalog query read and parse megabytes it had no use
+for. A listing now decodes each distinct vector once, as it already did for features.</li>
+<li><strong>It is the cohort key the packed HDF5 layout groups irregular arrays by</strong> (see
+<a href="reference/file-format.html#packed-mode">Packed mode</a>).</li>
+</ul>
+<p><code>data</code> is not human-readable, deliberately — the readable projection below covers hand inspection of
+everything else. Its layout is:</p>
+<pre><code class="language-text">[0]      version   u8       currently 1
+[1]      unit      u8       delta unit: 0=ns, 1=µs, 2=ms, 3=s, 4=min, 5=hour, 6=day
+then     count     uvarint  number of timestamps
+if count &gt; 0:
+  base_secs        svarint  seconds since the Unix epoch (zigzag)
+  base_nanos       uvarint  sub-second nanoseconds of the first timestamp
+  delta_1..delta_n svarint  successive differences, in `unit`s (zigzag)
+</code></pre>
+<p>Varints are LEB128; signed values are zigzag-encoded first. The unit is the coarsest one that
+divides every delta, which is what makes the encoding cheap: irregularity in this domain is usually
+coarse (event times on whole seconds or minutes, a regular grid with gaps), so a year of hourly
+timestamps becomes 8,760 single-byte deltas — ~8.8 KB against ~210 KB for the JSON form. A vector
+with genuine microsecond jitter degrades to ~4–5 bytes per timestamp, still well under JSON.
+Precision is nanoseconds over chrono's full range; the base timestamp is stored as its own
+<code>(seconds, nanoseconds)</code> pair and later ones are reconstructed by accumulating deltas in 128-bit
+arithmetic. The one thing not preserved is a leap second after the first position, which normalizes
+into the following second.</p>
+<p>Like <code>feature_sets</code>, there is <strong>no foreign key</strong> and <strong>no cascade</strong>: rows are shared.
+<code>Store::compact</code> sweeps unreachable vectors and reports the count as <code>timestamp_sets_reclaimed</code>.</p>
 <h3 id="supplemental_attribute_associations"><a class="header" href="#supplemental_attribute_associations"><code>supplemental_attribute_associations</code></a></h3>
 <p>Which supplemental attributes are attached to which components. Columns match infrasys' table of the
 same name, whose logic this replaces. See
@@ -3507,12 +3627,13 @@ SELECT id, owner_id, owner_type,
                              WHEN 5 THEN 'Scenarios'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name, initial_timestamp, resolution, length, horizon, interval, count,
-       units, dtype, element_shape, ext,
-       lower(hex(data_hash))     AS data_hash,
-       lower(hex(features_hash)) AS features_hash
+       units, element_type, element_shape, ext,
+       lower(hex(data_hash))       AS data_hash,
+       lower(hex(features_hash))   AS features_hash,
+       lower(hex(timestamps_hash)) AS timestamps_hash
 FROM time_series_associations;
 </code></pre>
-<p>This view decodes both discriminants and both content hashes, so it is the convenient thing to query
+<p>This view decodes both discriminants and every content hash, so it is the convenient thing to query
 by hand. Nothing in the library reads it.</p>
 <p>A projection of the association table with both hashes hex-encoded, for humans opening the catalog
 in <code>sqlite3</code> — see <a href="reference/file-format.html#reading-the-catalog-by-hand">Reading the catalog by hand</a>. Nothing in the
@@ -3574,7 +3695,7 @@ h5dump -A -n system.h5                   # root attributes and the object list
 sqlite3 system.h5.sqlite '.schema'
 # Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
-  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_readable;'
+  'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
 # Both association tables are absent in stores written before they existed.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
@@ -3597,6 +3718,94 @@ the relevant <code>sts_…_h</code> dataset; that row index is the column index 
 that a packed pool which fills up spills into <code>{name}__1</code>, <code>{name}__2</code>, so the dataset holding a
 given array is not derivable from its metadata — scan the <code>_h</code> datasets, or let <code>infrastore info</code> /
 <code>infrastore arrays</code> report the resolved <code>dataset</code> and <code>column</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="element-types"><a class="header" href="#element-types">Element Types</a></h1>
+<p>Every stored array carries an <strong><code>element_type</code></strong>: what its elements mean, and — for the composite
+kinds — how one timestep's values are laid out across the array's trailing dimensions.</p>
+<p>It is a first-class, store-owned concept, not a binding convention. A Julia <code>PiecewiseLinearData</code>, a
+Python list of <code>{"x": …, "y": …}</code> dicts, and a TypeScript <code>{x, y}[]</code> are all <code>piecewise_linear</code>
+here, so a consumer written in any of those languages can decode an array without knowing which
+language wrote it.</p>
+<p><code>element_type</code> <strong>replaces</strong> a separate physical <code>dtype</code> column: the dtype of the stored bytes is
+derived from it. <code>TypedArray</code> still carries a <code>dtype</code>, because it describes bytes; the element type
+lives on the association metadata and on the write API, where interpretation belongs.</p>
+<h2 id="canonical-string-form"><a class="header" href="#canonical-string-form">Canonical string form</a></h2>
+<p>The element type travels as a string: the <code>element_type</code> column in the SQLite catalog, a UTF-8
+string across the C ABI, and a <code>string</code> field over gRPC. A parameterized grammar does not fit an
+integer code, so unlike <code>dtype</code> there is no numeric encoding.</p>
+<pre><code class="language-text">f64 | f32 | i64 | i32 | i16 | i8 | u64 | u32 | u16 | u8 | bool
+tuple(N,dtype)          e.g. tuple(3,f64)
+linear_function
+quadratic_function
+piecewise_linear
+piecewise_step
+</code></pre>
+<p>The names are deliberately language-neutral: <code>piecewise_linear</code>, not <code>PiecewiseLinearData</code>;
+<code>tuple(3,f64)</code>, not <code>NTuple{3, Float64}</code>. Each binding maps them to its own domain types.</p>
+<h2 id="encoding"><a class="header" href="#encoding">Encoding</a></h2>
+<p>The first array dimension is time (the per-window horizon for forecasts). The trailing dimensions
+are the per-step element shape, determined by the element type:</p>
+<div class="table-wrapper"><table><thead><tr><th><code>element_type</code></th><th>element shape</th><th>row layout (one timestep)</th></tr></thead><tbody>
+<tr><td>a dtype spelling</td><td><code>[]</code></td><td>the value</td></tr>
+<tr><td><code>tuple(N,T)</code></td><td><code>[N]</code></td><td><code>t1 … tN</code></td></tr>
+<tr><td><code>linear_function</code></td><td><code>[2]</code></td><td><code>proportional, constant</code></td></tr>
+<tr><td><code>quadratic_function</code></td><td><code>[3]</code></td><td><code>quadratic, proportional, constant</code></td></tr>
+<tr><td><code>piecewise_linear</code></td><td><code>[1 + 2*w]</code></td><td><code>n, x1, y1, …, xn, yn</code>, zero-padded to width</td></tr>
+<tr><td><code>piecewise_step</code></td><td><code>[max(1, 2*w)]</code></td><td><code>n, x1 … xn, y1 … y(n-1)</code>, zero-padded to width</td></tr>
+</tbody></table>
+</div>
+<p><code>w</code> is the maximum point / x-coordinate count across the series (or across every window of a
+forecast). Ragged rows are self-describing through the leading count <code>n</code>, so decoding one row needs
+no global state.</p>
+<p>A scalar element type still allows a dense per-step array — a <code>Probabilistic</code> forecast's percentile
+columns, say. The dense-array case and the <code>tuple(N,T)</code> case differ in meaning, not bytes: the tuple
+says the <code>N</code> values are one composite value, not <code>N</code> independent samples.</p>
+<p>Forecasts stack windows in front of the per-step element shape: <code>[H, count, *E]</code> for a
+<code>Deterministic</code>, <code>[P, H, count, *E]</code> for a <code>Probabilistic</code> or <code>Scenarios</code>. The per-row scheme is
+unchanged; only how many leading axes precede it differs (<code>TimeSeriesType::leading_dims</code>).</p>
+<p>Every function-data kind is stored as <code>f64</code>.</p>
+<h2 id="validation"><a class="header" href="#validation">Validation</a></h2>
+<p>Because the store owns the element type, it can reject a write that contradicts it rather than
+storing the inconsistency blindly:</p>
+<ul>
+<li>the array's dtype must equal the element type's physical dtype;</li>
+<li>fixed-width kinds must have exactly their per-step dims (<code>[2]</code>, <code>[3]</code>, <code>[N]</code>);</li>
+<li>ragged kinds must have exactly one trailing dim, of a width their layout can produce (odd for
+<code>piecewise_linear</code>; 1 or even for <code>piecewise_step</code>);</li>
+<li>every ragged row's leading count <code>n</code> must be a non-negative whole number that fits the row.</li>
+</ul>
+<p>Scalars are unconstrained in their trailing dims, since a dense per-step array is legitimate.</p>
+<p>Every series carries a concrete element type — a constructor resolves it to plain scalars of the
+array's dtype, and declaring one replaces it — so the checks above run on every write, not only on
+writes that declared something. There is no "undeclared" state to fall back from.</p>
+<h2 id="the-catalog-is-the-source-of-truth"><a class="header" href="#the-catalog-is-the-source-of-truth">The catalog is the source of truth</a></h2>
+<p>Nothing about element typing is recoverable from the HDF5 file. Storage records how many bytes an
+element occupies; <code>element_type</code> records what it means, and even the physical dtype is not fully
+recoverable (<code>bool</code> and <code>u8</code> are the same byte). Every read therefore resolves the element type from
+the catalog first and tells the storage backend what to decode — the backend never infers it.</p>
+<p><code>infrastore verify</code> follows from this: it walks the arrays the <em>catalog</em> references, so a catalog
+row pointing at an array the file does not hold, or a row too malformed to name one, is reported. An
+array in the file that no association references is not checked — it is unreachable, and nothing
+records what its bytes mean.</p>
+<h2 id="codecs"><a class="header" href="#codecs">Codecs</a></h2>
+<p>Each binding ships a reference codec between the stored bytes and per-timestep values:</p>
+<ul>
+<li><strong>Rust</strong> — <code>infrastore_core::{decode, encode}</code> over <code>TypedArray</code> + <code>ElementType</code>, used by the CLI
+for human-readable dumps.</li>
+<li><strong>Python</strong> — <code>infrastore.decode_element_values(array, element_type, leading_dims)</code>.</li>
+<li><strong>TypeScript</strong> — <code>@infrastore/codec</code>, which decodes a gRPC response's <code>value_bytes</code> + <code>shape</code> +
+<code>element_type</code> directly into plottable values.</li>
+<li><strong>Julia</strong> — InfrastructureSystems.jl decodes straight to its own <code>FunctionData</code> types.</li>
+</ul>
+<p><code>conformance/element_type_vectors.json</code> at the repo root pins encoded bytes against expected decoded
+values for every element type, static and forecast. It is generated from <code>infrastore-core</code>'s
+<code>codec::conformance</code> vectors and read by every binding's codec tests, so all four implementations
+are held to one definition of the encodings rather than to each other. Regenerate it with:</p>
+<pre><code class="language-bash">UPDATE_CONFORMANCE_VECTORS=1 cargo test -p infrastore-core conformance
+</code></pre>
+<p>A binding may reject what it cannot represent — the grammar allows <code>tuple(4,i32)</code>, which the Julia
+binding does not map — but the store accepts the full grammar.</p>
+<p>Because consumers go through the codecs, a future storage optimization (a true ragged layout with an
+offsets array instead of zero padding) can land behind this boundary without touching them.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="rust-api"><a class="header" href="#rust-api">Rust API</a></h1>
 <p>The public surface of <code>infrastore-core</code>. Import paths below are relative to the crate root.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
@@ -4023,16 +4232,15 @@ timestamp-oriented access pattern — <em>walk the timeline and read every serie
 resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
 nothing. The reader is a passive plan: it does not borrow the <code>Store</code>, so reads go through
 <code>Store::static_read</code> / <code>Store::forecast_read</code>, which fill the buffers; the caller then walks the
-groups/entries. There are two: <a href="reference/rust-api.html#staticreader-and-staticgroup"><code>StaticReader</code></a> for
-<code>SingleTimeSeries</code> and <a href="reference/rust-api.html#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code></a> for
-forecasts.</p>
+groups/entries. There are two: <a href="reference/rust-api.html#staticreader-and-staticgroup"><code>StaticReader</code></a> for the static types
+and <a href="reference/rust-api.html#forecastreader-windowslot-and-forecastentry"><code>ForecastReader</code></a> for forecasts.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>// Static: value of every SingleTimeSeries at one timestamp, columnar.
 let mut reader = store.build_static_reader(ListFilter::new().resolution(res))?;
-for k in 0..reader.length() {
-    // Grid point k: initial + k·resolution (calendar-aware, hence `Period::add_to`).
-    let at = reader.resolution().add_to(reader.initial_timestamp(), k as i64).unwrap();
+// `timestamps()` walks the timeline whichever kind it is, so the loop below is
+// identical for an irregular reader.
+for at in reader.timestamps().collect::&lt;Vec&lt;_&gt;&gt;() {
     store.static_read(&amp;mut reader, at)?;
     for group in reader.groups() {
         let bytes = group.values();        // [num_columns, *element_shape], row-major LE
@@ -4056,8 +4264,19 @@ for k in 0..reader.count() {
     }
 }
 <span class="boring">}</span></code></pre></pre>
-<p><code>build_static_reader</code> requires the filter to pin a resolution and that all matched series share one
-grid (<code>initial_timestamp</code> + <code>length</code>) — validated at build, so there is no presence mask.
+<p><code>build_static_reader</code> covers both static types, and which one the filter names decides what must
+hold. For <code>SingleTimeSeries</code> (the default) the filter must pin a resolution and all matched series
+must share one grid (<code>initial_timestamp</code> + <code>length</code>). For <code>NonSequentialTimeSeries</code> it must pin <em>no</em>
+resolution — an irregular series has none — and all matched series must instead lie on one timestamp
+vector, the same cohort that pools their arrays on disk:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut reader = store.build_static_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::NonSequentialTimeSeries),
+)?;
+assert!(reader.resolution().is_none());     // no constant step to report
+<span class="boring">}</span></code></pre></pre>
+<p>Either way the uniformity is validated at build, so there is no presence mask.
 <code>build_forecast_reader</code> requires a forecast type and a resolution; a <code>Deterministic</code> reader is
 abstract (also matches <code>DeterministicSingleTimeSeries</code>), and all matched forecasts must share one
 window timeline (<code>initial_timestamp</code> + <code>interval</code> + <code>count</code>). <code>static_read</code> / <code>forecast_read</code> error
@@ -4252,6 +4471,9 @@ forecast type, <code>None</code> for the static types); <code>resolution</code> 
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
+    pub element_type: ElementType,   // never optional; see below
+    pub units: Option&lt;String&gt;,
+    pub ext: Option&lt;String&gt;,
 }
 
 impl SingleTimeSeries {
@@ -4259,9 +4481,20 @@ impl SingleTimeSeries {
         initial_timestamp: DateTime&lt;Utc&gt;, resolution: impl Into&lt;Period&gt;, data: TypedArray,
         name: impl Into&lt;String&gt;,
     ) -&gt; Self;
+    pub fn with_element_type(self, element_type: ElementType) -&gt; Self;
+    pub fn with_units(self, units: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_ext(self, ext: impl Into&lt;String&gt;) -&gt; Self;
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>length</code> is derived from the array's first axis (<code>data.length()</code>) by <code>new</code>.</p>
+<p>The three descriptors travel on the series rather than on the write request, so a read returns what
+a write declared. <code>element_type</code> is <strong>not</strong> an <code>Option</code>: <code>new</code> resolves it to <code>Scalar(data.dtype)</code> —
+what an ordinary numeric series is — and <code>with_element_type</code> replaces it. There is deliberately no
+"undeclared" spelling, because it would be a second way to say <code>Scalar(dtype)</code> and a series written
+that way would not compare equal to the same series read back. The consequence to know: replacing
+<code>data</code> on an already-built series without updating <code>element_type</code> is a mismatch the store rejects on
+write (<code>InvalidParameter</code>) rather than silently re-deriving one — build the series again instead.
+The other four series types follow the same pattern.</p>
 <h3 id="typedarray-and-dtype"><a class="header" href="#typedarray-and-dtype"><code>TypedArray</code> and <code>Dtype</code></a></h3>
 <p>The storage array type: an element <code>dtype</code>, an N-dimensional <code>shape</code> <code>[length, k1, k2, …]</code> (first
 axis time, trailing axes the per-step element shape), and raw row-major, little-endian bytes.</p>
@@ -4416,16 +4649,19 @@ impl Scenarios {
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="staticreader-and-staticgroup"><a class="header" href="#staticreader-and-staticgroup"><code>StaticReader</code> and <code>StaticGroup</code></a></h3>
-<p>The columnar <code>SingleTimeSeries</code> reader (see <a href="reference/rust-api.html#readers">Readers</a>). <code>Period</code> is the crate's resolution
+<p>The columnar static-series reader (see <a href="reference/rust-api.html#readers">Readers</a>). <code>Period</code> is the crate's resolution
 type. <code>values()</code> is empty until the first <code>Store::static_read</code>.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>impl StaticReader {
+    pub fn time_series_type(&amp;self) -&gt; TimeSeriesType;  // which static type, hence which timeline
     pub fn initial_timestamp(&amp;self) -&gt; DateTime&lt;Utc&gt;;
-    pub fn resolution(&amp;self) -&gt; Period;
-    pub fn length(&amp;self) -&gt; usize;            // grid points; valid timestamps initial + k·resolution
+    pub fn resolution(&amp;self) -&gt; Option&lt;Period&gt;;        // None for NonSequentialTimeSeries
+    pub fn length(&amp;self) -&gt; usize;                     // timeline points
     pub fn groups(&amp;self) -&gt; &amp;[StaticGroup];
     pub fn index_at(&amp;self, at: DateTime&lt;Utc&gt;) -&gt; Result&lt;usize&gt;;
+    pub fn timestamp_at(&amp;self, index: usize) -&gt; Result&lt;DateTime&lt;Utc&gt;&gt;;
+    pub fn timestamps(&amp;self) -&gt; impl Iterator&lt;Item = DateTime&lt;Utc&gt;&gt; + '_;
 }
 
 impl StaticGroup {
@@ -4857,9 +5093,12 @@ pub fn hash_hex(hash: &amp;[u8; 32]) -&gt; String;
 </code></pre>
 <p><code>infrastore.__version__</code> reports the wheel version.</p>
 <blockquote>
-<p><strong>Array dtypes.</strong> The binding accepts and returns NumPy arrays of <code>float64</code>, <code>float32</code>, <code>int64</code>,
-<code>int32</code>, <code>uint64</code>, or <code>bool</code>; whatever dtype is given round-trips unchanged. Multi-dimensional
-arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
+<p><strong>Array dtypes.</strong> The binding accepts and returns NumPy arrays of <code>float64</code>, <code>float32</code>, the signed
+and unsigned integer widths (<code>int64</code>/<code>int32</code>/<code>int16</code>/<code>int8</code>/<code>uint64</code>/<code>uint32</code>/<code>uint16</code>/<code>uint8</code>),
+or <code>bool</code>; whatever dtype is given round-trips unchanged. What those elements <em>mean</em> is the
+association's <code>element_type</code> (see <a href="reference/./element-types.html">Element types</a>), declared with the
+<code>element_type=</code> keyword on <code>add_time_series</code> and decoded with <code>decode_element_values</code>.
+Multi-dimensional arrays (a per-step element shape) are supported via the NumPy array's shape.</p>
 </blockquote>
 <h2 id="store-1"><a class="header" href="#store-1"><code>Store</code></a></h2>
 <h3 id="constructors-1"><a class="header" href="#constructors-1">Constructors</a></h3>
@@ -5066,8 +5305,7 @@ SQLite catalog, so <code>ok</code> is not a statement about the store as a whole
 <code>timedelta</code> or an ISO 8601 duration string for <code>resolution</code>; the getter always returns the ISO
 string. <code>name</code> is a required association attribute (the same array may be stored under different
 names). It is read off the object by <code>add_time_series</code> and populated on <code>get_time_series</code>. The
-array's dtype (one of <code>float64</code>, <code>float32</code>, <code>int64</code>, <code>int32</code>, <code>uint64</code>, <code>bool</code>) and per-step element
-shape are preserved through a round-trip.</p>
+array's <code>element_type</code> and per-step element shape are preserved through a round-trip.</p>
 <h2 id="nonsequentialtimeseries-2"><a class="header" href="#nonsequentialtimeseries-2"><code>NonSequentialTimeSeries</code></a></h2>
 <pre><code class="language-python">NonSequentialTimeSeries(
     timestamps: list[datetime],
@@ -5184,15 +5422,16 @@ forecast.name              -&gt; str
 <h2 id="readers-1"><a class="header" href="#readers-1">Readers</a></h2>
 <p><code>get_time_series</code> returns one whole series or forecast. For the simulation access pattern — <em>walk
 every timestamp and, at each, read the value of every matching series</em> — use a <strong>reader</strong> instead. A
-reader is built once over a filter, pins one resolution, and reuses its output buffers so a tight
-loop allocates almost nothing. There are two: <code>StaticReader</code> for <code>SingleTimeSeries</code>, and
-<code>ForecastReader</code> for forecasts. Both share the lifecycle: build → inspect the layout once →
-<code>*_read(when)</code> in a loop → pull values per group/entry.</p>
+reader is built once over a filter, pins one timeline, and reuses its output buffers so a tight loop
+allocates almost nothing. There are two: <code>StaticReader</code> for the static types, and <code>ForecastReader</code>
+for forecasts. Both share the lifecycle: build → inspect the layout once → <code>*_read(when)</code> in a loop
+→ pull values per group/entry.</p>
 <p>The builders and drivers live on <code>Store</code>:</p>
 <pre><code class="language-python">def build_static_reader(
     self,
-    resolution: timedelta | str,
+    resolution: timedelta | str | None = None,
     *,
+    time_series_type: TimeSeriesType | None = None,   # default: SingleTimeSeries
     owner_id: int | None = None,
     owner_category: OwnerCategory | None = None,
     owner_type: str | None = None,
@@ -5216,24 +5455,31 @@ def build_forecast_reader(
 ) -&gt; ForecastReader: ...
 def forecast_read(self, reader: ForecastReader, when: datetime) -&gt; None: ...
 </code></pre>
-<p><code>resolution</code> is required on both builders (one resolution per reader). <code>static_read</code> /
-<code>forecast_read</code> fill the reader's buffers in place and return <code>None</code>; passing a <code>when</code> that is off
-the reader's grid or timeline raises <code>InvalidParameterError</code>.</p>
+<p><code>resolution</code> is required on <code>build_forecast_reader</code>, and on <code>build_static_reader</code> for
+<code>SingleTimeSeries</code> (one resolution per reader). It must be <strong>omitted</strong> for
+<code>time_series_type=TimeSeriesType.NonSequentialTimeSeries</code>: an irregular series has no resolution, so
+its timeline is the timestamp vector its cohort shares instead. <code>static_read</code> / <code>forecast_read</code> fill
+the reader's buffers in place and return <code>None</code>; passing a <code>when</code> that is off the reader's timeline
+raises <code>InvalidParameterError</code>.</p>
 <h3 id="staticreader"><a class="header" href="#staticreader"><code>StaticReader</code></a></h3>
-<p>Reads the value of every matching <code>SingleTimeSeries</code> at one timestamp. Results are <strong>columnar</strong>:
-series are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as
-one dense <code>(num_columns, *element_shape)</code> numpy array.</p>
+<p>Reads the value of every matching static series at one timestamp. Results are <strong>columnar</strong>: series
+are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as one dense
+<code>(num_columns, *element_shape)</code> numpy array.</p>
 <pre><code class="language-python">class StaticReader:
-    def grid(self) -&gt; dict: ...     # {"initial_timestamp": rfc3339 str, "resolution": ISO str, "length": int}
-    def groups(self) -&gt; list[dict]: ...  # each: {"dtype": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
-    def timestamps(self) -&gt; list[datetime]: ...   # every timestamp on the grid, in order
+    def grid(self) -&gt; dict: ...     # {"time_series_type": str, "initial_timestamp": rfc3339 str, "resolution": ISO str | None, "length": int}
+    def groups(self) -&gt; list[dict]: ...  # each: {"dtype": str, "element_type": str, "element_shape": list[int], "keys": list[TimeSeriesKey]}
+    def timestamps(self) -&gt; list[datetime]: ...   # every timestamp on the timeline, in order
     def group_values(self, index: int) -&gt; numpy.ndarray: ...  # last read of group `index`
 </code></pre>
-<p>All matched series must share one grid (<code>initial_timestamp</code> + <code>length</code>); the build validates this
-and raises on divergence, so there is no presence mask — every column has a value at every valid
-timestamp. <code>group_values(i)</code> returns a <code>(num_columns, *element_shape)</code> array whose column <code>j</code>
-corresponds to <code>groups()[i]["keys"][j]</code>; it is empty until the first <code>static_read</code>.</p>
-<pre><code class="language-python">reader = store.build_static_reader(timedelta(hours=1))
+<p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
+<code>SingleTimeSeries</code>, one timestamp vector for <code>NonSequentialTimeSeries</code>. The build validates this and
+raises on divergence, so there is no presence mask — every column has a value at every valid
+timestamp. <code>grid()["resolution"]</code> is <code>None</code> for an irregular reader; <code>timestamps()</code> is the timeline
+either way, so a read loop written against it works unchanged for both. <code>group_values(i)</code> returns a
+<code>(num_columns, *element_shape)</code> array whose column <code>j</code> corresponds to <code>groups()[i]["keys"][j]</code>; it
+is empty until the first <code>static_read</code>.</p>
+<pre><code class="language-python"># For irregular series: build_static_reader(time_series_type=TimeSeriesType.NonSequentialTimeSeries)
+reader = store.build_static_reader(timedelta(hours=1))
 grid = reader.grid()
 groups = reader.groups()
 start = datetime.fromisoformat(grid["initial_timestamp"])
@@ -5511,7 +5757,7 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
 <code>remove_time_series!</code>, <code>rename_time_series!</code>, <code>replace_owner!</code>,
 <code>replace_parent_child_component_id!</code>, <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>,
-<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_values</code>,
+<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
 <code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
 <code>transform_single_time_series!</code>, <code>verify_integrity</code>.</p>
 <h2 id="constructors-2"><a class="header" href="#constructors-2">Constructors</a></h2>
@@ -5619,17 +5865,21 @@ end
 domain object on read; the store stores it verbatim and never interprets it. <code>add_time_series!</code>
 reads <code>name</code> off the object (it is not a call argument), so the same array can be stored under
 different names; its <code>ext=</code> keyword defaults to the object's <code>ext</code>. <code>data</code> keeps its Julia element
-type: the binding maps <code>T</code> to a stored dtype (<code>Float64</code>, <code>Float32</code>, <code>Int64</code>, <code>Int32</code>, <code>UInt64</code>,
-<code>Bool</code>) and converts to row-major bytes on the way down.</p>
+type: the binding maps <code>T</code> to a stored dtype (<code>Float64</code>, <code>Float32</code>, the signed and unsigned integer
+widths, <code>Bool</code>) and converts to row-major bytes on the way down. An <code>element_type=</code> keyword declares
+what the elements <em>mean</em> when they are not plain numbers (<code>"tuple(3,f64)"</code>, <code>"piecewise_linear"</code>, …
+— see <a href="reference/./element-types.html">Element types</a>); it defaults to the object's own <code>element_type</code>, which is
+<code>nothing</code> for plain scalars.</p>
 <h2 id="result-types"><a class="header" href="#result-types">Result Types</a></h2>
 <p>The catalog, metadata, and summary queries return <strong>structs</strong>, not <code>NamedTuple</code>s or <code>Dict</code>s. Each is
 immutable, compares and hashes by value (so results can go straight into a <code>Set</code> or <code>Dict</code>), and
 <code>show</code>s with its field names. Read a field with <code>x.field</code>; fields that do not apply to a row's time
 series type are <code>nothing</code>.</p>
 <p>Two conventions hold across every one of them: a <code>time_series_type</code> field holds the <strong>Julia type</strong>
-(<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), ready to pass to <code>get_time_series</code>, and a <code>dtype</code> field
-holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). An <code>owner_category</code> field is an
-<code>OwnerCategory</code>, never a string.</p>
+(<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), ready to pass to <code>get_time_series</code>, and a reader group's
+<code>dtype</code> field holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). Metadata instead carries the
+store's canonical <code>element_type</code> <strong>string</strong>, which names both the meaning and (through it) the
+dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, never a string.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
@@ -5644,7 +5894,7 @@ holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool<
     count             :: Union{Nothing,Int}        # forecasts
     length            :: Union{Nothing,Int}        # static series
     percentiles       :: Union{Nothing,Vector{Float64}}   # Probabilistic
-    dtype             :: Type
+    element_type      :: String              # "f64", "tuple(3,f64)", "piecewise_linear", …
     element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
     features          :: Dict{String,Any}
     units             :: Union{Nothing,String}
@@ -5669,13 +5919,15 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>SupplementalAttributeTypeCount</code></td><td><code>supplemental_attribute_counts_by_type</code></td><td><code>attribute_type</code>, <code>count</code></td></tr>
 <tr><td><code>SupplementalAttributeSummaryRow</code></td><td><code>supplemental_attribute_summary</code></td><td><code>component_type</code>, <code>attribute_type</code>, <code>count</code></td></tr>
 <tr><td><code>ForecastParameters</code></td><td><code>get_forecast_parameters</code></td><td><code>horizon</code>, <code>interval</code>, <code>count</code>, <code>resolution</code>, <code>initial_timestamp</code> (all <code>nothing</code> when nothing matches)</td></tr>
-<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>length</code></td></tr>
+<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code></td></tr>
 <tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code></td></tr>
 <tr><td><code>CompressionSettings</code></td><td><code>get_compression</code></td><td><code>compression</code> (<code>:deflate</code> / <code>:none</code>), <code>level</code>, <code>shuffle</code></td></tr>
 </tbody></table>
 </div>
-<p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's master grid) and <code>check_static_consistency</code> (one
-per resolution present) — the same concept, so the same type.</p>
+<p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
+per resolution present) — the same concept, so the same type. Its <code>resolution</code> is <code>nothing</code> only for
+a <code>NonSequentialTimeSeries</code> reader, whose timeline is an explicit list of instants rather than a
+grid; enumerate it with <code>static_timestamps</code>.</p>
 <h2 id="static-series-2"><a class="header" href="#static-series-2">Static Series</a></h2>
 <pre><code class="language-julia">add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
@@ -5759,18 +6011,18 @@ as its first argument exactly like <code>get_time_series</code>: <code>SingleTim
 <code>time_series_type</code> reports which form was found. <code>interval</code> is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a <code>SingleTimeSeries</code>, the same shorthand
 <code>has_time_series</code> and <code>remove_time_series!</code> use. Since every form returns the same struct, <code>ext</code>,
-<code>dtype</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was asked for and whichever
-way the record was reached (for a forecast, <code>element_shape</code> is the stored array's trailing dims
-after its first axis).</p>
+<code>element_type</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was asked for and
+whichever way the record was reached (for a forecast, <code>element_shape</code> is the stored array's trailing
+dims after its first axis).</p>
 <pre><code class="language-julia">get_metadata(store, 42, Component, "load"; resolution = Hour(1))
 get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
 </code></pre>
 <pre><code class="language-julia">get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -&gt; Vector{T}
 </code></pre>
 <p>Fetches the flattened array for a 32-byte content hash, decoded as element type <code>T</code>. Combine with
-<code>get_metadata</code> (for the dtype and shape) to read values without holding a <code>TimeSeriesKey</code>. Every
-<code>data_hash</code> in this API is these same 32 bytes, so any metadata record or <code>ArrayGroupRow</code> feeds it
-directly; <code>bytes2hex</code> gives the display form.</p>
+<code>get_metadata</code> (for the element type and shape) to read values without holding a <code>TimeSeriesKey</code>.
+Every <code>data_hash</code> in this API is these same 32 bytes, so any metadata record or <code>ArrayGroupRow</code>
+feeds it directly; <code>bytes2hex</code> gives the display form.</p>
 <h3 id="key-based-variants"><a class="header" href="#key-based-variants">Key-based variants</a></h3>
 <pre><code class="language-julia">has_time_series(store, key::TimeSeriesKey) -&gt; Bool
 remove_time_series!(store, key::TimeSeriesKey) -&gt; Nothing
@@ -5814,8 +6066,8 @@ the type has no materialized form.</p>
 <h2 id="forecasts-7"><a class="header" href="#forecasts-7">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> structs (see
 <a href="reference/julia-api.html#types">Types</a>) and added through the generic <code>add_time_series!</code>. Each struct wraps a native
-<code>AbstractArray</code> of any element type and dimensionality — the binding derives the stored dtype and
-dims and converts to row-major bytes, just like the static <code>add_time_series!</code> (see the
+<code>AbstractArray</code> of any supported element type and dimensionality — the binding derives the stored
+dtype and dims and converts to row-major bytes, just like the static <code>add_time_series!</code> (see the
 <a href="reference/../explanation/data-model.html#forecasts">data model</a> for the conventional shapes).</p>
 <p>The forecast <code>name</code> comes from the struct, e.g.
 <code>Deterministic(initial, resolution, horizon, interval, count, data, name)</code>.</p>
@@ -5932,30 +6184,37 @@ instant) prefer a reader — see <a href="reference/julia-api.html#readers-per-t
 <h2 id="readers-per-timestamp-iteration"><a class="header" href="#readers-per-timestamp-iteration">Readers (per-timestamp iteration)</a></h2>
 <p><code>get_time_series</code> returns a whole series or forecast struct. For the simulation access pattern —
 <em>walk every timestamp and, at each, read the value of every series</em> — use a <strong>reader</strong> instead. A
-reader is built once over a filter, pins one resolution, and reuses output buffers that each read
-overwrites in place, so a tight loop allocates almost nothing. There are two: <code>StaticReader</code> for
-<code>SingleTimeSeries</code>, and <code>ForecastReader</code> for forecasts. Both follow the same lifecycle: build →
-inspect the layout once → <code>*_read!(t)</code> in a loop → pull values per group/entry.</p>
+reader is built once over a filter, pins one timeline, and reuses output buffers that each read
+overwrites in place, so a tight loop allocates almost nothing. There are two: <code>StaticReader</code> for the
+static types, and <code>ForecastReader</code> for forecasts. Both follow the same lifecycle: build → inspect
+the layout once → <code>*_read!(t)</code> in a loop → pull values per group/entry.</p>
 <h3 id="staticreader-1"><a class="header" href="#staticreader-1">StaticReader</a></h3>
-<p>Reads the value of every matching <code>SingleTimeSeries</code> at one timestamp. Results are <strong>columnar</strong>:
-series are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as
-one dense <code>(num_columns, element_dims...)</code> array.</p>
-<pre><code class="language-julia">build_static_reader(store; resolution::Period, owner_id=nothing,
+<p>Reads the value of every matching static series at one timestamp. Results are <strong>columnar</strong>: series
+are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as one dense
+<code>(num_columns, element_dims...)</code> array.</p>
+<pre><code class="language-julia">build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
+                    time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, features=Dict()) -&gt; StaticReader
 
-static_grid(reader)   -&gt; StaticGrid  # initial_timestamp::DateTime, resolution::Period, length::Int
-static_groups(reader) -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
-static_read!(reader, t::DateTime) -&gt; reader   # fills buffers; errors if t is off the grid
+static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
+static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
+static_groups(reader)     -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_read!(reader, t::DateTime) -&gt; reader  # fills buffers; errors if t is off the timeline
 static_values(reader, group_index::Integer) -&gt; Array
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
 </code></pre>
-<p>All matched series must share one grid (<code>initial_timestamp</code> + <code>length</code>); the build validates this
-and errors on divergence, so there is no presence mask — every column has a value at every valid
+<p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
+<code>SingleTimeSeries</code>, one timestamp vector for <code>NonSequentialTimeSeries</code>. The build validates this and
+errors on divergence, so there is no presence mask — every column has a value at every valid
 timestamp.</p>
+<p><code>resolution</code> is required for <code>SingleTimeSeries</code> (one resolution per reader) and must be omitted for
+<code>time_series_type=NonSequentialTimeSeries</code>, which has none; <code>static_grid(reader).resolution</code> is then
+<code>nothing</code>. Iterating <code>static_timestamps</code> covers either kind, so one loop serves both:</p>
 <pre><code class="language-julia">reader = build_static_reader(store; resolution = Hour(1))
-grid = static_grid(reader)
-for k in 0:(grid.length - 1)
-    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+# ...or, for irregular series:
+# reader = build_static_reader(store; time_series_type = NonSequentialTimeSeries)
+for t in static_timestamps(reader)
+    static_read!(reader, t)
     for (gi, g) in enumerate(static_groups(reader))
         vals = static_values(reader, gi)   # column j ↔ g.keys[j]
     end
@@ -6064,8 +6323,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
 filter).</li>
 <li><code>features</code> — match keys whose features include all the given entries (subset match).</li>
 </ul>
-<p>Physical storage detail (<code>data_hash</code>, <code>dtype</code>, <code>ext</code>, <code>percentiles</code>) is not on a key — read it via
-<code>get_metadata</code> / <code>list_time_series</code>.</p>
+<p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>ext</code>, <code>percentiles</code>) is not on a key — read
+it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
                     name=nothing, resolution=nothing, interval=nothing, features=Dict()) -&gt; Bool
 </code></pre>
@@ -6277,17 +6536,20 @@ freed: <code>f64</code> percentile buffers (<code>double **</code>) with <code>i
 buffers (<code>uint8_t **</code>) with <code>infrastore_buffer_free_u8</code>, timestamp and shape buffers
 (<code>int64_t **</code>) with <code>infrastore_buffer_free_i64</code>, and the <code>u64</code> dims buffer from
 <code>infrastore_store_get_forecast</code> (<code>uint64_t **</code>) with <code>infrastore_buffer_free_u64</code>.</li>
-<li><strong>Typed arrays.</strong> Add functions take the element <code>dtype</code> code
-(<code>0=f64, 1=f32, 2=i64, 3=i32, 4=u64, 5=bool</code>), <code>ndims</code> plus a <code>dims_ptr</code> shape array
-(<code>[length, k1, …]</code>), and the raw little-endian <code>data_ptr</code> of <code>data_byte_len</code> bytes. Reads return
-the dtype code and a raw byte buffer for the caller to decode; <code>infrastore_store_get_single</code>
-follows the same dtype-generic convention, returning the dtype, shape, and raw element bytes.</li>
+<li><strong>Typed arrays.</strong> Add functions take an <code>element_type</code> string (a dtype spelling such as <code>"f64"</code>,
+or a composite kind such as <code>"tuple(3,f64)"</code> / <code>"piecewise_linear"</code> — see
+<a href="reference/./element-types.html">Element types</a>), <code>ndims</code> plus a <code>dims_ptr</code> shape array (<code>[length, k1, …]</code>),
+and the raw little-endian <code>data_ptr</code> of <code>data_byte_len</code> bytes. The physical dtype the bytes are
+encoded in is derived from the element type. Reads return the dtype code
+(<code>0=f64, 1=f32, 2=i64, 3=i32, 4=u64, 5=bool, 6=i16, 7=i8, 8=u32, 9=u16, 10=u8</code>) and a raw byte
+buffer for the caller to decode, plus an optional <code>out_element_type</code> string saying what those
+bytes mean; <code>infrastore_store_get_single</code> follows the same dtype-generic convention.</li>
 <li><strong><code>owner_category</code></strong> is an <code>int32_t</code> (<code>0 = Component</code>, <code>1 = SupplementalAttribute</code>) passed to the
 add functions. The owner identity is the pair <code>(owner_id, owner_category)</code> — a component and a
 supplemental attribute may share a numeric <code>owner_id</code> and stay distinct — and the category is
 recorded with the association at add time.</li>
 <li><strong><code>ext</code></strong> is an optional opaque, package-owned payload (typically JSON) passed verbatim to the add
-functions and stored uninterpreted.</li>
+functions and stored uninterpreted. Element typing does not go here — that is <code>element_type</code>.</li>
 <li><strong>Strings</strong> are null-terminated UTF-8. Optional string arguments (<code>ext</code>, <code>features_json</code>, <code>units</code>)
 accept <code>NULL</code>.</li>
 <li><strong>Features</strong> are passed as a JSON object string whose values are int / float / bool / string. An
@@ -6335,7 +6597,8 @@ void    infrastore_buffer_free_u64(uint64_t *ptr, uint64_t len);
                             int32_t owner_category,           /* 0=Component, 1=SupplementalAttribute */
                             const char *name,
                             int64_t initial_ts_unix_ms, const char *resolution,  /* ISO-8601 */
-                            int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                            const char *element_type, /* e.g. "f64", "piecewise_linear" */
+                            uint64_t ndims, const uint64_t *dims_ptr,
                             const uint8_t *data_ptr, uint64_t data_byte_len,
                             const char *ext,         /* optional */
                             const char *features_json,        /* optional */
@@ -6348,7 +6611,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             int32_t *out_dtype,
                             int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                             uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
-                            char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
+                            char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                            char **out_element_type);  /* optional (NULL skips); owned, same free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
 /* All-or-nothing batched remove: on any error (including one missing key)
@@ -6367,17 +6631,19 @@ int32_t infrastore_key_identity_hash(const struct InfraStoreKey *key, uint64_t *
 <p><code>infrastore_store_add_non_sequential</code> takes an explicit <code>int64_t</code> Unix-millisecond timestamp array
 alongside the typed data buffer. <code>infrastore_store_get_non_sequential</code> returns owned timestamp,
 shape, and raw-byte buffers (free with <code>infrastore_buffer_free_i64</code>, <code>infrastore_buffer_free_i64</code>,
-and <code>infrastore_buffer_free_u8</code>) plus the dtype code. The shape is the full
-<code>[length, *element_shape]</code> array shape (the first dim is time, so callers can recover an
-N-dimensional per-step element shape). <code>out_ext</code> is the optional opaque package-owned payload copied
-into a caller-allocated buffer of <code>ext_cap</code> bytes, with the full length reported in <code>out_ext_len</code> —
-probe with a NULL/zero-capacity buffer first, then call again with a buffer of that length (as
-<code>infrastore_store_get_single</code> documents for its shape and <code>ext</code> outputs).</p>
+and <code>infrastore_buffer_free_u8</code>) plus the dtype code and, in <code>out_element_type</code>, the canonical
+element-type string. The shape is the full <code>[length, *element_shape]</code> array shape (the first dim is
+time, so callers can recover an N-dimensional per-step element shape). <code>out_ext</code> is the optional
+opaque package-owned payload copied into a caller-allocated buffer of <code>ext_cap</code> bytes, with the full
+length reported in <code>out_ext_len</code> — probe with a NULL/zero-capacity buffer first, then call again
+with a buffer of that length (as <code>infrastore_store_get_single</code> documents for its shape and <code>ext</code>
+outputs).</p>
 <pre><code class="language-c">int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     int64_t owner_id, const char *owner_type,
                                     int32_t owner_category, const char *name,
                                     const int64_t *timestamps_unix_ms, uint64_t timestamps_len,
-                                    int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                                    const char *element_type,
+                                    uint64_t ndims, const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr, uint64_t data_byte_len,
                                     const char *ext, const char *features_json,
                                     const char *units,
@@ -6389,7 +6655,8 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                                     uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
                                     char *out_ext, uint64_t ext_cap,
-                                    uint64_t *out_ext_len);
+                                    uint64_t *out_ext_len,
+                                    char **out_element_type);  /* optional; infrastore_string_free */
 </code></pre>
 <h2 id="attribute-based-access"><a class="header" href="#attribute-based-access">Attribute-Based Access</a></h2>
 <p>Resolve a series by its attributes instead of a key handle. A <code>NULL</code>/empty <code>resolution</code> means unset.</p>
@@ -6467,7 +6734,7 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
 /* The whole metadata record for a key, as a JSON object with the shape of one
    infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
    time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
-   horizon, interval, count, length, percentiles, dtype, element_shape, features,
+   horizon, interval, count, length, percentiles, element_type, element_shape, features,
    units, ext — fields that do not apply to the key's type are null. One export
    covers every time series type, static and forecast alike. Probe-then-fetch:
    call with buf = NULL, cap = 0 to learn *out_len, then again with an
@@ -6507,7 +6774,7 @@ reader.</p>
 discriminant — <code>0 = SingleTimeSeries</code>, <code>1 = NonSequentialTimeSeries</code>, <code>2 = Deterministic</code>,
 <code>3 = DeterministicSingleTimeSeries</code>, <code>4 = Probabilistic</code>, <code>5 = Scenarios</code>. As a <em>request</em> it is read
 per <a href="reference/c-abi.html#requested-forecast-types">the matching rule</a> below. Forecast values are dtype-generic raw
-little-endian byte buffers with explicit dimensions — the same <code>dtype</code>, <code>ndims</code>, <code>dims_ptr</code>,
+little-endian byte buffers with explicit dimensions — the same <code>element_type</code>, <code>ndims</code>, <code>dims_ptr</code>,
 <code>data_ptr</code>, <code>data_byte_len</code> convention as the static add functions (see the
 <a href="reference/../explanation/data-model.html#forecasts">data model</a> for the conventional shapes); the store records
 the windowing parameters in metadata and does not interpret the layout. A
@@ -6527,7 +6794,8 @@ to <code>*out_count</code>:</p>
                               int64_t initial_ts_unix_ms,
                               const char *resolution, const char *horizon, const char *interval,  /* ISO-8601 */
                               uint64_t count,
-                              int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                              const char *element_type,
+                              uint64_t ndims, const uint64_t *dims_ptr,
                               const uint8_t *data_ptr, uint64_t data_byte_len,
                               const char *ext,          /* optional */
                               const char *features_json, const char *units,
@@ -6540,7 +6808,8 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *resolution, const char *horizon, const char *interval,  /* ISO-8601 */
                                    uint64_t count,
                                    const double *percentiles_ptr, uint64_t percentiles_len,
-                                   int32_t dtype, uint64_t ndims, const uint64_t *dims_ptr,
+                                   const char *element_type,
+                              uint64_t ndims, const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
                                    const char *ext,     /* optional */
                                    const char *features_json, const char *units,
@@ -6595,7 +6864,8 @@ ISO-8601 strings with <code>infrastore_string_free</code>.</p>
                               uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                               double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
                               int32_t *out_matched_type,  /* concrete matched TimeSeriesType */
-                              char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
+                              char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                              char **out_element_type);  /* optional (NULL skips); owned, same free */
 </code></pre>
 <p><code>infrastore_store_get_forecast_by_key</code> is the key-based counterpart: it takes a <code>InfraStoreKey</code>
 handle (the type comes from the key) instead of the
@@ -6616,7 +6886,8 @@ there is no family to resolve: <code>*out_matched_type</code> is simply the key'
                                      uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                                      double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
                                      int32_t *out_matched_type,
-                                     char **out_ext);  /* optional (NULL skips); owned, infrastore_string_free */
+                                     char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                                     char **out_element_type);  /* optional (NULL skips); owned, same free */
 </code></pre>
 <p>Forecast metadata is read with the same <code>infrastore_store_get_metadata_by_key</code> as everything else —
 build the key with <code>infrastore_make_key_from_attrs</code>, passing the forecast <code>ts_type</code> and, when a name
@@ -6668,10 +6939,11 @@ must not be freed. Group/entry shapes follow the probe-then-fetch convention —
 <code>shape_buf = NULL</code> / <code>shape_cap = 0</code> to learn <code>*out_shape_len</code>, then again with a buffer of that
 length. <code>*_read</code> errors (never clamps) if <code>at_unix_ms</code> is off the reader's grid/timeline.</p>
 <h3 id="staticreader-2"><a class="header" href="#staticreader-2">StaticReader</a></h3>
-<p>Reads every matching <code>SingleTimeSeries</code> at one timestamp, partitioned into <code>(dtype, element_shape)</code>
+<p>Reads every matching static series at one timestamp, partitioned into <code>(dtype, element_shape)</code>
 groups; each group's values are one dense <code>[num_columns, *element_shape]</code> little-endian buffer whose
 column <code>j</code> is the key from <code>infrastore_static_reader_group_key(reader, group_idx, j, …)</code>.</p>
 <pre><code class="language-c">int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
+                                     int32_t time_series_type,
                                      bool has_owner, int64_t owner_id,
                                      bool has_owner_category, int32_t owner_category,
                                      const char *name, const char *resolution,
@@ -6679,8 +6951,10 @@ column <code>j</code> is the key from <code>infrastore_static_reader_group_key(r
                                      struct InfraStoreStaticReaderHandle **out_reader);
 
 int32_t infrastore_static_reader_grid(const struct InfraStoreStaticReaderHandle *reader,
-                              int64_t *out_initial_ms, char **out_resolution,  /* free with infrastore_string_free */
+                              int64_t *out_initial_ms, char **out_resolution,  /* null, or free with infrastore_string_free */
                               uint64_t *out_length);
+int32_t infrastore_static_reader_timestamps(const struct InfraStoreStaticReaderHandle *reader,
+                              int64_t *buf, uint64_t cap, uint64_t *out_len);  /* probe with buf=NULL, cap=0 */
 int32_t infrastore_static_reader_num_groups(const struct InfraStoreStaticReaderHandle *reader, uint64_t *out_n);
 int32_t infrastore_static_reader_group_info(const struct InfraStoreStaticReaderHandle *reader, uint64_t group_idx,
                                     int32_t *out_dtype, uint64_t *out_num_columns,
@@ -6695,8 +6969,14 @@ int32_t infrastore_static_reader_group_values(const struct InfraStoreStaticReade
                                       uint64_t *out_byte_len);
 void infrastore_static_reader_free(struct InfraStoreStaticReaderHandle *reader);
 </code></pre>
-<p>All matched series must share one grid (<code>initial_timestamp</code> + <code>length</code>); the build validates this
-and errors on divergence, so every column has a value at every valid timestamp (no presence mask).</p>
+<p><code>time_series_type</code> picks the two shapes a reader can take. For <code>SingleTimeSeries</code> (<code>0</code>),
+<code>resolution</code> must be a non-empty ISO-8601 period — one resolution per reader — and all matched
+series must share one grid (<code>initial_timestamp</code> + <code>length</code>). For <code>NonSequentialTimeSeries</code> (<code>1</code>),
+<code>resolution</code> must be <strong>null</strong> (an irregular series has none) and all matched series must instead
+share one timestamp vector; <code>infrastore_static_reader_grid</code> then reports <code>*out_resolution</code> as null,
+and <code>infrastore_static_reader_timestamps</code> is how the timeline is read. Any other discriminant is
+rejected. Either way the build validates the uniformity and errors on divergence, so every column
+has a value at every valid timestamp (no presence mask).</p>
 <h3 id="forecastreader-2"><a class="header" href="#forecastreader-2">ForecastReader</a></h3>
 <p>Reads the forecast window at one timestamp for every matching forecast of one type. The build
 <code>ts_type</code> names the forecast type; a <code>Deterministic</code> reader (<code>2</code>) also includes
@@ -7175,7 +7455,8 @@ message TimeSeriesMetadata {
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
   optional string units                     = 16;
-  int32           dtype                     = 17;  // Dtype code
+  string          element_type              = 21;  // canonical element-type string
+  // (17 is reserved: the former int32 dtype code)
   repeated uint64 element_shape             = 18;  // per-step trailing dims
   optional string ext                       = 19;  // opaque package-owned payload
   repeated double percentiles               = 20;  // Probabilistic only
@@ -7207,7 +7488,8 @@ message GetResp {
   reserved 5;                                      // was: repeated double values
   TimeSeriesType  time_series_type          = 6;
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
-  int32           dtype                     = 8;   // Dtype code
+  string          element_type              = 16;  // canonical element-type string
+  // (8 is reserved: the former int32 dtype code)
   bytes           value_bytes               = 9;   // raw little-endian, row-major
   string          ext              = 10;
   // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
@@ -7261,11 +7543,12 @@ through the <a href="reference/./rust-api.html#forecasts">Rust core</a> or <a hr
 and (for <code>Probabilistic</code>) <code>percentiles</code> — and <code>GetCounts</code> includes them in <code>forecasts</code>.</p>
 <p><code>GetTimeSeries</code> returns forecast values too. For a <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>
 (synthesized into <code>Deterministic</code>), <code>Probabilistic</code>, or <code>Scenarios</code> key it fills the <code>GetResp</code> array
-fields (<code>value_bytes</code> + <code>dtype</code>), the window parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), and the
-<code>percentiles</code> (<code>Probabilistic</code>) or <code>scenario_count</code> (<code>Scenarios</code>); the client reconstructs the
+fields (<code>value_bytes</code> + <code>element_type</code>), the window parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), and
+the <code>percentiles</code> (<code>Probabilistic</code>) or <code>scenario_count</code> (<code>Scenarios</code>); the client reconstructs the
 matching type. Arrays are dtype-generic on the wire — <code>value_bytes</code> is the raw little-endian buffer
-and <code>dtype</code> names the element type (<code>f64</code>/<code>f32</code>/<code>i64</code>/<code>i32</code>/<code>u64</code>/<code>bool</code>), so non-<code>f64</code> arrays
-survive the round trip without coercion. One caveat:</p>
+and <code>element_type</code> says both what the elements mean and, through it, their physical dtype
+(<code>f64</code>/<code>f32</code>/<code>i64</code>/…, or a composite kind like <code>piecewise_linear</code>), so non-<code>f64</code> arrays survive the
+round trip without coercion. One caveat:</p>
 <ul>
 <li><strong><code>ext</code> is not carried in <code>GetResp</code>.</strong> The opaque package-owned payload is returned by
 <code>ListTimeSeries</code> (on <code>TimeSeriesMetadata</code>) but left empty by <code>GetTimeSeries</code>, so a value fetched
@@ -7577,7 +7860,7 @@ The CSV holds only numbers (plus a leading timestamp column for <code>non_sequen
 <tr><td><code>owner_category</code></td><td>optional</td><td><code>component</code> (default) or <code>supplemental_attribute</code>.</td></tr>
 <tr><td><code>name</code></td><td>all</td><td></td></tr>
 <tr><td><code>type</code></td><td>all</td><td>One of the five writable types.</td></tr>
-<tr><td><code>dtype</code></td><td>all</td><td><code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>, <code>bool</code>.</td></tr>
+<tr><td><code>element_type</code></td><td>all</td><td><code>f64</code>/<code>f32</code>/<code>i64</code>/…, <code>tuple(N,f64)</code>, or a function-data kind.</td></tr>
 <tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
 <tr><td><code>has_header</code></td><td>optional</td><td>Skip the first CSV row. Default <code>true</code>.</td></tr>
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>

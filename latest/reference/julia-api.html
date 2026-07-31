@@ -219,7 +219,7 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
 <code>remove_time_series!</code>, <code>rename_time_series!</code>, <code>replace_owner!</code>,
 <code>replace_parent_child_component_id!</code>, <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>,
-<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_values</code>,
+<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
 <code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
 <code>transform_single_time_series!</code>, <code>verify_integrity</code>.</p>
 <h2 id="constructors"><a class="header" href="#constructors">Constructors</a></h2>
@@ -327,17 +327,21 @@ end
 domain object on read; the store stores it verbatim and never interprets it. <code>add_time_series!</code>
 reads <code>name</code> off the object (it is not a call argument), so the same array can be stored under
 different names; its <code>ext=</code> keyword defaults to the object's <code>ext</code>. <code>data</code> keeps its Julia element
-type: the binding maps <code>T</code> to a stored dtype (<code>Float64</code>, <code>Float32</code>, <code>Int64</code>, <code>Int32</code>, <code>UInt64</code>,
-<code>Bool</code>) and converts to row-major bytes on the way down.</p>
+type: the binding maps <code>T</code> to a stored dtype (<code>Float64</code>, <code>Float32</code>, the signed and unsigned integer
+widths, <code>Bool</code>) and converts to row-major bytes on the way down. An <code>element_type=</code> keyword declares
+what the elements <em>mean</em> when they are not plain numbers (<code>"tuple(3,f64)"</code>, <code>"piecewise_linear"</code>, …
+— see <a href="./element-types.html">Element types</a>); it defaults to the object's own <code>element_type</code>, which is
+<code>nothing</code> for plain scalars.</p>
 <h2 id="result-types"><a class="header" href="#result-types">Result Types</a></h2>
 <p>The catalog, metadata, and summary queries return <strong>structs</strong>, not <code>NamedTuple</code>s or <code>Dict</code>s. Each is
 immutable, compares and hashes by value (so results can go straight into a <code>Set</code> or <code>Dict</code>), and
 <code>show</code>s with its field names. Read a field with <code>x.field</code>; fields that do not apply to a row's time
 series type are <code>nothing</code>.</p>
 <p>Two conventions hold across every one of them: a <code>time_series_type</code> field holds the <strong>Julia type</strong>
-(<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), ready to pass to <code>get_time_series</code>, and a <code>dtype</code> field
-holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). An <code>owner_category</code> field is an
-<code>OwnerCategory</code>, never a string.</p>
+(<code>SingleTimeSeries</code>, <code>Deterministic</code>, …), ready to pass to <code>get_time_series</code>, and a reader group's
+<code>dtype</code> field holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool</code>, …). Metadata instead carries the
+store's canonical <code>element_type</code> <strong>string</strong>, which names both the meaning and (through it) the
+dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, never a string.</p>
 <pre><code class="language-julia">struct TimeSeriesMetadata                    # get_metadata / list_time_series
     owner_id          :: Int64
     owner_type        :: String
@@ -352,7 +356,7 @@ holds the <strong>Julia element type</strong> (<code>Float64</code>, <code>Bool<
     count             :: Union{Nothing,Int}        # forecasts
     length            :: Union{Nothing,Int}        # static series
     percentiles       :: Union{Nothing,Vector{Float64}}   # Probabilistic
-    dtype             :: Type
+    element_type      :: String              # "f64", "tuple(3,f64)", "piecewise_linear", …
     element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
     features          :: Dict{String,Any}
     units             :: Union{Nothing,String}
@@ -377,13 +381,15 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>SupplementalAttributeTypeCount</code></td><td><code>supplemental_attribute_counts_by_type</code></td><td><code>attribute_type</code>, <code>count</code></td></tr>
 <tr><td><code>SupplementalAttributeSummaryRow</code></td><td><code>supplemental_attribute_summary</code></td><td><code>component_type</code>, <code>attribute_type</code>, <code>count</code></td></tr>
 <tr><td><code>ForecastParameters</code></td><td><code>get_forecast_parameters</code></td><td><code>horizon</code>, <code>interval</code>, <code>count</code>, <code>resolution</code>, <code>initial_timestamp</code> (all <code>nothing</code> when nothing matches)</td></tr>
-<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>length</code></td></tr>
+<tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code></td></tr>
 <tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code></td></tr>
 <tr><td><code>CompressionSettings</code></td><td><code>get_compression</code></td><td><code>compression</code> (<code>:deflate</code> / <code>:none</code>), <code>level</code>, <code>shuffle</code></td></tr>
 </tbody></table>
 </div>
-<p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's master grid) and <code>check_static_consistency</code> (one
-per resolution present) — the same concept, so the same type.</p>
+<p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
+per resolution present) — the same concept, so the same type. Its <code>resolution</code> is <code>nothing</code> only for
+a <code>NonSequentialTimeSeries</code> reader, whose timeline is an explicit list of instants rather than a
+grid; enumerate it with <code>static_timestamps</code>.</p>
 <h2 id="static-series"><a class="header" href="#static-series">Static Series</a></h2>
 <pre><code class="language-julia">add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
@@ -467,18 +473,18 @@ as its first argument exactly like <code>get_time_series</code>: <code>SingleTim
 <code>time_series_type</code> reports which form was found. <code>interval</code> is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a <code>SingleTimeSeries</code>, the same shorthand
 <code>has_time_series</code> and <code>remove_time_series!</code> use. Since every form returns the same struct, <code>ext</code>,
-<code>dtype</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was asked for and whichever
-way the record was reached (for a forecast, <code>element_shape</code> is the stored array's trailing dims
-after its first axis).</p>
+<code>element_type</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was asked for and
+whichever way the record was reached (for a forecast, <code>element_shape</code> is the stored array's trailing
+dims after its first axis).</p>
 <pre><code class="language-julia">get_metadata(store, 42, Component, "load"; resolution = Hour(1))
 get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
 </code></pre>
 <pre><code class="language-julia">get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -&gt; Vector{T}
 </code></pre>
 <p>Fetches the flattened array for a 32-byte content hash, decoded as element type <code>T</code>. Combine with
-<code>get_metadata</code> (for the dtype and shape) to read values without holding a <code>TimeSeriesKey</code>. Every
-<code>data_hash</code> in this API is these same 32 bytes, so any metadata record or <code>ArrayGroupRow</code> feeds it
-directly; <code>bytes2hex</code> gives the display form.</p>
+<code>get_metadata</code> (for the element type and shape) to read values without holding a <code>TimeSeriesKey</code>.
+Every <code>data_hash</code> in this API is these same 32 bytes, so any metadata record or <code>ArrayGroupRow</code>
+feeds it directly; <code>bytes2hex</code> gives the display form.</p>
 <h3 id="key-based-variants"><a class="header" href="#key-based-variants">Key-based variants</a></h3>
 <pre><code class="language-julia">has_time_series(store, key::TimeSeriesKey) -&gt; Bool
 remove_time_series!(store, key::TimeSeriesKey) -&gt; Nothing
@@ -522,8 +528,8 @@ the type has no materialized form.</p>
 <h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
 <p>Dense forecasts are constructed as <code>Deterministic</code>, <code>Probabilistic</code>, or <code>Scenarios</code> structs (see
 <a href="#types">Types</a>) and added through the generic <code>add_time_series!</code>. Each struct wraps a native
-<code>AbstractArray</code> of any element type and dimensionality — the binding derives the stored dtype and
-dims and converts to row-major bytes, just like the static <code>add_time_series!</code> (see the
+<code>AbstractArray</code> of any supported element type and dimensionality — the binding derives the stored
+dtype and dims and converts to row-major bytes, just like the static <code>add_time_series!</code> (see the
 <a href="../explanation/data-model.html#forecasts">data model</a> for the conventional shapes).</p>
 <p>The forecast <code>name</code> comes from the struct, e.g.
 <code>Deterministic(initial, resolution, horizon, interval, count, data, name)</code>.</p>
@@ -640,30 +646,37 @@ instant) prefer a reader — see <a href="#readers-per-timestamp-iteration">Read
 <h2 id="readers-per-timestamp-iteration"><a class="header" href="#readers-per-timestamp-iteration">Readers (per-timestamp iteration)</a></h2>
 <p><code>get_time_series</code> returns a whole series or forecast struct. For the simulation access pattern —
 <em>walk every timestamp and, at each, read the value of every series</em> — use a <strong>reader</strong> instead. A
-reader is built once over a filter, pins one resolution, and reuses output buffers that each read
-overwrites in place, so a tight loop allocates almost nothing. There are two: <code>StaticReader</code> for
-<code>SingleTimeSeries</code>, and <code>ForecastReader</code> for forecasts. Both follow the same lifecycle: build →
-inspect the layout once → <code>*_read!(t)</code> in a loop → pull values per group/entry.</p>
+reader is built once over a filter, pins one timeline, and reuses output buffers that each read
+overwrites in place, so a tight loop allocates almost nothing. There are two: <code>StaticReader</code> for the
+static types, and <code>ForecastReader</code> for forecasts. Both follow the same lifecycle: build → inspect
+the layout once → <code>*_read!(t)</code> in a loop → pull values per group/entry.</p>
 <h3 id="staticreader"><a class="header" href="#staticreader">StaticReader</a></h3>
-<p>Reads the value of every matching <code>SingleTimeSeries</code> at one timestamp. Results are <strong>columnar</strong>:
-series are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as
-one dense <code>(num_columns, element_dims...)</code> array.</p>
-<pre><code class="language-julia">build_static_reader(store; resolution::Period, owner_id=nothing,
+<p>Reads the value of every matching static series at one timestamp. Results are <strong>columnar</strong>: series
+are partitioned into <code>(dtype, element_shape)</code> groups, and each group's values come back as one dense
+<code>(num_columns, element_dims...)</code> array.</p>
+<pre><code class="language-julia">build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
+                    time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, features=Dict()) -&gt; StaticReader
 
-static_grid(reader)   -&gt; StaticGrid  # initial_timestamp::DateTime, resolution::Period, length::Int
-static_groups(reader) -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
-static_read!(reader, t::DateTime) -&gt; reader   # fills buffers; errors if t is off the grid
+static_grid(reader)       -&gt; StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
+static_timestamps(reader) -&gt; Vector{DateTime}  # every instant on the timeline, in order
+static_groups(reader)     -&gt; Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_read!(reader, t::DateTime) -&gt; reader  # fills buffers; errors if t is off the timeline
 static_values(reader, group_index::Integer) -&gt; Array
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
 </code></pre>
-<p>All matched series must share one grid (<code>initial_timestamp</code> + <code>length</code>); the build validates this
-and errors on divergence, so there is no presence mask — every column has a value at every valid
+<p>All matched series must share one timeline — one grid (<code>initial_timestamp</code> + <code>length</code>) for
+<code>SingleTimeSeries</code>, one timestamp vector for <code>NonSequentialTimeSeries</code>. The build validates this and
+errors on divergence, so there is no presence mask — every column has a value at every valid
 timestamp.</p>
+<p><code>resolution</code> is required for <code>SingleTimeSeries</code> (one resolution per reader) and must be omitted for
+<code>time_series_type=NonSequentialTimeSeries</code>, which has none; <code>static_grid(reader).resolution</code> is then
+<code>nothing</code>. Iterating <code>static_timestamps</code> covers either kind, so one loop serves both:</p>
 <pre><code class="language-julia">reader = build_static_reader(store; resolution = Hour(1))
-grid = static_grid(reader)
-for k in 0:(grid.length - 1)
-    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+# ...or, for irregular series:
+# reader = build_static_reader(store; time_series_type = NonSequentialTimeSeries)
+for t in static_timestamps(reader)
+    static_read!(reader, t)
     for (gi, g) in enumerate(static_groups(reader))
         vals = static_values(reader, gi)   # column j ↔ g.keys[j]
     end
@@ -772,8 +785,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
 filter).</li>
 <li><code>features</code> — match keys whose features include all the given entries (subset match).</li>
 </ul>
-<p>Physical storage detail (<code>data_hash</code>, <code>dtype</code>, <code>ext</code>, <code>percentiles</code>) is not on a key — read it via
-<code>get_metadata</code> / <code>list_time_series</code>.</p>
+<p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>ext</code>, <code>percentiles</code>) is not on a key — read
+it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
                     name=nothing, resolution=nothing, interval=nothing, features=Dict()) -&gt; Bool
 </code></pre>

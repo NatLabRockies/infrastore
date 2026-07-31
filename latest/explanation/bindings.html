@@ -210,7 +210,7 @@ why the APIs look the way they do, how errors propagate, and what each layer own
 importable as <code>infrastore</code>. The binding:</p>
 <ul>
 <li>Converts Python <code>datetime</code>/<code>timedelta</code> to <code>chrono</code> types and NumPy arrays (any shape) to
-<code>TypedArray</code>s at the boundary, supporting the full dtype set (<code>f64</code>, <code>f32</code>, <code>i64</code>, <code>i32</code>, <code>u64</code>,
+<code>TypedArray</code>s at the boundary, supporting the full dtype set (<code>f64</code>, <code>f32</code>, the integer widths,
 <code>bool</code>).</li>
 <li>Translates the typed <code>TimeSeriesError</code> variants into a Python exception hierarchy rooted at
 <code>TimeSeriesError</code> (<code>NotFoundError</code>, <code>DuplicateTimeSeriesError</code>, <code>InvalidParameterError</code>,

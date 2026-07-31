@@ -278,7 +278,8 @@ message TimeSeriesMetadata {
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
   optional string units                     = 16;
-  int32           dtype                     = 17;  // Dtype code
+  string          element_type              = 21;  // canonical element-type string
+  // (17 is reserved: the former int32 dtype code)
   repeated uint64 element_shape             = 18;  // per-step trailing dims
   optional string ext                       = 19;  // opaque package-owned payload
   repeated double percentiles               = 20;  // Probabilistic only
@@ -310,7 +311,8 @@ message GetResp {
   reserved 5;                                      // was: repeated double values
   TimeSeriesType  time_series_type          = 6;
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
-  int32           dtype                     = 8;   // Dtype code
+  string          element_type              = 16;  // canonical element-type string
+  // (8 is reserved: the former int32 dtype code)
   bytes           value_bytes               = 9;   // raw little-endian, row-major
   string          ext              = 10;
   // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
@@ -364,11 +366,12 @@ through the <a href="./rust-api.html#forecasts">Rust core</a> or <a href="./c-ab
 and (for <code>Probabilistic</code>) <code>percentiles</code> — and <code>GetCounts</code> includes them in <code>forecasts</code>.</p>
 <p><code>GetTimeSeries</code> returns forecast values too. For a <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>
 (synthesized into <code>Deterministic</code>), <code>Probabilistic</code>, or <code>Scenarios</code> key it fills the <code>GetResp</code> array
-fields (<code>value_bytes</code> + <code>dtype</code>), the window parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), and the
-<code>percentiles</code> (<code>Probabilistic</code>) or <code>scenario_count</code> (<code>Scenarios</code>); the client reconstructs the
+fields (<code>value_bytes</code> + <code>element_type</code>), the window parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), and
+the <code>percentiles</code> (<code>Probabilistic</code>) or <code>scenario_count</code> (<code>Scenarios</code>); the client reconstructs the
 matching type. Arrays are dtype-generic on the wire — <code>value_bytes</code> is the raw little-endian buffer
-and <code>dtype</code> names the element type (<code>f64</code>/<code>f32</code>/<code>i64</code>/<code>i32</code>/<code>u64</code>/<code>bool</code>), so non-<code>f64</code> arrays
-survive the round trip without coercion. One caveat:</p>
+and <code>element_type</code> says both what the elements mean and, through it, their physical dtype
+(<code>f64</code>/<code>f32</code>/<code>i64</code>/…, or a composite kind like <code>piecewise_linear</code>), so non-<code>f64</code> arrays survive the
+round trip without coercion. One caveat:</p>
 <ul>
 <li><strong><code>ext</code> is not carried in <code>GetResp</code>.</strong> The opaque package-owned payload is returned by
 <code>ListTimeSeries</code> (on <code>TimeSeriesMetadata</code>) but left empty by <code>GetTimeSeries</code>, so a value fetched

@@ -198,7 +198,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries three global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.12.0"
+<pre><code class="language-text">data_format_version = "0.14.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 </code></pre>
@@ -219,18 +219,24 @@ no in-place migration.</p>
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from TEXT names to small INTEGER codes —
-see <a href="#discriminant-encoding">Discriminant encoding</a> below; <code>0.11.0</code> renamed the metadata column
-<code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension payload (typically JSON) the store
-stores verbatim and never interprets; <code>0.10.0</code> replaced the per-association <code>features</code> table with
-the content-addressed <code>feature_sets</code> table below, so a feature map is stored once and shared by
-every association that uses it — dropping the <code>association_id</code> foreign key and its
-<code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to timestamp-major
-<code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to the writing
-batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
-<code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts of one
-variable that differ only by interval are now distinct series — widening both unique indexes (the
-<code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
+<p>(<code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association row: the
+<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
+content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
+axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
+<code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
+<em>logical</em> element type and derives the physical dtype from it — see
+<a href="./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
+TEXT names to small INTEGER codes — see <a href="#discriminant-encoding">Discriminant encoding</a> below;
+<code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
+payload (typically JSON) the store stores verbatim and never interprets; <code>0.10.0</code> replaced the
+per-association <code>features</code> table with the content-addressed <code>feature_sets</code> table below, so a feature
+map is stored once and shared by every association that uses it — dropping the <code>association_id</code>
+foreign key and its <code>ON DELETE CASCADE</code>; <code>0.9.0</code> changed the packed-dataset chunking to
+timestamp-major <code>(1, cols, *element_shape)</code> and made the column count <code>cols</code> per-dataset (sized to
+the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
+writes; <code>0.8.0</code> added the forecast <code>interval</code> to the association uniqueness key — so two forecasts
+of one variable that differ only by interval are now distinct series — widening both unique indexes
+(the <code>NULL</code>-folding index now <code>COALESCE</code>s <code>interval</code> as well as <code>resolution</code>); <code>0.7.0</code> made
 <code>resolution</code>/<code>horizon</code>/<code>interval</code> calendar-aware <a href="../explanation/data-model.html">periods</a>: they are
 now encoded as ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>) rather than integer
 milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
@@ -247,19 +253,33 @@ seconds; <code>0.2.0</code> introduced typed, multi-dimensional arrays and the t
 <p>Every stored array is a <strong><code>TypedArray</code></strong>: an element <code>dtype</code>, a <code>shape</code> <code>[length, k1, k2, …]</code> whose
 first axis is time and whose trailing axes are a fixed per-step element shape, and the raw
 row-major, little-endian element bytes. The supported dtypes and their stable integer codes (shared
-with the bindings and the C ABI):</p>
+with the bindings and the C ABI). Codes 0–5 are the original set and never move; new widths are
+appended:</p>
 <div class="table-wrapper"><table><thead><tr><th>Code</th><th>dtype</th><th>Width</th><th>Code</th><th>dtype</th><th>Width</th></tr></thead><tbody>
-<tr><td>0</td><td><code>f64</code></td><td>8</td><td>3</td><td><code>i32</code></td><td>4</td></tr>
-<tr><td>1</td><td><code>f32</code></td><td>4</td><td>4</td><td><code>u64</code></td><td>8</td></tr>
-<tr><td>2</td><td><code>i64</code></td><td>8</td><td>5</td><td><code>bool</code></td><td>1</td></tr>
+<tr><td>0</td><td><code>f64</code></td><td>8</td><td>6</td><td><code>i16</code></td><td>2</td></tr>
+<tr><td>1</td><td><code>f32</code></td><td>4</td><td>7</td><td><code>i8</code></td><td>1</td></tr>
+<tr><td>2</td><td><code>i64</code></td><td>8</td><td>8</td><td><code>u32</code></td><td>4</td></tr>
+<tr><td>3</td><td><code>i32</code></td><td>4</td><td>9</td><td><code>u16</code></td><td>2</td></tr>
+<tr><td>4</td><td><code>u64</code></td><td>8</td><td>10</td><td><code>u8</code></td><td>1</td></tr>
+<tr><td>5</td><td><code>bool</code></td><td>1</td><td></td><td></td><td></td></tr>
 </tbody></table>
 </div>
 <p>A scalar-per-step series has an empty element shape; a per-step tuple (e.g. the 3 coefficients of a
 quadratic cost curve) has element shape <code>[3]</code>.</p>
+<p>The <em>dtype</em> says how wide an element is. What those elements <strong>mean</strong> — and how a ragged piecewise
+curve is packed into a fixed-width row — is the association's <code>element_type</code>; see
+<a href="./element-types.html">Element types</a>. The dtype above is derived from it.</p>
+<p>The HDF5 file does <strong>not</strong> describe its own element typing, and is not meant to: <code>bool</code> and <code>u8</code> are
+the same byte on disk, and nothing in a dataspace says whether three <code>f64</code>s are a quadratic curve or
+three independent samples. Every read takes the dtype from the catalog's <code>element_type</code> instead. The
+two artifacts are one logical store — an <code>.h5</code> without its <code>.sqlite</code> is not readable in any case —
+so this removes a second, weaker source of truth rather than adding a dependency. Where a backend
+does know a dtype independently (a packed dataset's name encodes it), the catalog's value is checked
+against it and a mismatch is an integrity error.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.12.0"
+├── attribute  data_format_version = "0.14.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -267,6 +287,8 @@ quadratic cost curve) has element shape <code>[3]</code>.</p>
         ├── dset  sts_{dtype}_{shape}_{length}_{res}      packed  (length, cols, *element_shape)
         ├── dset  sts_{dtype}_{shape}_{length}_{res}_h    u8  (cols, 64)   # per-column hex hashes
         ├── dset  sts_{dtype}_{shape}_{length}_{res}__1   packed spill dataset
+        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}  packed irregular cohort
+        ├── dset  nsts_{dtype}_{shape}_{length}_{tshash}_h  u8  (cols, 64)
         ├── dset  arr_{hex_hash}                          standalone  [length, *element_shape]
         └── ...
 </code></pre>
@@ -278,18 +300,27 @@ round-trip.</p>
 <p>The hash companion <code>{dataset}_h</code> is a <code>(cols, 64)</code> array of <code>u8</code> holding each column's 64 lowercase
 hex characters as raw bytes — not an HDF5 string dataset. <strong>An all-zero row marks a free slot.</strong></p>
 <h3 id="packed-mode"><a class="header" href="#packed-mode">Packed mode</a></h3>
-<p>Used for <strong><code>SingleTimeSeries</code></strong> and the underlying array of a <strong><code>DeterministicSingleTimeSeries</code></strong>.
-Many arrays that share a <code>(dtype, element_shape, length, resolution)</code> are column-packed into one
-dataset:</p>
+<p>Used for every <strong>static</strong> series: <code>SingleTimeSeries</code>, the underlying array of a
+<code>DeterministicSingleTimeSeries</code>, and <code>NonSequentialTimeSeries</code>. Many arrays that share a
+<code>(dtype, element_shape, length)</code> <strong>and a time axis</strong> are column-packed into one dataset:</p>
 <div class="table-wrapper"><table><thead><tr><th>Element</th><th>Meaning</th></tr></thead><tbody>
-<tr><td><code>sts_</code></td><td>Prefix for packed <code>SingleTimeSeries</code> datasets</td></tr>
+<tr><td><code>sts_</code></td><td>Prefix for a packed <code>SingleTimeSeries</code> / DST pool</td></tr>
+<tr><td><code>nsts_</code></td><td>Prefix for a packed <code>NonSequentialTimeSeries</code> cohort</td></tr>
 <tr><td><code>{dtype}</code></td><td>Element dtype string (<code>f64</code>, <code>i64</code>, …)</td></tr>
 <tr><td><code>{shape}</code></td><td>Element shape: <code>s</code> = scalar, <code>3</code> = <code>[3]</code>, <code>3x2</code> = <code>[3, 2]</code></td></tr>
 <tr><td><code>{length}</code></td><td>Number of timesteps (size of the time axis)</td></tr>
-<tr><td><code>{res}</code></td><td>Resolution as an ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>; no <code>_</code>)</td></tr>
+<tr><td><code>{res}</code></td><td><code>sts_</code> only: resolution as an ISO-8601 duration (<code>PT1H</code>, <code>P1M</code>; no <code>_</code>)</td></tr>
+<tr><td><code>{tshash}</code></td><td><code>nsts_</code> only: 64 hex chars, the timestamp vector's content hash</td></tr>
 <tr><td><code>__{n}</code></td><td>Spill suffix; absent for the first dataset, <code>__1</code>, <code>__2</code>, … after</td></tr>
 </tbody></table>
 </div>
+<p>The trailing element is what pins the <strong>time axis</strong>, which is what makes packing meaningful at all:
+the chunking is timestamp-major, so row <code>t</code> of a dataset is "every column at the same instant". A
+regular series takes its axis from the resolution; an irregular one carries the axis explicitly, and
+two of them share one exactly when their timestamp vectors are equal — which the catalog already
+answers by content-addressing those vectors (see <a href="#timestamp_sets"><code>timestamp_sets</code></a>). The full
+64-char hash is used, not a prefix: the name is parsed back into the pool key when the index is
+rebuilt at open, so a truncated form could let two distinct time axes collide into one pool.</p>
 <p>The dataset shape is <code>(length, cols, *element_shape)</code> and chunking is <code>(1, cols, *element_shape)</code>,
 so one HDF5 chunk holds a single timestamp across every column — making a read across series by
 timestamp one chunk, and a buffered bulk write fill whole chunks. <code>cols</code> is chosen per dataset: a
@@ -309,14 +340,17 @@ incremental writes fill a default-width dataset — the next write creates a spi
 then <code>…__2</code>, and so on.</li>
 </ul>
 <h3 id="standalone-mode"><a class="header" href="#standalone-mode">Standalone mode</a></h3>
-<p>Used for <strong><code>NonSequentialTimeSeries</code></strong> and the dense forecast arrays (<strong><code>Deterministic</code></strong>,
-<strong><code>Probabilistic</code></strong>, <strong><code>Scenarios</code></strong>). Each array is its own typed, multi-dimensional variable named
-<code>arr_{hex_hash}</code> in the <code>time_series/single</code> group. There is no column packing and no companion hash
-variable — the variable name carries the hash.</p>
+<p>Used for the dense forecast arrays (<strong><code>Deterministic</code></strong>, <strong><code>Probabilistic</code></strong>, <strong><code>Scenarios</code></strong>), and
+for a <strong><code>NonSequentialTimeSeries</code></strong> whose time axis nothing else shares. Each array is its own
+typed, multi-dimensional variable named <code>arr_{hex_hash}</code> in the <code>time_series/single</code> group. There is
+no column packing and no companion hash variable — the variable name carries the hash.</p>
 <ul>
-<li><strong><code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
-whole-array chunk. It stores its explicit, strictly-increasing timestamps in the association's
-<code>timestamps_json</code> metadata field, not in the array.</li>
+<li><strong>A lone <code>NonSequentialTimeSeries</code></strong> is shaped <code>[length, *element_shape]</code> and chunked as a single
+whole-array chunk. It stores its explicit, strictly-increasing timestamps in the catalog, not in
+the array. Packing is only a win once a cohort is several columns wide — a packed dataset spreads
+one array over <code>length</code> chunks — so a series alone on its time axis stays standalone. Whether a
+given array is packed or standalone is a write-time choice with no effect on reads (they resolve
+by content hash and handle either), and one cohort can hold columns of both.</li>
 <li><strong>Dense forecasts</strong> are shaped <code>[H, count, *element_shape]</code> (<code>Deterministic</code>),
 <code>[num_percentiles, H, count, *element_shape]</code> (<code>Probabilistic</code>), or
 <code>[num_scenarios, H, count, *element_shape]</code> (<code>Scenarios</code>), where <code>count</code> is the number of forecast
@@ -353,10 +387,10 @@ The dataset does not shrink.</li>
 dead space (HDF5 cannot reclaim the space in place).</li>
 <li><code>compact()</code> reports reclaimable slots but does not physically resize datasets or remove dead
 standalone datasets in this release (HDF5 cannot reclaim the space in place).</li>
-<li><strong>Feature sets:</strong> because they are shared, deleting an association never deletes its feature set;
-removing the last association that referenced one leaves it unreachable. <code>compact()</code> deletes
-unreachable sets and reports the row count as <code>feature_sets_reclaimed</code>. This is the one thing
-compaction physically removes.</li>
+<li><strong>Feature sets and timestamp vectors:</strong> because both are shared, deleting an association never
+deletes either; removing the last association that referenced one leaves it unreachable.
+<code>compact()</code> deletes unreachable rows and reports the counts as <code>feature_sets_reclaimed</code> and
+<code>timestamp_sets_reclaimed</code>. These are the only things compaction physically removes.</li>
 </ul>
 <h2 id="sqlite-schema"><a class="header" href="#sqlite-schema">SQLite Schema</a></h2>
 <p>The catalog database is created with <code>PRAGMA foreign_keys = ON</code> and the following DDL (idempotent —
@@ -376,10 +410,10 @@ compaction physically removes.</li>
 <tr><td><code>horizon</code></td><td>TEXT</td><td>ISO-8601 forecast horizon; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>interval</code></td><td>TEXT</td><td>ISO-8601 forecast interval; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>count</code></td><td>INTEGER</td><td>Forecast window count; <code>NULL</code> for non-forecasts</td></tr>
-<tr><td><code>timestamps_json</code></td><td>TEXT</td><td>JSON array of RFC 3339 timestamps (<code>NonSequentialTimeSeries</code>)</td></tr>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the timestamp vector (<code>NonSequentialTimeSeries</code>)</td></tr>
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
-<tr><td><code>dtype</code></td><td>TEXT</td><td>Element dtype string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
+<tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
 <tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
 <tr><td><code>ext</code></td><td>TEXT</td><td>Opaque package-owned extension payload (JSON), verbatim; <code>NULL</code> if unset</td></tr>
 <tr><td><code>data_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the array; links to an HDF5 column/variable</td></tr>
@@ -415,6 +449,47 @@ Removing the last association that referenced a set instead leaves it unreachabl
 deletion semantics as the HDF5 side's unreachable standalone variables. <code>Store::compact</code> sweeps
 unreachable sets and reports the count as <code>feature_sets_reclaimed</code>; clearing a store drops them all
 outright.</p>
+<h3 id="timestamp_sets"><a class="header" href="#timestamp_sets"><code>timestamp_sets</code></a></h3>
+<p>The explicit timestamp vector of a <code>NonSequentialTimeSeries</code>, content-addressed exactly as feature
+sets are. The association row carries only the 32-byte <code>timestamps_hash</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of <code>data</code>; <code>PRIMARY KEY</code></td></tr>
+<tr><td><code>data</code></td><td>BLOB</td><td>The vector in the compact encoding below</td></tr>
+</tbody></table>
+</div>
+<p>Three things this buys, in descending order of how much they matter:</p>
+<ul>
+<li><strong>The vector is stored once per distinct time axis.</strong> Irregular series in a power-systems model
+overwhelmingly share one — event times, an outage schedule, a market timeline — so a thousand
+components sampled at the same instants hold one copy between them.</li>
+<li><strong>The association table stays narrow.</strong> The vector used to live inline as an RFC 3339 JSON array
+(24 bytes per timestamp, ~210 KB for a year of hourly data), which pushed those rows into SQLite
+overflow pages and made every scan-shaped catalog query read and parse megabytes it had no use
+for. A listing now decodes each distinct vector once, as it already did for features.</li>
+<li><strong>It is the cohort key the packed HDF5 layout groups irregular arrays by</strong> (see
+<a href="#packed-mode">Packed mode</a>).</li>
+</ul>
+<p><code>data</code> is not human-readable, deliberately — the readable projection below covers hand inspection of
+everything else. Its layout is:</p>
+<pre><code class="language-text">[0]      version   u8       currently 1
+[1]      unit      u8       delta unit: 0=ns, 1=µs, 2=ms, 3=s, 4=min, 5=hour, 6=day
+then     count     uvarint  number of timestamps
+if count &gt; 0:
+  base_secs        svarint  seconds since the Unix epoch (zigzag)
+  base_nanos       uvarint  sub-second nanoseconds of the first timestamp
+  delta_1..delta_n svarint  successive differences, in `unit`s (zigzag)
+</code></pre>
+<p>Varints are LEB128; signed values are zigzag-encoded first. The unit is the coarsest one that
+divides every delta, which is what makes the encoding cheap: irregularity in this domain is usually
+coarse (event times on whole seconds or minutes, a regular grid with gaps), so a year of hourly
+timestamps becomes 8,760 single-byte deltas — ~8.8 KB against ~210 KB for the JSON form. A vector
+with genuine microsecond jitter degrades to ~4–5 bytes per timestamp, still well under JSON.
+Precision is nanoseconds over chrono's full range; the base timestamp is stored as its own
+<code>(seconds, nanoseconds)</code> pair and later ones are reconstructed by accumulating deltas in 128-bit
+arithmetic. The one thing not preserved is a leap second after the first position, which normalizes
+into the following second.</p>
+<p>Like <code>feature_sets</code>, there is <strong>no foreign key</strong> and <strong>no cascade</strong>: rows are shared.
+<code>Store::compact</code> sweeps unreachable vectors and reports the count as <code>timestamp_sets_reclaimed</code>.</p>
 <h3 id="supplemental_attribute_associations"><a class="header" href="#supplemental_attribute_associations"><code>supplemental_attribute_associations</code></a></h3>
 <p>Which supplemental attributes are attached to which components. Columns match infrasys' table of the
 same name, whose logic this replaces. See
@@ -524,12 +599,13 @@ SELECT id, owner_id, owner_type,
                              WHEN 5 THEN 'Scenarios'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name, initial_timestamp, resolution, length, horizon, interval, count,
-       units, dtype, element_shape, ext,
-       lower(hex(data_hash))     AS data_hash,
-       lower(hex(features_hash)) AS features_hash
+       units, element_type, element_shape, ext,
+       lower(hex(data_hash))       AS data_hash,
+       lower(hex(features_hash))   AS features_hash,
+       lower(hex(timestamps_hash)) AS timestamps_hash
 FROM time_series_associations;
 </code></pre>
-<p>This view decodes both discriminants and both content hashes, so it is the convenient thing to query
+<p>This view decodes both discriminants and every content hash, so it is the convenient thing to query
 by hand. Nothing in the library reads it.</p>
 <p>A projection of the association table with both hashes hex-encoded, for humans opening the catalog
 in <code>sqlite3</code> — see <a href="#reading-the-catalog-by-hand">Reading the catalog by hand</a>. Nothing in the
@@ -591,7 +667,7 @@ h5dump -A -n system.h5                   # root attributes and the object list
 sqlite3 system.h5.sqlite '.schema'
 # Query the view, not the table, to see decoded discriminants.
 sqlite3 system.h5.sqlite \
-  'SELECT name, time_series_type, dtype, element_shape, length FROM time_series_readable;'
+  'SELECT name, time_series_type, element_type, element_shape, length FROM time_series_readable;'
 # Both association tables are absent in stores written before they existed.
 sqlite3 system.h5.sqlite 'SELECT * FROM supplemental_attribute_associations;'
 sqlite3 system.h5.sqlite 'SELECT * FROM parent_child_associations;'
@@ -623,7 +699,7 @@ given array is not derivable from its metadata — scan the <code>_h</code> data
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../reference/rust-api.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../reference/element-types.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -637,7 +713,7 @@ given array is not derivable from its metadata — scan the <code>_h</code> data
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../reference/rust-api.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../reference/element-types.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
