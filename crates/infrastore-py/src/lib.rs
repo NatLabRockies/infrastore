@@ -1447,8 +1447,10 @@ impl PyStore {
         // These describe the series, so they are set on it, not on the request.
         data.set_units(units);
         data.set_ext(ext);
+        // Omitting it keeps whatever the series already carries — a constructor
+        // resolved that to plain scalars of the array's dtype.
         if let Some(et) = element_type {
-            data.set_element_type(Some(parse_element_type(&et)?));
+            data.set_element_type(parse_element_type(&et)?);
         }
         let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
             .with_features(features);
@@ -1504,7 +1506,12 @@ impl PyStore {
                 _ => None,
             };
             let mut data = extract_time_series_data(&time_series)?;
-            data.set_descriptors(element_type, units, ext);
+            data.set_units(units);
+            data.set_ext(ext);
+            // As above: an absent `element_type` leaves the series' own.
+            if let Some(et) = element_type {
+                data.set_element_type(et);
+            }
             requests.push(core_lib::AddRequest {
                 owner_id,
                 owner_type,

@@ -945,11 +945,7 @@ impl Store {
         // catalog row, not in the array bytes. Filling them in here — once, for
         // every variant — is what makes a read round-trip what a write declared.
         let mut data = self.materialize_array(meta, time_range)?;
-        data.set_descriptors(
-            Some(meta.element_type),
-            meta.units.clone(),
-            meta.ext.clone(),
-        );
+        data.set_descriptors(meta.element_type, meta.units.clone(), meta.ext.clone());
         Ok(data)
     }
 
@@ -1023,8 +1019,11 @@ impl Store {
                     length: sliced_length,
                     data,
                     name: meta.name.clone(),
-                    // Filled in by `materialize_time_series`.
-                    element_type: None,
+                    // The descriptors are filled in by
+                    // `materialize_time_series`; the element type is set here
+                    // too because it has no "unset" spelling, and this is the
+                    // value that call resolves to anyway.
+                    element_type: meta.element_type,
                     units: None,
                     ext: None,
                 }))
@@ -1532,7 +1531,7 @@ impl Store {
                     name: meta.name.clone(),
                     // This fast path bypasses `materialize_time_series`, so the
                     // descriptors come straight off the row it already loaded.
-                    element_type: Some(meta.element_type),
+                    element_type: meta.element_type,
                     units: meta.units.clone(),
                     ext: meta.ext.clone(),
                 }));
@@ -3061,15 +3060,20 @@ fn forecast_metadata(
     }
 }
 
-/// The element type a request writes: the caller's declaration if it made one,
-/// else plain scalars of the array's own dtype. Validated against the array
-/// here so the store never persists a row that misdescribes its own bytes.
+/// The element type a request writes — the one the series carries, which a
+/// constructor resolved to plain scalars of the array's dtype unless the caller
+/// declared otherwise.
+///
+/// Always validated against the array, so the store never persists a row that
+/// misdescribes its own bytes. That also catches a series whose `data` was
+/// replaced after construction without updating its element type: the check
+/// reports the disagreement rather than silently re-deriving one.
 fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
-    let array = request_array(item);
-    let Some(declared) = item.data.element_type() else {
-        return Ok(ElementType::Scalar(array.dtype));
-    };
-    declared.validate_array(array, item.data.time_series_type().leading_dims())?;
+    let declared = item.data.element_type();
+    declared.validate_array(
+        request_array(item),
+        item.data.time_series_type().leading_dims(),
+    )?;
     Ok(declared)
 }
 

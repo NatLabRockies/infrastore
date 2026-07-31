@@ -461,7 +461,7 @@ pub fn get_resp_to_time_series_data(
             message: e,
         }
     })?;
-    match ts_type {
+    let series: Result<TimeSeriesData, ConvertError> = match ts_type {
         pb::TimeSeriesType::SingleTimeSeries => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
                 .map(|d| d.with_timezone(&Utc))?;
@@ -471,9 +471,10 @@ pub fn get_resp_to_time_series_data(
                 length: resp.length as usize,
                 data,
                 name,
-                // The gRPC response carries no catalog row, so the descriptive
-                // attributes are unset here.
-                element_type: None,
+                // Overwritten below, along with every other variant's.
+                element_type,
+                // The response carries no units or ext field, so those stay
+                // unset rather than being invented here.
                 units: None,
                 ext: None,
             }))
@@ -549,7 +550,12 @@ pub fn get_resp_to_time_series_data(
             })?;
             Ok(TimeSeriesData::Scenarios(scen))
         }
-    }
+    };
+    // The wire carries the element type, so a read over gRPC reports the same
+    // one a local read would. Applied here rather than per branch because the
+    // constructors resolve it to plain scalars of the array's dtype, which is
+    // right only when that is what the server actually sent.
+    Ok(series?.with_element_type(element_type))
 }
 
 // ---- Helpers ----

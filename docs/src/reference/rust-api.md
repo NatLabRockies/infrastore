@@ -693,6 +693,9 @@ pub struct SingleTimeSeries {
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
+    pub element_type: ElementType,   // never optional; see below
+    pub units: Option<String>,
+    pub ext: Option<String>,
 }
 
 impl SingleTimeSeries {
@@ -700,10 +703,22 @@ impl SingleTimeSeries {
         initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>, data: TypedArray,
         name: impl Into<String>,
     ) -> Self;
+    pub fn with_element_type(self, element_type: ElementType) -> Self;
+    pub fn with_units(self, units: impl Into<String>) -> Self;
+    pub fn with_ext(self, ext: impl Into<String>) -> Self;
 }
 ```
 
 `length` is derived from the array's first axis (`data.length()`) by `new`.
+
+The three descriptors travel on the series rather than on the write request, so a read returns what
+a write declared. `element_type` is **not** an `Option`: `new` resolves it to `Scalar(data.dtype)` —
+what an ordinary numeric series is — and `with_element_type` replaces it. There is deliberately no
+"undeclared" spelling, because it would be a second way to say `Scalar(dtype)` and a series written
+that way would not compare equal to the same series read back. The consequence to know: replacing
+`data` on an already-built series without updating `element_type` is a mismatch the store rejects on
+write (`InvalidParameter`) rather than silently re-deriving one — build the series again instead.
+The other four series types follow the same pattern.
 
 ### `TypedArray` and `Dtype`
 

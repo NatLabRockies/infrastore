@@ -483,7 +483,7 @@ unsafe fn build_single_request(
     let mut data = core_lib::TimeSeriesData::SingleTimeSeries(single);
     // `element_type`, `units`, and `ext` describe the series, so they travel on
     // it rather than on the request.
-    data.set_descriptors(Some(element_type), units, ext);
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
@@ -633,7 +633,7 @@ unsafe fn build_non_sequential_request(
     let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
     // `element_type`, `units`, and `ext` describe the series, so they travel on
     // it rather than on the request.
-    data.set_descriptors(Some(element_type), units, ext);
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
@@ -2613,7 +2613,7 @@ unsafe fn build_forecast_request(
     let mut data = data;
     // `element_type`, `units`, and `ext` describe the series, so they travel on
     // it rather than on the request.
-    data.set_descriptors(Some(element_type), units, ext);
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
@@ -2775,7 +2775,7 @@ unsafe fn build_probabilistic_request(
     let mut data = core_lib::TimeSeriesData::Probabilistic(prob);
     // `element_type`, `units`, and `ext` describe the series, so they travel on
     // it rather than on the request.
-    data.set_descriptors(Some(element_type), units, ext);
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
@@ -3253,7 +3253,7 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
 /// Each non-null pointer must be valid for writing one pointer.
 unsafe fn emit_descriptors(
     ext: Option<&str>,
-    element_type: Option<core_lib::ElementType>,
+    element_type: core_lib::ElementType,
     units: Option<&str>,
     out_ext: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
@@ -3263,9 +3263,10 @@ unsafe fn emit_descriptors(
         if !out_ext.is_null() {
             *out_ext = ext.map_or(std::ptr::null_mut(), owned_cstr);
         }
+        // Unlike `ext` and `units`, the element type is never absent — a series
+        // always carries a concrete one — so this is always a string.
         if !out_element_type.is_null() {
-            *out_element_type =
-                element_type.map_or(std::ptr::null_mut(), |et| owned_cstr(&et.to_string()));
+            *out_element_type = owned_cstr(&element_type.to_string());
         }
         if !out_units.is_null() {
             *out_units = units.map_or(std::ptr::null_mut(), owned_cstr);

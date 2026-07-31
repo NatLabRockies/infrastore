@@ -1281,7 +1281,7 @@ fn series_descriptors_round_trip_on_the_struct() {
             let data = store.get_time_series(labeled.identity(), None).unwrap();
             assert_eq!(data.units(), Some("MW"), "{backend}");
             assert_eq!(data.ext(), Some("Profile"), "{backend}");
-            assert_eq!(data.element_type(), Some(meta.element_type), "{backend}");
+            assert_eq!(data.element_type(), meta.element_type, "{backend}");
 
             // A slice is the same values over a shorter window, so it keeps them.
             let sliced = store

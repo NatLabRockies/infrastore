@@ -110,6 +110,72 @@ fn add_and_get_round_trip() {
     assert_eq!(single.resolution, s.resolution);
 }
 
+/// A series read back compares equal to the one written, field for field.
+///
+/// This is why `element_type` is not an `Option`: while it was, an ordinary
+/// numeric series was constructed as "undeclared" and read back as
+/// `Scalar(f64)` — two spellings of the same fact, which the derived
+/// `PartialEq` (and every binding's `==`, which delegates to it) called
+/// unequal.
+#[test]
+fn a_series_reads_back_equal_to_the_one_written() {
+    let mut store = create_store(None, true).unwrap();
+
+    // The plain case: nothing declared, so the constructor resolves the element
+    // type and the read must agree with what it chose.
+    let plain = series(2024, 24, 100.0);
+    let key = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(plain.clone()),
+            Features::new(),
+        )
+        .unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    assert_eq!(got.element_type(), plain.element_type);
+    assert_eq!(got.as_single().unwrap(), &plain);
+
+    // And with every descriptor set, since those travel on the series too.
+    let described = TimeSeriesData::SingleTimeSeries(series(2024, 24, 7.0))
+        .with_units("MW")
+        .with_ext(r#"{"source":"test"}"#);
+    let key = store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            described.clone(),
+            Features::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_time_series(key.identity(), None).unwrap(),
+        described
+    );
+
+    // An irregular series round-trips the same way.
+    let stamps = vec![
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 37, 0).unwrap(),
+    ];
+    let irregular =
+        NonSequentialTimeSeries::new(stamps, TypedArray::from_f64(vec![2], &[1.0, 2.0]), "outage")
+            .unwrap();
+    let key = store
+        .add_time_series(
+            3,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(irregular.clone()),
+            Features::new(),
+        )
+        .unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    assert_eq!(got.as_non_sequential().unwrap(), &irregular);
+}
+
 #[test]
 fn duplicate_key_rejected() {
     let mut store = create_store(None, true).unwrap();

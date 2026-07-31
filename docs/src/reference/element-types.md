@@ -71,6 +71,10 @@ storing the inconsistency blindly:
 
 Scalars are unconstrained in their trailing dims, since a dense per-step array is legitimate.
 
+Every series carries a concrete element type — a constructor resolves it to plain scalars of the
+array's dtype, and declaring one replaces it — so the checks above run on every write, not only on
+writes that declared something. There is no "undeclared" state to fall back from.
+
 ## The catalog is the source of truth
 
 Nothing about element typing is recoverable from the HDF5 file. Storage records how many bytes an

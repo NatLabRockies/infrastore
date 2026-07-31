@@ -231,7 +231,7 @@ impl Descriptor {
         let mut data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
         // The descriptor's `element_type`, `units`, and `ext` describe the
         // series, so they are set on it rather than on the request.
-        data.set_descriptors(Some(element_type), self.units.clone(), self.ext.clone());
+        data.set_descriptors(element_type, self.units.clone(), self.ext.clone());
 
         Ok(AddRequest {
             owner_id: self.owner_id,

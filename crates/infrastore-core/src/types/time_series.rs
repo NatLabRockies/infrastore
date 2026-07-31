@@ -185,10 +185,17 @@ pub struct SingleTimeSeries {
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
-    /// What the stored elements mean and how one timestep is laid out. `None`
-    /// means plain scalars of the array's own dtype, which is what an ordinary
-    /// numeric series is. A read fills in the resolved value.
-    pub element_type: Option<ElementType>,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
     /// User-declared units label for the values (e.g. `"MW"`), or `None`.
     ///
     /// Set by whoever creates the series and returned unchanged on read. The
@@ -210,13 +217,14 @@ impl SingleTimeSeries {
         name: impl Into<String>,
     ) -> Self {
         let length = data.length();
+        let element_type = ElementType::Scalar(data.dtype);
         Self {
             initial_timestamp,
             resolution: resolution.into(),
             length,
             data,
             name: name.into(),
-            element_type: None,
+            element_type,
             units: None,
             ext: None,
         }
@@ -227,7 +235,7 @@ impl SingleTimeSeries {
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = Some(element_type);
+        self.element_type = element_type;
         self
     }
 
@@ -254,10 +262,17 @@ pub struct NonSequentialTimeSeries {
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
-    /// What the stored elements mean and how one timestep is laid out. `None`
-    /// means plain scalars of the array's own dtype, which is what an ordinary
-    /// numeric series is. A read fills in the resolved value.
-    pub element_type: Option<ElementType>,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
     /// User-declared units label for the values (e.g. `"MW"`), or `None`.
     ///
     /// Set by whoever creates the series and returned unchanged on read. The
@@ -287,12 +302,13 @@ impl NonSequentialTimeSeries {
         if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err("timestamps must be strictly increasing".to_string());
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             timestamps,
             length,
             data,
             name: name.into(),
-            element_type: None,
+            element_type,
             units: None,
             ext: None,
         })
@@ -303,7 +319,7 @@ impl NonSequentialTimeSeries {
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = Some(element_type);
+        self.element_type = element_type;
         self
     }
 
@@ -334,10 +350,17 @@ pub struct Deterministic {
     /// Shape `[H, count, *E]`.
     pub data: TypedArray,
     pub name: String,
-    /// What the stored elements mean and how one timestep is laid out. `None`
-    /// means plain scalars of the array's own dtype, which is what an ordinary
-    /// numeric series is. A read fills in the resolved value.
-    pub element_type: Option<ElementType>,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
     /// User-declared units label for the values (e.g. `"MW"`), or `None`.
     ///
     /// Set by whoever creates the series and returned unchanged on read. The
@@ -387,6 +410,7 @@ impl Deterministic {
                 data.shape
             ));
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             initial_timestamp,
             resolution,
@@ -395,7 +419,7 @@ impl Deterministic {
             count,
             data,
             name: name.into(),
-            element_type: None,
+            element_type,
             units: None,
             ext: None,
         })
@@ -416,10 +440,17 @@ pub struct Probabilistic {
     /// Shape `[num_percentiles, H, count, *E]`.
     pub data: TypedArray,
     pub name: String,
-    /// What the stored elements mean and how one timestep is laid out. `None`
-    /// means plain scalars of the array's own dtype, which is what an ordinary
-    /// numeric series is. A read fills in the resolved value.
-    pub element_type: Option<ElementType>,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
     /// User-declared units label for the values (e.g. `"MW"`), or `None`.
     ///
     /// Set by whoever creates the series and returned unchanged on read. The
@@ -437,7 +468,7 @@ impl Deterministic {
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = Some(element_type);
+        self.element_type = element_type;
         self
     }
 
@@ -499,6 +530,7 @@ impl Probabilistic {
                 data.shape
             ));
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             initial_timestamp,
             resolution,
@@ -508,7 +540,7 @@ impl Probabilistic {
             percentiles,
             data,
             name: name.into(),
-            element_type: None,
+            element_type,
             units: None,
             ext: None,
         })
@@ -529,10 +561,17 @@ pub struct Scenarios {
     /// Shape `[scenario_count, H, count, *E]`.
     pub data: TypedArray,
     pub name: String,
-    /// What the stored elements mean and how one timestep is laid out. `None`
-    /// means plain scalars of the array's own dtype, which is what an ordinary
-    /// numeric series is. A read fills in the resolved value.
-    pub element_type: Option<ElementType>,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
     /// User-declared units label for the values (e.g. `"MW"`), or `None`.
     ///
     /// Set by whoever creates the series and returned unchanged on read. The
@@ -550,7 +589,7 @@ impl Probabilistic {
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = Some(element_type);
+        self.element_type = element_type;
         self
     }
 
@@ -600,6 +639,7 @@ impl Scenarios {
                 data.shape
             ));
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             initial_timestamp,
             resolution,
@@ -609,7 +649,7 @@ impl Scenarios {
             scenario_count,
             data,
             name: name.into(),
-            element_type: None,
+            element_type,
             units: None,
             ext: None,
         })
@@ -658,7 +698,7 @@ impl Scenarios {
     /// Declare the logical element type of the array. Validated on commit
     /// against the array's dtype and per-step shape.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = Some(element_type);
+        self.element_type = element_type;
         self
     }
 
@@ -709,9 +749,9 @@ impl TimeSeriesData {
         }
     }
 
-    /// The declared element type, or `None` for plain scalars of the array's
-    /// own dtype.
-    pub fn element_type(&self) -> Option<ElementType> {
+    /// The element type of the wrapped series — always concrete, defaulting to
+    /// plain scalars of the array's own dtype.
+    pub fn element_type(&self) -> ElementType {
         match self {
             TimeSeriesData::SingleTimeSeries(s) => s.element_type,
             TimeSeriesData::NonSequentialTimeSeries(s) => s.element_type,
@@ -745,7 +785,7 @@ impl TimeSeriesData {
 
     /// Declare the logical element type of the wrapped series.
     pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.set_element_type(Some(element_type));
+        self.set_element_type(element_type);
         self
     }
 
@@ -762,7 +802,7 @@ impl TimeSeriesData {
     }
 
     /// Set the element type in place.
-    pub fn set_element_type(&mut self, element_type: Option<ElementType>) {
+    pub fn set_element_type(&mut self, element_type: ElementType) {
         match self {
             TimeSeriesData::SingleTimeSeries(s) => s.element_type = element_type,
             TimeSeriesData::NonSequentialTimeSeries(s) => s.element_type = element_type,
@@ -798,7 +838,7 @@ impl TimeSeriesData {
     /// a reconstructed series in from its catalog row.
     pub fn set_descriptors(
         &mut self,
-        element_type: Option<ElementType>,
+        element_type: ElementType,
         units: Option<String>,
         ext: Option<String>,
     ) {
