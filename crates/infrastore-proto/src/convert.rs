@@ -344,16 +344,17 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 
 /// Encode a [`TimeSeriesData`] into the wire-shape used by `GetResp`.
 ///
+/// The `element_type` comes off the data itself: a read fills it in from the
+/// association row, so the caller needs no second catalog lookup to describe
+/// what the bytes mean.
+///
 /// `GetResp.ext` is left empty on every variant, and that is not an omission:
 /// `ext` belongs to the association row ([`TimeSeriesMetadata::ext`], which
-/// [`metadata_to_pb`] does carry), not to the time-series values, so a
-/// `TimeSeriesData` has no `ext` for this function to forward. A gRPC caller
-/// reads `ext` from `GetMetadata` or `ListTimeSeries`. Pinned by
+/// [`metadata_to_pb`] does carry), so a gRPC caller reads it from `GetMetadata`
+/// or `ListTimeSeries` rather than from the values. Pinned by
 /// `ext_is_always_empty_in_get_resp`; see the proto comment on field 10.
-pub fn time_series_data_to_get_resp(
-    data: &TimeSeriesData,
-    element_type: ElementType,
-) -> pb::GetResp {
+pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
+    let element_type = data.element_type();
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
@@ -799,7 +800,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(
             resp.time_series_type,
             pb::TimeSeriesType::Deterministic as i32
@@ -831,7 +832,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.shape, vec![2u64, 3, 2]);
         assert_eq!(resp.count, 3);
 
@@ -862,7 +863,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Probabilistic(prob);
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(
             resp.time_series_type,
             pb::TimeSeriesType::Probabilistic as i32
@@ -896,7 +897,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Probabilistic(prob);
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.shape, vec![2u64, 3, 4, 5]);
         assert_eq!(resp.percentiles, percentiles);
 
@@ -923,7 +924,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.time_series_type, pb::TimeSeriesType::Scenarios as i32);
         assert_eq!(resp.scenario_count, 4);
         assert_eq!(resp.count, 3);
@@ -953,7 +954,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.shape, vec![2u64, 4, 3, 2]);
         assert_eq!(resp.scenario_count, 2);
 
@@ -980,7 +981,7 @@ mod tests {
         )
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
-        let resp = time_series_data_to_get_resp(&original, ElementType::Scalar(Dtype::I64));
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.element_type, "i64");
 
         let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
@@ -1045,7 +1046,7 @@ mod convert_coverage_tests {
                 data.clone(),
                 "load",
             ));
-            let resp = time_series_data_to_get_resp(&original, ElementType::Scalar(dtype));
+            let resp = time_series_data_to_get_resp(&original);
             assert_eq!(
                 resp.element_type,
                 dtype.as_str(),
@@ -1104,7 +1105,7 @@ mod convert_coverage_tests {
             )
             .unwrap();
             let original = TimeSeriesData::Deterministic(det);
-            let resp = time_series_data_to_get_resp(&original, ElementType::Scalar(dtype));
+            let resp = time_series_data_to_get_resp(&original);
             assert_eq!(resp.element_type, dtype.as_str(), "{dtype:?}");
             let back = get_resp_to_time_series_data(resp, "det".to_string()).unwrap();
             assert_eq!(back, original, "{dtype:?}");
@@ -1120,7 +1121,7 @@ mod convert_coverage_tests {
             data,
             "load",
         ));
-        let mut resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let mut resp = time_series_data_to_get_resp(&original);
         resp.element_type = "float64".into();
         assert!(matches!(
             get_resp_to_time_series_data(resp, "load".to_string()),
@@ -1371,7 +1372,7 @@ mod convert_coverage_tests {
         .unwrap();
         let original = TimeSeriesData::Deterministic(det);
 
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.resolution, "P1M");
         assert_eq!(resp.horizon, "P3M");
         assert_eq!(resp.interval, "P1M");
@@ -1720,7 +1721,7 @@ mod convert_coverage_tests {
                 .unwrap(),
             ),
         ] {
-            let resp = time_series_data_to_get_resp(&original, ElementType::default());
+            let resp = time_series_data_to_get_resp(&original);
             assert_eq!(
                 resp.ext,
                 "",
@@ -1742,7 +1743,7 @@ mod convert_coverage_tests {
             data.clone(),
             "load",
         ));
-        let resp = time_series_data_to_get_resp(&original, ElementType::default());
+        let resp = time_series_data_to_get_resp(&original);
         assert_eq!(resp.value_bytes, data.bytes);
         let back = get_resp_to_time_series_data(resp, "load".to_string()).unwrap();
         // `TypedArray`'s PartialEq compares raw bytes, so this is a bitwise

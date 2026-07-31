@@ -309,8 +309,11 @@ mod tests {
                 path.display()
             )
         });
+        // A Windows checkout with `core.autocrlf` on hands back CRLF for the LF
+        // this test wrote, and that difference says nothing about whether the
+        // corpus is stale — so compare the content, not the line endings.
         assert_eq!(
-            have,
+            have.replace("\r\n", "\n"),
             want,
             "{} is out of date; regenerate with UPDATE_CONFORMANCE_VECTORS=1 \
              cargo test -p infrastore-core conformance",

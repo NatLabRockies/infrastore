@@ -113,13 +113,15 @@ const _AddableTimeSeries = Union{
 
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
-                     features=Dict(), units=ts.units, ext=ts.ext) -> TimeSeriesKey
+                     features=Dict(), element_type=ts.element_type,
+                     units=ts.units, ext=ts.ext) -> TimeSeriesKey
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
 `Deterministic`, `Probabilistic`, or `Scenarios`) and return its
 [`TimeSeriesKey`](@ref). `owner_id` identifies the owning component /
 supplemental attribute (a signed 64-bit integer). The association `name` comes
-from the time series object (`ts.name`), as does its `units` label.
+from the time series object (`ts.name`), as do its `element_type` and `units`
+labels.
 
 A `features` key that shadows a field of a time series or of the key that
 addresses one (`name`, `resolution`, `owner_id`, …) is rejected: those names are
