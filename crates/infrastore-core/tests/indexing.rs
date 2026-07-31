@@ -29,7 +29,6 @@ fn add_single(store: &mut Store, owner: i64, s: SingleTimeSeries) -> TimeSeriesK
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
         )
         .unwrap()
 }
@@ -467,7 +466,6 @@ fn non_sequential_boundary_semantics() {
                         OwnerCategory::Component,
                         TimeSeriesData::NonSequentialTimeSeries(series),
                         Features::new(),
-                        None,
                     )
                     .unwrap()
             }

@@ -32,9 +32,8 @@ fn persistent_round_trip() {
                 42,
                 "Generator",
                 OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(s.clone()),
+                TimeSeriesData::SingleTimeSeries(s.clone()).with_units("MW"),
                 Features::new(),
-                Some("MW".into()),
             )
             .unwrap();
         store.flush().unwrap();
@@ -75,9 +74,8 @@ fn on_disk_persist_copies_and_leaves_the_source_usable() {
             42,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         )
         .unwrap();
 
@@ -100,9 +98,8 @@ fn on_disk_persist_copies_and_leaves_the_source_usable() {
             43,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         )
         .unwrap();
     drop(store);
@@ -141,9 +138,8 @@ fn in_memory_persist_round_trip() {
                 42,
                 "Generator",
                 OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(s),
+                TimeSeriesData::SingleTimeSeries(s).with_units("MW"),
                 Features::new(),
-                Some("MW".into()),
             )
             .unwrap();
         store.persist_to(&path).unwrap();
@@ -184,7 +180,6 @@ fn in_memory_persist_preserves_forecast_window_reads() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2030, 24, 100.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         // H=2, count=3, scalar. Row-major [s, k]; value = k*10 + s.
@@ -205,7 +200,6 @@ fn in_memory_persist_preserves_forecast_window_reads() {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(det),
                 Features::new(),
-                None,
             )
             .unwrap();
         let stamps = vec![t0, t0 + Duration::minutes(7), t0 + Duration::days(3)];
@@ -222,7 +216,6 @@ fn in_memory_persist_preserves_forecast_window_reads() {
                 OwnerCategory::Component,
                 TimeSeriesData::NonSequentialTimeSeries(ns),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.persist_to(&path).unwrap();
@@ -298,7 +291,6 @@ fn compression_policies_round_trip() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
             store.flush().unwrap();
@@ -317,7 +309,6 @@ fn compression_policies_round_trip() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
             store.flush().unwrap();
@@ -359,7 +350,6 @@ fn read_only_open_works_on_write_protected_files() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -390,7 +380,6 @@ fn read_only_open_works_on_write_protected_files() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 24, 200.0)),
                 Features::new(),
-                None,
             )
             .unwrap_err();
         assert!(matches!(err, TimeSeriesError::ReadOnlyStore));
@@ -437,7 +426,6 @@ fn deduplication_persists() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(s.clone()),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
         }
@@ -479,7 +467,6 @@ fn multiple_resolutions_separate_datasets() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(s),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
         }
@@ -515,7 +502,6 @@ fn time_range_slicing_through_disk() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -566,7 +552,6 @@ fn spill_into_new_dataset_past_capacity() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(s),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
         }
@@ -620,9 +605,9 @@ fn bulk_add_session_writes_block_and_round_trips() {
                 (i + 1) as i64,
                 "Generator",
                 OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series(2024, 12, i as f64 * 10.0)),
+                TimeSeriesData::SingleTimeSeries(series(2024, 12, i as f64 * 10.0))
+                    .with_units("MW"),
                 Features::new(),
-                Some("MW".into()),
             );
         }
         // Duplicate the content of series 0 under a new owner.
@@ -630,9 +615,8 @@ fn bulk_add_session_writes_block_and_round_trips() {
             10_000,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(series(2024, 12, 0.0)),
+            TimeSeriesData::SingleTimeSeries(series(2024, 12, 0.0)).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         );
         let keys = bulk.commit().unwrap();
         assert_eq!(keys.len(), n + 1);
@@ -684,7 +668,6 @@ fn bulk_add_dropped_without_commit_writes_nothing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 12, 1.0)),
             Features::new(),
-            None,
         );
         assert_eq!(bulk.len(), 1);
         // Dropped here without commit: nothing should be written.
@@ -720,16 +703,14 @@ fn bulk_read_matches_get_time_series_across_types() {
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(ns),
             Features::new(),
-            None,
         );
         for i in 0..n {
             bulk.add(
                 (i + 1) as i64,
                 "Generator",
                 OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(series(2024, 16, i as f64)),
+                TimeSeriesData::SingleTimeSeries(series(2024, 16, i as f64)).with_units("MW"),
                 Features::new(),
-                Some("MW".into()),
             );
         }
         bulk.commit().unwrap();
@@ -785,7 +766,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s1),
             Features::new(),
-            None,
         )
         .unwrap();
     let _k2 = store
@@ -795,7 +775,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
-            None,
         )
         .unwrap();
     let _k3 = store
@@ -805,7 +784,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s3),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -827,7 +805,6 @@ fn compact_reports_tombstones_and_slot_is_reused() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s4),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -878,7 +855,6 @@ fn disk_roundtrips_multidim_element_tuples() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -930,7 +906,6 @@ fn non_sequential_persistent_round_trip() {
                 OwnerCategory::Component,
                 TimeSeriesData::NonSequentialTimeSeries(series),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -962,7 +937,6 @@ fn opening_a_store_from_an_older_format_is_rejected() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -1003,7 +977,6 @@ fn store_on_disk() -> (tempfile::TempDir, std::path::PathBuf, TimeSeriesKey) {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -1339,7 +1312,6 @@ fn discriminant_columns_are_stored_as_integer_codes() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, 0.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         // A supplemental-attribute owner exercises the other category code.
@@ -1350,7 +1322,6 @@ fn discriminant_columns_are_stored_as_integer_codes() {
                 OwnerCategory::SupplementalAttribute,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store

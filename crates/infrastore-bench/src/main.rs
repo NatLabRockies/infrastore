@@ -194,16 +194,11 @@ fn make_sts_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 owner_id: i as i64,
                 owner_type: "Generator".to_string(),
                 owner_category: OwnerCategory::Component,
-                data: TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
-                    initial,
-                    resolution,
-                    data,
-                    "active_power",
-                )),
+                data: TimeSeriesData::SingleTimeSeries(
+                    SingleTimeSeries::new(initial, resolution, data, "active_power")
+                        .with_units("MW"),
+                ),
                 features: Features::default(),
-                units: Some("MW".to_string()),
-                element_type: None,
-                ext: None,
             }
         })
         .collect()
@@ -229,16 +224,14 @@ fn make_det_requests(count: usize, length: usize) -> Vec<AddRequest> {
                 data,
                 "active_power_forecast",
             )
-            .expect("valid Deterministic shape");
+            .expect("valid Deterministic shape")
+            .with_units("MW");
             AddRequest {
                 owner_id: i as i64,
                 owner_type: "Generator".to_string(),
                 owner_category: OwnerCategory::Component,
                 data: TimeSeriesData::Deterministic(det),
                 features: Features::default(),
-                units: Some("MW".to_string()),
-                element_type: None,
-                ext: None,
             }
         })
         .collect()

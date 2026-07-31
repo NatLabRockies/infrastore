@@ -84,7 +84,6 @@ fn add_forecast(
                         initial, resolution, data, name,
                     )),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
             store
@@ -112,7 +111,6 @@ fn add_forecast(
             OwnerCategory::Component,
             data,
             Features::new(),
-            None,
         )
         .unwrap()
 }
@@ -1107,7 +1105,6 @@ fn deterministic_and_dst_are_mutually_exclusive() {
                 .unwrap(),
             ),
             Features::new(),
-            None,
         )
         .unwrap_err();
     assert!(
@@ -1144,7 +1141,6 @@ fn deterministic_and_dst_are_mutually_exclusive() {
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
     let err = store
@@ -1184,7 +1180,6 @@ fn transform_honors_owner_category_and_resolution_filters() {
                     "load",
                 )),
                 Features::new(),
-                None,
             )
             .unwrap();
     };
@@ -1273,7 +1268,6 @@ fn transform_rejects_horizon_change_at_same_interval() {
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -1380,7 +1374,6 @@ fn monthly_deterministic_round_trips_on_both_backends() {
                     OwnerCategory::Component,
                     TimeSeriesData::Deterministic(monthly_det(initial, 4)),
                     Features::new(),
-                    None,
                 )
                 .unwrap()
         },
@@ -1423,7 +1416,6 @@ fn monthly_deterministic_window_selection_at_calendar_boundaries() {
                     OwnerCategory::Component,
                     TimeSeriesData::Deterministic(monthly_det(initial, 4)),
                     Features::new(),
-                    None,
                 )
                 .unwrap()
         },
@@ -1488,7 +1480,6 @@ fn monthly_deterministic_end_of_month_initial_timestamp() {
             OwnerCategory::Component,
             TimeSeriesData::Deterministic(monthly_det(initial, 3)),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -1531,7 +1522,6 @@ fn transform_single_time_series_on_a_monthly_grid() {
                 "monthly_load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -1599,7 +1589,6 @@ fn forecast_reader_sweeps_a_monthly_grid() {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(monthly_det(initial, 4)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -1667,7 +1656,6 @@ fn monthly_and_fixed_periods_never_over_match() {
                     name,
                 )),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -1738,7 +1726,6 @@ fn non_positive_forecast_periods_are_rejected_through_the_add_path() {
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
     assert!(
@@ -1929,7 +1916,6 @@ fn single_window_transform_stores_the_requested_interval_and_stays_idempotent() 
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -1987,7 +1973,6 @@ fn single_window_transform_at_a_smaller_interval_keeps_it() {
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
     assert_eq!(

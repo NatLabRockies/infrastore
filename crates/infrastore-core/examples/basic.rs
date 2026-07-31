@@ -21,9 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         42,
         "Generator",
         OwnerCategory::Component,
-        TimeSeriesData::SingleTimeSeries(ts),
+        TimeSeriesData::SingleTimeSeries(ts).with_units("MW"),
         Features::new(),
-        Some("MW".into()),
     )?;
 
     let got = store.get_time_series(key.identity(), None)?;

@@ -49,7 +49,6 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -98,9 +97,8 @@ fn add_and_get_round_trip() {
             42,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(s.clone()),
+            TimeSeriesData::SingleTimeSeries(s.clone()).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         )
         .unwrap();
 
@@ -124,7 +122,6 @@ fn duplicate_key_rejected() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -135,7 +132,6 @@ fn duplicate_key_rejected() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
@@ -154,7 +150,6 @@ fn features_disambiguate_keys() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s1.clone()),
             features_with_year(2030),
-            None,
         )
         .unwrap();
     store
@@ -164,7 +159,6 @@ fn features_disambiguate_keys() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s2.clone()),
             features_with_year(2035),
-            None,
         )
         .unwrap();
 
@@ -198,7 +192,6 @@ fn deduplication_via_content_addressing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
     store
@@ -208,7 +201,6 @@ fn deduplication_via_content_addressing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -260,7 +252,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
     let k2 = store
@@ -270,7 +261,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -301,7 +291,6 @@ fn bulk_add_atomic_rollback() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -313,9 +302,6 @@ fn bulk_add_atomic_rollback() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             features: Features::new(),
-            units: None,
-            element_type: None,
-            ext: None,
         },
         AddRequest {
             owner_id: 1,
@@ -323,9 +309,6 @@ fn bulk_add_atomic_rollback() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
             features: Features::new(),
-            units: None,
-            element_type: None,
-            ext: None,
         },
     ];
     let err = store.add_time_series_bulk(bulk).unwrap_err();
@@ -353,7 +336,6 @@ fn time_range_slicing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -382,7 +364,6 @@ fn clear_by_owner() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -417,7 +398,6 @@ fn read_only_blocks_writes() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -432,7 +412,6 @@ fn read_only_blocks_writes() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
         )
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::ReadOnlyStore));
@@ -460,7 +439,6 @@ fn distinct_resolutions_returned_sorted() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -493,9 +471,8 @@ fn non_sequential_round_trip_and_time_slice() {
             7,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::NonSequentialTimeSeries(series),
+            TimeSeriesData::NonSequentialTimeSeries(series).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         )
         .unwrap();
 
@@ -553,7 +530,6 @@ fn duplicate_non_sequential_key_is_rejected() {
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
-            None,
         );
         if values[0] == 1.0 {
             result.unwrap();
@@ -580,7 +556,6 @@ fn list_keys_with_hash_groups_shared_arrays() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -592,7 +567,6 @@ fn list_keys_with_hash_groups_shared_arrays() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -638,7 +612,6 @@ fn copy_time_series_shares_the_array_and_renames() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -671,7 +644,6 @@ fn copy_time_series_preserves_deterministic_single_type() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
             Features::new(),
-            None,
         )
         .unwrap();
     // Derive the DeterministicSingleTimeSeries view over the stored SingleTimeSeries.
@@ -719,7 +691,6 @@ fn copy_time_series_rejects_a_duplicate_destination() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
             Features::new(),
-            None,
         )
         .unwrap();
     let src = only_key(&store, 1);
@@ -760,7 +731,6 @@ fn deleting_one_sharer_leaves_the_others_features_intact() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
                 features.clone(),
-                None,
             )
             .unwrap();
     }
@@ -813,7 +783,6 @@ fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
             features.clone(),
-            None,
         )
         .unwrap();
 
@@ -849,7 +818,6 @@ fn transform_reuses_the_sources_feature_set() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
                 features.clone(),
-                None,
             )
             .unwrap();
     }
@@ -898,7 +866,6 @@ fn static_consistency_is_checked_per_resolution() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
     };

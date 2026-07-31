@@ -93,6 +93,8 @@ struct SingleTimeSeries{T, N}
     ext::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
+    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
+    units::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -104,6 +106,7 @@ function SingleTimeSeries(
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
         initial,
@@ -112,6 +115,7 @@ function SingleTimeSeries(
         String(name),
         _maybe_string(ext),
         _maybe_string(element_type),
+        _maybe_string(units),
     )
 end
 
@@ -127,6 +131,8 @@ struct NonSequentialTimeSeries{T, N}
     ext::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
+    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
+    units::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -138,6 +144,7 @@ function NonSequentialTimeSeries(
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
@@ -150,6 +157,7 @@ function NonSequentialTimeSeries(
         String(name),
         _maybe_string(ext),
         _maybe_string(element_type),
+        _maybe_string(units),
     )
 end
 
@@ -177,6 +185,8 @@ struct Deterministic{T, N}
     ext::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
+    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
+    units::Union{Nothing, String}
 end
 
 function Deterministic(
@@ -189,6 +199,7 @@ function Deterministic(
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
 )
     return Deterministic{eltype(data), ndims(data)}(
         initial,
@@ -200,6 +211,7 @@ function Deterministic(
         String(name),
         _maybe_string(ext),
         _maybe_string(element_type),
+        _maybe_string(units),
     )
 end
 
@@ -218,6 +230,8 @@ struct Probabilistic{T, N}
     ext::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
+    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
+    units::Union{Nothing, String}
 end
 
 function Probabilistic(
@@ -231,6 +245,7 @@ function Probabilistic(
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
 )
     return Probabilistic{eltype(data), ndims(data)}(
         initial,
@@ -243,6 +258,7 @@ function Probabilistic(
         String(name),
         _maybe_string(ext),
         _maybe_string(element_type),
+        _maybe_string(units),
     )
 end
 
@@ -261,6 +277,8 @@ struct Scenarios{T, N}
     ext::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
+    "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
+    units::Union{Nothing, String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -274,6 +292,7 @@ function Scenarios(
     name::AbstractString;
     ext::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=nothing,
 )
     return Scenarios{eltype(data), ndims(data)}(
         initial,
@@ -286,6 +305,7 @@ function Scenarios(
         String(name),
         _maybe_string(ext),
         _maybe_string(element_type),
+        _maybe_string(units),
     )
 end
 

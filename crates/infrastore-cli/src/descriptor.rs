@@ -228,7 +228,10 @@ impl Descriptor {
         let layout = self.csv_layout(&csv_path, ts_type)?;
         let csv = csv_io::read_csv(&csv_path, self.has_header, layout.leading_cols())?;
 
-        let data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
+        let mut data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
+        // The descriptor's `element_type`, `units`, and `ext` describe the
+        // series, so they are set on it rather than on the request.
+        data.set_descriptors(Some(element_type), self.units.clone(), self.ext.clone());
 
         Ok(AddRequest {
             owner_id: self.owner_id,
@@ -236,9 +239,6 @@ impl Descriptor {
             owner_category,
             data,
             features: self.features()?,
-            units: self.units.clone(),
-            element_type: Some(element_type),
-            ext: self.ext.clone(),
         })
     }
 

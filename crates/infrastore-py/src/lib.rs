@@ -1430,19 +1430,15 @@ impl PyStore {
         ext: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
-        let data = extract_time_series_data(time_series)?;
-        let mut request =
-            core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
-                .with_features(features);
-        if let Some(u) = units {
-            request = request.with_units(u);
-        }
+        let mut data = extract_time_series_data(time_series)?;
+        // These describe the series, so they are set on it, not on the request.
+        data.set_units(units);
+        data.set_ext(ext);
         if let Some(et) = element_type {
-            request = request.with_element_type(parse_element_type(&et)?);
+            data.set_element_type(Some(parse_element_type(&et)?));
         }
-        if let Some(lt) = ext {
-            request = request.with_ext(lt);
-        }
+        let request = core_lib::AddRequest::new(owner_id, owner_type, owner_category.into(), data)
+            .with_features(features);
         let key = self.store_mut()?.add(request).map_err(map_err)?;
         Ok(PyTimeSeriesKey {
             inner: key.identity().clone(),
@@ -1494,16 +1490,14 @@ impl PyStore {
                 Some(e) if !e.is_none() => Some(parse_element_type(&e.extract::<String>()?)?),
                 _ => None,
             };
-            let data = extract_time_series_data(&time_series)?;
+            let mut data = extract_time_series_data(&time_series)?;
+            data.set_descriptors(element_type, units, ext);
             requests.push(core_lib::AddRequest {
                 owner_id,
                 owner_type,
                 owner_category: owner_category.into(),
                 data,
                 features,
-                units,
-                element_type,
-                ext,
             });
         }
         let keys = self

@@ -43,7 +43,7 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::SingleTimeSeries;
     features::AbstractDict=Dict{String, Any}(),
-    units::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=ts.units,
     ext::Union{Nothing, AbstractString}=ts.ext,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -79,7 +79,7 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::NonSequentialTimeSeries;
     features::AbstractDict=Dict{String, Any}(),
-    units::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=ts.units,
     ext::Union{Nothing, AbstractString}=ts.ext,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -116,7 +116,7 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::Deterministic;
     features::AbstractDict=Dict{String, Any}(),
-    units::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=ts.units,
     ext::Union{Nothing, AbstractString}=ts.ext,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -147,7 +147,7 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::Scenarios;
     features::AbstractDict=Dict{String, Any}(),
-    units::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=ts.units,
     ext::Union{Nothing, AbstractString}=ts.ext,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -225,7 +225,7 @@ function add_time_series!(
     owner_category::OwnerCategory,
     ts::Probabilistic;
     features::AbstractDict=Dict{String, Any}(),
-    units::Union{Nothing, AbstractString}=nothing,
+    units::Union{Nothing, AbstractString}=ts.units,
     ext::Union{Nothing, AbstractString}=ts.ext,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )

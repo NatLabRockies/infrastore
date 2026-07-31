@@ -116,24 +116,17 @@ pub struct AddRequest {
     pub owner_category: OwnerCategory,
     pub data: TimeSeriesData,
     pub features: Features,
-    pub units: Option<String>,
-    /// What the array's elements mean. `None` means plain scalars of the
-    /// array's own dtype, which is what an ordinary numeric series is; a
-    /// binding storing function data (piecewise curves, cost coefficients)
-    /// sets it so any consumer can decode the rows without private knowledge.
-    pub element_type: Option<ElementType>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never interprets it.
-    pub ext: Option<String>,
 }
 
 impl AddRequest {
-    /// Start a request with empty features, scalar elements, and no units or
-    /// extension payload. Chain [`Self::with_features`], [`Self::with_units`],
-    /// [`Self::with_element_type`], and [`Self::with_ext`] to set the optional
-    /// fields. This is the ergonomic constructor for [`Store::add`] and
-    /// [`BulkAdd::push`]; unlike the wide [`Store::add_time_series`] signature
-    /// it preserves `element_type` and `ext`.
+    /// Start a request with empty features. Chain [`Self::with_features`] to
+    /// set them.
+    ///
+    /// A series' descriptive attributes — `element_type`, `units`, and `ext` —
+    /// live on the [`TimeSeriesData`] itself, not here: they describe the data,
+    /// so they travel with it and come back on a read. Set them with the
+    /// `with_element_type` / `with_units` / `with_ext` builders on the concrete
+    /// series type before wrapping it in a request.
     pub fn new(
         owner_id: i64,
         owner_type: impl Into<String>,
@@ -146,34 +139,12 @@ impl AddRequest {
             owner_category,
             data,
             features: Features::new(),
-            units: None,
-            element_type: None,
-            ext: None,
         }
-    }
-
-    /// Declare the logical element type of the array. Validated on commit
-    /// against the array's dtype and per-step shape.
-    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
-        self.element_type = Some(element_type);
-        self
     }
 
     /// Set the feature set.
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
-        self
-    }
-
-    /// Set the units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
         self
     }
 }
@@ -510,7 +481,6 @@ impl Store {
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-        units: Option<String>,
     ) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![AddRequest {
             owner_id,
@@ -518,16 +488,14 @@ impl Store {
             owner_category,
             data,
             features,
-            units,
-            element_type: None,
-            ext: None,
         }])
         .map(|mut keys| keys.remove(0))
     }
 
-    /// Add one time series from an [`AddRequest`], preserving every field
-    /// including `ext` (which [`Self::add_time_series`] cannot set).
-    /// Routed through the same per-column path as [`Self::add_time_series`].
+    /// Add one time series from an [`AddRequest`]. Equivalent to
+    /// [`Self::add_time_series`] — both preserve the series' `element_type`,
+    /// `units`, and `ext`, since those travel on the [`TimeSeriesData`] itself.
+    /// Routed through the same per-column path.
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![request])
             .map(|mut keys| keys.remove(0))
@@ -969,6 +937,26 @@ impl Store {
         meta: &TimeSeriesMetadata,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
+        // `element_type`, `units`, and `ext` describe the series but live on the
+        // catalog row, not in the array bytes. Filling them in here — once, for
+        // every variant — is what makes a read round-trip what a write declared.
+        let mut data = self.materialize_array(meta, time_range)?;
+        data.set_descriptors(
+            Some(meta.element_type),
+            meta.units.clone(),
+            meta.ext.clone(),
+        );
+        Ok(data)
+    }
+
+    /// The array-reconstruction half of [`Self::materialize_time_series`]: builds
+    /// the variant from the stored bytes and the row's shape/time fields. The
+    /// descriptive attributes are left unset for the caller to fill in.
+    fn materialize_array(
+        &self,
+        meta: &TimeSeriesMetadata,
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
@@ -1031,6 +1019,10 @@ impl Store {
                     length: sliced_length,
                     data,
                     name: meta.name.clone(),
+                    // Filled in by `materialize_time_series`.
+                    element_type: None,
+                    units: None,
+                    ext: None,
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
@@ -1488,6 +1480,11 @@ impl Store {
                     length,
                     data,
                     name: meta.name.clone(),
+                    // This fast path bypasses `materialize_time_series`, so the
+                    // descriptors come straight off the row it already loaded.
+                    element_type: Some(meta.element_type),
+                    units: meta.units.clone(),
+                    ext: meta.ext.clone(),
                 }));
             } else {
                 out.push(self.get_time_series(key, None)?);
@@ -2552,7 +2549,6 @@ impl BulkAdd<'_> {
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-        units: Option<String>,
     ) -> &mut Self {
         self.push(AddRequest {
             owner_id,
@@ -2560,9 +2556,6 @@ impl BulkAdd<'_> {
             owner_category,
             data,
             features,
-            units,
-            element_type: None,
-            ext: None,
         })
     }
 
@@ -2659,11 +2652,11 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     count: None,
                     timestamps: None,
                     features: item.features.clone(),
-                    units: item.units.clone(),
+                    units: item.data.units().map(str::to_owned),
                     percentiles: None,
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
-                    ext: item.ext.clone(),
+                    ext: item.data.ext().map(str::to_owned),
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -2700,11 +2693,11 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     count: None,
                     timestamps: Some(non_sequential.timestamps.clone()),
                     features: item.features.clone(),
-                    units: item.units.clone(),
+                    units: item.data.units().map(str::to_owned),
                     percentiles: None,
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
-                    ext: item.ext.clone(),
+                    ext: item.data.ext().map(str::to_owned),
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -2905,11 +2898,11 @@ fn forecast_metadata(
         count: Some(count),
         timestamps: None,
         features: item.features.clone(),
-        units: item.units.clone(),
+        units: item.data.units().map(str::to_owned),
         percentiles,
         element_type,
         element_shape: data.element_shape().to_vec(),
-        ext: item.ext.clone(),
+        ext: item.data.ext().map(str::to_owned),
     }
 }
 
@@ -2918,7 +2911,7 @@ fn forecast_metadata(
 /// here so the store never persists a row that misdescribes its own bytes.
 fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
     let array = request_array(item);
-    let Some(declared) = item.element_type else {
+    let Some(declared) = item.data.element_type() else {
         return Ok(ElementType::Scalar(array.dtype));
     };
     declared.validate_array(array, item.data.time_series_type().leading_dims())?;

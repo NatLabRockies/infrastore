@@ -3152,3 +3152,125 @@ end
     @test_throws InfraStore.InvalidParameterError commit_transaction!(store)
     @test_throws InfraStore.InvalidParameterError rollback_transaction!(store)
 end
+
+@testset "units is declared on the struct and returned on read" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    hor, ivl, count = Hour(2), Hour(1), 3
+
+    # A units label declared at construction reaches the store without being
+    # passed to add_time_series!, and comes back on the reconstructed struct.
+    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load"; units="MW")
+    k = add_time_series!(store, 1, "Generator", Component, sts)
+    @test get_metadata(store, key_info(k).owner_id, Component, "load"; resolution=res).units ==
+        "MW"
+    @test get_time_series(store, k).units == "MW"
+
+    # It survives a sliced read too (the label describes the values, not the window).
+    @test get_time_series(store, k; time_range=(t0 + Hour(2), t0 + Hour(5))).units == "MW"
+
+    # Omitting it leaves `nothing` end to end -- the user decides whether that
+    # means unknown or dimensionless; the store neither fills it in nor guesses.
+    plain = SingleTimeSeries(t0, res, collect(1.0:8.0), "unitless")
+    @test plain.units === nothing
+    kp = add_time_series!(store, 1, "Generator", Component, plain)
+    @test get_time_series(store, kp).units === nothing
+
+    # Non-sequential.
+    stamps = [t0, t0 + Hour(1), t0 + Hour(4)]
+    ns = NonSequentialTimeSeries(stamps, Float64[1, 2, 3], "events"; units="MWh")
+    kn = add_time_series!(store, 2, "Generator", Component, ns)
+    @test get_time_series(NonSequentialTimeSeries, store, kn).units == "MWh"
+
+    # All three forecast types.
+    det_data = Float64[h * 10 + c for h in 1:2, c in 1:3]
+    kd = add_time_series!(
+        store, 3, "Generator", Component,
+        Deterministic(t0, res, hor, ivl, count, det_data, "fc"; units="MW"),
+    )
+    @test get_time_series(Deterministic, store, kd).units == "MW"
+
+    pcts = [0.1, 0.9]
+    prob_data = Float64[p + h + c for p in 1:2, h in 1:2, c in 1:3]
+    kpr = add_time_series!(
+        store, 4, "Generator", Component,
+        Probabilistic(t0, res, hor, ivl, count, pcts, prob_data, "pf"; units="MW"),
+    )
+    @test get_time_series(Probabilistic, store, kpr).units == "MW"
+
+    scen_data = Float64[s + h + c for s in 1:2, h in 1:2, c in 1:3]
+    ks = add_time_series!(
+        store, 5, "Generator", Component,
+        Scenarios(t0, res, hor, ivl, count, scen_data, "sc"; units="MW"),
+    )
+    @test get_time_series(Scenarios, store, ks).units == "MW"
+
+    # An explicit kwarg still wins over the struct's field: the kwarg is the
+    # lower-level write API and predates the field.
+    over = SingleTimeSeries(t0, res, collect(1.0:8.0), "override"; units="MW")
+    ko = add_time_series!(store, 6, "Generator", Component, over; units="kW")
+    @test get_time_series(store, ko).units == "kW"
+
+    # units is not identity: two series differing only in their label collide.
+    a = SingleTimeSeries(t0, res, collect(1.0:8.0), "dup"; units="MW")
+    b = SingleTimeSeries(t0, res, collect(1.0:8.0), "dup"; units="kW")
+    add_time_series!(store, 7, "Generator", Component, a)
+    @test_throws InfraStore.DuplicateTimeSeriesError add_time_series!(
+        store, 7, "Generator", Component, b
+    )
+
+    # ...and it cannot be smuggled in as a feature.
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 8, "Generator", Component,
+        SingleTimeSeries(t0, res, collect(1.0:8.0), "feat");
+        features=Dict("units" => "MW"),
+    )
+end
+
+@testset "bulk reads carry the same descriptors as per-key reads" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    hor, ivl, count = Hour(2), Hour(1), 3
+
+    ks = TimeSeriesKey[]
+    push!(
+        ks,
+        add_time_series!(store, 1, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(1.0:8.0), "load"; units="MW", ext="Profile"),
+        ),
+    )
+    push!(
+        ks,
+        add_time_series!(store, 2, "Generator", Component,
+            NonSequentialTimeSeries([t0, t0 + Hour(1), t0 + Hour(4)], Float64[1, 2, 3],
+                "events"; units="MWh", ext="Events")),
+    )
+    push!(
+        ks,
+        add_time_series!(store, 3, "Generator", Component,
+            Deterministic(t0, res, hor, ivl, count,
+                Float64[h * 10 + c for h in 1:2, c in 1:3], "fc"; units="MW", ext="Fc")),
+    )
+
+    # A bulk read and a per-key read of the same series must agree on every
+    # descriptive attribute -- they describe the values, not the access path.
+    bulk = bulk_read(store, ks)
+    for (k, b) in zip(ks, bulk)
+        single = get_time_series(key_info(k).time_series_type, store, k)
+        @test b.units == single.units
+        @test b.ext == single.ext
+        @test b.element_type == single.element_type
+    end
+    @test bulk[1].units == "MW" && bulk[1].ext == "Profile"
+    @test bulk[2].units == "MWh" && bulk[2].ext == "Events"
+    @test bulk[3].units == "MW" && bulk[3].ext == "Fc"
+
+    # Unset stays unset through the bulk path too.
+    kp = add_time_series!(store, 4, "Generator", Component,
+        SingleTimeSeries(t0, res, collect(1.0:8.0), "bare"))
+    b = only(bulk_read(store, [kp]))
+    @test b.units === nothing
+    @test b.ext === nothing
+end

@@ -57,11 +57,11 @@ fn store_add_preserves_ext() {
                 1,
                 "Generator",
                 OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
+                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
+                    .with_units("MW")
+                    .with_ext("QuadraticFunctionData"),
             )
-            .with_features(features.clone())
-            .with_units("MW")
-            .with_ext("QuadraticFunctionData"),
+            .with_features(features.clone()),
         )
         .unwrap();
 
@@ -76,24 +76,18 @@ fn bulk_push_preserves_ext() {
     let mut store = create_store(None, true).unwrap();
     let keys = {
         let mut bulk = store.bulk_add();
-        bulk.push(
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(sts("a", 1.0, 4)),
-            )
-            .with_ext("TypeA"),
-        );
-        bulk.push(
-            AddRequest::new(
-                2,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(sts("b", 2.0, 4)),
-            )
-            .with_ext("TypeB"),
-        );
+        bulk.push(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("a", 1.0, 4)).with_ext("TypeA"),
+        ));
+        bulk.push(AddRequest::new(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("b", 2.0, 4)).with_ext("TypeB"),
+        ));
         bulk.commit().unwrap()
     };
     assert_eq!(keys.len(), 2);
@@ -159,7 +153,6 @@ fn write_paths_reject_reserved_feature_names() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
                     reserved_features(name),
-                    None,
                 )
                 .unwrap_err(),
             name,
@@ -340,16 +333,14 @@ fn period_serializes_as_iso8601_string() {
 fn metadata_and_data_json_round_trip() {
     let mut store = create_store(None, true).unwrap();
     let key = store
-        .add(
-            AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)),
-            )
-            .with_units("MW")
-            .with_ext("QuadraticFunctionData"),
-        )
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
+                .with_units("MW")
+                .with_ext("QuadraticFunctionData"),
+        ))
         .unwrap();
 
     let meta = store.get_metadata(key.identity()).unwrap();
@@ -1251,4 +1242,86 @@ fn a_read_only_store_rejects_every_write_entry_point() {
     // Reads still work, and nothing changed.
     assert!(store.get_time_series(key.identity(), None).is_ok());
     assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+}
+
+/// The descriptive attributes — `element_type`, `units`, `ext` — live on the
+/// series, not on the request, so a read hands back what a write declared.
+/// Exercised against both backends, so a persist/reopen cycle is covered too.
+#[test]
+fn series_descriptors_round_trip_on_the_struct() {
+    for_each_backend_mut(
+        |store| {
+            let labeled = store
+                .add(AddRequest::new(
+                    1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
+                        .with_units("MW")
+                        .with_ext("Profile"),
+                ))
+                .unwrap();
+            let bare = store
+                .add(AddRequest::new(
+                    2,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::SingleTimeSeries(sts("bare", 1.0, 4)),
+                ))
+                .unwrap();
+            (labeled, bare)
+        },
+        |store, (labeled, bare), backend| {
+            // The catalog row records them...
+            let meta = store.get_metadata(labeled.identity()).unwrap();
+            assert_eq!(meta.units.as_deref(), Some("MW"), "{backend}");
+            assert_eq!(meta.ext.as_deref(), Some("Profile"), "{backend}");
+
+            // ...and a read puts them back on the series itself.
+            let data = store.get_time_series(labeled.identity(), None).unwrap();
+            assert_eq!(data.units(), Some("MW"), "{backend}");
+            assert_eq!(data.ext(), Some("Profile"), "{backend}");
+            assert_eq!(data.element_type(), Some(meta.element_type), "{backend}");
+
+            // A slice is the same values over a shorter window, so it keeps them.
+            let sliced = store
+                .get_time_series(labeled.identity(), Some((t0(), t0() + Duration::hours(2))))
+                .unwrap();
+            assert_eq!(sliced.units(), Some("MW"), "{backend}");
+            assert_eq!(sliced.ext(), Some("Profile"), "{backend}");
+
+            // A bulk read takes the packed fast path, which builds its own
+            // struct; it must agree with the per-key read rather than drop them.
+            let ids = [labeled.identity()];
+            let bulk = store.bulk_read(&ids).unwrap();
+            assert_eq!(bulk[0].units(), Some("MW"), "{backend}");
+            assert_eq!(bulk[0].ext(), Some("Profile"), "{backend}");
+
+            // Unset stays unset -- the store never invents a label.
+            let plain = store.get_time_series(bare.identity(), None).unwrap();
+            assert_eq!(plain.units(), None, "{backend}");
+            assert_eq!(plain.ext(), None, "{backend}");
+        },
+    );
+}
+
+/// Forecast types carry the same attributes through the same path.
+#[test]
+fn forecast_descriptors_round_trip_on_the_struct() {
+    for_each_backend_mut(
+        |store| {
+            store
+                .add(AddRequest::new(
+                    1,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::Deterministic(det("fc", 1.0)).with_units("MW"),
+                ))
+                .unwrap()
+        },
+        |store, key, backend| {
+            let data = store.get_time_series(key.identity(), None).unwrap();
+            assert_eq!(data.units(), Some("MW"), "{backend}");
+        },
+    );
 }

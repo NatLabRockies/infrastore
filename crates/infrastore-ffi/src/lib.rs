@@ -480,15 +480,16 @@ unsafe fn build_single_request(
         unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
 
+    let mut data = core_lib::TimeSeriesData::SingleTimeSeries(single);
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(Some(element_type), units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
-        data: core_lib::TimeSeriesData::SingleTimeSeries(single),
+        data,
         features,
-        units,
-        element_type: Some(element_type),
-        ext,
     })
 }
 
@@ -629,15 +630,16 @@ unsafe fn build_non_sequential_request(
     let features = unsafe { parse_features_json(features_json) }?;
     let units = unsafe { cstr_to_optional_string(units) }?;
     let ext = unsafe { cstr_to_optional_string(ext) }?;
+    let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(Some(element_type), units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
-        data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
+        data,
         features,
-        units,
-        element_type: Some(element_type),
-        ext,
     })
 }
 
@@ -743,13 +745,19 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// read the returned bytes as domain values; `out_dtype` is only their physical
 /// width.
 ///
+/// `out_units`, when non-null, receives the association's units label: null when
+/// the series carries none, otherwise an owned C string freed the same way.
+/// Unlike `element_type` this is a user-declared label the store never
+/// interprets; it is returned so a caller can hand it back on the reconstructed
+/// series.
+///
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_ext` and `out_element_type` must be valid for writing its indicated value; those two may
-/// be null. The returned shape and data buffers must each be released exactly once with the
-/// matching free function and returned length, and a non-null `*out_ext` / `*out_element_type`
-/// exactly once with `infrastore_string_free`.
+/// `out_ext`, `out_element_type`, and `out_units` must be valid for writing its indicated value;
+/// those three may be null. The returned shape and data buffers must each be released exactly once
+/// with the matching free function and returned length, and a non-null `*out_ext` /
+/// `*out_element_type` / `*out_units` exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_single(
@@ -767,6 +775,7 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     out_data_byte_len: *mut u64,
     out_ext: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -839,6 +848,14 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     } else {
         owned_cstr(&meta.element_type.to_string())
     };
+    // The units label likewise lives on the metadata row, not on the series.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
@@ -865,6 +882,9 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         if !out_element_type.is_null() {
             *out_element_type = element_type_cstr;
         }
+        if !out_units.is_null() {
+            *out_units = units_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -884,6 +904,10 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 /// `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
 /// string the caller must free with `infrastore_string_free`. It is what says how to read the
 /// bytes as domain values.
+///
+/// `out_units`, when non-null, receives the association's user-declared units label as an owned C
+/// string freed the same way; it is null when the series carries none. The store never interprets
+/// it.
 ///
 /// The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
 /// with `infrastore_buffer_free_i64`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8` respectively.
@@ -912,6 +936,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     ext_cap: u64,
     out_ext_len: *mut u64,
     out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
@@ -961,6 +986,14 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     } else {
         owned_cstr(&meta.element_type.to_string())
     };
+    // The units label likewise lives on the metadata row, not on the series.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let mut timestamps = match series
         .timestamps
         .iter()
@@ -999,6 +1032,9 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         write_str_out(&ext, out_ext, ext_cap, out_ext_len);
         if !out_element_type.is_null() {
             *out_element_type = element_type_cstr;
+        }
+        if !out_units.is_null() {
+            *out_units = units_cstr;
         }
     }
     INFRASTORE_OK
@@ -2574,15 +2610,16 @@ unsafe fn build_forecast_request(
         }
     };
 
+    let mut data = data;
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(Some(element_type), units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
         data,
         features,
-        units,
-        element_type: Some(element_type),
-        ext,
     })
 }
 
@@ -2735,15 +2772,16 @@ unsafe fn build_probabilistic_request(
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
         }
     };
+    let mut data = core_lib::TimeSeriesData::Probabilistic(prob);
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(Some(element_type), units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
-        data: core_lib::TimeSeriesData::Probabilistic(prob),
+        data,
         features,
-        units,
-        element_type: Some(element_type),
-        ext,
     })
 }
 
@@ -3200,6 +3238,41 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
     INFRASTORE_OK
 }
 
+/// Write a series' descriptive attributes (`ext`, `element_type`, `units`) into
+/// three optional out-params.
+///
+/// Each pointer may be null to skip that attribute. A non-null target receives
+/// either null (the attribute is unset on this series) or an owned C string the
+/// caller must free exactly once with `infrastore_string_free`.
+///
+/// The three live on the series itself, so a bulk-read result carries them just
+/// as a per-key read does — the two paths must not disagree.
+///
+/// # Safety
+///
+/// Each non-null pointer must be valid for writing one pointer.
+unsafe fn emit_descriptors(
+    ext: Option<&str>,
+    element_type: Option<core_lib::ElementType>,
+    units: Option<&str>,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
+) {
+    unsafe {
+        if !out_ext.is_null() {
+            *out_ext = ext.map_or(std::ptr::null_mut(), owned_cstr);
+        }
+        if !out_element_type.is_null() {
+            *out_element_type =
+                element_type.map_or(std::ptr::null_mut(), |et| owned_cstr(&et.to_string()));
+        }
+        if !out_units.is_null() {
+            *out_units = units.map_or(std::ptr::null_mut(), owned_cstr);
+        }
+    }
+}
+
 /// The number of series held by a bulk-read result handle, or `-1` if `result`
 /// is null.
 ///
@@ -3222,11 +3295,19 @@ pub unsafe extern "C" fn infrastore_bulk_result_len(
 /// `infrastore_string_free`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8`. The handle
 /// is not consumed, so an element may be read more than once.
 ///
+/// `out_ext`, `out_element_type`, and `out_units` each receive an owned C string
+/// (null when that attribute is unset), freed with `infrastore_string_free`. Any
+/// of the three may be null to skip it. They carry the same values a per-key
+/// read returns: the attributes live on the series, so both paths agree.
+///
 /// # Safety
 ///
 /// `result` must be a live handle from `infrastore_store_bulk_read_single` and `index`
-/// must be less than its length. Every output pointer must be valid for writing
-/// its indicated value.
+/// must be less than its length. Every output pointer except `out_ext`,
+/// `out_element_type`, and `out_units` must be valid for writing its indicated
+/// value; those three may be null, and a non-null `*out_ext` /
+/// `*out_element_type` / `*out_units` must be freed exactly once with
+/// `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_bulk_result_get_single(
@@ -3239,6 +3320,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3299,6 +3383,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_len;
+        emit_descriptors(
+            single.ext.as_deref(),
+            single.element_type,
+            single.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        );
     }
     INFRASTORE_OK
 }
@@ -3418,6 +3510,10 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_type(
 /// fetch it per-key with `infrastore_store_get_metadata` if needed). The caller owns the
 /// `out_timestamps`, `out_shape`, and `out_data` buffers.
 ///
+///
+/// `out_ext`, `out_element_type`, and `out_units` behave as in
+/// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
+/// them nullable to skip, freed with `infrastore_string_free`.
 /// # Safety
 ///
 /// `result` must be a live bulk-read handle and `index` less than its length.
@@ -3435,6 +3531,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3501,6 +3600,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
+        emit_descriptors(
+            series.ext.as_deref(),
+            series.element_type,
+            series.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        );
     }
     INFRASTORE_OK
 }
@@ -3511,6 +3618,10 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
 /// non-null only for `Probabilistic`). The caller owns the `out_dims`,
 /// `out_data`, and `out_percentiles` buffers.
 ///
+///
+/// `out_ext`, `out_element_type`, and `out_units` behave as in
+/// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
+/// them nullable to skip, freed with `infrastore_string_free`.
 /// # Safety
 ///
 /// `result` must be a live bulk-read handle and `index` less than its length.
@@ -3534,6 +3645,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     out_data_byte_len: *mut u64,
     out_percentiles: *mut *mut f64,
     out_percentiles_len: *mut u64,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3578,7 +3692,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    unsafe {
+    // Captured before `data` is moved into the emitter; written only on success
+    // so a failed emit does not hand back strings the caller never frees.
+    let (ext, element_type, units) = (
+        data.ext().map(str::to_owned),
+        data.element_type(),
+        data.units().map(str::to_owned),
+    );
+    let code = unsafe {
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
@@ -3595,7 +3716,20 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             out_percentiles,
             out_percentiles_len,
         )
+    };
+    if code == INFRASTORE_OK {
+        unsafe {
+            emit_descriptors(
+                ext.as_deref(),
+                element_type,
+                units.as_deref(),
+                out_ext,
+                out_element_type,
+                out_units,
+            )
+        };
     }
+    code
 }
 
 /// Free a bulk-read result handle created by `infrastore_store_bulk_read_single` or
@@ -3733,6 +3867,8 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 /// - `out_element_type` follows the same rules and receives the canonical
 ///   `element_type` string, which is how a caller reads the returned bytes as
 ///   domain values (`out_dtype` gives only their physical width).
+/// - `out_units` follows the same rules and receives the association's
+///   user-declared units label (null when unset). The store never interprets it.
 /// - All returned heap buffers are invalidated after their matching free call
 ///   and must not be used afterwards.
 #[unsafe(no_mangle)]
@@ -3776,6 +3912,9 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     // optional: the canonical `element_type` string (owned C string, freed the
     // same way).
     out_element_type: *mut *mut c_char,
+    // optional: the user-declared units label (owned C string, freed the same
+    // way; null when the series carries none).
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -3876,6 +4015,14 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     } else {
         owned_cstr(&meta.element_type.to_string())
     };
+    // The units label likewise comes off that row.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
@@ -3902,9 +4049,12 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         if !out_element_type.is_null() {
             unsafe { *out_element_type = element_type_cstr };
         }
+        if !out_units.is_null() {
+            unsafe { *out_units = units_cstr };
+        }
     } else {
         // Don't leak the metadata strings when the emit fails after the fetch.
-        for owned in [ext_cstr, element_type_cstr] {
+        for owned in [ext_cstr, element_type_cstr, units_cstr] {
             if !owned.is_null() {
                 unsafe { drop(std::ffi::CString::from_raw(owned)) };
             }
@@ -4096,6 +4246,8 @@ unsafe fn emit_forecast_data(
 /// - `out_element_type` follows the same rules and receives the canonical
 ///   `element_type` string, which is how a caller reads the returned bytes as
 ///   domain values (`out_dtype` gives only their physical width).
+/// - `out_units` follows the same rules and receives the association's
+///   user-declared units label (null when unset). The store never interprets it.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
@@ -4127,6 +4279,9 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     // optional: the canonical `element_type` string (owned C string, freed the
     // same way).
     out_element_type: *mut *mut c_char,
+    // optional: the user-declared units label (owned C string, freed the same
+    // way; null when the series carries none).
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -4202,6 +4357,14 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     } else {
         owned_cstr(&meta.element_type.to_string())
     };
+    // The units label likewise comes off that row.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
@@ -4228,9 +4391,12 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
         if !out_element_type.is_null() {
             unsafe { *out_element_type = element_type_cstr };
         }
+        if !out_units.is_null() {
+            unsafe { *out_units = units_cstr };
+        }
     } else {
         // Don't leak the metadata strings when the emit fails after the fetch.
-        for owned in [ext_cstr, element_type_cstr] {
+        for owned in [ext_cstr, element_type_cstr, units_cstr] {
             if !owned.is_null() {
                 unsafe { drop(std::ffi::CString::from_raw(owned)) };
             }
@@ -7289,7 +7455,6 @@ mod reader_ffi_tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -7412,7 +7577,6 @@ mod reader_ffi_tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(det),
                 Default::default(),
-                None,
             )
             .unwrap();
         let handle = InfraStoreHandle { inner: store };
@@ -7538,7 +7702,6 @@ mod reader_ffi_tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
         let handle = InfraStoreHandle { inner: store };
@@ -7583,6 +7746,7 @@ mod reader_ffi_tests {
                     &mut shape_len,
                     &mut data_ptr,
                     &mut data_len,
+                    ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
@@ -7877,6 +8041,7 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
             )
@@ -8404,6 +8569,7 @@ mod abi_tests {
                 &mut data_len,
                 ptr::null_mut(),
                 ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_NOT_FOUND);
@@ -8771,7 +8937,6 @@ mod abi_tests {
                 core_lib::OwnerCategory::Component,
                 core_lib::TimeSeriesData::Deterministic(det),
                 Default::default(),
-                None,
             )
             .unwrap();
     }

@@ -45,7 +45,6 @@ fn add(store: &mut Store, owner: i64, base: f64) -> TimeSeriesKey {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(base)),
             Features::new(),
-            None,
         )
         .unwrap()
 }
@@ -250,7 +249,6 @@ fn rollback_undoes_several_bulk_commits() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(series((chunk * 4 + i) as f64 * 10.0)),
                     Features::new(),
-                    None,
                 );
             }
             bulk.commit().unwrap();
@@ -316,7 +314,6 @@ fn a_failed_operation_does_not_abort_the_transaction() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(0.0)),
             Features::new(),
-            None,
         );
         assert!(dup.is_err(), "{backend}");
 

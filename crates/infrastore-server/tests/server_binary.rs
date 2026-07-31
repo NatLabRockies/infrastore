@@ -54,7 +54,6 @@ fn write_store(dir: &Path) -> PathBuf {
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
     store.flush().unwrap();

@@ -50,9 +50,8 @@ fn fixture_store() -> Store {
             42,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(s),
+            TimeSeriesData::SingleTimeSeries(s).with_units("MW"),
             features,
-            Some("MW".into()),
         )
         .unwrap();
     let s2 = series(2024, 24, 5.0);
@@ -63,7 +62,6 @@ fn fixture_store() -> Store {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
-            None,
         )
         .unwrap();
     store
@@ -202,7 +200,6 @@ async fn non_sequential_round_trip_over_grpc() {
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -244,7 +241,6 @@ async fn dtype_preserved_over_grpc() {
                 initial, resolution, data, "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -286,20 +282,18 @@ async fn element_type_preserved_over_grpc() {
         ],
     );
     store
-        .add(
-            infrastore_core::AddRequest::new(
-                1,
-                "Generator",
-                OwnerCategory::Component,
-                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
-                    initial,
-                    resolution_hour(),
-                    data,
-                    "cost",
-                )),
-            )
+        .add(infrastore_core::AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution_hour(),
+                data,
+                "cost",
+            ))
             .with_element_type(ElementType::PiecewiseLinear),
-        )
+        ))
         .unwrap();
 
     let addr = spawn_server(store).await;

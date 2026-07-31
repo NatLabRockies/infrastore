@@ -471,6 +471,11 @@ pub fn get_resp_to_time_series_data(
                 length: resp.length as usize,
                 data,
                 name,
+                // The gRPC response carries no catalog row, so the descriptive
+                // attributes are unset here.
+                element_type: None,
+                units: None,
+                ext: None,
             }))
         }
         pb::TimeSeriesType::NonSequentialTimeSeries => {

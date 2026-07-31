@@ -40,7 +40,6 @@ fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesKey {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(sts_series()),
             Features::new(),
-            None,
         )
         .unwrap()
 }
@@ -170,7 +169,6 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
                     "load",
                 )),
                 Features::new(),
-                None,
             )
             .unwrap();
         let timestamps = vec![
@@ -188,7 +186,6 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
                     NonSequentialTimeSeries::new(timestamps, ns_data.clone(), "avail").unwrap(),
                 ),
                 Features::new(),
-                None,
             )
             .unwrap();
 
@@ -293,7 +290,6 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(series),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
             hashes.push(store.get_metadata(key.identity()).unwrap().data_hash);
@@ -348,7 +344,6 @@ fn locate_array_names_the_standalone_dataset_of_an_irregular_series() {
                 OwnerCategory::Component,
                 TimeSeriesData::NonSequentialTimeSeries(ns),
                 Features::new(),
-                None,
             )
             .unwrap();
         let hash = store.get_metadata(key.identity()).unwrap().data_hash;
@@ -378,7 +373,6 @@ fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(sts_series()),
             Features::new(),
-            None,
         )
         .unwrap();
     let hash = store.get_metadata(key.identity()).unwrap().data_hash;

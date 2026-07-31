@@ -969,7 +969,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1229,7 +1228,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(det),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1597,7 +1595,6 @@ mod tests {
                         OwnerCategory::Component,
                         TimeSeriesData::SingleTimeSeries(ts),
                         Default::default(),
-                        None,
                     )
                     .unwrap();
                 owner += 1;
@@ -1684,7 +1681,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Probabilistic(prob),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1720,7 +1716,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Scenarios(scen),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1863,7 +1858,6 @@ mod tests {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(ts),
                     Default::default(),
-                    None,
                 )
                 .unwrap();
         }
@@ -1922,7 +1916,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
 
@@ -2006,7 +1999,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(two_hour),
                 Default::default(),
-                None,
             )
             .unwrap();
 
