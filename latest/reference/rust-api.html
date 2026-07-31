@@ -461,6 +461,9 @@ changes how data is read back — see the <a href="../explanation/storage-model.
     ) -&gt; Result&lt;usize&gt;;
     pub fn count_parent_child_associations(&amp;self, filter: &amp;ParentChildFilter) -&gt; Result&lt;i64&gt;;
 
+    // Reclaims both halves. On an on-disk store this rewrites the .h5 file from
+    // the catalog's live set and replaces it, so a delete actually shrinks the
+    // store; assumes this process is the file's only user.
     pub fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
     pub fn verify_integrity(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     pub fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
@@ -1324,10 +1327,12 @@ pub struct ForecastSummaryRow {
     pub window_count: Option&lt;i64&gt;,
     pub count: i64,
 }
-pub struct CompactionReport {
+pub struct CompactionReport {   // on-disk compaction rewrites the .h5; see the file-format reference
     pub slots_reclaimed: usize,
     pub datasets_dropped: usize,
     pub feature_sets_reclaimed: usize,
+    pub timestamp_sets_reclaimed: usize,
+    pub bytes_reclaimed: u64,   // how much smaller the file got; 0 for an in-memory store
 }
 pub struct IntegrityReport { pub errors: Vec&lt;String&gt; }  // .ok() == errors.is_empty()
 pub struct ForecastParameters {
@@ -1398,7 +1403,8 @@ crate root — import it (and the backends) from the <code>storage</code> module
     fn get_slice(&amp;self, hash: &amp;[u8; 32], range: Range&lt;usize&gt;) -&gt; Result&lt;TypedArray&gt;;
     fn remove_array(&amp;mut self, hash: &amp;[u8; 32]) -&gt; Result&lt;()&gt;;   // no-op if absent
     fn contains(&amp;self, hash: &amp;[u8; 32]) -&gt; Result&lt;bool&gt;;
-    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
+    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;   // in-memory path only; `Store::compact`
+                                                        // rewrites the file for an on-disk store
     fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
 

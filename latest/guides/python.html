@@ -328,8 +328,10 @@ store.clear_time_series()                                  # remove everything
 # Reassign every series from one owner to another; returns the number moved.
 moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
-report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
-                                   #  "feature_sets_reclaimed": ...}
+report = store.compact()            # rewrites the .h5 from the live set; keys include
+                                   #  "slots_reclaimed", "datasets_dropped",
+                                   #  "feature_sets_reclaimed", "timestamp_sets_reclaimed",
+                                   #  "bytes_reclaimed"
 integrity = store.verify_integrity()   # {"ok": True, "errors": []} when arrays are intact
                                    # (arrays only — the SQLite catalog is not checked)
 </code></pre>

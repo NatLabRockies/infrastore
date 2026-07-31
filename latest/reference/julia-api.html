@@ -191,19 +191,19 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <pre><code class="language-julia">using InfraStore
 </code></pre>
 <p>Exported names (types first, then functions):</p>
-<p><code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>Component</code>, <code>CompressionSettings</code>,
-<code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>, <code>ForecastParameters</code>,
-<code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>, <code>KeyRow</code>,
-<code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>, <code>Scenarios</code>,
-<code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>, <code>Store</code>,
-<code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>, <code>SupplementalAttributeSummaryRow</code>,
-<code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>, <code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>,
-<code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>, <code>add_parent_child_association!</code>,
-<code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
-<code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
-<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>,
-<code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>, <code>count_array_references</code>,
-<code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
+<p><code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>CompactionReport</code>, <code>Component</code>,
+<code>CompressionSettings</code>, <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>,
+<code>ForecastParameters</code>, <code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>,
+<code>KeyRow</code>, <code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>,
+<code>Scenarios</code>, <code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>,
+<code>Store</code>, <code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>,
+<code>SupplementalAttributeSummaryRow</code>, <code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>,
+<code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>, <code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>,
+<code>add_parent_child_association!</code>, <code>add_parent_child_associations!</code>,
+<code>add_supplemental_attribute_association!</code>, <code>add_supplemental_attribute_associations!</code>,
+<code>add_time_series!</code>, <code>add_time_series_bulk!</code>, <code>build_forecast_reader</code>, <code>build_static_reader</code>,
+<code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
+<code>count_array_references</code>, <code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
 <code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
 <code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
 <code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
@@ -384,6 +384,7 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code></td></tr>
 <tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code></td></tr>
 <tr><td><code>CompressionSettings</code></td><td><code>get_compression</code></td><td><code>compression</code> (<code>:deflate</code> / <code>:none</code>), <code>level</code>, <code>shuffle</code></td></tr>
+<tr><td><code>CompactionReport</code></td><td><code>compact!</code></td><td><code>slots_reclaimed</code>, <code>datasets_dropped</code>, <code>feature_sets_reclaimed</code>, <code>timestamp_sets_reclaimed</code>, <code>bytes_reclaimed</code></td></tr>
 </tbody></table>
 </div>
 <p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
@@ -747,7 +748,8 @@ check_static_consistency(store; resolution=nothing) -&gt; Vector{StaticGrid}  # 
 get_resolutions(store; time_series_type=nothing) -&gt; Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
-compact!(store) -&gt; Nothing
+compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
+                                      # .h5 file from the live set and replaces it (single writer)
 flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.

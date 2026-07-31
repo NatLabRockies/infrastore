@@ -354,17 +354,23 @@ for backup or archival; afterward both <code>system.h5</code> and <code>system.h
 without closing the handle. The two files must always be kept together — neither is usable alone.</p>
 <h2 id="compaction"><a class="header" href="#compaction">Compaction</a></h2>
 <p><code>compact()</code> reclaims space in both halves of the artifact, and the two halves behave differently.</p>
-<p><strong>On the array side, compaction reports rather than reclaims.</strong> Deleting a series frees its column
-slot but does not shrink the HDF5 dataset. The freed slot is transparently reused by the next
-compatible write (<code>first_free</code>), and a deleted standalone dataset lingers as dead space. <code>compact()</code>
-reports how many slots are reclaimable (<code>slots_reclaimed</code>); v0 does not physically shrink datasets
-or drop dead ones, because HDF5 cannot reclaim the space in place — that is a follow-up.</p>
-<p><strong>On the catalog side, compaction physically deletes.</strong> Because feature sets are shared, deleting an
-association cannot cascade into them: removing the last association that referenced a set leaves it
-unreachable, mirroring the HDF5 side's unreachable standalone variables. <code>compact()</code> sweeps those
-rows and reports the count as <code>feature_sets_reclaimed</code> — the one thing compaction actually removes.
-(Clearing the whole store is the exception that needs no sweep: it orphans every set by
-construction, so it drops them all outright.)</p>
+<p><strong>On the array side, compaction rewrites the file.</strong> Deleting a series frees its column slot (reused
+transparently by the next compatible write, via <code>first_free</code>) or unlinks its standalone dataset, but
+HDF5 cannot hand either back to the filesystem in place, so neither shrinks the <code>.h5</code>. Compaction
+therefore materializes every array the catalog still references into a fresh sibling file and
+renames it over the original, reopening the store on the result. What does not survive the trip:
+freed slots, datasets nothing references, and the slack in packed pools sized for growth rather than
+for the cohort actually stored. The report says how much went — <code>slots_reclaimed</code>,
+<code>datasets_dropped</code>, and <code>bytes_reclaimed</code> (how much smaller the file got).</p>
+<p>Because the file is replaced, compaction assumes the compacting process is its only user. That is
+the store's single-writer model in general; the difference is that here a concurrent reader on Unix
+silently keeps reading the pre-compaction file, and on Windows the rename fails outright.</p>
+<p><strong>On the catalog side, compaction sweeps.</strong> Because feature sets are shared, deleting an association
+cannot cascade into them: removing the last association that referenced a set leaves it unreachable.
+<code>compact()</code> deletes those rows and reports the count as <code>feature_sets_reclaimed</code> (and
+<code>timestamp_sets_reclaimed</code> for timestamp vectors), before the rewrite, so the rewrite's liveness
+scan sees the swept catalog. (Clearing the whole store is the exception that needs no sweep: it
+orphans every set by construction, so it drops them all outright.)</p>
 <p>See <a href="../reference/rust-api.html#store"><code>compact</code></a>.</p>
 
                     </main>

@@ -299,10 +299,12 @@ instead accepts unreachable rows and sweeps them in bulk. Concretely:</p>
 <li><strong>No foreign key, no <code>ON DELETE CASCADE</code>.</strong> A cascade would be actively wrong: rows are shared, so
 deleting one association must not delete a set another association still uses.</li>
 <li><strong>Deleting the last user leaves the row unreachable</strong>, rather than deleting it — the same
-end-state as the HDF5 side's dead standalone variables, which also linger.</li>
+end-state as the HDF5 side's freed packed slots and unlinked datasets, whose space also lingers
+until a compaction.</li>
 <li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set and every timestamp vector no
 association references any more, reporting the row counts as <code>feature_sets_reclaimed</code> and
-<code>timestamp_sets_reclaimed</code>. These are the only things compaction physically removes.</li>
+<code>timestamp_sets_reclaimed</code>. On an on-disk store the same call then rewrites the <code>.h5</code> file, so the
+array side is reclaimed too.</li>
 <li><strong>Clearing the whole store drops them all outright</strong>, since a cleared store orphans every row by
 construction and may never see a compaction.</li>
 </ul>
@@ -363,10 +365,10 @@ store — zero time series, every array still present and now unreachable — ve
 <p>This is a deliberate scope rather than an oversight: the array side is where silent bit-level
 corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
 checks — <code>check_static_consistency</code> for per-resolution grid agreement, and <code>compact</code> for the
-unreachable arrays and feature sets a delete leaves behind (an expected state, documented in the
-<a href="../reference/file-format.html">file format</a>, not corruption). SQLite also enforces a good deal
-itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique indexes that guarantee identity
-uniqueness.</p>
+unreachable arrays and feature sets a delete leaves behind, which it reclaims and reports (an
+expected state, documented in the <a href="../reference/file-format.html">file format</a>, not corruption).
+SQLite also enforces a good deal itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique
+indexes that guarantee identity uniqueness.</p>
 <p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the <a href="../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
 <code>.h5</code> and its <code>.sqlite</code> together.</p>

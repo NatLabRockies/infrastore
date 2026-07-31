@@ -1195,17 +1195,23 @@ for backup or archival; afterward both <code>system.h5</code> and <code>system.h
 without closing the handle. The two files must always be kept together — neither is usable alone.</p>
 <h2 id="compaction"><a class="header" href="#compaction">Compaction</a></h2>
 <p><code>compact()</code> reclaims space in both halves of the artifact, and the two halves behave differently.</p>
-<p><strong>On the array side, compaction reports rather than reclaims.</strong> Deleting a series frees its column
-slot but does not shrink the HDF5 dataset. The freed slot is transparently reused by the next
-compatible write (<code>first_free</code>), and a deleted standalone dataset lingers as dead space. <code>compact()</code>
-reports how many slots are reclaimable (<code>slots_reclaimed</code>); v0 does not physically shrink datasets
-or drop dead ones, because HDF5 cannot reclaim the space in place — that is a follow-up.</p>
-<p><strong>On the catalog side, compaction physically deletes.</strong> Because feature sets are shared, deleting an
-association cannot cascade into them: removing the last association that referenced a set leaves it
-unreachable, mirroring the HDF5 side's unreachable standalone variables. <code>compact()</code> sweeps those
-rows and reports the count as <code>feature_sets_reclaimed</code> — the one thing compaction actually removes.
-(Clearing the whole store is the exception that needs no sweep: it orphans every set by
-construction, so it drops them all outright.)</p>
+<p><strong>On the array side, compaction rewrites the file.</strong> Deleting a series frees its column slot (reused
+transparently by the next compatible write, via <code>first_free</code>) or unlinks its standalone dataset, but
+HDF5 cannot hand either back to the filesystem in place, so neither shrinks the <code>.h5</code>. Compaction
+therefore materializes every array the catalog still references into a fresh sibling file and
+renames it over the original, reopening the store on the result. What does not survive the trip:
+freed slots, datasets nothing references, and the slack in packed pools sized for growth rather than
+for the cohort actually stored. The report says how much went — <code>slots_reclaimed</code>,
+<code>datasets_dropped</code>, and <code>bytes_reclaimed</code> (how much smaller the file got).</p>
+<p>Because the file is replaced, compaction assumes the compacting process is its only user. That is
+the store's single-writer model in general; the difference is that here a concurrent reader on Unix
+silently keeps reading the pre-compaction file, and on Windows the rename fails outright.</p>
+<p><strong>On the catalog side, compaction sweeps.</strong> Because feature sets are shared, deleting an association
+cannot cascade into them: removing the last association that referenced a set leaves it unreachable.
+<code>compact()</code> deletes those rows and reports the count as <code>feature_sets_reclaimed</code> (and
+<code>timestamp_sets_reclaimed</code> for timestamp vectors), before the rewrite, so the rewrite's liveness
+scan sees the swept catalog. (Clearing the whole store is the exception that needs no sweep: it
+orphans every set by construction, so it drops them all outright.)</p>
 <p>See <a href="explanation/../reference/rust-api.html#store"><code>compact</code></a>.</p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="content-addressing"><a class="header" href="#content-addressing">Content Addressing</a></h1>
 <p>Every array is identified by the SHA-256 hash of its contents, not by a name or an ID. Two series
@@ -1322,10 +1328,12 @@ instead accepts unreachable rows and sweeps them in bulk. Concretely:</p>
 <li><strong>No foreign key, no <code>ON DELETE CASCADE</code>.</strong> A cascade would be actively wrong: rows are shared, so
 deleting one association must not delete a set another association still uses.</li>
 <li><strong>Deleting the last user leaves the row unreachable</strong>, rather than deleting it — the same
-end-state as the HDF5 side's dead standalone variables, which also linger.</li>
+end-state as the HDF5 side's freed packed slots and unlinked datasets, whose space also lingers
+until a compaction.</li>
 <li><strong><code>Store::compact</code> sweeps them.</strong> It deletes every feature set and every timestamp vector no
 association references any more, reporting the row counts as <code>feature_sets_reclaimed</code> and
-<code>timestamp_sets_reclaimed</code>. These are the only things compaction physically removes.</li>
+<code>timestamp_sets_reclaimed</code>. On an on-disk store the same call then rewrites the <code>.h5</code> file, so the
+array side is reclaimed too.</li>
 <li><strong>Clearing the whole store drops them all outright</strong>, since a cleared store orphans every row by
 construction and may never see a compaction.</li>
 </ul>
@@ -1386,10 +1394,10 @@ store — zero time series, every array still present and now unreachable — ve
 <p>This is a deliberate scope rather than an oversight: the array side is where silent bit-level
 corruption happens, and it is the half no other call examines. The catalog has its own purpose-built
 checks — <code>check_static_consistency</code> for per-resolution grid agreement, and <code>compact</code> for the
-unreachable arrays and feature sets a delete leaves behind (an expected state, documented in the
-<a href="explanation/../reference/file-format.html">file format</a>, not corruption). SQLite also enforces a good deal
-itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique indexes that guarantee identity
-uniqueness.</p>
+unreachable arrays and feature sets a delete leaves behind, which it reclaims and reports (an
+expected state, documented in the <a href="explanation/../reference/file-format.html">file format</a>, not corruption).
+SQLite also enforces a good deal itself: the <code>NOT NULL</code> and <code>CHECK</code> constraints, and the two unique
+indexes that guarantee identity uniqueness.</p>
 <p>If you need end-to-end assurance that a copied or restored store is intact, the operational rule in
 the <a href="explanation/../reference/file-format.html">file format</a> is the one that matters: move, copy, and delete the
 <code>.h5</code> and its <code>.sqlite</code> together.</p>
@@ -2095,8 +2103,10 @@ store.clear_time_series()                                  # remove everything
 # Reassign every series from one owner to another; returns the number moved.
 moved = store.replace_owner(42, 43, OwnerCategory.Component)
 
-report = store.compact()            # {"slots_reclaimed": ..., "datasets_dropped": ...,
-                                   #  "feature_sets_reclaimed": ...}
+report = store.compact()            # rewrites the .h5 from the live set; keys include
+                                   #  "slots_reclaimed", "datasets_dropped",
+                                   #  "feature_sets_reclaimed", "timestamp_sets_reclaimed",
+                                   #  "bytes_reclaimed"
 integrity = store.verify_integrity()   # {"ok": True, "errors": []} when arrays are intact
                                    # (arrays only — the SQLite catalog is not checked)
 </code></pre>
@@ -2456,7 +2466,9 @@ end
 <h2 id="store-wide-operations"><a class="header" href="#store-wide-operations">Store-Wide Operations</a></h2>
 <pre><code class="language-julia">counts = get_counts(store)        # TimeSeriesCounts: components_with_time_series, static_time_series, forecasts
 nerr   = verify_integrity(store)  # 0 == arrays intact (catalog not checked)
-compact!(store)
+report = compact!(store)          # CompactionReport; rewrites the .h5 from the live set, so a
+                                  # delete actually shrinks the file. Nothing else may have the
+                                  # store open while it runs.
 </code></pre>
 <h2 id="associations-2"><a class="header" href="#associations-2">Associations</a></h2>
 <p>Two catalog tables record relationships between entities the store does not otherwise model, wholly
@@ -3411,15 +3423,35 @@ regardless of the filter, so stores written with different settings stay mutuall
 <li><strong>Packed:</strong> deletion zero-fills both the column's hash row and the column's data, so no stale
 values are readable through a reused slot. The slot becomes reusable by the next compatible write.
 The dataset does not shrink.</li>
-<li><strong>Standalone:</strong> deletion drops the array from the in-memory index; the HDF5 dataset lingers as
-dead space (HDF5 cannot reclaim the space in place).</li>
-<li><code>compact()</code> reports reclaimable slots but does not physically resize datasets or remove dead
-standalone datasets in this release (HDF5 cannot reclaim the space in place).</li>
+<li><strong>Standalone:</strong> deletion unlinks the HDF5 dataset. The object is unreachable immediately and stays
+gone across a reopen, but the space it occupied is not returned to the filesystem until a
+compaction (HDF5 cannot reclaim space in place). Re-adding the same content therefore rewrites the
+dataset rather than re-indexing it.</li>
 <li><strong>Feature sets and timestamp vectors:</strong> because both are shared, deleting an association never
 deletes either; removing the last association that referenced one leaves it unreachable.
 <code>compact()</code> deletes unreachable rows and reports the counts as <code>feature_sets_reclaimed</code> and
-<code>timestamp_sets_reclaimed</code>. These are the only things compaction physically removes.</li>
+<code>timestamp_sets_reclaimed</code>.</li>
 </ul>
+<p><code>compact()</code> on an on-disk store <strong>rewrites the <code>.h5</code> file</strong>, because that is the only way HDF5 gives
+the freed space back:</p>
+<ol>
+<li>The catalog is swept of unreachable feature sets and timestamp vectors, then read for the live
+set — the catalog, not the file, is what makes an array live.</li>
+<li>Every live array is written into a fresh file at <code>&lt;store&gt;.h5.repack</code>, sibling to the original so
+the two share a filesystem. Layouts are planned from scratch: packed pools are created at exactly
+their cohort width rather than the growth-sized width an incremental write reserves.</li>
+<li>The store's HDF5 handle is closed, the temp file is renamed over the original, and the store
+reopens on the result. A crash before the rename leaves the original untouched plus a stray
+<code>.repack</code> file, which the next compaction deletes.</li>
+</ol>
+<p>What the new file therefore lacks: freed packed slots, unreferenced datasets (an interrupted bulk
+add's leftovers, or tombstones left by a store written before deletion unlinked), and the slack in
+over-wide packed pools. The <code>.sqlite</code> half is not touched — arrays are content-addressed, so a
+different physical layout is invisible to it — and <code>data_format_version</code> is unchanged, because the
+rewrite emits the same format.</p>
+<p>Compaction assumes the process running it is the file's only user. On Unix another process holding
+the file open keeps reading the pre-compaction inode; on Windows its lock makes the rename fail, and
+the error surfaces with the compacting store still open on the original file.</p>
 <h2 id="sqlite-schema"><a class="header" href="#sqlite-schema">SQLite Schema</a></h2>
 <p>The catalog database is created with <code>PRAGMA foreign_keys = ON</code> and the following DDL (idempotent —
 <code>CREATE TABLE IF NOT EXISTS</code>).</p>
@@ -4083,6 +4115,9 @@ changes how data is read back — see the <a href="reference/../explanation/stor
     ) -&gt; Result&lt;usize&gt;;
     pub fn count_parent_child_associations(&amp;self, filter: &amp;ParentChildFilter) -&gt; Result&lt;i64&gt;;
 
+    // Reclaims both halves. On an on-disk store this rewrites the .h5 file from
+    // the catalog's live set and replaces it, so a delete actually shrinks the
+    // store; assumes this process is the file's only user.
     pub fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
     pub fn verify_integrity(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     pub fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
@@ -4946,10 +4981,12 @@ pub struct ForecastSummaryRow {
     pub window_count: Option&lt;i64&gt;,
     pub count: i64,
 }
-pub struct CompactionReport {
+pub struct CompactionReport {   // on-disk compaction rewrites the .h5; see the file-format reference
     pub slots_reclaimed: usize,
     pub datasets_dropped: usize,
     pub feature_sets_reclaimed: usize,
+    pub timestamp_sets_reclaimed: usize,
+    pub bytes_reclaimed: u64,   // how much smaller the file got; 0 for an in-memory store
 }
 pub struct IntegrityReport { pub errors: Vec&lt;String&gt; }  // .ok() == errors.is_empty()
 pub struct ForecastParameters {
@@ -5020,7 +5057,8 @@ crate root — import it (and the backends) from the <code>storage</code> module
     fn get_slice(&amp;self, hash: &amp;[u8; 32], range: Range&lt;usize&gt;) -&gt; Result&lt;TypedArray&gt;;
     fn remove_array(&amp;mut self, hash: &amp;[u8; 32]) -&gt; Result&lt;()&gt;;   // no-op if absent
     fn contains(&amp;self, hash: &amp;[u8; 32]) -&gt; Result&lt;bool&gt;;
-    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;
+    fn compact(&amp;mut self) -&gt; Result&lt;CompactionReport&gt;;   // in-memory path only; `Store::compact`
+                                                        // rewrites the file for an on-disk store
     fn verify(&amp;self) -&gt; Result&lt;IntegrityReport&gt;;
     fn flush(&amp;mut self) -&gt; Result&lt;()&gt;;
 
@@ -5283,9 +5321,11 @@ matching that grid.</li>
 <li><strong><code>get_compression</code></strong> returns <code>{"compression": "deflate" | "none", "level": int, "shuffle": bool}</code>
 — the policy the store was created with (restored from the file on open; <code>"none"</code> for in-memory).</li>
 <li><strong><code>compact</code></strong> returns
-<code>{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed": int}</code>.
+<code>{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed": int, "timestamp_sets_reclaimed": int, "bytes_reclaimed": int}</code>.
 <code>feature_sets_reclaimed</code> counts content-addressed feature rows that no association referenced any
-more; see the <a href="reference/file-format.html#feature_sets">file format</a>.</li>
+more; see the <a href="reference/file-format.html#feature_sets">file format</a>. On an on-disk store the call rewrites
+the <code>.h5</code> file from the live set and replaces it, which is what makes <code>bytes_reclaimed</code> nonzero —
+nothing else may have the store open while it runs.</li>
 <li><strong><code>verify_integrity</code></strong> returns <code>{"ok": bool, "errors": list[str]}</code>; <code>ok</code> is <code>True</code> when the error
 list is empty. It checks stored arrays against their recorded hashes and does not inspect the
 SQLite catalog, so <code>ok</code> is not a statement about the store as a whole — see
@@ -5729,19 +5769,19 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <pre><code class="language-julia">using InfraStore
 </code></pre>
 <p>Exported names (types first, then functions):</p>
-<p><code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>Component</code>, <code>CompressionSettings</code>,
-<code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>, <code>ForecastParameters</code>,
-<code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>, <code>KeyRow</code>,
-<code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>, <code>Scenarios</code>,
-<code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>, <code>Store</code>,
-<code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>, <code>SupplementalAttributeSummaryRow</code>,
-<code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>, <code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>,
-<code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>, <code>add_parent_child_association!</code>,
-<code>add_parent_child_associations!</code>, <code>add_supplemental_attribute_association!</code>,
-<code>add_supplemental_attribute_associations!</code>, <code>add_time_series!</code>, <code>add_time_series_bulk!</code>,
-<code>build_forecast_reader</code>, <code>build_static_reader</code>, <code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>,
-<code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>, <code>count_array_references</code>,
-<code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
+<p><code>AddBatch</code>, <code>ArrayGroupRow</code>, <code>ArrayReferenceCounts</code>, <code>CompactionReport</code>, <code>Component</code>,
+<code>CompressionSettings</code>, <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>, <code>ForecastEntry</code>,
+<code>ForecastParameters</code>, <code>ForecastReader</code>, <code>ForecastSummaryRow</code>, <code>ForecastTimeline</code>, <code>KeyInfo</code>,
+<code>KeyRow</code>, <code>NonSequentialTimeSeries</code>, <code>OwnerCategory</code>, <code>ParentChildAssociation</code>, <code>Probabilistic</code>,
+<code>Scenarios</code>, <code>SingleTimeSeries</code>, <code>StaticGrid</code>, <code>StaticGroup</code>, <code>StaticReader</code>, <code>StaticSummaryRow</code>,
+<code>Store</code>, <code>SupplementalAttribute</code>, <code>SupplementalAttributeAssociation</code>,
+<code>SupplementalAttributeSummaryRow</code>, <code>SupplementalAttributeTypeCount</code>, <code>TimeSeriesCounts</code>,
+<code>TimeSeriesCountsDetailed</code>, <code>TimeSeriesKey</code>, <code>TimeSeriesMetadata</code>, <code>TimeSeriesTypeCount</code>,
+<code>add_parent_child_association!</code>, <code>add_parent_child_associations!</code>,
+<code>add_supplemental_attribute_association!</code>, <code>add_supplemental_attribute_associations!</code>,
+<code>add_time_series!</code>, <code>add_time_series_bulk!</code>, <code>build_forecast_reader</code>, <code>build_static_reader</code>,
+<code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
+<code>count_array_references</code>, <code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
 <code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
 <code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
 <code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
@@ -5922,6 +5962,7 @@ than absent, so no field is silently dropped by the addressing path taken.</p>
 <tr><td><code>StaticGrid</code></td><td><code>static_grid</code>, <code>check_static_consistency</code></td><td><code>initial_timestamp</code>, <code>resolution</code> (<code>nothing</code> for an irregular reader), <code>length</code></td></tr>
 <tr><td><code>ForecastTimeline</code></td><td><code>forecast_timeline</code></td><td><code>initial_timestamp</code>, <code>resolution</code>, <code>interval</code>, <code>count</code></td></tr>
 <tr><td><code>CompressionSettings</code></td><td><code>get_compression</code></td><td><code>compression</code> (<code>:deflate</code> / <code>:none</code>), <code>level</code>, <code>shuffle</code></td></tr>
+<tr><td><code>CompactionReport</code></td><td><code>compact!</code></td><td><code>slots_reclaimed</code>, <code>datasets_dropped</code>, <code>feature_sets_reclaimed</code>, <code>timestamp_sets_reclaimed</code>, <code>bytes_reclaimed</code></td></tr>
 </tbody></table>
 </div>
 <p><code>StaticGrid</code> is shared by <code>static_grid</code> (a reader's timeline) and <code>check_static_consistency</code> (one
@@ -6285,7 +6326,8 @@ check_static_consistency(store; resolution=nothing) -&gt; Vector{StaticGrid}  # 
 get_resolutions(store; time_series_type=nothing) -&gt; Vector{Period}  # distinct resolutions, in the core's stored (lexical-by-ISO) order
 get_compression(store) -&gt; CompressionSettings  # compression=:deflate|:none, level, shuffle; restored from file on open
 verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
-compact!(store) -&gt; Nothing
+compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
+                                      # .h5 file from the live set and replaces it (single writer)
 flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
@@ -7111,7 +7153,11 @@ int32_t infrastore_store_get_resolutions(const struct InfraStore *handle,
 int32_t infrastore_store_get_compression(const struct InfraStore *handle, uint8_t *out_kind,
                                  uint8_t *out_level, bool *out_shuffle);
 int32_t infrastore_store_verify(const struct InfraStore *handle, uint64_t *out_error_count);
-int32_t infrastore_store_compact(struct InfraStore *handle);
+/* Compacts and returns the report as a JSON object {slots_reclaimed, datasets_dropped,
+   feature_sets_reclaimed, timestamp_sets_reclaimed, bytes_reclaimed}. Owned allocation:
+   free with infrastore_string_free. On an on-disk store this rewrites the .h5 file and
+   replaces it, so the call must run exactly once (no probe-then-fetch). */
+int32_t infrastore_store_compact(struct InfraStore *handle, char **out_json, uint64_t *out_len);
 int32_t infrastore_store_flush(struct InfraStore *handle);
 /* Cross-operation transactions. Adds, removals, and transforms between a begin and
    its matching commit either all take effect or none do; removals are reversible
@@ -7729,7 +7775,7 @@ namespaces to type.</p>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>verify</code></td><td>Verify store integrity; nonzero exit if errors are present.</td></tr>
 <tr><td><code>check-consistency</code></td><td>Verify the per-resolution static grid (<code>--resolution</code>).</td></tr>
-<tr><td><code>compact</code></td><td>Reclaim reusable space (prompts unless <code>--force</code>); print the report.</td></tr>
+<tr><td><code>compact</code></td><td>Rewrite the <code>.h5</code> to reclaim space (prompts unless <code>--force</code>); print the report.</td></tr>
 <tr><td><code>persist</code></td><td>Write the store to a new HDF5 + SQLite artifact (<code>--dest</code>).</td></tr>
 </tbody></table>
 </div>
