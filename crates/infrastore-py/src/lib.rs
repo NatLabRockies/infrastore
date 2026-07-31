@@ -1918,6 +1918,15 @@ impl PyStore {
         Ok(d)
     }
 
+    /// Reclaim space in both halves of the store, returning a dict
+    /// `{"slots_reclaimed": int, "datasets_dropped": int,
+    /// "feature_sets_reclaimed": int, "timestamp_sets_reclaimed": int,
+    /// "bytes_reclaimed": int}`.
+    ///
+    /// For an on-disk store this rewrites the HDF5 file from the catalog's live
+    /// set and swaps the rewrite over the original — HDF5 cannot hand freed
+    /// space back in place, so this is what makes a delete actually shrink the
+    /// store. Assumes this process is the store's only user.
     fn compact<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let r = self.store_mut()?.compact().map_err(map_err)?;
         let d = PyDict::new(py);
@@ -1925,6 +1934,7 @@ impl PyStore {
         d.set_item("datasets_dropped", r.datasets_dropped)?;
         d.set_item("feature_sets_reclaimed", r.feature_sets_reclaimed)?;
         d.set_item("timestamp_sets_reclaimed", r.timestamp_sets_reclaimed)?;
+        d.set_item("bytes_reclaimed", r.bytes_reclaimed)?;
         Ok(d)
     }
 

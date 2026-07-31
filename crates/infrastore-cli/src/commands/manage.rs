@@ -308,15 +308,16 @@ pub fn persist(store_path: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// `compact`: reclaim reusable space; print the compaction report. Confirms
-/// first when interactive (it rewrites store internals); `--force` bypasses.
+/// `compact`: reclaim space; print the compaction report. Confirms first when
+/// interactive — this rewrites the HDF5 file in place of the original, so it
+/// must not run while anything else has the store open. `--force` bypasses.
 pub fn compact(
     store_path: &Path,
     force: bool,
     format: crate::output::Format,
 ) -> Result<(), String> {
     if !force && std::io::stdin().is_terminal() {
-        print!("Compact the store (rewrites internal bookkeeping)? [y/N] ");
+        print!("Compact the store? This rewrites the .h5 file and replaces it. [y/N] ");
         std::io::stdout().flush().ok();
         let mut answer = String::new();
         std::io::stdin()
@@ -337,6 +338,7 @@ pub fn compact(
             "datasets_dropped": report.datasets_dropped,
             "feature_sets_reclaimed": report.feature_sets_reclaimed,
             "timestamp_sets_reclaimed": report.timestamp_sets_reclaimed,
+            "bytes_reclaimed": report.bytes_reclaimed,
         }))?,
         _ => {
             let headers = vec!["Metric".to_string(), "Value".to_string()];
@@ -356,6 +358,10 @@ pub fn compact(
                 vec![
                     "timestamp_sets_reclaimed".to_string(),
                     report.timestamp_sets_reclaimed.to_string(),
+                ],
+                vec![
+                    "bytes_reclaimed".to_string(),
+                    report.bytes_reclaimed.to_string(),
                 ],
             ];
             if format == crate::output::Format::Csv {

@@ -319,7 +319,11 @@ enum Commands {
         #[arg(long)]
         dest: PathBuf,
     },
-    /// Reclaim reusable space; print the compaction report.
+    /// Reclaim space; print the compaction report.
+    ///
+    /// Rewrites the `.h5` file from the live set and replaces the original, so
+    /// deleted data actually leaves the file. Nothing else may have the store
+    /// open while this runs.
     Compact {
         /// Skip the interactive confirmation prompt.
         #[arg(long)]

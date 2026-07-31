@@ -78,12 +78,12 @@ namespaces to type.
 
 ### Integrity & maintenance
 
-| Command             | Purpose                                                              |
-| ------------------- | -------------------------------------------------------------------- |
-| `verify`            | Verify store integrity; nonzero exit if errors are present.          |
-| `check-consistency` | Verify the per-resolution static grid (`--resolution`).              |
-| `compact`           | Reclaim reusable space (prompts unless `--force`); print the report. |
-| `persist`           | Write the store to a new HDF5 + SQLite artifact (`--dest`).          |
+| Command             | Purpose                                                                          |
+| ------------------- | -------------------------------------------------------------------------------- |
+| `verify`            | Verify store integrity; nonzero exit if errors are present.                      |
+| `check-consistency` | Verify the per-resolution static grid (`--resolution`).                          |
+| `compact`           | Rewrite the `.h5` to reclaim space (prompts unless `--force`); print the report. |
+| `persist`           | Write the store to a new HDF5 + SQLite artifact (`--dest`).                      |
 
 ### Scaffolding
 

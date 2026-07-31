@@ -2407,6 +2407,77 @@ end
     end
 end
 
+@testset "compact! returns a report and rewrites the file" begin
+    mktempdir() do dir
+        path = joinpath(dir, "compact.h5")
+        t0 = DateTime(2024, 1, 1)
+        store = Store(in_memory=false, path=path)
+        add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "keep"),
+        )
+        # Big enough that dropping it moves the file size past HDF5's own noise.
+        horizon, count = 48, 400
+        add_time_series!(
+            store,
+            2,
+            "Generator",
+            Component,
+            Deterministic(
+                t0,
+                Hour(1),
+                Hour(horizon),
+                Hour(1),
+                count,
+                reshape(collect(Float64, 1:(horizon * count)), horizon, count),
+                "drop",
+            ),
+        )
+        flush!(store)
+        drop_key = only(get_time_series_keys(store, 2, Component))
+        remove_time_series!(store, drop_key)
+        flush!(store)
+
+        before = filesize(path)
+        report = compact!(store)
+        after = filesize(path)
+
+        @test report isa CompactionReport
+        @test report.bytes_reclaimed == before - after > 0
+        @test report.slots_reclaimed >= 0
+        # The result struct gets the shared value semantics and labelled show.
+        @test report == CompactionReport(
+            report.slots_reclaimed,
+            report.datasets_dropped,
+            report.feature_sets_reclaimed,
+            report.timestamp_sets_reclaimed,
+            report.bytes_reclaimed,
+        )
+        @test occursin("bytes_reclaimed=", sprint(show, report))
+
+        # The survivor is intact and the store is still usable across the swap.
+        @test get_time_series(SingleTimeSeries, store, 1, Component, "keep").data ==
+            Float64[1, 2, 3, 4]
+        @test verify_integrity(store) == 0
+        close!(store)
+    end
+
+    # An in-memory store has no file to rewrite.
+    store = Store(in_memory=true)
+    add_time_series!(
+        store,
+        1,
+        "Generator",
+        Component,
+        SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), Float64[1, 2], "load"),
+    )
+    @test compact!(store).bytes_reclaimed == 0
+    close!(store)
+end
+
 @testset "an embedded NUL in a name is rejected at the wrapper level" begin
     # PIN: Julia's `Cstring` conversion refuses a String containing a NUL, so the
     # call throws `ArgumentError` before any bytes reach the FFI. The C ABI would

@@ -48,7 +48,7 @@ use super::common::{
     dataset_base_name, element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols,
     spill_name, standalone_chunks,
 };
-use super::{ArrayLocation, CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, StorageBackend};
 
 /// Root attribute naming the backend that wrote the file; `Store::open` checks
 /// it (absent on stores written by the removed netcdf backend, which are
@@ -423,6 +423,38 @@ impl Hdf5Backend {
 
     pub fn compression(&self) -> Compression {
         self.inner.lock().expect("mutex poisoned").compression
+    }
+
+    /// Pre-create a packed pool wide enough for up to `cols` columns, returning
+    /// the width it actually got (the per-chunk byte budget caps it, so a large
+    /// request may need several calls).
+    ///
+    /// A pool created on demand by the single-array write path is sized for
+    /// growth — it reserves [`DEFAULT_COLS_PER_DATASET`](super::common::DEFAULT_COLS_PER_DATASET)
+    /// columns, and its hash companion costs 64 bytes per column whether or not
+    /// the slot is ever filled. A caller that knows the whole cohort up front
+    /// (rewriting a store: [`crate::Store::compact`] and
+    /// [`crate::Store::persist_to`]) uses this to size each pool exactly, the
+    /// same bet the bulk-add path makes. Otherwise a rewrite of a
+    /// bulk-written store would *grow* the file.
+    pub(crate) fn reserve_pack_group(
+        &mut self,
+        dtype: Dtype,
+        element_shape: &[usize],
+        length: usize,
+        group: PackGroup,
+        cols: usize,
+    ) -> Result<usize> {
+        let inner = self.inner.get_mut().expect("mutex poisoned");
+        let key = (dtype, element_shape.to_vec(), length, group);
+        let spill_count = inner.dataset_groups.get(&key).map_or(0, Vec::len);
+        let base = dataset_base_name(dtype, element_shape, length, group);
+        let name = spill_name(&base, spill_count);
+        inner.create_packed_dataset(&name, dtype, element_shape, length, group, Some(cols))?;
+        Ok(inner
+            .datasets
+            .get(&name)
+            .map_or(0, |state| state.columns.len()))
     }
 
     #[tracing::instrument(skip(self))]
@@ -1236,26 +1268,57 @@ impl StorageBackend for Hdf5Backend {
             None => return Ok(()),
         };
         match loc {
-            // Standalone: drop from the index; the dataset lingers as a
-            // tombstone until compact (HDF5 cannot reclaim the space in place, and
-            // keeping re-adds of the same content a pure re-index).
-            Location::Standalone { .. } => Ok(()),
-            // Packed: drop the column from the index and clear its hash
-            // companion so a reopen does not re-index it. The column's bytes
-            // stay in place as a tombstone until compact, exactly like a
-            // standalone dataset — zeroing them here would cost a whole-chunk
-            // read-modify-write per removal for no reachability change.
+            // Standalone: unlink the dataset outright. HDF5 does not return the
+            // freed space to the filesystem — the file only shrinks when
+            // `Store::compact` repacks it — but the object becomes unreachable
+            // immediately and stays that way across a reopen (`rebuild_index`
+            // re-indexes by scanning links, so a lingering dataset would be
+            // resurrected as live). Re-adding the same content therefore
+            // rewrites the dataset instead of being a pure re-index; that is
+            // the accepted cost of making removal real.
+            Location::Standalone { var } => {
+                // Drop any cached handle first: it keeps the object alive past
+                // the unlink and would serve stale reads.
+                inner.handles.borrow_mut().remove(&var);
+                inner.standalone_vars.remove(&var);
+                let single = inner.single()?;
+                single.unlink(&var).map_err(map_h5)
+            }
+            // Packed: drop the column from the index, clear its hash companion
+            // so a reopen does not re-index it, and zero the column's data so
+            // no stale values are readable through the slot once it is reused.
+            // Costs a read-modify-write of the touched chunks; removal is not a
+            // hot path.
             Location::Packed { dataset, col } => {
-                let hash_name = {
+                let (hash_name, dtype, element_shape, length) = {
                     let state = inner.datasets.get_mut(&dataset).ok_or_else(|| {
                         TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
                     })?;
                     if col < state.columns.len() {
                         state.columns[col] = None;
                     }
-                    state.hash_name.clone()
+                    (
+                        state.hash_name.clone(),
+                        state.dtype,
+                        state.element_shape.clone(),
+                        state.length,
+                    )
                 };
-                inner.write_hash_row(&hash_name, col, None)
+                inner.write_hash_row(&hash_name, col, None)?;
+                if length > 0 {
+                    let ds = inner.dataset(&dataset)?;
+                    let mut slice_shape = vec![length, 1];
+                    slice_shape.extend_from_slice(&element_shape);
+                    let zeros = vec![0u8; slice_shape.iter().product::<usize>() * dtype.size()];
+                    write_sel(
+                        &ds,
+                        dtype,
+                        &zeros,
+                        &slice_shape,
+                        packed_ranges(0..length, col, &element_shape),
+                    )?;
+                }
+                Ok(())
             }
         }
     }
@@ -1281,19 +1344,33 @@ impl StorageBackend for Hdf5Backend {
         )
     }
 
+    /// Reports what a compaction would reclaim without touching the file.
+    ///
+    /// `Store::compact` does not call this for an on-disk store: reclaiming
+    /// space here means rewriting the file from the catalog's live set, which
+    /// the backend cannot see. It stays as the honest "nothing was reclaimed in
+    /// place" answer for any other caller.
     fn compact(&mut self) -> Result<CompactionReport> {
-        let inner = self.inner.lock().expect("mutex poisoned");
-        let reclaimed = inner
-            .datasets
-            .values()
-            .map(|s| s.columns.iter().filter(|c| c.is_none()).count())
-            .sum();
+        let stats = self.stats();
         Ok(CompactionReport {
-            slots_reclaimed: reclaimed,
+            slots_reclaimed: stats.free_packed_slots,
             datasets_dropped: 0,
             feature_sets_reclaimed: 0,
             timestamp_sets_reclaimed: 0,
+            bytes_reclaimed: 0,
         })
+    }
+
+    fn stats(&self) -> BackendStats {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        BackendStats {
+            free_packed_slots: inner
+                .datasets
+                .values()
+                .map(|s| s.columns.iter().filter(|c| c.is_none()).count())
+                .sum(),
+            data_datasets: inner.datasets.len() + inner.standalone_vars.len(),
+        }
     }
 
     fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
@@ -1642,7 +1719,17 @@ mod tests {
             be.get_array(&ha, Dtype::F64),
             Err(TimeSeriesError::NotFound)
         ));
-        // Re-adding reuses the freed packed slot / tombstoned standalone var.
+        // The standalone dataset is unlinked outright, so it is gone from the
+        // file rather than lingering as a tombstone.
+        {
+            let inner = be.inner.lock().unwrap();
+            let names = inner.single().unwrap().member_names().unwrap();
+            assert!(
+                !names.contains(&format!("{STANDALONE_PREFIX}{}", hash_hex(&hf))),
+                "removed standalone dataset still present: {names:?}"
+            );
+        }
+        // Re-adding reuses the freed packed slot; the standalone is rewritten.
         assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
         assert!(
             be.put_array(
@@ -1655,6 +1742,55 @@ mod tests {
         );
         assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
         assert_eq!(be.get_array(&hf, Dtype::F64).unwrap(), f);
+    }
+
+    #[test]
+    fn removed_standalone_stays_removed_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let f = f64_array(vec![6, 4], 9.0);
+        let hf = array_hash(&f);
+        {
+            let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+            be.put_array(
+                &hf,
+                &f,
+                res(),
+                ArrayLayout::StandaloneWindowed { count_axis: 1 },
+            )
+            .unwrap();
+            be.remove_array(&hf).unwrap();
+            be.flush().unwrap();
+        }
+        // `rebuild_index` re-indexes standalone datasets by scanning links, so a
+        // tombstoned dataset would come back as live. The unlink prevents that.
+        let be = Hdf5Backend::open(&path, false).unwrap();
+        assert!(!be.contains(&hf).unwrap());
+    }
+
+    #[test]
+    fn removed_packed_column_reads_back_as_zeros() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![24], 7.5);
+        let ha = array_hash(&a);
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
+        let (dataset, col) = match be.locate(&ha).unwrap() {
+            ArrayLocation::Packed { dataset, column } => (dataset, column),
+            other => panic!("expected a packed location, got {other:?}"),
+        };
+        let name = dataset.rsplit('/').next().unwrap().to_string();
+        be.remove_array(&ha).unwrap();
+        // Read the raw column straight out of the dataset: the removal zero-fills
+        // it, so a reused slot can never surface the old values.
+        let inner = be.inner.lock().unwrap();
+        let ds = inner.dataset(&name).unwrap();
+        let raw = read_sel(&ds, Dtype::F64, packed_ranges(0..24, col, &[])).unwrap();
+        assert!(
+            raw.iter().all(|&b| b == 0),
+            "removed column was not zero-filled"
+        );
     }
 
     #[test]

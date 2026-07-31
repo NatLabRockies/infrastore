@@ -217,10 +217,12 @@ with store.transaction():
 - **`get_compression`** returns `{"compression": "deflate" | "none", "level": int, "shuffle": bool}`
   — the policy the store was created with (restored from the file on open; `"none"` for in-memory).
 - **`compact`** returns
-  `{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed":
-  int}`.
+  `{"slots_reclaimed": int, "datasets_dropped": int, "feature_sets_reclaimed": int,
+  "timestamp_sets_reclaimed": int, "bytes_reclaimed": int}`.
   `feature_sets_reclaimed` counts content-addressed feature rows that no association referenced any
-  more; see the [file format](file-format.md#feature_sets).
+  more; see the [file format](file-format.md#feature_sets). On an on-disk store the call rewrites
+  the `.h5` file from the live set and replaces it, which is what makes `bytes_reclaimed` nonzero —
+  nothing else may have the store open while it runs.
 - **`verify_integrity`** returns `{"ok": bool, "errors": list[str]}`; `ok` is `True` when the error
   list is empty. It checks stored arrays against their recorded hashes and does not inspect the
   SQLite catalog, so `ok` is not a statement about the store as a whole — see

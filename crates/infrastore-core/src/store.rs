@@ -2754,9 +2754,33 @@ impl Store {
         self.metadata.count_parent_child_associations(filter)
     }
 
-    /// Reclaim space in both halves of the artifact: reusable packed slots and
-    /// unreachable arrays in the HDF5 file, and feature sets in the SQLite
-    /// catalog that no association references any more.
+    /// Reclaim space in both halves of the artifact.
+    ///
+    /// On the catalog side this sweeps the content-addressed feature sets and
+    /// timestamp vectors no association references any more.
+    ///
+    /// On the array side, for an on-disk store, this **rewrites the HDF5 file**:
+    /// every array the catalog still references is written into a fresh sibling
+    /// file, which then replaces the original. HDF5 cannot return freed space to
+    /// the filesystem in place, so a rewrite is the only way a deletion actually
+    /// shrinks the store. What the new file leaves behind is the freed packed
+    /// slots (live columns are laid out contiguously again) and any dataset
+    /// nothing references — an interrupted bulk add's leftovers, or a tombstone
+    /// written by a version that did not unlink on removal. The `.sqlite` half
+    /// is untouched: arrays are content-addressed, so a different physical
+    /// layout is invisible to it.
+    ///
+    /// An in-memory store has no file to rewrite; there the array side is just
+    /// the backend dropping its tombstone bookkeeping.
+    ///
+    /// # Single writer
+    ///
+    /// Replacing the file assumes this process is the store's only user, which
+    /// is the store's model in general. A second process holding the old file
+    /// open keeps reading the old inode on Unix (it will not see the compacted
+    /// data, and its handle keeps the old bytes on disk until it closes); on
+    /// Windows its lock makes the replacement fail, and the error surfaces with
+    /// this store still open on the original file.
     pub fn compact(&mut self) -> Result<CompactionReport> {
         if self.read_only {
             return Err(TimeSeriesError::ReadOnlyStore);
@@ -2769,12 +2793,86 @@ impl Store {
                 "cannot compact while a transaction is open; commit or roll back first".into(),
             ));
         }
-        let mut report = self.backend.compact()?;
+        // Size the file before anything this call does can change it. The flush
+        // below is part of that: HDF5 does hand back the blocks a removal freed
+        // *at the end of the file*, truncating on flush, so measuring after it
+        // would credit the caller with nothing for space this call reclaimed.
+        // What a caller observes is `stat` before the call against `stat`
+        // after, and that is what the report should say.
+        let bytes_before = self
+            .file_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map_or(0, |m| m.len());
+        // Checkpoint the catalog WAL and flush the arrays so both halves are
+        // complete on disk before the rewrite reads from them.
+        self.flush()?;
+        // Sweep the catalog first: the rewrite's liveness scan should see the
+        // post-sweep catalog.
         let tx = self.metadata.savepoint()?;
-        report.feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
-        report.timestamp_sets_reclaimed = MetadataStore::sweep_orphan_timestamp_sets(&tx)?;
+        let feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
+        let timestamp_sets_reclaimed = MetadataStore::sweep_orphan_timestamp_sets(&tx)?;
         tx.commit()?;
-        Ok(report)
+
+        let Some(path) = self.file_path.clone() else {
+            let mut report = self.backend.compact()?;
+            report.feature_sets_reclaimed = feature_sets_reclaimed;
+            report.timestamp_sets_reclaimed = timestamp_sets_reclaimed;
+            return Ok(report);
+        };
+
+        let before = self.backend.stats();
+
+        // Sibling of the original so the rename stays within one filesystem and
+        // is therefore atomic. A crash mid-rewrite leaves the original intact
+        // plus this temp file, which the next compaction clears out.
+        let tmp = repack_temp_path(&path);
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        let rewritten = (|| -> Result<u64> {
+            let mut backend = Hdf5Backend::create(&tmp, self.compression())?;
+            self.materialize_into(&mut backend)?;
+            backend.flush()?;
+            drop(backend);
+            Ok(std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0))
+        })();
+        let bytes_after = match rewritten {
+            Ok(len) => len,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+
+        // HDF5 keeps a byte-range lock on an open file, so the live handle has
+        // to go before the original is replaced (required on Windows, correct
+        // everywhere). The placeholder backend is never observed: nothing else
+        // runs between the swap and the reopen.
+        drop(std::mem::replace(
+            &mut self.backend,
+            Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
+        ));
+        let renamed = std::fs::rename(&tmp, &path);
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        // Reopen before surfacing a rename failure, so a failed compaction
+        // leaves the store usable instead of stranded on the placeholder.
+        self.backend = open_backend(&path, self.read_only)?;
+        renamed?;
+
+        let after = self.backend.stats();
+        Ok(CompactionReport {
+            slots_reclaimed: before.free_packed_slots,
+            datasets_dropped: before.data_datasets.saturating_sub(after.data_datasets),
+            feature_sets_reclaimed,
+            timestamp_sets_reclaimed,
+            bytes_reclaimed: bytes_before.saturating_sub(bytes_after),
+        })
     }
 
     /// Recompute every stored array's content hash and report the ones that
@@ -2872,51 +2970,89 @@ impl Store {
         let _ = std::fs::remove_file(&sqlite_path);
         {
             let mut backend = Hdf5Backend::create(path, self.compression())?;
-            // Plan each distinct array's layout before writing: packed is only
-            // valid for arrays that every referencing association reads as a
-            // series along axis 0 (the static types). Dense forecasts must stay
-            // standalone — the forecast window read path rejects packed arrays.
-            let mut plans: HashMap<[u8; 32], ArrayPlan> = HashMap::new();
-            for meta in self.list_time_series(ListFilter::default())? {
-                let plan = ArrayPlan {
-                    layout: array_layout_for(meta.time_series_type),
-                    pool: pool_key_of(&meta),
-                };
-                plans
-                    .entry(meta.data_hash)
-                    // A hash shared across keys must use a standalone layout if
-                    // any referencing key is standalone (the window read rejects
-                    // packed); the first non-packed layout wins and sticks.
-                    .and_modify(|existing| {
-                        if existing.layout.is_packed() {
-                            existing.layout = plan.layout;
-                        }
-                    })
-                    .or_insert(plan);
-            }
-            // Same bet as the write path: a pool only pays once several arrays
-            // share it, and here the whole store is in hand, so cohort sizes are
-            // exact rather than batch-local.
-            let mut cohort: HashMap<PoolKey, usize> = HashMap::new();
-            for plan in plans.values().filter(|p| p.layout.is_packed()) {
-                *cohort.entry(plan.pool.clone()).or_default() += 1;
-            }
-            for (hash, plan) in &plans {
-                let mut layout = plan.layout;
-                if matches!(plan.pool.3, PackGroup::Irregular(_))
-                    && cohort.get(&plan.pool).copied().unwrap_or(0) < 2
-                {
-                    layout = ArrayLayout::Standalone;
-                }
-                let element_type = self.metadata.element_type_for_hash(hash)?;
-                let array = self
-                    .backend
-                    .get_array(hash, element_type.physical_dtype())?;
-                backend.put_array(hash, &array, plan.pool.3, layout)?;
-            }
+            self.materialize_into(&mut backend)?;
             backend.flush()?;
         }
         self.metadata.backup_to(&sqlite_path)?;
+        Ok(())
+    }
+
+    /// Write every array the catalog still references into `backend`, choosing
+    /// each one's physical layout from scratch.
+    ///
+    /// The catalog is the liveness source: an array no association names is
+    /// simply never read, so it does not make it into `backend`. That is what
+    /// makes this both the materialization step of [`Self::persist_to`] for an
+    /// in-memory store and the rewrite step of [`Self::compact`] for an on-disk
+    /// one — in both cases the destination ends up holding the live set and
+    /// nothing else.
+    fn materialize_into(&mut self, backend: &mut Hdf5Backend) -> Result<()> {
+        // Plan each distinct array's layout before writing: packed is only
+        // valid for arrays that every referencing association reads as a
+        // series along axis 0 (the static types). Dense forecasts must stay
+        // standalone — the forecast window read path rejects packed arrays.
+        let mut plans: HashMap<[u8; 32], ArrayPlan> = HashMap::new();
+        for meta in self.list_time_series(ListFilter::default())? {
+            let plan = ArrayPlan {
+                layout: array_layout_for(meta.time_series_type),
+                pool: pool_key_of(&meta),
+            };
+            plans
+                .entry(meta.data_hash)
+                // A hash shared across keys must use a standalone layout if
+                // any referencing key is standalone (the window read rejects
+                // packed); the first non-packed layout wins and sticks.
+                .and_modify(|existing| {
+                    if existing.layout.is_packed() {
+                        existing.layout = plan.layout;
+                    }
+                })
+                .or_insert(plan);
+        }
+        // Same bet as the write path: a pool only pays once several arrays
+        // share it, and here the whole store is in hand, so cohort sizes are
+        // exact rather than batch-local.
+        let mut cohort: HashMap<PoolKey, usize> = HashMap::new();
+        for plan in plans.values().filter(|p| p.layout.is_packed()) {
+            *cohort.entry(plan.pool.clone()).or_default() += 1;
+        }
+        // Create each pool at exactly its cohort width before writing anything
+        // into it. Left to grow on demand, a pool reserves room for a thousand
+        // columns and pays 64 bytes of hash companion for every unfilled one —
+        // enough that rewriting a bulk-written store would make the file bigger
+        // instead of smaller.
+        for (pool, &count) in &cohort {
+            // An irregular cohort of one is written standalone below, so it
+            // needs no pool at all.
+            if matches!(pool.3, PackGroup::Irregular(_)) && count < 2 {
+                continue;
+            }
+            let mut remaining = count;
+            while remaining > 0 {
+                let created =
+                    backend.reserve_pack_group(pool.0, &pool.1, pool.2, pool.3, remaining)?;
+                // A pool that cannot hold a single column would loop forever;
+                // `resolve_dataset_cols` clamps to at least 1, so this only
+                // guards against a future change to that floor.
+                if created == 0 {
+                    break;
+                }
+                remaining = remaining.saturating_sub(created);
+            }
+        }
+        for (hash, plan) in &plans {
+            let mut layout = plan.layout;
+            if matches!(plan.pool.3, PackGroup::Irregular(_))
+                && cohort.get(&plan.pool).copied().unwrap_or(0) < 2
+            {
+                layout = ArrayLayout::Standalone;
+            }
+            let element_type = self.metadata.element_type_for_hash(hash)?;
+            let array = self
+                .backend
+                .get_array(hash, element_type.physical_dtype())?;
+            backend.put_array(hash, &array, plan.pool.3, layout)?;
+        }
         Ok(())
     }
 }
@@ -3472,6 +3608,20 @@ pub fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
     let new_name = match p.file_name().and_then(|n| n.to_str()) {
         Some(name) => format!("{name}.sqlite"),
         None => "metadata.sqlite".to_string(),
+    };
+    p.set_file_name(new_name);
+    p
+}
+
+/// Where [`Store::compact`] builds the rewritten HDF5 file before swapping it
+/// over the original: a sibling of `data_path`, so the two are on one
+/// filesystem and the swap is a plain atomic rename. A leftover from an
+/// interrupted compaction is removed by the next one.
+fn repack_temp_path(data_path: &Path) -> PathBuf {
+    let mut p = data_path.to_path_buf();
+    let new_name = match p.file_name().and_then(|n| n.to_str()) {
+        Some(name) => format!("{name}.repack"),
+        None => "store.h5.repack".to_string(),
     };
     p.set_file_name(new_name);
     p
