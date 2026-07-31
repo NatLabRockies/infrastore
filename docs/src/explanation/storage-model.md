@@ -79,13 +79,22 @@ flowchart TB
   regardless of the filter, so stores written with different settings stay mutually readable and the
   data-format version is unaffected. In-memory stores ignore the setting.
 
-**Standalone mode** holds `NonSequentialTimeSeries` and the dense forecast arrays (`Deterministic`,
-`Probabilistic`, `Scenarios`). Each is its own typed, multi-dimensional variable `arr_{hex_hash}` —
-no column packing and no companion hash (the variable name carries the hash). Irregular series are
-shaped `[length, *element_shape]` and chunked whole; dense forecasts are shaped
-`[H, count, *element_shape]` (with extra leading axes for `Probabilistic` / `Scenarios`) and chunked
-in bounded blocks along the `count` (window) axis, so reading one forecast window decompresses a
-single block rather than the whole array. The `ForecastReader` caches a block at a time to match.
+Packed mode holds every **static** series. `SingleTimeSeries` (and the array behind a
+`DeterministicSingleTimeSeries`) pool by resolution into `sts_…` datasets; `NonSequentialTimeSeries`
+pool by their _timestamp vector_ into `nsts_…` datasets, because the chunking is timestamp-major and
+so only means something for arrays on a common time axis. An irregular series carries that axis
+explicitly, and the catalog already content-addresses it, so the interned hash is the cohort key —
+which is what lets a `StaticReader` sweep irregular series the same way it sweeps regular ones.
+
+**Standalone mode** holds the dense forecast arrays (`Deterministic`, `Probabilistic`, `Scenarios`)
+and any `NonSequentialTimeSeries` alone on its time axis — a pool spreads one array over `length`
+chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
+`arr_{hex_hash}` — no column packing and no companion hash (the variable name carries the hash).
+Lone irregular series are shaped `[length, *element_shape]` and chunked whole; dense forecasts are
+shaped `[H, count, *element_shape]` (with extra leading axes for `Probabilistic` / `Scenarios`) and
+chunked in bounded blocks along the `count` (window) axis, so reading one forecast window
+decompresses a single block rather than the whole array. The `ForecastReader` caches a block at a
+time to match.
 
 The [file-format reference](../reference/file-format.md#hdf5-layout) gives the precise naming and
 dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
@@ -93,8 +102,8 @@ same physical shape — the type, timestamps, and windowing parameters all live 
 
 ## The Metadata Side: SQLite
 
-The catalog holds five tables. The first three describe time series; the last two record
-relationships between catalog entities and have nothing to do with time series at all.
+The catalog holds six tables. The first four describe time series; the last two record relationships
+between catalog entities and have nothing to do with time series at all.
 
 - **`time_series_associations`** — one row per
   `(owner_id, owner_category, time_series_type, name, resolution, interval, features)` association,

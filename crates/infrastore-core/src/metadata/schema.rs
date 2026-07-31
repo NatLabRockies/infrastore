@@ -24,10 +24,17 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     horizon           TEXT,
     interval          TEXT,
     count             INTEGER,
-    timestamps_json   TEXT,
+    -- Content hash of this row's explicit timestamp vector, resolved through the
+    -- `timestamp_sets` table below. NULL for every type but
+    -- NonSequentialTimeSeries, which is the only one that carries one.
+    timestamps_hash   BLOB,
     units             TEXT,
     percentiles_json  TEXT,
-    dtype             TEXT    NOT NULL DEFAULT 'f64',
+    -- The logical element type in its canonical string form (`ElementType`):
+    -- a dtype spelling for plain scalars, else `tuple(N,dtype)` or one of the
+    -- function-data kinds. It supersedes the physical `dtype` column: the dtype
+    -- of the stored bytes is derived from it.
+    element_type      TEXT    NOT NULL DEFAULT 'f64',
     element_shape     TEXT,
     ext      TEXT,
     -- Content-address hashes are grouped at the end of the row. Column order is
@@ -62,6 +69,40 @@ CREATE TABLE IF NOT EXISTS feature_sets (
     value_str         TEXT,
     features_hash     BLOB    NOT NULL,
     PRIMARY KEY (features_hash, key)
+);
+
+-- The explicit timestamp vector of a `NonSequentialTimeSeries`, content-
+-- addressed by the SHA-256 of its canonical encoding, exactly as feature sets
+-- are above. The association table carries only the hash.
+--
+-- Three things this buys, in descending order of how much they matter:
+--
+--   * The vector is stored ONCE per distinct time axis. Irregular series in a
+--     power-systems model overwhelmingly share one — event times, an outage
+--     schedule, a market timeline — so a thousand components sampled at the same
+--     instants hold one copy between them rather than a thousand.
+--   * The association table stays narrow. The vector used to live inline as an
+--     RFC3339 JSON array (24 bytes per timestamp, ~210 KB for a year of hourly
+--     data), which pushed those rows into SQLite overflow pages and made every
+--     scan-shaped catalog query — `list`, the filters, the summaries — read and
+--     parse megabytes it had no use for. `list` now hydrates each DISTINCT
+--     vector once, the way it already does for features.
+--   * It is the cohort key the packed HDF5 layout groups irregular arrays by.
+--     Series that share a time axis are column-packed into one timestamp-major
+--     dataset, which is what lets `StaticReader` sweep them (see
+--     `storage/common.rs`).
+--
+-- `data` is the encoding from `crate::timestamps` — deltas as varints in the
+-- coarsest unit that divides them, ~1 byte per timestamp for a regular grid.
+-- It is not human-readable, deliberately: the catalog is a machine artifact and
+-- the readable projection below covers hand inspection of the rest.
+--
+-- Like `feature_sets`, there is deliberately NO foreign key and NO cascade:
+-- rows are shared, so deleting one association must not delete a vector another
+-- still uses. `Store::compact` sweeps the ones nothing references any more.
+CREATE TABLE IF NOT EXISTS timestamp_sets (
+    timestamps_hash   BLOB    NOT NULL PRIMARY KEY,
+    data              BLOB    NOT NULL
 );
 
 -- The store's uniqueness invariant is
@@ -117,9 +158,9 @@ CREATE INDEX IF NOT EXISTS idx_owner      ON time_series_associations(owner_id, 
 CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution);
 
 -- Secondary indexes for the filter/discovery surface. Without these, every
--- predicate below is a full-table scan, and the table's rows are wide (ext,
--- timestamps_json), so scans get expensive well before row counts get large.
--- Measured on a 405k-row catalog (100k owners):
+-- predicate below is a full-table scan, and the table's rows are wide enough
+-- (ext) that scans get expensive well before row counts get large. Measured on
+-- a 405k-row catalog (100k owners):
 --
 --   * idx_ts_type       count_by_type / counts_by_type / list() with a type
 --                       predicate: 3-10x. Serves every stats and summary call
@@ -272,8 +313,9 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, dtype, element_shape, ext,
-       lower(hex(data_hash))     AS data_hash,
-       lower(hex(features_hash)) AS features_hash
+       units, element_type, element_shape, ext,
+       lower(hex(data_hash))       AS data_hash,
+       lower(hex(features_hash))   AS features_hash,
+       lower(hex(timestamps_hash)) AS timestamps_hash
 FROM time_series_associations;
 "#;

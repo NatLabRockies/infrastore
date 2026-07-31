@@ -438,16 +438,15 @@ timestamp-oriented access pattern — _walk the timeline and read every series' 
 resolution, and holds reusable buffers that each read overwrites in place, so a tight loop allocates
 nothing. The reader is a passive plan: it does not borrow the `Store`, so reads go through
 `Store::static_read` / `Store::forecast_read`, which fill the buffers; the caller then walks the
-groups/entries. There are two: [`StaticReader`](#staticreader-and-staticgroup) for
-`SingleTimeSeries` and [`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for
-forecasts.
+groups/entries. There are two: [`StaticReader`](#staticreader-and-staticgroup) for the static types
+and [`ForecastReader`](#forecastreader-windowslot-and-forecastentry) for forecasts.
 
 ```rust
 // Static: value of every SingleTimeSeries at one timestamp, columnar.
 let mut reader = store.build_static_reader(ListFilter::new().resolution(res))?;
-for k in 0..reader.length() {
-    // Grid point k: initial + k·resolution (calendar-aware, hence `Period::add_to`).
-    let at = reader.resolution().add_to(reader.initial_timestamp(), k as i64).unwrap();
+// `timestamps()` walks the timeline whichever kind it is, so the loop below is
+// identical for an irregular reader.
+for at in reader.timestamps().collect::<Vec<_>>() {
     store.static_read(&mut reader, at)?;
     for group in reader.groups() {
         let bytes = group.values();        // [num_columns, *element_shape], row-major LE
@@ -472,8 +471,20 @@ for k in 0..reader.count() {
 }
 ```
 
-`build_static_reader` requires the filter to pin a resolution and that all matched series share one
-grid (`initial_timestamp` + `length`) — validated at build, so there is no presence mask.
+`build_static_reader` covers both static types, and which one the filter names decides what must
+hold. For `SingleTimeSeries` (the default) the filter must pin a resolution and all matched series
+must share one grid (`initial_timestamp` + `length`). For `NonSequentialTimeSeries` it must pin _no_
+resolution — an irregular series has none — and all matched series must instead lie on one timestamp
+vector, the same cohort that pools their arrays on disk:
+
+```rust
+let mut reader = store.build_static_reader(
+    ListFilter::new().time_series_type(TimeSeriesType::NonSequentialTimeSeries),
+)?;
+assert!(reader.resolution().is_none());     // no constant step to report
+```
+
+Either way the uniformity is validated at build, so there is no presence mask.
 `build_forecast_reader` requires a forecast type and a resolution; a `Deterministic` reader is
 abstract (also matches `DeterministicSingleTimeSeries`), and all matched forecasts must share one
 window timeline (`initial_timestamp` + `interval` + `count`). `static_read` / `forecast_read` error
@@ -682,6 +693,9 @@ pub struct SingleTimeSeries {
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
+    pub element_type: ElementType,   // never optional; see below
+    pub units: Option<String>,
+    pub ext: Option<String>,
 }
 
 impl SingleTimeSeries {
@@ -689,10 +703,22 @@ impl SingleTimeSeries {
         initial_timestamp: DateTime<Utc>, resolution: impl Into<Period>, data: TypedArray,
         name: impl Into<String>,
     ) -> Self;
+    pub fn with_element_type(self, element_type: ElementType) -> Self;
+    pub fn with_units(self, units: impl Into<String>) -> Self;
+    pub fn with_ext(self, ext: impl Into<String>) -> Self;
 }
 ```
 
 `length` is derived from the array's first axis (`data.length()`) by `new`.
+
+The three descriptors travel on the series rather than on the write request, so a read returns what
+a write declared. `element_type` is **not** an `Option`: `new` resolves it to `Scalar(data.dtype)` —
+what an ordinary numeric series is — and `with_element_type` replaces it. There is deliberately no
+"undeclared" spelling, because it would be a second way to say `Scalar(dtype)` and a series written
+that way would not compare equal to the same series read back. The consequence to know: replacing
+`data` on an already-built series without updating `element_type` is a mismatch the store rejects on
+write (`InvalidParameter`) rather than silently re-deriving one — build the series again instead.
+The other four series types follow the same pattern.
 
 ### `TypedArray` and `Dtype`
 
@@ -863,16 +889,19 @@ impl Scenarios {
 
 ### `StaticReader` and `StaticGroup`
 
-The columnar `SingleTimeSeries` reader (see [Readers](#readers)). `Period` is the crate's resolution
+The columnar static-series reader (see [Readers](#readers)). `Period` is the crate's resolution
 type. `values()` is empty until the first `Store::static_read`.
 
 ```rust
 impl StaticReader {
+    pub fn time_series_type(&self) -> TimeSeriesType;  // which static type, hence which timeline
     pub fn initial_timestamp(&self) -> DateTime<Utc>;
-    pub fn resolution(&self) -> Period;
-    pub fn length(&self) -> usize;            // grid points; valid timestamps initial + k·resolution
+    pub fn resolution(&self) -> Option<Period>;        // None for NonSequentialTimeSeries
+    pub fn length(&self) -> usize;                     // timeline points
     pub fn groups(&self) -> &[StaticGroup];
     pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize>;
+    pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>>;
+    pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_;
 }
 
 impl StaticGroup {

@@ -252,7 +252,7 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
     obj.insert("name".into(), json!(meta.name));
     obj.insert("units".into(), json!(meta.units));
     obj.insert("ext".into(), json!(meta.ext));
-    obj.insert("dtype".into(), json!(meta.dtype.as_str()));
+    obj.insert("element_type".into(), json!(meta.element_type.to_string()));
     // Features are part of identity: an export that drops them cannot describe
     // which of several same-named series it holds, and cannot be turned back
     // into a descriptor that would recreate it.

@@ -327,6 +327,7 @@ class Store:
         *,
         features: dict[str, int | float | bool | str] | None = None,
         units: str | None = None,
+        element_type: str | None = None,
         ext: str | None = None,
     ) -> TimeSeriesKey: ...
     def add_time_series_bulk(self, items: list[dict[str, Any]]) -> list[TimeSeriesKey]: ...
@@ -417,8 +418,9 @@ class Store:
     # -- readers --
     def build_static_reader(
         self,
-        resolution: Period,
+        resolution: Period | None = None,
         *,
+        time_series_type: TimeSeriesType | str | None = None,
         owner_id: int | None = None,
         owner_category: OwnerCategory | None = None,
         owner_type: str | None = None,
@@ -692,3 +694,8 @@ class Store:
     ) -> int: ...
 
 def init_tracing(filter: str) -> None: ...
+def decode_element_values(
+    data: Any,
+    element_type: str,
+    leading_dims: int = 1,
+) -> list[Any] | None: ...

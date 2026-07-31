@@ -40,7 +40,6 @@ fn add_sts(store: &mut Store, owner: i64) -> infrastore_core::TimeSeriesKey {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(sts_series()),
             Features::new(),
-            None,
         )
         .unwrap()
 }
@@ -76,8 +75,15 @@ fn removing_the_last_sts_backing_a_dst_is_refused() {
 
     // Derive a single DST view sharing the STS's array.
     let derived = store
-        .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
-        .unwrap();
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .transformed;
     assert_eq!(derived, 1);
 
     let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
@@ -111,7 +117,13 @@ fn bulk_remove_of_dst_and_backing_sts_is_order_independent() {
     let mut store = create_store(None, true).unwrap();
     let sts_key = add_sts(&mut store, 5);
     store
-        .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+        .transform_single_time_series(
+            Duration::hours(2),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
         .unwrap();
     let hash = store.get_metadata(sts_key.identity()).unwrap().data_hash;
     let dst_key = store
@@ -170,7 +182,6 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
                     "load",
                 )),
                 Features::new(),
-                None,
             )
             .unwrap();
         let timestamps = vec![
@@ -188,7 +199,6 @@ fn shared_hash_across_packed_and_standalone_persists_as_standalone() {
                     NonSequentialTimeSeries::new(timestamps, ns_data.clone(), "avail").unwrap(),
                 ),
                 Features::new(),
-                None,
             )
             .unwrap();
 
@@ -293,7 +303,6 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(series),
                     Features::new(),
-                    None,
                 )
                 .unwrap();
             hashes.push(store.get_metadata(key.identity()).unwrap().data_hash);
@@ -327,8 +336,11 @@ fn locate_array_names_the_dataset_and_column_of_a_packed_array() {
     assert!(store.locate_array(&[0u8; 32]).is_err());
 }
 
+/// An irregular series whose time axis nothing else shares gets its own
+/// standalone dataset: a packed pool spreads one array over `length` chunks, so
+/// a cohort of one would cost more than it saves.
 #[test]
-fn locate_array_names_the_standalone_dataset_of_an_irregular_series() {
+fn locate_array_names_the_standalone_dataset_of_a_lone_irregular_series() {
     use infrastore_core::ArrayLocation;
 
     let dir = tempfile::tempdir().unwrap();
@@ -348,7 +360,6 @@ fn locate_array_names_the_standalone_dataset_of_an_irregular_series() {
                 OwnerCategory::Component,
                 TimeSeriesData::NonSequentialTimeSeries(ns),
                 Features::new(),
-                None,
             )
             .unwrap();
         let hash = store.get_metadata(key.identity()).unwrap().data_hash;
@@ -362,8 +373,99 @@ fn locate_array_names_the_standalone_dataset_of_an_irregular_series() {
             dataset.starts_with("/time_series/single/arr_"),
             "a standalone array is its own dataset, got {dataset}"
         ),
-        other => panic!("a NonSequentialTimeSeries is standalone, got {other:?}"),
+        other => panic!("a lone irregular series is standalone, got {other:?}"),
     }
+}
+
+/// Irregular series that *do* share a time axis are column-packed into one
+/// timestamp-major dataset keyed by that axis — the layout a
+/// [`Store::build_static_reader`] sweep over them reads one chunk per timestamp.
+#[test]
+fn irregular_series_sharing_a_time_axis_are_packed_into_one_cohort_dataset() {
+    use infrastore_core::{AddRequest, ArrayLocation};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let stamps = vec![t0(), t0() + Duration::hours(3), t0() + Duration::hours(11)];
+    // A fourth series on a *different* axis, to prove the pool is keyed by the
+    // timestamps and not merely by shape.
+    let other_stamps = vec![t0(), t0() + Duration::hours(4), t0() + Duration::hours(11)];
+
+    let mut store = create_store(Some(path.as_path()), false).unwrap();
+    let mut bulk = store.bulk_add();
+    for owner in 1..=3 {
+        let ns = NonSequentialTimeSeries::new(
+            stamps.clone(),
+            TypedArray::from_f64(vec![3], &[owner as f64, 10.0 + owner as f64, 99.0]),
+            "outage",
+        )
+        .unwrap();
+        bulk.push(AddRequest::new(
+            owner,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(ns),
+        ));
+    }
+    let odd = NonSequentialTimeSeries::new(
+        other_stamps,
+        TypedArray::from_f64(vec![3], &[7.0, 8.0, 9.0]),
+        "outage",
+    )
+    .unwrap();
+    bulk.push(AddRequest::new(
+        4,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::NonSequentialTimeSeries(odd),
+    ));
+    let keys = bulk.commit().unwrap();
+    store.flush().unwrap();
+
+    let hashes: Vec<[u8; 32]> = keys
+        .iter()
+        .map(|k| store.get_metadata(k.identity()).unwrap().data_hash)
+        .collect();
+    let mut cohort_datasets = Vec::new();
+    for hash in &hashes[..3] {
+        match store.locate_array(hash).unwrap() {
+            ArrayLocation::Packed { dataset, .. } => {
+                assert!(
+                    dataset.starts_with("/time_series/single/nsts_f64_s_3_"),
+                    "a cohort dataset is keyed by its timestamp vector, got {dataset}"
+                );
+                cohort_datasets.push(dataset);
+            }
+            other => panic!("a shared time axis packs, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        cohort_datasets[0], cohort_datasets[2],
+        "one time axis, one dataset"
+    );
+    // The odd one out is alone on its axis, so it stays standalone.
+    assert!(matches!(
+        store.locate_array(&hashes[3]).unwrap(),
+        ArrayLocation::Standalone { .. }
+    ));
+
+    // Every value survives the packing, across a reopen that rebuilds the pool
+    // index from the dataset names.
+    drop(store);
+    let store = open_store(path.as_path(), true).unwrap();
+    for (owner, key) in keys.iter().enumerate().take(3) {
+        match store.get_time_series(key.identity(), None).unwrap() {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => {
+                assert_eq!(ns.timestamps, stamps);
+                assert_eq!(
+                    ns.data.to_f64_vec().unwrap(),
+                    vec![owner as f64 + 1.0, 11.0 + owner as f64, 99.0]
+                );
+            }
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        }
+    }
+    assert!(store.verify_integrity().unwrap().ok());
 }
 
 #[test]
@@ -378,7 +480,6 @@ fn locate_array_reports_no_on_disk_location_for_an_in_memory_store() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(sts_series()),
             Features::new(),
-            None,
         )
         .unwrap();
     let hash = store.get_metadata(key.identity()).unwrap().data_hash;

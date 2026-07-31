@@ -719,16 +719,12 @@ fn hostile_owner_type_units_and_ext_round_trip() {
     let ext = "{\"kind\": \"负荷\", \"q\": \"it's\"}";
 
     let key = store
-        .add(
-            AddRequest::new(
-                1,
-                owner_type,
-                OwnerCategory::Component,
-                sts("load", data.clone()),
-            )
-            .with_units(units)
-            .with_ext(ext),
-        )
+        .add(AddRequest::new(
+            1,
+            owner_type,
+            OwnerCategory::Component,
+            sts("load", data.clone()).with_units(units).with_ext(ext),
+        ))
         .unwrap();
 
     let meta = store.get_metadata(key.identity()).unwrap();
@@ -759,10 +755,12 @@ fn ext_is_stored_verbatim_even_when_not_valid_json() {
     let garbage = "{not json at all: ]]}\0trailing";
 
     let key = store
-        .add(
-            AddRequest::new(1, "Generator", OwnerCategory::Component, sts("load", data))
-                .with_ext(garbage),
-        )
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            sts("load", data).with_ext(garbage),
+        ))
         .unwrap();
     assert_eq!(
         store.get_metadata(key.identity()).unwrap().ext.as_deref(),
@@ -781,10 +779,12 @@ fn one_megabyte_ext_round_trips_through_disk() {
     let key = {
         let mut store = create_store(Some(path.as_path()), false).unwrap();
         let key = store
-            .add(
-                AddRequest::new(1, "Generator", OwnerCategory::Component, sts("load", data))
-                    .with_ext(payload.clone()),
-            )
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                sts("load", data).with_ext(payload.clone()),
+            ))
             .unwrap();
         store.flush().unwrap();
         key

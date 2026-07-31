@@ -4,10 +4,9 @@ use std::ops::Range;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
-use crate::types::array::TypedArray;
-use crate::types::period::Period;
+use crate::types::array::{Dtype, TypedArray};
 
-use super::{ArrayLayout, CompactionReport, IntegrityReport, StorageBackend};
+use super::{ArrayLayout, CompactionReport, IntegrityReport, PackGroup, StorageBackend};
 
 /// Pure in-memory storage backend.
 ///
@@ -31,7 +30,7 @@ impl StorageBackend for MemoryBackend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        _resolution: Period,
+        _group: PackGroup,
         _layout: ArrayLayout,
     ) -> Result<bool> {
         // If the slot was tombstoned, "reuse" it by clearing the marker.
@@ -43,15 +42,24 @@ impl StorageBackend for MemoryBackend {
         Ok(true)
     }
 
-    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
+    fn get_array(&self, hash: &[u8; 32], dtype: Dtype) -> Result<TypedArray> {
+        let array = self.arrays.get(hash).ok_or(TimeSeriesError::NotFound)?;
+        // This backend keeps whole `TypedArray`s, so it knows the dtype itself;
+        // the caller's is an assertion that the catalog agrees.
+        super::check_dtype(hash, array.dtype, dtype)?;
+        Ok(array.clone())
+    }
+
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
         self.arrays
             .get(hash)
-            .cloned()
+            .map(|a| a.shape.clone())
             .ok_or(TimeSeriesError::NotFound)
     }
 
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
+    fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray> {
         let array = self.arrays.get(hash).ok_or(TimeSeriesError::NotFound)?;
+        super::check_dtype(hash, array.dtype, dtype)?;
         let len = array.length();
         if range.start > range.end || range.end > len {
             return Err(TimeSeriesError::InvalidParameter(format!(
@@ -93,13 +101,32 @@ impl StorageBackend for MemoryBackend {
             // The catalog is not the backend's to sweep; `Store::compact` fills
             // this in after the array side is done.
             feature_sets_reclaimed: 0,
+            timestamp_sets_reclaimed: 0,
         })
     }
 
-    fn verify(&self) -> Result<IntegrityReport> {
+    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
         let mut errors = Vec::new();
-        for (hash, data) in &self.arrays {
-            let recomputed = array_hash(data);
+        for (hash, dtype) in arrays {
+            let data = match self.get_array(hash, *dtype) {
+                Ok(data) => data,
+                Err(TimeSeriesError::NotFound) => {
+                    errors.push(format!(
+                        "dangling reference: the catalog references array {} but the array \
+                         store does not hold it",
+                        crate::hash::hash_hex(hash),
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "read error for array {}: {e}",
+                        crate::hash::hash_hex(hash)
+                    ));
+                    continue;
+                }
+            };
+            let recomputed = array_hash(&data);
             if &recomputed != hash {
                 errors.push(format!(
                     "hash mismatch: stored={} computed={}",

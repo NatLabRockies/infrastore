@@ -25,12 +25,20 @@ Pkg.add("InfraStore")
 using Dates, InfraStore
 
 store = Store(in_memory=true)
-ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load")
+ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(100.0:123.0), "load";
+                      units="MW")
 key = add_time_series!(store, 42, "Generator", Component, ts;
-                       features=Dict("model_year" => 2030), units="MW")
+                       features=Dict("model_year" => 2030))
 got = get_time_series(store, key)
 @assert got.data == ts.data
+@assert got.units == "MW"
 ```
+
+`units` is a user-declared label carried on the series itself: set it at construction, get it back
+on read. The store never interprets or validates it, and it is not part of a series' identity — you
+cannot filter on it, and two series differing only in their label are a duplicate. It defaults to
+`nothing`, which the store leaves alone (whether that means "unknown" or "dimensionless" is the
+caller's convention).
 
 `Store` and `open_store` also take do-block forms, which close the store on exit:
 

@@ -2,27 +2,29 @@
 //!
 //! Simulations consume the store with a `for` loop over every timestamp: at
 //! each timestamp they want the value of *every* time series at that instant.
-//! [`StaticReader`] serves exactly that access pattern for `SingleTimeSeries`,
-//! which is why those arrays are kept in the compacted/packed on-disk format
+//! [`StaticReader`] serves exactly that access pattern for both static types,
+//! which is why their arrays are kept in the compacted/packed on-disk format
 //! (one timestamp across all columns of a packed dataset is a single hyperslab).
 //!
 //! # Design (locked 2026-06-25)
 //!
-//! * **One resolution per reader.** The build filter must pin a resolution.
-//! * **Static and forecast are separate readers.** [`StaticReader`] serves
-//!   `SingleTimeSeries`; [`ForecastReader`] serves dense forecasts (one type per
+//! * **One timeline per reader.** Every column shares one time axis: for
+//!   `SingleTimeSeries` a regular grid the build filter pins by resolution, for
+//!   `NonSequentialTimeSeries` one explicit timestamp vector — the same cohort
+//!   that pools their arrays on disk. See [`Timeline`].
+//! * **Static and forecast are separate readers.** [`StaticReader`] serves the
+//!   static types; [`ForecastReader`] serves dense forecasts (one type per
 //!   reader, with `Deterministic` abstract over `DeterministicSingleTimeSeries`).
 //! * **Columnar batches.** Results are grouped by `(dtype, element_shape)` — the
 //!   same partition the packed datasets already use — so each group is a dense
 //!   `[num_columns, *element_shape]` typed buffer.
-//! * **No presence mask.** A single-resolution reader is built over series that
-//!   share one grid (`initial_timestamp` + `length`); [`build_groups`] validates
-//!   this and errors on divergence, so every column has a value at every valid
-//!   timestamp.
+//! * **No presence mask.** A reader is built over series that share one
+//!   timeline, validated at build (a divergent grid, or a second timestamp
+//!   vector, is an error), so every column has a value at every valid timestamp.
 //! * **Buffer reuse.** Each group owns its output buffer; [`Store::static_read`]
 //!   overwrites it in place, so a tight read loop allocates nothing per step.
-//! * **Off-grid timestamps are a hard error** (see [`StaticReader::index_at`]).
-//! * **`NonSequentialTimeSeries` is excluded** (irregular, no resolution).
+//! * **Off-timeline timestamps are a hard error** (see
+//!   [`StaticReader::index_at`]).
 //!
 //! The reader is a *passive plan*: it holds the resolved layout + reusable
 //! buffers but does not borrow the [`Store`]. Reads go through
@@ -38,24 +40,62 @@ use chrono::{DateTime, Utc};
 use crate::error::{Result, TimeSeriesError};
 use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
+use crate::types::element_type::ElementType;
 use crate::types::key::TimeSeriesKey;
 use crate::types::metadata::TimeSeriesMetadata;
 use crate::types::period::Period;
 use crate::types::time_series::{TimeSeriesType, compute_h};
 
-/// A prepared reader returning the value of every matching `SingleTimeSeries`
-/// at one timestamp. Build with [`Store::build_static_reader`], drive with
+/// A prepared reader returning the value of every matching static series at one
+/// timestamp. Build with [`Store::build_static_reader`], drive with
 /// [`Store::static_read`], then read results via [`Self::groups`].
 #[derive(Debug)]
 pub struct StaticReader {
-    /// Shared master grid for every series in the reader.
-    initial_timestamp: DateTime<Utc>,
-    resolution: Period,
-    length: usize,
+    /// The time axis every column in the reader shares.
+    timeline: Timeline,
     /// Columnar groups, in a deterministic order (by dtype code then shape).
     groups: Vec<StaticGroup>,
     /// Timestamp of the last successful [`Store::static_read`], for diagnostics.
     last_read: Option<DateTime<Utc>>,
+}
+
+/// The shared time axis of a [`StaticReader`], in the two shapes a static series
+/// can have one.
+///
+/// Both answer the same two questions — "which index is this timestamp?" and
+/// "which timestamp is this index?" — and that is all the read path needs, which
+/// is why one reader type covers both. A regular grid answers them
+/// arithmetically; an irregular one looks them up in the vector it was built
+/// from.
+#[derive(Debug, Clone)]
+pub(crate) enum Timeline {
+    /// `SingleTimeSeries`: `initial + k · resolution` for `k` in `[0, length)`.
+    Regular {
+        initial: DateTime<Utc>,
+        resolution: Period,
+        length: usize,
+    },
+    /// `NonSequentialTimeSeries`: one explicit, strictly increasing vector,
+    /// shared by every column (they are one storage cohort).
+    Irregular { timestamps: Vec<DateTime<Utc>> },
+}
+
+impl Timeline {
+    fn length(&self) -> usize {
+        match self {
+            Timeline::Regular { length, .. } => *length,
+            Timeline::Irregular { timestamps } => timestamps.len(),
+        }
+    }
+
+    /// Which static type this timeline belongs to — also what a row must be for
+    /// [`build_groups`] to admit it.
+    fn time_series_type(&self) -> TimeSeriesType {
+        match self {
+            Timeline::Regular { .. } => TimeSeriesType::SingleTimeSeries,
+            Timeline::Irregular { .. } => TimeSeriesType::NonSequentialTimeSeries,
+        }
+    }
 }
 
 /// One `(dtype, element_shape)` batch. After a read, [`Self::values`] holds a
@@ -63,7 +103,7 @@ pub struct StaticReader {
 /// `j` corresponds to `keys()[j]`.
 #[derive(Debug)]
 pub struct StaticGroup {
-    dtype: Dtype,
+    element_type: ElementType,
     element_shape: Vec<usize>,
     /// Identity of each column, in buffer order. Returned once; stable for the
     /// reader's lifetime.
@@ -77,8 +117,15 @@ pub struct StaticGroup {
 }
 
 impl StaticGroup {
+    /// Physical dtype of the group's bytes, derived from [`Self::element_type`].
     pub fn dtype(&self) -> Dtype {
-        self.dtype
+        self.element_type.physical_dtype()
+    }
+
+    /// What the group's elements mean. Columns are grouped by this *and*
+    /// [`Self::element_shape`], so one group is uniform in both.
+    pub fn element_type(&self) -> ElementType {
+        self.element_type
     }
 
     /// Per-step element shape (trailing dims after the column axis); empty =
@@ -108,10 +155,10 @@ impl StaticGroup {
     /// buffer alignment; use [`Self::values`] for the zero-copy byte view. Empty
     /// until [`Store::static_read`] has run at least once.
     pub fn values_to_vec<T: Element>(&self) -> Result<Vec<T>> {
-        if self.dtype != T::DTYPE {
+        if self.dtype() != T::DTYPE {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "group dtype is {}, requested {}",
-                self.dtype.as_str(),
+                self.dtype().as_str(),
                 T::DTYPE.as_str()
             )));
         }
@@ -128,31 +175,53 @@ impl StaticGroup {
     }
 
     /// Drive a backend read into this group's reusable buffer. The closure
-    /// receives the column hashes (in key order) and the output buffer to fill;
-    /// splitting the borrow across the two fields lets the backend read hashes
-    /// and write the buffer of the *same* group without aliasing.
+    /// receives the column hashes (in key order), the dtype they share, and the
+    /// output buffer to fill; splitting the borrow across the fields lets the
+    /// backend read hashes and write the buffer of the *same* group without
+    /// aliasing. The group carries the dtype because a backend no longer infers
+    /// one — it comes from the catalog, via the group's `element_type`.
     pub(crate) fn fill<F>(&mut self, read: F) -> Result<()>
     where
-        F: FnOnce(&[[u8; 32]], &mut Vec<u8>) -> Result<()>,
+        F: FnOnce(&[[u8; 32]], Dtype, &mut Vec<u8>) -> Result<()>,
     {
-        read(&self.hashes, &mut self.buf)?;
+        let dtype = self.element_type.physical_dtype();
+        read(&self.hashes, dtype, &mut self.buf)?;
         self.filled = true;
         Ok(())
     }
 }
 
 impl StaticReader {
+    /// Which static type the reader holds: `SingleTimeSeries` on a regular grid,
+    /// or `NonSequentialTimeSeries` on an explicit timestamp vector. This is
+    /// what tells a caller whether [`Self::resolution`] can be `Some`.
+    pub fn time_series_type(&self) -> TimeSeriesType {
+        self.timeline.time_series_type()
+    }
+
+    /// The first timestamp on the timeline.
     pub fn initial_timestamp(&self) -> DateTime<Utc> {
-        self.initial_timestamp
+        match &self.timeline {
+            Timeline::Regular { initial, .. } => *initial,
+            // Non-empty by construction: `build_groups` rejects an empty
+            // irregular timeline, which would have no first timestamp to report.
+            Timeline::Irregular { timestamps } => timestamps[0],
+        }
     }
 
-    pub fn resolution(&self) -> Period {
-        self.resolution
+    /// The grid resolution, or `None` for an irregular reader — a
+    /// `NonSequentialTimeSeries` has no constant step between its timestamps,
+    /// which is the whole point of the type. Walk [`Self::timestamps`] instead.
+    pub fn resolution(&self) -> Option<Period> {
+        match &self.timeline {
+            Timeline::Regular { resolution, .. } => Some(*resolution),
+            Timeline::Irregular { .. } => None,
+        }
     }
 
-    /// Number of timestamps on the grid (`[0, length)`).
+    /// Number of timestamps on the timeline (`[0, length)`).
     pub fn length(&self) -> usize {
-        self.length
+        self.timeline.length()
     }
 
     pub fn groups(&self) -> &[StaticGroup] {
@@ -168,34 +237,51 @@ impl StaticReader {
     }
 
     /// Map a wall-clock timestamp to its 0-based array index on the reader's
-    /// grid. Errors (never clamps) if `at` is before the grid start, not aligned
-    /// to the resolution, or past the end — the simulation contract is that it
-    /// only ever reads valid grid points.
+    /// timeline. Errors (never clamps) if `at` is not a point on it — before the
+    /// start, off-grid or absent from the vector, or past the end. The
+    /// simulation contract is that it only ever reads valid points.
     pub fn index_at(&self, at: DateTime<Utc>) -> Result<usize> {
-        index_on_grid(
-            self.initial_timestamp,
-            self.resolution,
-            self.length,
-            at,
-            "grid",
-        )
+        match &self.timeline {
+            Timeline::Regular {
+                initial,
+                resolution,
+                length,
+            } => index_on_grid(*initial, *resolution, *length, at, "grid"),
+            // Strictly increasing (the store validates it on write), so the
+            // vector is sorted and a binary search is exact.
+            Timeline::Irregular { timestamps } => timestamps.binary_search(&at).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "timestamp {at} is not on the reader's timeline (an irregular timeline has \
+                     no value between its timestamps, so only the {} stored instants are \
+                     readable)",
+                    timestamps.len()
+                ))
+            }),
+        }
     }
 
-    /// The wall-clock timestamp at 0-based grid index `index`
-    /// (`initial_timestamp + index · resolution`), calendar-aware for a
-    /// `Period::Months` grid. The inverse of [`Self::index_at`]. Errors if
-    /// `index >= length` or the date arithmetic overflows.
+    /// The wall-clock timestamp at 0-based index `index` — `initial_timestamp +
+    /// index · resolution` on a regular grid (calendar-aware for a
+    /// `Period::Months` one), or the vector's `index`th entry on an irregular
+    /// timeline. The inverse of [`Self::index_at`]. Errors if `index >= length`
+    /// or the date arithmetic overflows.
     pub fn timestamp_at(&self, index: usize) -> Result<DateTime<Utc>> {
-        timestamp_on_grid(
-            self.initial_timestamp,
-            self.resolution,
-            self.length,
-            index,
-            "grid",
-        )
+        match &self.timeline {
+            Timeline::Regular {
+                initial,
+                resolution,
+                length,
+            } => timestamp_on_grid(*initial, *resolution, *length, index, "grid"),
+            Timeline::Irregular { timestamps } => timestamps.get(index).copied().ok_or_else(|| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "index {index} is past the timeline extent ({})",
+                    timestamps.len()
+                ))
+            }),
+        }
     }
 
-    /// Iterate every timestamp on the reader's grid, `[0, length)` in order.
+    /// Iterate every timestamp on the reader's timeline, `[0, length)` in order.
     /// The canonical simulation loop is:
     ///
     /// ```no_run
@@ -214,11 +300,9 @@ impl StaticReader {
     /// # }
     /// ```
     pub fn timestamps(&self) -> impl Iterator<Item = DateTime<Utc>> + '_ {
-        let (initial, resolution) = (self.initial_timestamp, self.resolution);
-        (0..self.length).map(move |k| {
-            resolution
-                .add_to(initial, k as i64)
-                .expect("timestamp on the reader grid is representable")
+        (0..self.length()).map(move |k| {
+            self.timestamp_at(k)
+                .expect("timestamp on the reader timeline is representable")
         })
     }
 }
@@ -278,23 +362,22 @@ fn timestamp_on_grid(
     })
 }
 
-/// Resolve a set of `SingleTimeSeries` metadata rows into the reader's master
-/// grid plus its `(dtype, element_shape)` groups.
+/// The master grid every `SingleTimeSeries` in `rows` shares, or an error naming
+/// the first row that diverges from it.
 ///
-/// Pure (no I/O) so it can be unit-tested without a backend. Validates that
-/// every row shares one grid; this is what makes the per-read path mask-free.
-pub(crate) fn build_groups(
-    mut rows: Vec<TimeSeriesMetadata>,
-) -> Result<(DateTime<Utc>, Period, usize, Vec<StaticGroup>)> {
-    if rows.is_empty() {
-        return Err(TimeSeriesError::InvalidParameter(
+/// Pure (no I/O) so it can be unit-tested without a backend. This uniformity is
+/// what makes the per-read path mask-free. Its irregular counterpart is settled
+/// in the catalog instead — series on one time axis are exactly the ones sharing
+/// a `timestamps_hash`, so [`Store::build_static_reader`] resolves that with a
+/// `DISTINCT` query rather than comparing vectors row by row.
+pub(crate) fn regular_timeline(rows: &[TimeSeriesMetadata]) -> Result<Timeline> {
+    let first = rows.first().ok_or_else(|| {
+        TimeSeriesError::InvalidParameter(
             "build_static_reader: no SingleTimeSeries match the filter".into(),
-        ));
-    }
-
-    // Master grid from the first row; every other row must match it.
-    let grid = grid_of(&rows[0])?;
-    for r in &rows {
+        )
+    })?;
+    let grid = grid_of(first)?;
+    for r in rows {
         let g = grid_of(r)?;
         if g != grid {
             return Err(TimeSeriesError::InvalidParameter(format!(
@@ -305,27 +388,77 @@ pub(crate) fn build_groups(
         }
     }
     let (initial, resolution, length) = grid;
+    Ok(Timeline::Regular {
+        initial,
+        resolution,
+        length,
+    })
+}
 
-    // Deterministic layout: order by dtype, then element shape, then key
-    // identity, so column positions are stable across processes.
+/// Resolve metadata rows lying on `timeline` into a reader's
+/// `(dtype, element_shape)` groups.
+///
+/// Pure (no I/O). Validates that every row is of the timeline's type and spans
+/// its full extent — a column shorter than the timeline would read out of
+/// bounds part-way through a sweep.
+pub(crate) fn build_groups(
+    timeline: Timeline,
+    mut rows: Vec<TimeSeriesMetadata>,
+) -> Result<StaticReader> {
+    if rows.is_empty() {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "build_static_reader: no {} match the filter",
+            timeline.time_series_type().as_str()
+        )));
+    }
+    if timeline.length() == 0 {
+        return Err(TimeSeriesError::InvalidParameter(
+            "build_static_reader: the matched series have no timestamps to read".into(),
+        ));
+    }
+    for r in &rows {
+        if r.time_series_type != timeline.time_series_type() {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "StaticReader for {} cannot hold {} '{}'",
+                timeline.time_series_type().as_str(),
+                r.time_series_type.as_str(),
+                r.name
+            )));
+        }
+        if r.length != Some(timeline.length()) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "StaticReader requires a uniform timeline; series '{}' (owner {}) has length \
+                 {:?} but the reader timeline has {}",
+                r.name,
+                r.owner_id,
+                r.length,
+                timeline.length()
+            )));
+        }
+    }
+
+    // Deterministic layout: order by element type, then element shape, then key
+    // identity, so column positions are stable across processes. Grouping on the
+    // logical element type rather than the physical dtype keeps a group uniform
+    // in meaning as well as in bytes — a quadratic-cost column never shares a
+    // group with a plain 3-tuple column that happens to have the same layout.
     rows.sort_by(|a, b| {
-        a.dtype
-            .code()
-            .cmp(&b.dtype.code())
+        a.element_type
+            .cmp(&b.element_type)
             .then_with(|| a.element_shape.cmp(&b.element_shape))
             .then_with(|| identity_sort_key(a).cmp(&identity_sort_key(b)))
     });
 
     let mut groups: Vec<StaticGroup> = Vec::new();
     for r in rows {
-        let want = (r.dtype, r.element_shape.as_slice());
+        let want = (r.element_type, r.element_shape.as_slice());
         let push_new = groups
             .last()
-            .map(|g| (g.dtype, g.element_shape.as_slice()) != want)
+            .map(|g| (g.element_type, g.element_shape.as_slice()) != want)
             .unwrap_or(true);
         if push_new {
             groups.push(StaticGroup {
-                dtype: r.dtype,
+                element_type: r.element_type,
                 element_shape: r.element_shape.clone(),
                 keys: Vec::new(),
                 hashes: Vec::new(),
@@ -340,31 +473,16 @@ pub(crate) fn build_groups(
 
     // Pre-size each reuse buffer so the read loop never reallocates.
     for g in &mut groups {
-        let bytes = g.num_columns() * g.elements_per_column() * g.dtype.size();
+        let bytes = g.num_columns() * g.elements_per_column() * g.dtype().size();
         g.buf = vec![0u8; bytes];
         g.buf.clear();
     }
 
-    Ok((initial, resolution, length, groups))
-}
-
-impl StaticReader {
-    /// Assemble a reader from a resolved grid + groups. Used by
-    /// [`Store::build_static_reader`].
-    pub(crate) fn from_parts(
-        initial_timestamp: DateTime<Utc>,
-        resolution: Period,
-        length: usize,
-        groups: Vec<StaticGroup>,
-    ) -> Self {
-        Self {
-            initial_timestamp,
-            resolution,
-            length,
-            groups,
-            last_read: None,
-        }
-    }
+    Ok(StaticReader {
+        timeline,
+        groups,
+        last_read: None,
+    })
 }
 
 // ---- ForecastReader -------------------------------------------------------
@@ -436,7 +554,7 @@ pub(crate) enum WindowRead {
 #[derive(Debug)]
 pub struct WindowSlot {
     hash: [u8; 32],
-    dtype: Dtype,
+    element_type: ElementType,
     /// Shape of a single window.
     window_shape: Vec<usize>,
     /// How to read this slot's window from storage.
@@ -458,8 +576,14 @@ pub struct WindowSlot {
 }
 
 impl WindowSlot {
+    /// Physical dtype of the window bytes, derived from [`Self::element_type`].
     pub fn dtype(&self) -> Dtype {
-        self.dtype
+        self.element_type.physical_dtype()
+    }
+
+    /// What the window's elements mean.
+    pub fn element_type(&self) -> ElementType {
+        self.element_type
     }
 
     pub fn window_shape(&self) -> &[usize] {
@@ -477,10 +601,10 @@ impl WindowSlot {
     /// slot's dtype). Copy-based, so alignment-safe; use [`Self::window`] for the
     /// zero-copy byte view. Empty until [`Store::forecast_read`] has run.
     pub fn window_to_vec<T: Element>(&self) -> Result<Vec<T>> {
-        if self.dtype != T::DTYPE {
+        if self.dtype() != T::DTYPE {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "slot dtype is {}, requested {}",
-                self.dtype.as_str(),
+                self.dtype().as_str(),
                 T::DTYPE.as_str()
             )));
         }
@@ -505,16 +629,26 @@ impl WindowSlot {
         read_range: FRange,
     ) -> Result<()>
     where
-        FBlock: FnOnce(&[u8; 32], usize, usize, usize, &mut Vec<u8>) -> Result<()>,
-        FRange: FnOnce(&[u8; 32], usize, usize, &mut Vec<u8>) -> Result<()>,
+        FBlock: FnOnce(&[u8; 32], Dtype, usize, usize, usize, &mut Vec<u8>) -> Result<()>,
+        FRange: FnOnce(&[u8; 32], Dtype, usize, usize, &mut Vec<u8>) -> Result<()>,
     {
+        // The slot's element type comes from the catalog; the backend is told
+        // the dtype rather than inferring one from what it stored.
+        let dtype = self.element_type.physical_dtype();
         match self.read {
             WindowRead::Dense { count_axis } => {
                 let cols = self.block_cols.max(1);
                 let start = (window / cols) * cols;
                 let end = (start + cols).min(self.count);
                 if self.cached.as_ref() != Some(&(start..end)) {
-                    read_block(&self.hash, count_axis, start, end - start, &mut self.block)?;
+                    read_block(
+                        &self.hash,
+                        dtype,
+                        count_axis,
+                        start,
+                        end - start,
+                        &mut self.block,
+                    )?;
                     self.cached = Some(start..end);
                 }
                 gather_window(
@@ -523,7 +657,7 @@ impl WindowSlot {
                     count_axis,
                     end - start,
                     window - start,
-                    self.dtype.size(),
+                    self.dtype().size(),
                     &mut self.buf,
                 );
             }
@@ -532,7 +666,7 @@ impl WindowSlot {
                 horizon_steps,
             } => {
                 let start = window * interval_steps;
-                read_range(&self.hash, start, horizon_steps, &mut self.buf)?;
+                read_range(&self.hash, dtype, start, horizon_steps, &mut self.buf)?;
             }
         }
         self.filled = true;
@@ -847,19 +981,22 @@ pub(crate) fn build_forecast_entries(
         // Validate every row's layout, even ones that land on an existing slot.
         let (window_shape, read) = entry_layout(&m, &shape, count)?;
         let slot = *slot_of.entry((m.data_hash, read)).or_insert_with(|| {
-            let bytes = window_shape.iter().product::<usize>().max(1) * m.dtype.size();
+            let bytes = window_shape.iter().product::<usize>().max(1)
+                * m.element_type.physical_dtype().size();
             let mut buf = vec![0u8; bytes];
             buf.clear();
             // Block-cache the dense path at the storage chunk width so a window
             // sweep decompresses each chunk once; the derived path reads a
             // contiguous run per window and is not block-cached.
             let block_cols = match read {
-                WindowRead::Dense { count_axis } => window_block_cols(m.dtype, &shape, count_axis),
+                WindowRead::Dense { count_axis } => {
+                    window_block_cols(m.element_type.physical_dtype(), &shape, count_axis)
+                }
                 WindowRead::Derived { .. } => 1,
             };
             slots.push(WindowSlot {
                 hash: m.data_hash,
-                dtype: m.dtype,
+                element_type: m.element_type,
                 window_shape: window_shape.clone(),
                 read,
                 count,
@@ -937,7 +1074,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1156,6 +1292,178 @@ mod tests {
         assert_eq!(f64_cols(g), vec![12.0, 42.0]);
     }
 
+    // ---- StaticReader over an irregular cohort ----------------------------
+
+    /// Add a `NonSequentialTimeSeries` on the explicit `stamps` axis.
+    fn add_ns(
+        store: &mut Store,
+        owner_id: i64,
+        name: &str,
+        stamps: &[DateTime<Utc>],
+        vals: &[f64],
+    ) {
+        let ns = crate::types::time_series::NonSequentialTimeSeries::new(
+            stamps.to_vec(),
+            TypedArray::from_f64(vec![vals.len()], vals),
+            name,
+        )
+        .unwrap();
+        store
+            .add_time_series(
+                owner_id,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(ns),
+                Default::default(),
+            )
+            .unwrap();
+    }
+
+    /// Three irregular timestamps, none a multiple of the others — the point
+    /// being that the reader never assumes a step.
+    fn irregular_stamps() -> Vec<DateTime<Utc>> {
+        vec![
+            t0(),
+            t0() + Duration::minutes(37),
+            t0() + Duration::hours(9),
+        ]
+    }
+
+    fn irregular_filter() -> ListFilter {
+        ListFilter::new().time_series_type(TimeSeriesType::NonSequentialTimeSeries)
+    }
+
+    /// The irregular counterpart of `reads_columnar_values_at_a_timestamp`:
+    /// series sharing one timestamp vector read columnar at each of its
+    /// instants, on disk (where they are packed into one cohort dataset) exactly
+    /// as in memory.
+    #[test]
+    fn reads_columnar_values_across_an_irregular_cohort() {
+        let stamps = irregular_stamps();
+        let populate = |store: &mut Store| {
+            add_ns(store, 2, "outage", &stamps, &[20.0, 21.0, 22.0]);
+            add_ns(store, 1, "outage", &stamps, &[10.0, 11.0, 12.0]);
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.h5");
+        let mut disk = Store::create(Some(&path), false).unwrap();
+        populate(&mut disk);
+        let mut mem = Store::create(None, true).unwrap();
+        populate(&mut mem);
+
+        let mut r_disk = disk.build_static_reader(irregular_filter()).unwrap();
+        let mut r_mem = mem.build_static_reader(irregular_filter()).unwrap();
+
+        assert_eq!(
+            r_disk.time_series_type(),
+            TimeSeriesType::NonSequentialTimeSeries
+        );
+        // No constant step to report, and the timeline is the vector itself.
+        assert_eq!(r_disk.resolution(), None);
+        assert_eq!(r_disk.length(), 3);
+        assert_eq!(r_disk.initial_timestamp(), stamps[0]);
+        assert_eq!(r_disk.timestamps().collect::<Vec<_>>(), stamps);
+
+        // Sweep the timeline: at each instant, every column at once.
+        for (index, at) in stamps.iter().enumerate() {
+            disk.static_read(&mut r_disk, *at).unwrap();
+            mem.static_read(&mut r_mem, *at).unwrap();
+            assert_eq!(r_disk.index_at(*at).unwrap(), index);
+            let g = &r_disk.groups()[0];
+            assert_eq!(g.num_columns(), 2);
+            assert_eq!(g.keys()[0].owner_id(), 1, "columns order by identity");
+            assert_eq!(
+                f64_cols(g),
+                vec![10.0 + index as f64, 20.0 + index as f64],
+                "at {at}"
+            );
+            assert_eq!(f64_cols(g), f64_cols(&r_mem.groups()[0]));
+        }
+    }
+
+    #[test]
+    fn a_timestamp_off_the_irregular_timeline_is_an_error() {
+        let stamps = irregular_stamps();
+        let mut store = Store::create(None, true).unwrap();
+        add_ns(&mut store, 1, "outage", &stamps, &[10.0, 11.0, 12.0]);
+        let mut reader = store.build_static_reader(irregular_filter()).unwrap();
+
+        // Between two stored instants: an irregular series has no value there,
+        // so this is a hard error rather than a nearest-neighbour read.
+        let err = store
+            .static_read(&mut reader, stamps[0] + Duration::minutes(1))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not on the reader's timeline"),
+            "{err}"
+        );
+        // Before the first and after the last, too.
+        assert!(
+            store
+                .static_read(&mut reader, t0() - Duration::hours(1))
+                .is_err()
+        );
+        assert!(
+            store
+                .static_read(&mut reader, t0() + Duration::days(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn divergent_timestamp_vectors_are_rejected_at_build() {
+        let stamps = irregular_stamps();
+        let mut other = stamps.clone();
+        other[1] += Duration::minutes(1);
+
+        let mut store = Store::create(None, true).unwrap();
+        add_ns(&mut store, 1, "outage", &stamps, &[10.0, 11.0, 12.0]);
+        add_ns(&mut store, 2, "outage", &other, &[20.0, 21.0, 22.0]);
+        let err = store.build_static_reader(irregular_filter()).unwrap_err();
+        assert!(err.to_string().contains("uniform timeline"), "{err}");
+
+        // Narrowing to one cohort builds, which is what the error suggests.
+        let reader = store
+            .build_static_reader(irregular_filter().owner_id(1))
+            .unwrap();
+        assert_eq!(reader.groups()[0].num_columns(), 1);
+    }
+
+    /// The two static types never share a reader: their timelines are different
+    /// kinds of thing, and a filter that pinned a resolution would silently
+    /// match no irregular series at all.
+    #[test]
+    fn the_two_static_types_get_separate_readers() {
+        let stamps = irregular_stamps();
+        let mut store = Store::create(None, true).unwrap();
+        add_f64(&mut store, 1, "load", &[10.0, 11.0, 12.0]);
+        add_ns(&mut store, 1, "outage", &stamps, &[20.0, 21.0, 22.0]);
+
+        // A default (SingleTimeSeries) reader ignores the irregular series.
+        let regular = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        assert_eq!(regular.time_series_type(), TimeSeriesType::SingleTimeSeries);
+        assert_eq!(regular.resolution(), Some(Period::from(Duration::hours(1))));
+        assert_eq!(regular.groups()[0].num_columns(), 1);
+
+        // And an irregular reader rejects a resolution filter outright.
+        let err = store
+            .build_static_reader(irregular_filter().resolution(Duration::hours(1)))
+            .unwrap_err();
+        assert!(err.to_string().contains("no resolution filter"), "{err}");
+
+        // Forecast types were never eligible.
+        let err = store
+            .build_static_reader(
+                ListFilter::new()
+                    .time_series_type(TimeSeriesType::Deterministic)
+                    .resolution(Duration::hours(1)),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("static types"), "{err}");
+    }
+
     // ---- ForecastReader ---------------------------------------------------
 
     fn f64_window(s: &WindowSlot) -> Vec<f64> {
@@ -1197,7 +1505,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(det),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1284,7 +1591,7 @@ mod tests {
         // Model array value[hi][k] = k*10 + hi (native `[H, count]` row-major).
         let mut slot = WindowSlot {
             hash: [0u8; 32],
-            dtype: Dtype::F64,
+            element_type: ElementType::Scalar(Dtype::F64),
             window_shape: vec![h], // count axis removed
             read: WindowRead::Dense { count_axis: 1 },
             count,
@@ -1296,12 +1603,14 @@ mod tests {
         };
         let reads = Cell::new(0usize);
         let range_unused =
-            |_: &[u8; 32], _: usize, _: usize, _: &mut Vec<u8>| -> Result<()> { unreachable!() };
+            |_: &[u8; 32], _: Dtype, _: usize, _: usize, _: &mut Vec<u8>| -> Result<()> {
+                unreachable!()
+            };
 
         for k in 0..count {
             slot.read_window(
                 k,
-                |_hash, _axis, start, len, out| {
+                |_hash, _dtype, _axis, start, len, out| {
                     reads.set(reads.get() + 1);
                     out.clear();
                     // Emit the `[H, len]` block in native row-major order.
@@ -1326,7 +1635,7 @@ mod tests {
         // Re-reading a window inside the currently cached block does no I/O.
         slot.read_window(
             count - 1,
-            |_, _, _, _, _| -> Result<()> { panic!("cached block must not re-read") },
+            |_, _, _, _, _, _| -> Result<()> { panic!("cached block must not re-read") },
             range_unused,
         )
         .unwrap();
@@ -1449,7 +1758,13 @@ mod tests {
             add_det(store, 2, "gen", 2, 5, vec![], &det);
             // Derive a DST view for owner 1 from its SingleTimeSeries.
             store
-                .transform_single_time_series(Duration::hours(2), Duration::hours(1), None, None)
+                .transform_single_time_series(
+                    Duration::hours(2),
+                    Duration::hours(1),
+                    None,
+                    None,
+                    Default::default(),
+                )
                 .unwrap();
         };
 
@@ -1513,7 +1828,12 @@ mod tests {
                 Dtype::F32 => bytes.extend_from_slice(&(v as f32).to_le_bytes()),
                 Dtype::I64 => bytes.extend_from_slice(&(v as i64).to_le_bytes()),
                 Dtype::I32 => bytes.extend_from_slice(&(v as i32).to_le_bytes()),
+                Dtype::I16 => bytes.extend_from_slice(&(v as i16).to_le_bytes()),
+                Dtype::I8 => bytes.extend_from_slice(&(v as i8).to_le_bytes()),
                 Dtype::U64 => bytes.extend_from_slice(&(v as u64).to_le_bytes()),
+                Dtype::U32 => bytes.extend_from_slice(&(v as u32).to_le_bytes()),
+                Dtype::U16 => bytes.extend_from_slice(&(v as u16).to_le_bytes()),
+                Dtype::U8 => bytes.extend_from_slice(&(v as u8).to_le_bytes()),
                 Dtype::Bool => bytes.push(if v != 0.0 { 1 } else { 0 }),
             }
         }
@@ -1558,7 +1878,6 @@ mod tests {
                         OwnerCategory::Component,
                         TimeSeriesData::SingleTimeSeries(ts),
                         Default::default(),
-                        None,
                     )
                     .unwrap();
                 owner += 1;
@@ -1645,7 +1964,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Probabilistic(prob),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1681,7 +1999,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Scenarios(scen),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -1769,7 +2086,13 @@ mod tests {
         // DST owner 7: underlying length (count-1)*interval_steps + H = 3*1 + 2 = 5.
         add_f64(&mut store, 7, "load", &distinct(7000.0, 5));
         store
-            .transform_single_time_series(Duration::hours(h as i64), ivl, None, None)
+            .transform_single_time_series(
+                Duration::hours(h as i64),
+                ivl,
+                None,
+                None,
+                Default::default(),
+            )
             .unwrap();
 
         for ts_type in [
@@ -1824,7 +2147,6 @@ mod tests {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(ts),
                     Default::default(),
-                    None,
                 )
                 .unwrap();
         }
@@ -1883,7 +2205,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
 
@@ -1967,7 +2288,6 @@ mod tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(two_hour),
                 Default::default(),
-                None,
             )
             .unwrap();
 

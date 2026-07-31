@@ -98,7 +98,8 @@ message TimeSeriesMetadata {
   repeated string timestamps_rfc3339        = 13;
   Features        features                  = 14;
   optional string units                     = 16;
-  int32           dtype                     = 17;  // Dtype code
+  string          element_type              = 21;  // canonical element-type string
+  // (17 is reserved: the former int32 dtype code)
   repeated uint64 element_shape             = 18;  // per-step trailing dims
   optional string ext                       = 19;  // opaque package-owned payload
   repeated double percentiles               = 20;  // Probabilistic only
@@ -133,7 +134,8 @@ message GetResp {
   reserved 5;                                      // was: repeated double values
   TimeSeriesType  time_series_type          = 6;
   repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
-  int32           dtype                     = 8;   // Dtype code
+  string          element_type              = 16;  // canonical element-type string
+  // (8 is reserved: the former int32 dtype code)
   bytes           value_bytes               = 9;   // raw little-endian, row-major
   string          ext              = 10;
   // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
@@ -192,11 +194,12 @@ and (for `Probabilistic`) `percentiles` — and `GetCounts` includes them in `fo
 
 `GetTimeSeries` returns forecast values too. For a `Deterministic`, `DeterministicSingleTimeSeries`
 (synthesized into `Deterministic`), `Probabilistic`, or `Scenarios` key it fills the `GetResp` array
-fields (`value_bytes` + `dtype`), the window parameters (`horizon`, `interval`, `count`), and the
-`percentiles` (`Probabilistic`) or `scenario_count` (`Scenarios`); the client reconstructs the
+fields (`value_bytes` + `element_type`), the window parameters (`horizon`, `interval`, `count`), and
+the `percentiles` (`Probabilistic`) or `scenario_count` (`Scenarios`); the client reconstructs the
 matching type. Arrays are dtype-generic on the wire — `value_bytes` is the raw little-endian buffer
-and `dtype` names the element type (`f64`/`f32`/`i64`/`i32`/`u64`/`bool`), so non-`f64` arrays
-survive the round trip without coercion. One caveat:
+and `element_type` says both what the elements mean and, through it, their physical dtype
+(`f64`/`f32`/`i64`/…, or a composite kind like `piecewise_linear`), so non-`f64` arrays survive the
+round trip without coercion. One caveat:
 
 - **`ext` is not carried in `GetResp`.** The opaque package-owned payload is returned by
   `ListTimeSeries` (on `TimeSeriesMetadata`) but left empty by `GetTimeSeries`, so a value fetched

@@ -79,7 +79,7 @@ const LIST_HEADERS: &[&str] = &[
     "Type",
     "Name",
     "Features",
-    "Dtype",
+    "Element Type",
     "Resolution",
     "Interval",
     "Length",
@@ -111,7 +111,7 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
         m.time_series_type.as_str().to_string(),
         m.name.clone(),
         fields::features_str(&m.features),
-        m.dtype.as_str().to_string(),
+        m.element_type.to_string(),
         fields::opt_period(m.resolution),
         fields::opt_period(m.interval),
         fields::opt(m.length),
@@ -142,7 +142,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert("name".into(), json!(m.name));
     obj.insert("features".into(), fields::features_json(&m.features));
     obj.insert("data_hash".into(), json!(fields::hash_hex(&m.data_hash)));
-    obj.insert("dtype".into(), json!(m.dtype.as_str()));
+    obj.insert("element_type".into(), json!(m.element_type.to_string()));
     obj.insert("element_shape".into(), json!(m.element_shape));
     obj.insert(
         "resolution".into(),
@@ -228,7 +228,7 @@ pub fn info(
         ("owner_type".into(), json!(meta.owner_type)),
         ("owner_category".into(), json!(meta.owner_category.as_str())),
         ("type".into(), json!(meta.time_series_type.as_str())),
-        ("dtype".into(), json!(meta.dtype.as_str())),
+        ("element_type".into(), json!(meta.element_type.to_string())),
         ("element_shape".into(), json!(meta.element_shape)),
     ];
     if let Some(r) = meta.resolution {

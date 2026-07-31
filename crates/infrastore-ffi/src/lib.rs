@@ -227,6 +227,35 @@ pub unsafe extern "C" fn infrastore_string_free(s: *mut c_char) {
     }
 }
 
+/// Hand a produced string to the caller as an owned allocation, to be released
+/// with `infrastore_string_free`.
+///
+/// This is the convention for outputs whose size scales with the data — a
+/// listing over a large catalog runs to tens of megabytes. The alternative, a
+/// probe-then-fetch pair of calls with a caller-sized buffer, would execute the
+/// query and serialize the result *twice*, since neither pass can retain
+/// anything for the other.
+///
+/// # Safety
+///
+/// `out` and `out_len` must be valid for writing one pointer and one `u64`.
+unsafe fn write_owned_str_out(s: String, out: *mut *mut c_char, out_len: *mut u64) -> i32 {
+    // The payload is JSON, which never contains an interior NUL, so this only
+    // fails on a genuine encoding bug.
+    let len = s.len() as u64;
+    match std::ffi::CString::new(s) {
+        Ok(c) => unsafe {
+            *out = c.into_raw();
+            *out_len = len;
+            INFRASTORE_OK
+        },
+        Err(e) => {
+            set_error(format!("result contained an interior NUL: {e}"));
+            INFRASTORE_ERR_INTERNAL
+        }
+    }
+}
+
 // ---- Store create / open / free ------------------------------------------
 
 /// Create a time-series store and return an owning handle through `out`.
@@ -368,23 +397,36 @@ pub unsafe extern "C" fn infrastore_store_free(handle: *mut InfraStoreHandle) {
 
 // ---- add_single -----------------------------------------------------------
 
-/// Build a [`TypedArray`] from a dtype code, shape (`ndims` × `dims_ptr`), and
+/// Parse a null-terminated `element_type` string into an [`core_lib::ElementType`].
+/// Required on every write: it says both what the elements mean and, through
+/// [`core_lib::ElementType::physical_dtype`], how the bytes are encoded.
+unsafe fn cstr_to_element_type(
+    p: *const c_char,
+) -> std::result::Result<core_lib::ElementType, i32> {
+    let s = match unsafe { cstr_to_str(p) } {
+        Ok(s) => s,
+        Err(c) => {
+            set_error("element_type is null or invalid UTF-8");
+            return Err(c);
+        }
+    };
+    s.parse::<core_lib::ElementType>().map_err(|e| {
+        set_error(e.to_string());
+        INFRASTORE_ERR_INVALID_PARAMETER
+    })
+}
+
+/// Build a [`TypedArray`] from an element type, shape (`ndims` × `dims_ptr`), and
 /// raw little-endian bytes. Returns an FFI error code on failure (and sets the
 /// thread-local error). The buffers are borrowed for the duration of the call.
 unsafe fn build_typed_array(
-    dtype_code: i32,
+    element_type: core_lib::ElementType,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
     data_byte_len: u64,
 ) -> std::result::Result<core_lib::TypedArray, i32> {
-    let dtype = match core_lib::Dtype::from_code(dtype_code) {
-        Some(d) => d,
-        None => {
-            set_error(format!("invalid dtype code {dtype_code}"));
-            return Err(INFRASTORE_ERR_INVALID_PARAMETER);
-        }
-    };
+    let dtype = element_type.physical_dtype();
     let dims: Vec<usize> = if ndims == 0 || dims_ptr.is_null() {
         Vec::new()
     } else {
@@ -415,7 +457,7 @@ unsafe fn build_single_request(
     name: *const c_char,
     initial_ts_unix_ms: i64,
     resolution: *const c_char,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -462,18 +504,21 @@ unsafe fn build_single_request(
         }
     };
     let resolution = unsafe { cstr_to_period(resolution)? };
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
     let single = core_lib::SingleTimeSeries::new(initial_timestamp, resolution, array, name);
 
+    let mut data = core_lib::TimeSeriesData::SingleTimeSeries(single);
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
-        data: core_lib::TimeSeriesData::SingleTimeSeries(single),
+        data,
         features,
-        units,
-
-        ext,
     })
 }
 
@@ -499,7 +544,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     name: *const c_char,
     initial_ts_unix_ms: i64,
     resolution: *const c_char,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -529,7 +574,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             name,
             initial_ts_unix_ms,
             resolution,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -566,7 +611,7 @@ unsafe fn build_non_sequential_request(
     name: *const c_char,
     timestamps_unix_ms: *const i64,
     timestamps_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -601,7 +646,9 @@ unsafe fn build_non_sequential_request(
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
         }
     };
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
     let series = match core_lib::NonSequentialTimeSeries::new(timestamps, array, name) {
         Ok(series) => series,
         Err(error) => {
@@ -612,15 +659,16 @@ unsafe fn build_non_sequential_request(
     let features = unsafe { parse_features_json(features_json) }?;
     let units = unsafe { cstr_to_optional_string(units) }?;
     let ext = unsafe { cstr_to_optional_string(ext) }?;
+    let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
-        data: core_lib::TimeSeriesData::NonSequentialTimeSeries(series),
+        data,
         features,
-        units,
-
-        ext,
     })
 }
 
@@ -643,7 +691,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     name: *const c_char,
     timestamps_unix_ms: *const i64,
     timestamps_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -673,7 +721,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             name,
             timestamps_unix_ms,
             timestamps_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -718,15 +766,27 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 ///
 /// `out_ext`, when non-null, receives the association's opaque extension payload
 /// from the metadata row: null when the series carries no `ext`, otherwise an
-/// owned C string the caller must free with `infrastore_string_free`. Pass a
-/// null `out_ext` to skip the metadata lookup entirely.
+/// owned C string the caller must free with `infrastore_string_free`.
+///
+/// `out_element_type`, when non-null, receives the canonical `element_type`
+/// string (`"f64"`, `"tuple(3,f64)"`, `"piecewise_linear"`, ...) as an owned C
+/// string the caller must free the same way. It is what tells a caller how to
+/// read the returned bytes as domain values; `out_dtype` is only their physical
+/// width.
+///
+/// `out_units`, when non-null, receives the association's units label: null when
+/// the series carries none, otherwise an owned C string freed the same way.
+/// Unlike `element_type` this is a user-declared label the store never
+/// interprets; it is returned so a caller can hand it back on the reconstructed
+/// series.
 ///
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_ext` must be valid for writing its indicated value; `out_ext` may be null. The returned
-/// shape and data buffers must each be released exactly once with the matching free function and
-/// returned length, and a non-null `*out_ext` exactly once with `infrastore_string_free`.
+/// `out_ext`, `out_element_type`, and `out_units` must be valid for writing its indicated value;
+/// those three may be null. The returned shape and data buffers must each be released exactly once
+/// with the matching free function and returned length, and a non-null `*out_ext` /
+/// `*out_element_type` / `*out_units` exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_single(
@@ -743,6 +803,8 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
     out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -810,6 +872,19 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     } else {
         meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
+    // The units label likewise lives on the metadata row, not on the series.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
@@ -833,6 +908,12 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         if !out_ext.is_null() {
             *out_ext = ext_cstr;
         }
+        if !out_element_type.is_null() {
+            *out_element_type = element_type_cstr;
+        }
+        if !out_units.is_null() {
+            *out_units = units_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -845,10 +926,17 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 ///
 /// `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
 /// N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
-/// and `out_data` carry the row-major element bytes. `out_ext` is an optional opaque
-/// element-typing tag (e.g. `"QuadraticFunctionData"`) copied into a caller-allocated buffer of
-/// `ext_cap` bytes; the full length is reported in `out_ext_len` so the caller can
-/// probe with a null/zero-capacity buffer first.
+/// and `out_data` carry the row-major element bytes. `out_ext` is the association's opaque
+/// extension payload, copied into a caller-allocated buffer of `ext_cap` bytes; the full length is
+/// reported in `out_ext_len` so the caller can probe with a null/zero-capacity buffer first.
+///
+/// `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
+/// string the caller must free with `infrastore_string_free`. It is what says how to read the
+/// bytes as domain values.
+///
+/// `out_units`, when non-null, receives the association's user-declared units label as an owned C
+/// string freed the same way; it is null when the series carries none. The store never interprets
+/// it.
 ///
 /// The caller owns the `out_timestamps`, `out_shape`, and `out_data` buffers and must release them
 /// with `infrastore_buffer_free_i64`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8` respectively.
@@ -876,6 +964,8 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     out_ext: *mut c_char,
     ext_cap: u64,
     out_ext_len: *mut u64,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
@@ -920,6 +1010,19 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     // The extension payload lives on the metadata row, not on the reconstructed
     // series; the row came back with the data from the single catalog lookup.
     let ext = meta.ext.unwrap_or_default();
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
+    // The units label likewise lives on the metadata row, not on the series.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let mut timestamps = match series
         .timestamps
         .iter()
@@ -956,6 +1059,12 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
         write_str_out(&ext, out_ext, ext_cap, out_ext_len);
+        if !out_element_type.is_null() {
+            *out_element_type = element_type_cstr;
+        }
+        if !out_units.is_null() {
+            *out_units = units_cstr;
+        }
     }
     INFRASTORE_OK
 }
@@ -2371,7 +2480,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     horizon: *const c_char,
     interval: *const c_char,
     count: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2399,7 +2508,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             horizon,
             interval,
             count,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2438,7 +2547,7 @@ unsafe fn build_forecast_request(
     horizon: *const c_char,
     interval: *const c_char,
     count: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2478,7 +2587,9 @@ unsafe fn build_forecast_request(
         }
     };
     let ext = unsafe { cstr_to_optional_string(ext) }?;
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let resolution = unsafe { cstr_to_period(resolution)? };
     let horizon = unsafe { cstr_to_period(horizon)? };
@@ -2528,15 +2639,16 @@ unsafe fn build_forecast_request(
         }
     };
 
+    let mut data = data;
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
         data,
         features,
-        units,
-
-        ext,
     })
 }
 
@@ -2565,7 +2677,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2594,7 +2706,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             count,
             percentiles_ptr,
             percentiles_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2634,7 +2746,7 @@ unsafe fn build_probabilistic_request(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2669,7 +2781,9 @@ unsafe fn build_probabilistic_request(
     let percentiles =
         unsafe { slice::from_raw_parts(percentiles_ptr, percentiles_len as usize) }.to_vec();
     let ext = unsafe { cstr_to_optional_string(ext) }?;
-    let array = unsafe { build_typed_array(dtype, ndims, dims_ptr, data_ptr, data_byte_len) }?;
+    let element_type = unsafe { cstr_to_element_type(element_type) }?;
+    let array =
+        unsafe { build_typed_array(element_type, ndims, dims_ptr, data_ptr, data_byte_len) }?;
 
     let prob = match core_lib::Probabilistic::new(
         initial_timestamp,
@@ -2687,15 +2801,16 @@ unsafe fn build_probabilistic_request(
             return Err(INFRASTORE_ERR_INVALID_PARAMETER);
         }
     };
+    let mut data = core_lib::TimeSeriesData::Probabilistic(prob);
+    // `element_type`, `units`, and `ext` describe the series, so they travel on
+    // it rather than on the request.
+    data.set_descriptors(element_type, units, ext);
     Ok(core_lib::AddRequest {
         owner_id,
         owner_type: owner_type.to_string(),
         owner_category,
-        data: core_lib::TimeSeriesData::Probabilistic(prob),
+        data,
         features,
-        units,
-
-        ext,
     })
 }
 
@@ -2751,7 +2866,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     name: *const c_char,
     initial_ts_unix_ms: i64,
     resolution: *const c_char,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2776,7 +2891,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             name,
             initial_ts_unix_ms,
             resolution,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2814,7 +2929,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     name: *const c_char,
     timestamps_unix_ms: *const i64,
     timestamps_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2839,7 +2954,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             name,
             timestamps_unix_ms,
             timestamps_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2881,7 +2996,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     horizon: *const c_char,
     interval: *const c_char,
     count: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2910,7 +3025,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             horizon,
             interval,
             count,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -2953,7 +3068,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     count: u64,
     percentiles_ptr: *const f64,
     percentiles_len: u64,
-    dtype: i32,
+    element_type: *const c_char,
     ndims: u64,
     dims_ptr: *const u64,
     data_ptr: *const u8,
@@ -2983,7 +3098,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             count,
             percentiles_ptr,
             percentiles_len,
-            dtype,
+            element_type,
             ndims,
             dims_ptr,
             data_ptr,
@@ -3152,6 +3267,42 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
     INFRASTORE_OK
 }
 
+/// Write a series' descriptive attributes (`ext`, `element_type`, `units`) into
+/// three optional out-params.
+///
+/// Each pointer may be null to skip that attribute. A non-null target receives
+/// either null (the attribute is unset on this series) or an owned C string the
+/// caller must free exactly once with `infrastore_string_free`.
+///
+/// The three live on the series itself, so a bulk-read result carries them just
+/// as a per-key read does — the two paths must not disagree.
+///
+/// # Safety
+///
+/// Each non-null pointer must be valid for writing one pointer.
+unsafe fn emit_descriptors(
+    ext: Option<&str>,
+    element_type: core_lib::ElementType,
+    units: Option<&str>,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
+) {
+    unsafe {
+        if !out_ext.is_null() {
+            *out_ext = ext.map_or(std::ptr::null_mut(), owned_cstr);
+        }
+        // Unlike `ext` and `units`, the element type is never absent — a series
+        // always carries a concrete one — so this is always a string.
+        if !out_element_type.is_null() {
+            *out_element_type = owned_cstr(&element_type.to_string());
+        }
+        if !out_units.is_null() {
+            *out_units = units.map_or(std::ptr::null_mut(), owned_cstr);
+        }
+    }
+}
+
 /// The number of series held by a bulk-read result handle, or `-1` if `result`
 /// is null.
 ///
@@ -3174,11 +3325,19 @@ pub unsafe extern "C" fn infrastore_bulk_result_len(
 /// `infrastore_string_free`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8`. The handle
 /// is not consumed, so an element may be read more than once.
 ///
+/// `out_ext`, `out_element_type`, and `out_units` each receive an owned C string
+/// (null when that attribute is unset), freed with `infrastore_string_free`. Any
+/// of the three may be null to skip it. They carry the same values a per-key
+/// read returns: the attributes live on the series, so both paths agree.
+///
 /// # Safety
 ///
 /// `result` must be a live handle from `infrastore_store_bulk_read_single` and `index`
-/// must be less than its length. Every output pointer must be valid for writing
-/// its indicated value.
+/// must be less than its length. Every output pointer except `out_ext`,
+/// `out_element_type`, and `out_units` must be valid for writing its indicated
+/// value; those three may be null, and a non-null `*out_ext` /
+/// `*out_element_type` / `*out_units` must be freed exactly once with
+/// `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_bulk_result_get_single(
@@ -3191,6 +3350,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3251,6 +3413,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_len;
+        emit_descriptors(
+            single.ext.as_deref(),
+            single.element_type,
+            single.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        );
     }
     INFRASTORE_OK
 }
@@ -3370,6 +3540,10 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_type(
 /// fetch it per-key with `infrastore_store_get_metadata` if needed). The caller owns the
 /// `out_timestamps`, `out_shape`, and `out_data` buffers.
 ///
+///
+/// `out_ext`, `out_element_type`, and `out_units` behave as in
+/// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
+/// them nullable to skip, freed with `infrastore_string_free`.
 /// # Safety
 ///
 /// `result` must be a live bulk-read handle and `index` less than its length.
@@ -3387,6 +3561,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3453,6 +3630,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
+        emit_descriptors(
+            series.ext.as_deref(),
+            series.element_type,
+            series.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        );
     }
     INFRASTORE_OK
 }
@@ -3463,6 +3648,10 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
 /// non-null only for `Probabilistic`). The caller owns the `out_dims`,
 /// `out_data`, and `out_percentiles` buffers.
 ///
+///
+/// `out_ext`, `out_element_type`, and `out_units` behave as in
+/// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
+/// them nullable to skip, freed with `infrastore_string_free`.
 /// # Safety
 ///
 /// `result` must be a live bulk-read handle and `index` less than its length.
@@ -3486,6 +3675,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     out_data_byte_len: *mut u64,
     out_percentiles: *mut *mut f64,
     out_percentiles_len: *mut u64,
+    out_ext: *mut *mut c_char,
+    out_element_type: *mut *mut c_char,
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3530,7 +3722,14 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    unsafe {
+    // Captured before `data` is moved into the emitter; written only on success
+    // so a failed emit does not hand back strings the caller never frees.
+    let (ext, element_type, units) = (
+        data.ext().map(str::to_owned),
+        data.element_type(),
+        data.units().map(str::to_owned),
+    );
+    let code = unsafe {
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
@@ -3547,7 +3746,20 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             out_percentiles,
             out_percentiles_len,
         )
+    };
+    if code == INFRASTORE_OK {
+        unsafe {
+            emit_descriptors(
+                ext.as_deref(),
+                element_type,
+                units.as_deref(),
+                out_ext,
+                out_element_type,
+                out_units,
+            )
+        };
     }
+    code
 }
 
 /// Free a bulk-read result handle created by `infrastore_store_bulk_read_single` or
@@ -3564,22 +3776,60 @@ pub unsafe extern "C" fn infrastore_bulk_result_free(result: *mut InfraStoreBulk
     }
 }
 
+/// Buffer size a caller must provide for
+/// `infrastore_store_transform_single_time_series`'s `out_interval`. An
+/// ISO-8601 period is far shorter than this; the slack is deliberate.
+pub const INTERVAL_BUF_LEN: u64 = 64;
+
 /// Derive `DeterministicSingleTimeSeries` forecasts from the stored
-/// `SingleTimeSeries` associations (see `Store::transform_single_time_series`).
-/// Writes the number of series transformed to `*out_count`.
+/// `SingleTimeSeries` associations (see `Store::transform_single_time_series`,
+/// which performs the whole of the eligibility validation).
+///
+/// Writes the number of series transformed to `*out_count`. The remaining
+/// out-parameters report the rest of the `TransformOutcome` and may each be
+/// null if the caller does not need them:
+///
+/// - `out_sources` — `SingleTimeSeries` matched before idempotent skips; zero
+///   means there was nothing to transform.
+/// - `out_interval` — the ISO-8601 interval actually stored, NUL-terminated.
+///   Unlike the listing exports this takes no probe pass: an ISO period is
+///   bounded, so the caller passes a fixed buffer of `INTERVAL_BUF_LEN` bytes.
+/// - `out_interval_normalized` — non-zero when the request described a single
+///   window (see `normalize_single_window`).
+///
+/// The two policy flags are `TransformPolicy` (see the core docs); both false
+/// is the permissive default, and InfrastructureSystems.jl passes both true:
+///
+/// - `normalize_single_window` selects the single-window encoding: non-zero
+///   stores the zero interval (what InfrastructureSystems.jl looks up by), zero
+///   stores the requested interval verbatim.
+/// - `require_uniform_forecast_grid` requires every resolution in scope, and
+///   any forecast already stored at the same `(resolution, interval)`, to agree
+///   on the derived window `count` and `initial_timestamp`.
+/// - `dry_run` runs every check and reports what would happen without writing.
+///   `*out_count` is then the count a committing run would produce. Legal
+///   against a read-only store.
 ///
 /// # Safety
 ///
 /// `handle` must be a live mutable store handle and `out_count` must be valid
-/// for writing one `u64`.
+/// for writing one `u64`. Each non-null optional out-parameter must be valid
+/// for writing its type.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
     handle: *mut InfraStoreHandle,
     horizon: *const c_char,
     interval: *const c_char,
     owner_category: i32,
     resolution: *const c_char,
+    normalize_single_window: bool,
+    require_uniform_forecast_grid: bool,
+    dry_run: bool,
     out_count: *mut u64,
+    out_sources: *mut u64,
+    out_interval: *mut c_char,
+    out_interval_normalized: *mut bool,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(mut handle);
@@ -3610,12 +3860,34 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
         Ok(i) => i,
         Err(c) => return c,
     };
+    let policy = core_lib::TransformPolicy {
+        dry_run,
+        normalize_single_window,
+        require_uniform_forecast_grid,
+    };
     match store
         .inner
-        .transform_single_time_series(horizon, interval, category, resolution)
+        .transform_single_time_series(horizon, interval, category, resolution, policy)
     {
-        Ok(n) => {
-            unsafe { *out_count = n as u64 };
+        Ok(outcome) => {
+            unsafe {
+                *out_count = outcome.transformed as u64;
+                if !out_sources.is_null() {
+                    *out_sources = outcome.sources as u64;
+                }
+                if !out_interval_normalized.is_null() {
+                    *out_interval_normalized = outcome.interval_normalized;
+                }
+                if !out_interval.is_null() {
+                    let mut written = 0u64;
+                    write_str_out(
+                        &outcome.interval.to_iso8601(),
+                        out_interval,
+                        INTERVAL_BUF_LEN,
+                        &raw mut written,
+                    );
+                }
+            }
             INFRASTORE_OK
         }
         Err(e) => map_core_error(e),
@@ -3682,6 +3954,11 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 /// - `out_ext` may be null (the metadata lookup is skipped); when non-null it
 ///   must be valid for writing one pointer, and a non-null `*out_ext` must be
 ///   freed exactly once with `infrastore_string_free`.
+/// - `out_element_type` follows the same rules and receives the canonical
+///   `element_type` string, which is how a caller reads the returned bytes as
+///   domain values (`out_dtype` gives only their physical width).
+/// - `out_units` follows the same rules and receives the association's
+///   user-declared units label (null when unset). The store never interprets it.
 /// - All returned heap buffers are invalidated after their matching free call
 ///   and must not be used afterwards.
 #[unsafe(no_mangle)]
@@ -3722,6 +3999,12 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     // with `infrastore_string_free`; null when unset). Pass null to skip the
     // metadata lookup.
     out_ext: *mut *mut c_char,
+    // optional: the canonical `element_type` string (owned C string, freed the
+    // same way).
+    out_element_type: *mut *mut c_char,
+    // optional: the user-declared units label (owned C string, freed the same
+    // way; null when the series carries none).
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -3817,6 +4100,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     } else {
         meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
+    // The units label likewise comes off that row.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
@@ -3840,9 +4136,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         if !out_ext.is_null() {
             unsafe { *out_ext = ext_cstr };
         }
-    } else if !ext_cstr.is_null() {
-        // Don't leak the ext string when the emit fails after the metadata fetch.
-        unsafe { drop(std::ffi::CString::from_raw(ext_cstr)) };
+        if !out_element_type.is_null() {
+            unsafe { *out_element_type = element_type_cstr };
+        }
+        if !out_units.is_null() {
+            unsafe { *out_units = units_cstr };
+        }
+    } else {
+        // Don't leak the metadata strings when the emit fails after the fetch.
+        for owned in [ext_cstr, element_type_cstr, units_cstr] {
+            if !owned.is_null() {
+                unsafe { drop(std::ffi::CString::from_raw(owned)) };
+            }
+        }
     }
     code
 }
@@ -4027,6 +4333,11 @@ unsafe fn emit_forecast_data(
 /// - `out_ext` may be null (the metadata lookup is skipped); when non-null it
 ///   must be valid for writing one pointer, and a non-null `*out_ext` must be
 ///   freed exactly once with `infrastore_string_free`.
+/// - `out_element_type` follows the same rules and receives the canonical
+///   `element_type` string, which is how a caller reads the returned bytes as
+///   domain values (`out_dtype` gives only their physical width).
+/// - `out_units` follows the same rules and receives the association's
+///   user-declared units label (null when unset). The store never interprets it.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
@@ -4055,6 +4366,12 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     // with `infrastore_string_free`; null when unset). Pass null to skip the
     // metadata lookup.
     out_ext: *mut *mut c_char,
+    // optional: the canonical `element_type` string (owned C string, freed the
+    // same way).
+    out_element_type: *mut *mut c_char,
+    // optional: the user-declared units label (owned C string, freed the same
+    // way; null when the series carries none).
+    out_units: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -4125,6 +4442,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     } else {
         meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
     };
+    let element_type_cstr = if out_element_type.is_null() {
+        std::ptr::null_mut()
+    } else {
+        owned_cstr(&meta.element_type.to_string())
+    };
+    // The units label likewise comes off that row.
+    let units_cstr = if out_units.is_null() {
+        std::ptr::null_mut()
+    } else {
+        meta.units
+            .as_deref()
+            .map_or(std::ptr::null_mut(), owned_cstr)
+    };
     let code = unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
@@ -4148,9 +4478,19 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
         if !out_ext.is_null() {
             unsafe { *out_ext = ext_cstr };
         }
-    } else if !ext_cstr.is_null() {
-        // Don't leak the ext string when the emit fails after the metadata fetch.
-        unsafe { drop(std::ffi::CString::from_raw(ext_cstr)) };
+        if !out_element_type.is_null() {
+            unsafe { *out_element_type = element_type_cstr };
+        }
+        if !out_units.is_null() {
+            unsafe { *out_units = units_cstr };
+        }
+    } else {
+        // Don't leak the metadata strings when the emit fails after the fetch.
+        for owned in [ext_cstr, element_type_cstr, units_cstr] {
+            if !owned.is_null() {
+                unsafe { drop(std::ffi::CString::from_raw(owned)) };
+            }
+        }
     }
     code
 }
@@ -4385,8 +4725,8 @@ fn keys_with_hash_to_json(rows: &[(core_lib::TimeSeriesKey, [u8; 32])]) -> Strin
 }
 
 /// Full-metadata JSON object for one association row: the identity/descriptive
-/// key fields plus the physical-storage columns a key row omits (`data_hash`
-/// hex, `dtype`, `element_shape`, `percentiles`, `units`, `ext`).
+/// key fields plus the storage columns a key row omits (`data_hash` hex,
+/// `element_type`, `element_shape`, `percentiles`, `units`, `ext`).
 /// Periods are ISO-8601 strings; `initial_timestamp_ms` is Unix milliseconds.
 fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, Value> {
     let iso = |p: Option<core_lib::Period>| -> Value {
@@ -4435,7 +4775,10 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
             None => Value::Null,
         },
     );
-    o.insert("dtype".into(), Value::from(m.dtype.as_str()));
+    o.insert(
+        "element_type".into(),
+        Value::from(m.element_type.to_string()),
+    );
     o.insert(
         "element_shape".into(),
         Value::Array(
@@ -4474,10 +4817,11 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// - `features_json` (a JSON object; null or empty = no feature filter; matches as
 ///   a subset, i.e. a key whose features include all the given ones)
 ///
-/// Follows the probe-then-fetch convention: call with `buf` null and `cap` 0 to
-/// learn the byte length via `out_len`, then call again with a buffer of at
-/// least `len + 1` bytes. The string is NUL-terminated and truncated to `cap`;
-/// `out_len` is always the untruncated byte length.
+/// Returns the JSON through `out_json` as an **owned** allocation the caller
+/// releases with `infrastore_string_free`; `out_len` is its byte length. A
+/// listing's size scales with the catalog, so this deliberately does not use the
+/// probe-then-fetch convention the fixed-size outputs use — that would run the
+/// query and serialize the rows twice.
 ///
 /// # Safety
 ///
@@ -4499,14 +4843,13 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4531,14 +4874,13 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
         Err(e) => return map_core_error(e),
     };
     let json = keys_to_json(&keys);
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// List full time-series metadata rows as a JSON array (see `metadata_to_map`
 /// for the per-row shape: the key fields plus `data_hash`, `dtype`,
 /// `element_shape`, `percentiles`, `units`, and `ext`). Filters and the
-/// probe-then-fetch buffer convention match `infrastore_store_list_keys`.
+/// owned-string return (freed with `infrastore_string_free`) match `infrastore_store_list_keys`.
 ///
 /// # Safety
 ///
@@ -4557,14 +4899,13 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4593,12 +4934,11 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
         .map(|m| Value::Object(metadata_to_map(m)))
         .collect();
     let json = Value::Array(arr).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// List the distinct series names matching the filter as a JSON array of strings
-/// (sorted). Filters and the probe-then-fetch convention match
+/// (sorted). Filters and the owned-string return match
 /// `infrastore_store_list_keys`.
 ///
 /// # Safety
@@ -4618,14 +4958,13 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4650,12 +4989,11 @@ pub unsafe extern "C" fn infrastore_store_list_names(
         Err(e) => return map_core_error(e),
     };
     let json = Value::Array(names.into_iter().map(Value::from).collect()).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// List the distinct owner types matching the filter as a JSON array of strings
-/// (sorted). Filters and the probe-then-fetch convention match
+/// (sorted). Filters and the owned-string return match
 /// `infrastore_store_list_keys`.
 ///
 /// # Safety
@@ -4675,14 +5013,13 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -4707,8 +5044,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
         Err(e) => return map_core_error(e),
     };
     let json = Value::Array(types.into_iter().map(Value::from).collect()).to_string();
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// Remove every time series matching the filter in one all-or-nothing
@@ -4980,7 +5316,7 @@ unsafe fn build_list_filter(
 /// share a stored array share their `data_hash`, so a caller can group time
 /// series by their underlying data in one query (no per-row metadata fetch).
 ///
-/// Filters and the probe-then-fetch buffer convention are identical to
+/// Filters and the owned-string return are identical to
 /// `infrastore_store_list_keys`.
 ///
 /// # Safety
@@ -5003,14 +5339,13 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
-    buf: *mut c_char,
-    cap: u64,
+    out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
-    if out_len.is_null() {
-        set_error("out_len is null");
+    if out_json.is_null() || out_len.is_null() {
+        set_error("a required pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
     let filter = match unsafe {
@@ -5035,8 +5370,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
         Err(e) => return map_core_error(e),
     };
     let json = keys_with_hash_to_json(&rows);
-    unsafe { write_str_out(&json, buf, cap, out_len) };
-    INFRASTORE_OK
+    unsafe { write_owned_str_out(json, out_json, out_len) }
 }
 
 /// Free the key-handle array returned by `infrastore_store_get_time_series_keys`.
@@ -5413,8 +5747,10 @@ pub unsafe extern "C" fn infrastore_store_replace_owner(
 // arguments, the same way `features_json` already does: a filter has four
 // optional fields, two of which are string lists, and spreading that over eight
 // arguments is unreadable from the caller side. Result sets come back through
-// the probe-then-fetch JSON convention used by the other list-returning exports,
-// so no new deallocator is introduced.
+// the probe-then-fetch JSON convention. These association listings are bounded
+// by one owner's edges rather than by the whole catalog, so the convention's
+// double execution is not the cost here that it is for the time-series listings
+// (`infrastore_store_list_keys` and friends), which return owned strings.
 
 /// Parse a filter from a JSON object, or the default (match-everything) filter
 /// from a null or empty string. Unknown fields are rejected so a typo in a
@@ -6468,20 +6804,33 @@ unsafe fn write_i64_slice_out(values: &[i64], buf: *mut i64, cap: u64, out_len: 
 
 // ---- StaticReader ---------------------------------------------------------
 
-/// Build a [`InfraStoreStaticReaderHandle`] over the SingleTimeSeries matching the
-/// filter. `resolution` must be a non-empty ISO-8601 period (one resolution per reader); the
-/// matched series must share one grid (`initial_timestamp` + `length`).
+/// Build a [`InfraStoreStaticReaderHandle`] over the static series matching the
+/// filter.
+///
+/// `time_series_type` is a `TimeSeriesType` discriminant and selects the two
+/// shapes a reader can take:
+///
+/// * `SingleTimeSeries` (0): `resolution` must be a non-empty ISO-8601 period —
+///   one resolution per reader — and the matched series must share one grid
+///   (`initial_timestamp` + `length`).
+/// * `NonSequentialTimeSeries` (1): `resolution` must be null (an irregular
+///   series has none); the matched series must instead share one timestamp
+///   vector, which is also what pools their arrays on disk. Read that timeline
+///   with `infrastore_static_reader_timestamps`.
+///
+/// Any other discriminant is rejected.
 ///
 /// # Safety
 ///
-/// `handle` must be a live store handle. `name` / `features_json` must be null
-/// or valid null-terminated UTF-8. `out_reader` must be valid for writing one
-/// pointer; the returned handle must be freed exactly once with
+/// `handle` must be a live store handle. `name` / `resolution` / `features_json`
+/// must be null or valid null-terminated UTF-8. `out_reader` must be valid for
+/// writing one pointer; the returned handle must be freed exactly once with
 /// `infrastore_static_reader_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_build_static_reader(
     handle: *const InfraStoreHandle,
+    time_series_type: i32,
     has_owner: bool,
     owner_id: i64,
     has_owner_category: bool,
@@ -6503,6 +6852,13 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
         set_error("out_reader is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
+    let ts_type = match resolve_requested_type_from_int(time_series_type) {
+        Some(t) => t,
+        None => {
+            set_error(format!("invalid time_series_type {time_series_type}"));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
     let filter = match unsafe {
         reader_filter(
             has_owner,
@@ -6517,6 +6873,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
         Ok(f) => f,
         Err(c) => return c,
     };
+    let filter = filter.time_series_type(ts_type);
     let reader = match store.inner.build_static_reader(filter) {
         Ok(r) => r,
         Err(e) => return map_core_error(e),
@@ -6527,15 +6884,20 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     INFRASTORE_OK
 }
 
-/// Read the reader's master grid: `initial_timestamp` (unix ms), `resolution`
-/// (an owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
-/// timestamps on the grid.
+/// Read the reader's timeline: `initial_timestamp` (unix ms), `resolution` (an
+/// owned ISO-8601 duration string, e.g. `PT1H` / `P1M`), and the number of
+/// timestamps on it.
+///
+/// `*out_resolution` is **null** for a `NonSequentialTimeSeries` reader: an
+/// irregular timeline has no constant step, so read it with
+/// `infrastore_static_reader_timestamps` instead.
 ///
 /// # Safety
 ///
 /// `reader` must be a live static-reader handle. Each out pointer must be valid
-/// for writing one value. On success `*out_resolution` is an owned C string the
-/// caller must free exactly once with [`infrastore_string_free`].
+/// for writing one value. On success `*out_resolution` is either null or an
+/// owned C string the caller must free exactly once with
+/// [`infrastore_string_free`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_static_reader_grid(
     reader: *const InfraStoreStaticReaderHandle,
@@ -6564,9 +6926,55 @@ pub unsafe extern "C" fn infrastore_static_reader_grid(
     };
     unsafe {
         *out_initial_ms = initial;
-        *out_resolution = period_cstr(reader.inner.resolution());
+        *out_resolution = opt_period_cstr(reader.inner.resolution());
         *out_length = reader.inner.length() as u64;
     }
+    INFRASTORE_OK
+}
+
+/// Every timestamp on the reader's timeline, in order, as unix milliseconds.
+///
+/// Probe-then-fetch: call with `buf` null and `cap` 0 to learn the length
+/// (always reported through `out_len`), then again with a buffer that size. This
+/// is how a caller reads an irregular timeline, whose instants
+/// `infrastore_static_reader_grid` cannot describe; it works for a regular grid
+/// too, where they are `initial_timestamp + k · resolution`.
+///
+/// # Safety
+///
+/// `reader` must be a live static-reader handle. `out_len` must be valid for
+/// writing one `u64`; when non-null, `buf` must be valid for writing `cap`
+/// `i64` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_static_reader_timestamps(
+    reader: *const InfraStoreStaticReaderHandle,
+    buf: *mut i64,
+    cap: u64,
+    out_len: *mut u64,
+) -> i32 {
+    clear_error();
+    let reader = match unsafe { reader.as_ref() } {
+        Some(r) => r,
+        None => {
+            set_error("reader handle is null");
+            return INFRASTORE_ERR_NULL_POINTER;
+        }
+    };
+    if out_len.is_null() {
+        set_error("out_len is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let mut millis = Vec::with_capacity(reader.inner.length());
+    for t in reader.inner.timestamps() {
+        match datetime_to_unix_ms(t) {
+            Some(ms) => millis.push(ms),
+            None => {
+                set_error("a timeline timestamp is out of i64 millisecond range");
+                return INFRASTORE_ERR_INTEGRITY;
+            }
+        }
+    }
+    unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
     INFRASTORE_OK
 }
 
@@ -7202,7 +7610,6 @@ mod reader_ffi_tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
@@ -7219,6 +7626,7 @@ mod reader_ffi_tests {
         let rc = unsafe {
             infrastore_store_build_static_reader(
                 &handle,
+                0, // SingleTimeSeries
                 false,
                 0,
                 false,
@@ -7325,7 +7733,6 @@ mod reader_ffi_tests {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(det),
                 Default::default(),
-                None,
             )
             .unwrap();
         let handle = InfraStoreHandle { inner: store };
@@ -7451,7 +7858,6 @@ mod reader_ffi_tests {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(ts),
                 Default::default(),
-                None,
             )
             .unwrap();
         let handle = InfraStoreHandle { inner: store };
@@ -7497,6 +7903,8 @@ mod reader_ffi_tests {
                     &mut data_ptr,
                     &mut data_len,
                     ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -7541,6 +7949,8 @@ mod abi_tests {
 
     const T0_MS: i64 = 1_700_000_000_000;
     const HOUR: &str = "PT1H";
+    /// The `element_type` a plain `f64` series is written with.
+    const F64_ET: &std::ffi::CStr = c"f64";
 
     /// `infrastore_last_error_message`'s current value.
     fn last_error() -> String {
@@ -7579,7 +7989,7 @@ mod abi_tests {
             store,
             owner,
             name,
-            core_lib::Dtype::F64.code(),
+            F64_ET.as_ptr(),
             &to_le(vals),
             vals.len(),
         );
@@ -7596,7 +8006,7 @@ mod abi_tests {
         store: *mut InfraStoreHandle,
         owner: i64,
         name: &str,
-        dtype: i32,
+        element_type: *const c_char,
         bytes: &[u8],
         length: usize,
     ) -> (i32, *mut InfraStoreKeyHandle) {
@@ -7614,7 +8024,7 @@ mod abi_tests {
                 name_c.as_ptr(),
                 T0_MS,
                 res.as_ptr(),
-                dtype,
+                element_type,
                 1,
                 dims.as_ptr(),
                 bytes.as_ptr(),
@@ -7788,6 +8198,8 @@ mod abi_tests {
                 &mut data_ptr,
                 &mut data_len,
                 ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_OK, "get_single failed: {}", last_error());
@@ -7922,6 +8334,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     ptr::null(),
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -7944,6 +8357,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -8027,7 +8441,7 @@ mod abi_tests {
             INFRASTORE_ERR_NULL_POINTER
         );
 
-        // -- buffer op (probe-then-fetch with a null out_len)
+        // -- listing op (owned-string return with a null out_len)
         assert_eq!(
             unsafe {
                 infrastore_store_list_keys(
@@ -8043,7 +8457,6 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null_mut(),
-                    0,
                     ptr::null_mut(),
                 )
             },
@@ -8083,7 +8496,7 @@ mod abi_tests {
                 bad_name.as_ptr() as *const c_char,
                 T0_MS,
                 res.as_ptr(),
-                core_lib::Dtype::F64.code(),
+                F64_ET.as_ptr(),
                 1,
                 dims.as_ptr(),
                 bytes.as_ptr(),
@@ -8141,7 +8554,7 @@ mod abi_tests {
                 name.as_ptr(),
                 T0_MS,
                 bad_res.as_ptr(),
-                core_lib::Dtype::F64.code(),
+                F64_ET.as_ptr(),
                 1,
                 dims.as_ptr(),
                 bytes.as_ptr(),
@@ -8158,9 +8571,16 @@ mod abi_tests {
     }
 
     #[test]
-    fn an_unknown_dtype_code_is_an_invalid_parameter() {
+    fn an_unknown_element_type_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
-        let (rc, key) = abi_try_add(store, 1, "load", 99, &to_le(&[1.0, 2.0]), 2);
+        let (rc, key) = abi_try_add(
+            store,
+            1,
+            "load",
+            c"float64".as_ptr(),
+            &to_le(&[1.0, 2.0]),
+            2,
+        );
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
         assert!(key.is_null());
         assert!(!last_error().is_empty());
@@ -8171,14 +8591,7 @@ mod abi_tests {
     fn a_byte_length_that_contradicts_the_shape_is_an_invalid_parameter() {
         let store = abi_create_in_memory();
         // Shape says 4 elements, only 2 f64s of bytes are supplied.
-        let (rc, key) = abi_try_add(
-            store,
-            1,
-            "load",
-            core_lib::Dtype::F64.code(),
-            &to_le(&[1.0, 2.0]),
-            4,
-        );
+        let (rc, key) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 4);
         assert_eq!(rc, INFRASTORE_ERR_INVALID_PARAMETER);
         assert!(key.is_null());
         unsafe { infrastore_store_free(store) };
@@ -8235,14 +8648,7 @@ mod abi_tests {
         assert!(!last_error().is_empty());
 
         // DUPLICATE: add the same identity twice.
-        let (rc, dup) = abi_try_add(
-            store,
-            1,
-            "load",
-            core_lib::Dtype::F64.code(),
-            &to_le(&[1.0, 2.0]),
-            2,
-        );
+        let (rc, dup) = abi_try_add(store, 1, "load", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_ERR_DUPLICATE);
         assert!(dup.is_null());
 
@@ -8258,14 +8664,7 @@ mod abi_tests {
             unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut ro) },
             INFRASTORE_OK
         );
-        let (rc, k) = abi_try_add(
-            ro,
-            2,
-            "new",
-            core_lib::Dtype::F64.code(),
-            &to_le(&[1.0, 2.0]),
-            2,
-        );
+        let (rc, k) = abi_try_add(ro, 2, "new", F64_ET.as_ptr(), &to_le(&[1.0, 2.0]), 2);
         assert_eq!(rc, INFRASTORE_ERR_READ_ONLY);
         assert!(k.is_null());
         assert_eq!(
@@ -8325,6 +8724,8 @@ mod abi_tests {
                 &mut shape_len,
                 &mut data_ptr,
                 &mut data_len,
+                ptr::null_mut(),
+                ptr::null_mut(),
                 ptr::null_mut(),
             )
         };
@@ -8468,7 +8869,7 @@ mod abi_tests {
                     name.as_ptr(),
                     T0_MS,
                     res.as_ptr(),
-                    core_lib::Dtype::F64.code(),
+                    F64_ET.as_ptr(),
                     3,
                     dims.as_ptr(),
                     bytes.as_ptr(),
@@ -8487,6 +8888,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -8556,6 +8958,7 @@ mod abi_tests {
             unsafe {
                 infrastore_store_build_static_reader(
                     store,
+                    0, // SingleTimeSeries
                     false,
                     0,
                     false,
@@ -8693,17 +9096,17 @@ mod abi_tests {
                 core_lib::OwnerCategory::Component,
                 core_lib::TimeSeriesData::Deterministic(det),
                 Default::default(),
-                None,
             )
             .unwrap();
     }
 
-    // ---- Dtype codes -------------------------------------------------------
+    // ---- Element types -----------------------------------------------------
 
     #[test]
-    fn every_dtype_code_round_trips_through_get_single() {
-        // Only F64 (0) and I64 (2) were asserted before. The codes are the ABI
-        // contract each binding maps to its own element type.
+    fn every_scalar_element_type_round_trips_through_get_single() {
+        // The write side names the element type; the read side still reports the
+        // physical dtype code, and both are the ABI contract each binding maps to
+        // its own element type.
         assert_eq!(
             [
                 core_lib::Dtype::F64.code(),
@@ -8739,17 +9142,19 @@ mod abi_tests {
             .collect();
         let f64_bytes = to_le(&[1.0, 2.0, 3.0]);
 
-        let cases: Vec<(&str, i32, Vec<u8>)> = vec![
-            ("f64", 0, f64_bytes),
-            ("f32", 1, f32_bytes),
-            ("i64", 2, i64_bytes),
-            ("i32", 3, i32_bytes),
-            ("u64", 4, u64_bytes),
-            ("bool", 5, bool_bytes),
+        // (element_type name, expected dtype code on read, raw little-endian bytes)
+        let cases: Vec<(&std::ffi::CStr, i32, Vec<u8>)> = vec![
+            (c"f64", 0, f64_bytes),
+            (c"f32", 1, f32_bytes),
+            (c"i64", 2, i64_bytes),
+            (c"i32", 3, i32_bytes),
+            (c"u64", 4, u64_bytes),
+            (c"bool", 5, bool_bytes),
         ];
 
-        for (i, (name, code, bytes)) in cases.iter().enumerate() {
-            let (rc, key) = abi_try_add(store, i as i64 + 1, name, *code, bytes, 3);
+        for (i, (element_type, code, bytes)) in cases.iter().enumerate() {
+            let name = element_type.to_str().unwrap();
+            let (rc, key) = abi_try_add(store, i as i64 + 1, name, element_type.as_ptr(), bytes, 3);
             assert_eq!(rc, INFRASTORE_OK, "adding {name}: {}", last_error());
             unsafe { infrastore_key_free(key) };
 

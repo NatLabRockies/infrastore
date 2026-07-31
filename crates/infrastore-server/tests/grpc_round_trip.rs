@@ -6,7 +6,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Dtype, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
+    Dtype, ElementType, FeatureValue, Features, NonSequentialTimeSeries, OwnerCategory, Period,
     SingleTimeSeries, Store, TimeSeriesData, TimeSeriesType, TypedArray, create_store,
 };
 use infrastore_server::client::RemoteClient;
@@ -50,9 +50,8 @@ fn fixture_store() -> Store {
             42,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(s),
+            TimeSeriesData::SingleTimeSeries(s).with_units("MW"),
             features,
-            Some("MW".into()),
         )
         .unwrap();
     let s2 = series(2024, 24, 5.0);
@@ -63,7 +62,6 @@ fn fixture_store() -> Store {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s2),
             Features::new(),
-            None,
         )
         .unwrap();
     store
@@ -202,7 +200,6 @@ async fn non_sequential_round_trip_over_grpc() {
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -244,7 +241,6 @@ async fn dtype_preserved_over_grpc() {
                 initial, resolution, data, "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -268,6 +264,69 @@ async fn dtype_preserved_over_grpc() {
         .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
         .collect();
     assert_eq!(vals, vec![10, 20, 30]);
+}
+
+/// The whole point of `element_type` on the wire: a client that never touches
+/// the store's files can still tell a piecewise cost curve from a bare matrix of
+/// the same shape, and decode it.
+#[tokio::test]
+async fn element_type_preserved_over_grpc() {
+    let mut store = create_store(None, true).unwrap();
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    // Two timesteps; the widest has 2 points, so the row width is 1 + 2*2 = 5.
+    let data = TypedArray::from_f64(
+        vec![2, 5],
+        &[
+            2.0, 0.0, 1.0, 1.0, 3.0, //
+            1.0, 0.0, 5.0, 0.0, 0.0,
+        ],
+    );
+    store
+        .add(infrastore_core::AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                initial,
+                resolution_hour(),
+                data,
+                "cost",
+            ))
+            .with_element_type(ElementType::PiecewiseLinear),
+        ))
+        .unwrap();
+
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+    let keys = client
+        .get_time_series_keys(1, OwnerCategory::Component)
+        .await
+        .unwrap();
+
+    let meta = client.get_metadata(keys[0].identity()).await.unwrap();
+    assert_eq!(meta.element_type, ElementType::PiecewiseLinear);
+
+    // And a value read carries it too, so decoding needs no second call.
+    let got = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
+    let single = got.as_single().unwrap();
+    let decoded = infrastore_core::decode(&single.data, meta.element_type, 1).unwrap();
+    assert_eq!(
+        decoded,
+        infrastore_core::DecodedValues::PiecewiseLinear(vec![
+            vec![
+                infrastore_core::XyPoint { x: 0.0, y: 1.0 },
+                infrastore_core::XyPoint { x: 1.0, y: 3.0 },
+            ],
+            vec![infrastore_core::XyPoint { x: 0.0, y: 5.0 }],
+        ])
+    );
+}
+
+fn resolution_hour() -> Duration {
+    Duration::hours(1)
 }
 
 #[tokio::test]

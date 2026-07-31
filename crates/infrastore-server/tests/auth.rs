@@ -30,7 +30,6 @@ fn make_store() -> Store {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
         )
         .unwrap();
     store

@@ -78,8 +78,15 @@ pub fn transform(
     let resolution = resolution.map(parse::parse_period).transpose()?;
     let mut store = store_access::open_writable(store_path)?;
     let n = store
-        .transform_single_time_series(horizon, interval, owner_category, resolution)
-        .map_err(|e| e.to_string())?;
+        .transform_single_time_series(
+            horizon,
+            interval,
+            owner_category,
+            resolution,
+            Default::default(),
+        )
+        .map_err(|e| e.to_string())?
+        .transformed;
     store.flush().map_err(|e| e.to_string())?;
     println!(
         "{}",
@@ -329,6 +336,7 @@ pub fn compact(
             "slots_reclaimed": report.slots_reclaimed,
             "datasets_dropped": report.datasets_dropped,
             "feature_sets_reclaimed": report.feature_sets_reclaimed,
+            "timestamp_sets_reclaimed": report.timestamp_sets_reclaimed,
         }))?,
         _ => {
             let headers = vec!["Metric".to_string(), "Value".to_string()];
@@ -344,6 +352,10 @@ pub fn compact(
                 vec![
                     "feature_sets_reclaimed".to_string(),
                     report.feature_sets_reclaimed.to_string(),
+                ],
+                vec![
+                    "timestamp_sets_reclaimed".to_string(),
+                    report.timestamp_sets_reclaimed.to_string(),
                 ],
             ];
             if format == crate::output::Format::Csv {
@@ -383,7 +395,7 @@ const SINGLE: &str = r#"{
   "owner_category": "component",
   "name": "load",
   "type": "single",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "ext": "Profile",
   "csv": "load.csv",
@@ -402,7 +414,7 @@ const NON_SEQUENTIAL: &str = r#"{
   "owner_category": "component",
   "name": "events",
   "type": "non_sequential",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "events.csv",
   "has_header": true
@@ -415,7 +427,7 @@ const DETERMINISTIC: &str = r#"{
   "owner_category": "component",
   "name": "load_forecast",
   "type": "deterministic",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "forecast.csv",
   "has_header": true,
@@ -433,7 +445,7 @@ const PROBABILISTIC: &str = r#"{
   "owner_category": "component",
   "name": "load_prob",
   "type": "probabilistic",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "prob.csv",
   "has_header": true,
@@ -452,7 +464,7 @@ const SCENARIOS: &str = r#"{
   "owner_category": "component",
   "name": "load_scenarios",
   "type": "scenarios",
-  "dtype": "f64",
+  "element_type": "f64",
   "units": "MW",
   "csv": "scenarios.csv",
   "has_header": true,

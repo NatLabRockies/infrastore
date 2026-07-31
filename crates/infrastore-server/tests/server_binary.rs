@@ -14,6 +14,7 @@ use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, TimeZone, Utc};
@@ -54,17 +55,20 @@ fn write_store(dir: &Path) -> PathBuf {
                 "load",
             )),
             Features::new(),
-            None,
         )
         .unwrap();
     store.flush().unwrap();
     path
 }
 
+/// Serializes the window between picking a port and the server owning it, so
+/// that two concurrent tests cannot be handed the same one. See `spawn_server`.
+static PORT_HANDOFF: Mutex<()> = Mutex::new(());
+
 /// A port that is free right now. The binary calls `serve(addr)` with the
 /// configured port and does not log the port it actually bound, so a port must
 /// be chosen up front; binding and immediately dropping a listener is the usual
-/// way. `spawn_server` retries to absorb the small race.
+/// way. Callers must hold `PORT_HANDOFF` until their server has bound it.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -109,6 +113,10 @@ fn spawn_binary(config: &Path) -> Child {
 }
 
 /// Wait until `port` accepts a TCP connection, or the child exits.
+///
+/// A socket answering is not on its own proof that the child owns the port —
+/// something else may have taken it while the child died binding — so the
+/// child must still be running for the connection to count.
 fn wait_until_listening(child: &mut Child, port: u16) -> bool {
     let deadline = Instant::now() + StdDuration::from_secs(20);
     while Instant::now() < deadline {
@@ -116,7 +124,7 @@ fn wait_until_listening(child: &mut Child, port: u16) -> bool {
             return false; // exited before listening
         }
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
+            return matches!(child.try_wait(), Ok(None));
         }
         std::thread::sleep(StdDuration::from_millis(50));
     }
@@ -125,12 +133,22 @@ fn wait_until_listening(child: &mut Child, port: u16) -> bool {
 
 /// Spawn the binary on a fresh port, retrying if the port was taken in the race
 /// between `free_port` and the bind. Returns `(process, port)`.
+///
+/// `PORT_HANDOFF` is held across the whole attempt: `free_port` drops its
+/// listener before the child binds, so without it two tests running in
+/// parallel can be handed the same port. The loser then exits with an
+/// address-in-use error while the winner's socket answers on that port,
+/// which used to read as a successful start and only surfaced later, as a
+/// connection refused once the winner shut down.
 fn spawn_server(dir: &Path, store: &Path, auth: &str, keys: &[&str]) -> (ServerProcess, u16) {
     for attempt in 0..5 {
+        let bound = PORT_HANDOFF.lock().unwrap_or_else(|e| e.into_inner());
         let port = free_port();
         let config = write_config(dir, store, port, auth, keys);
         let mut child = spawn_binary(&config);
-        if wait_until_listening(&mut child, port) {
+        let listening = wait_until_listening(&mut child, port);
+        drop(bound);
+        if listening {
             return (ServerProcess(child), port);
         }
         let _ = child.kill();

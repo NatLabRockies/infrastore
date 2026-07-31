@@ -2,8 +2,10 @@
 //!
 //! Layout (shared policy in [`super::common`]): packed
 //! `sts_{dtype}_{shape}_{length}_{res}` datasets for SingleTimeSeries/DST
-//! arrays, one standalone `arr_{hexhash}` dataset per irregular series or
-//! dense forecast, written through libhdf5 via `hdf5-metno`.
+//! arrays and `nsts_{dtype}_{shape}_{length}_{timestamps_hash}` datasets for the
+//! NonSequentialTimeSeries sharing one time axis, plus one standalone
+//! `arr_{hexhash}` dataset per dense forecast (and per irregular series whose
+//! time axis nothing else shares), written through libhdf5 via `hdf5-metno`.
 //!
 //! This backend replaced a netcdf-c–driven one with the same logical layout.
 //! The motivation was netcdf-c's define-mode semantics: every new variable
@@ -32,20 +34,19 @@ use std::sync::Mutex;
 
 use hdf5_metno as h5;
 
-use h5::types::{FloatSize, IntSize, TypeDescriptor, VarLenUnicode};
+use h5::types::VarLenUnicode;
 use h5::{Group, Hyperslab, Selection, SliceOrIndex};
 
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::{array_hash, hash_hex};
 use crate::storage::{ArrayLayout, Compression};
 use crate::types::array::{Dtype, TypedArray};
-use crate::types::period::Period;
 use crate::version::DATA_FORMAT_VERSION;
 
 use super::common::{
-    COMPRESSION_ATTR, HASH_SUFFIX, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX, dataset_base_name,
-    element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols, spill_name,
-    standalone_chunks,
+    COMPRESSION_ATTR, HASH_SUFFIX, PackGroup, ROOT_GROUP, SINGLE_GROUP, STANDALONE_PREFIX,
+    dataset_base_name, element_block_bytes, hex_to_hash, parse_dataset_name, resolve_dataset_cols,
+    spill_name, standalone_chunks,
 };
 use super::{ArrayLocation, CompactionReport, IntegrityReport, StorageBackend};
 
@@ -140,7 +141,12 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
         Dtype::F32 => rd!(f32),
         Dtype::I64 => rd!(i64),
         Dtype::I32 => rd!(i32),
+        Dtype::I16 => rd!(i16),
+        Dtype::I8 => rd!(i8),
         Dtype::U64 => rd!(u64),
+        Dtype::U32 => rd!(u32),
+        Dtype::U16 => rd!(u16),
+        Dtype::U8 => rd!(u8),
         Dtype::Bool => {
             let a = ds.read_slice::<u8, _, ndarray::IxDyn>(s).map_err(map_h5)?;
             a.iter().copied().collect()
@@ -164,7 +170,12 @@ fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
         Dtype::F32 => rd!(f32),
         Dtype::I64 => rd!(i64),
         Dtype::I32 => rd!(i32),
+        Dtype::I16 => rd!(i16),
+        Dtype::I8 => rd!(i8),
         Dtype::U64 => rd!(u64),
+        Dtype::U32 => rd!(u32),
+        Dtype::U16 => rd!(u16),
+        Dtype::U8 => rd!(u8),
         Dtype::Bool => ds.read_raw::<u8>().map_err(map_h5)?,
     })
 }
@@ -193,7 +204,12 @@ fn write_sel(
         Dtype::F32 => wr!(f32, 4),
         Dtype::I64 => wr!(i64, 8),
         Dtype::I32 => wr!(i32, 4),
+        Dtype::I16 => wr!(i16, 2),
+        Dtype::I8 => wr!(i8, 1),
         Dtype::U64 => wr!(u64, 8),
+        Dtype::U32 => wr!(u32, 4),
+        Dtype::U16 => wr!(u16, 2),
+        Dtype::U8 => wr!(u8, 1),
         Dtype::Bool => {
             let view = ndarray::ArrayViewD::from_shape(dyn_shape, bytes)
                 .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
@@ -215,7 +231,12 @@ fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
         Dtype::F32 => wr!(f32, 4),
         Dtype::I64 => wr!(i64, 8),
         Dtype::I32 => wr!(i32, 4),
+        Dtype::I16 => wr!(i16, 2),
+        Dtype::I8 => wr!(i8, 1),
         Dtype::U64 => wr!(u64, 8),
+        Dtype::U32 => wr!(u32, 4),
+        Dtype::U16 => wr!(u16, 2),
+        Dtype::U8 => wr!(u8, 1),
         Dtype::Bool => ds.write_raw(bytes).map_err(map_h5),
     }
 }
@@ -261,31 +282,14 @@ fn create_ds(
         Dtype::F32 => mk!(f32),
         Dtype::I64 => mk!(i64),
         Dtype::I32 => mk!(i32),
+        Dtype::I16 => mk!(i16),
+        Dtype::I8 => mk!(i8),
         Dtype::U64 => mk!(u64),
+        Dtype::U32 => mk!(u32),
+        Dtype::U16 => mk!(u16),
+        Dtype::U8 => mk!(u8),
         Dtype::Bool => mk!(u8),
     }
-}
-
-/// Map an HDF5 dataset's element type back to a [`Dtype`].
-fn dtype_of_dataset(ds: &h5::Dataset) -> Result<Dtype> {
-    let desc = ds
-        .dtype()
-        .map_err(map_h5)?
-        .to_descriptor()
-        .map_err(map_h5)?;
-    Ok(match desc {
-        TypeDescriptor::Float(FloatSize::U8) => Dtype::F64,
-        TypeDescriptor::Float(FloatSize::U4) => Dtype::F32,
-        TypeDescriptor::Integer(IntSize::U8) => Dtype::I64,
-        TypeDescriptor::Integer(IntSize::U4) => Dtype::I32,
-        TypeDescriptor::Unsigned(IntSize::U8) => Dtype::U64,
-        TypeDescriptor::Unsigned(IntSize::U1) => Dtype::Bool,
-        other => {
-            return Err(TimeSeriesError::IntegrityError(format!(
-                "unsupported hdf5 dataset type {other:?}"
-            )));
-        }
-    })
 }
 
 fn write_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
@@ -332,7 +336,7 @@ impl DatasetState {
     }
 }
 
-type DatasetGroupKey = (Dtype, Vec<usize>, usize, Period);
+type DatasetGroupKey = (Dtype, Vec<usize>, usize, PackGroup);
 
 pub(crate) struct Hdf5Backend {
     inner: Mutex<Inner>,
@@ -439,7 +443,7 @@ impl Hdf5Backend {
                 continue;
             }
 
-            let (dtype, element_shape, length, resolution) = parse_dataset_name(&name)?;
+            let (dtype, element_shape, length, group) = parse_dataset_name(&name)?;
             let hash_name = format!("{name}{HASH_SUFFIX}");
             let hash_ds = single.dataset(&hash_name).map_err(|_| {
                 TimeSeriesError::IntegrityError(format!("missing hash dataset {hash_name}"))
@@ -468,7 +472,7 @@ impl Hdf5Backend {
             }
             inner
                 .dataset_groups
-                .entry((dtype, element_shape.clone(), length, resolution))
+                .entry((dtype, element_shape.clone(), length, group))
                 .or_default()
                 .push(name.clone());
             inner.datasets.insert(
@@ -520,9 +524,9 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<String> {
-        let key = (dtype, element_shape.to_vec(), length, resolution);
+        let key = (dtype, element_shape.to_vec(), length, group);
         let mut spill_count = 0;
         if let Some(names) = self.dataset_groups.get(&key) {
             spill_count = names.len();
@@ -534,9 +538,9 @@ impl Inner {
                 }
             }
         }
-        let base = dataset_base_name(dtype, element_shape, length, resolution);
+        let base = dataset_base_name(dtype, element_shape, length, group);
         let new_name = spill_name(&base, spill_count);
-        self.create_packed_dataset(&new_name, dtype, element_shape, length, resolution, None)?;
+        self.create_packed_dataset(&new_name, dtype, element_shape, length, group, None)?;
         Ok(new_name)
     }
 
@@ -546,7 +550,7 @@ impl Inner {
         dtype: Dtype,
         element_shape: &[usize],
         length: usize,
-        resolution: Period,
+        group: PackGroup,
         requested_cols: Option<usize>,
     ) -> Result<()> {
         let cols = resolve_dataset_cols(requested_cols, dtype, element_shape);
@@ -588,7 +592,7 @@ impl Inner {
         );
         let group = self
             .dataset_groups
-            .entry((dtype, element_shape.to_vec(), length, resolution))
+            .entry((dtype, element_shape.to_vec(), length, group))
             .or_default();
         let pos = group
             .binary_search_by(|n| n.as_str().cmp(name))
@@ -607,13 +611,12 @@ impl Inner {
     }
 
     #[tracing::instrument(skip(self, hash, data), fields(bytes = data.bytes.len()))]
-    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, resolution: Period) -> Result<()> {
+    fn put_packed(&mut self, hash: &[u8; 32], data: &TypedArray, group: PackGroup) -> Result<()> {
         let length = data.length();
         let element_shape = data.element_shape().to_vec();
         let dtype = data.dtype;
 
-        let dataset_name =
-            self.ensure_writable_dataset(dtype, &element_shape, length, resolution)?;
+        let dataset_name = self.ensure_writable_dataset(dtype, &element_shape, length, group)?;
         let (col_index, hash_name) = {
             let state = self.datasets.get(&dataset_name).expect("dataset ensured");
             let col = state.first_free().ok_or_else(|| {
@@ -657,7 +660,7 @@ impl Inner {
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<Vec<bool>> {
         let mut written = vec![false; hashes.len()];
 
@@ -677,7 +680,7 @@ impl Inner {
         let element_shape = new[0].2.element_shape().to_vec();
         let length = new[0].2.length();
         let block = element_block_bytes(dtype, &element_shape);
-        let group_key = (dtype, element_shape.clone(), length, resolution);
+        let group_key = (dtype, element_shape.clone(), length, group);
 
         let mut start = 0;
         while start < new.len() {
@@ -685,17 +688,10 @@ impl Inner {
             let width = resolve_dataset_cols(Some(remaining), dtype, &element_shape);
             let seg = &new[start..start + width];
 
-            let base = dataset_base_name(dtype, &element_shape, length, resolution);
+            let base = dataset_base_name(dtype, &element_shape, length, group);
             let spill_count = self.dataset_groups.get(&group_key).map_or(0, Vec::len);
             let name = spill_name(&base, spill_count);
-            self.create_packed_dataset(
-                &name,
-                dtype,
-                &element_shape,
-                length,
-                resolution,
-                Some(width),
-            )?;
+            self.create_packed_dataset(&name, dtype, &element_shape, length, group, Some(width))?;
             let hash_name = format!("{name}{HASH_SUFFIX}");
 
             // Interleave the segment's arrays into one row-major
@@ -798,7 +794,12 @@ impl Inner {
     }
 
     #[tracing::instrument(skip(self, hash, range))]
-    fn read_locked(&self, hash: &[u8; 32], range: Option<Range<usize>>) -> Result<TypedArray> {
+    fn read_locked(
+        &self,
+        hash: &[u8; 32],
+        dtype: Dtype,
+        range: Option<Range<usize>>,
+    ) -> Result<TypedArray> {
         let loc = self
             .by_hash
             .get(hash)
@@ -809,6 +810,9 @@ impl Inner {
                 let state = self.datasets.get(&dataset).ok_or_else(|| {
                     TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
                 })?;
+                // A packed dataset's name carries its dtype, so here the
+                // caller's value is an assertion the two artifacts agree.
+                super::check_dtype(hash, state.dtype, dtype)?;
                 let total = state.length;
                 let range = range.unwrap_or(0..total);
                 if range.start > range.end || range.end > total {
@@ -831,7 +835,6 @@ impl Inner {
             Location::Standalone { var } => {
                 let ds = self.dataset(&var)?;
                 let full_shape = ds.shape();
-                let dtype = dtype_of_dataset(&ds)?;
                 let total = full_shape.first().copied().unwrap_or(0);
                 match range {
                     None => {
@@ -862,6 +865,7 @@ impl Inner {
     fn read_index_locked(
         &self,
         hashes: &[[u8; 32]],
+        dtype: Dtype,
         index: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
@@ -880,6 +884,7 @@ impl Inner {
         for hash in hashes {
             match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
                 Location::Packed { dataset, col } => {
+                    self.check_packed_dtype(hash, dataset, dtype)?;
                     max_col
                         .entry(dataset.clone())
                         .and_modify(|m| *m = (*m).max(*col))
@@ -931,7 +936,7 @@ impl Inner {
                     out.extend_from_slice(block);
                 }
                 Placement::Standalone { hash } => {
-                    let arr = self.read_locked(hash, Some(index..index + 1))?;
+                    let arr = self.read_locked(hash, dtype, Some(index..index + 1))?;
                     out.extend_from_slice(&arr.bytes);
                 }
             }
@@ -939,21 +944,29 @@ impl Inner {
         Ok(())
     }
 
-    fn read_arrays_locked(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+    fn read_arrays_locked(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
         if hashes.is_empty() {
             return Ok(Vec::new());
         }
 
         enum Placement {
             Packed { dataset: String, col: usize },
-            Standalone { hash: [u8; 32] },
+            Standalone { hash: [u8; 32], dtype: Dtype },
         }
 
+        if dtypes.len() != hashes.len() {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "read_arrays: {} dtypes for {} hashes",
+                dtypes.len(),
+                hashes.len()
+            )));
+        }
         let mut placements: Vec<Placement> = Vec::with_capacity(hashes.len());
         let mut max_col: HashMap<String, usize> = HashMap::new();
-        for hash in hashes {
+        for (hash, &dtype) in hashes.iter().zip(dtypes) {
             match self.by_hash.get(hash).ok_or(TimeSeriesError::NotFound)? {
                 Location::Packed { dataset, col } => {
+                    self.check_packed_dtype(hash, dataset, dtype)?;
                     max_col
                         .entry(dataset.clone())
                         .and_modify(|m| *m = (*m).max(*col))
@@ -964,7 +977,7 @@ impl Inner {
                     });
                 }
                 Location::Standalone { .. } => {
-                    placements.push(Placement::Standalone { hash: *hash });
+                    placements.push(Placement::Standalone { hash: *hash, dtype });
                 }
             }
         }
@@ -1026,32 +1039,40 @@ impl Inner {
                             .map_err(TimeSeriesError::IntegrityError)?,
                     );
                 }
-                Placement::Standalone { hash } => {
-                    out.push(self.read_locked(hash, None)?);
+                Placement::Standalone { hash, dtype } => {
+                    out.push(self.read_locked(hash, *dtype, None)?);
                 }
             }
         }
         Ok(out)
     }
 
-    fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+    /// Assert that a packed dataset's own dtype (recovered from its name) is the
+    /// one the catalog says the array has. Only reachable if the two artifacts
+    /// have drifted.
+    fn check_packed_dtype(&self, hash: &[u8; 32], dataset: &str, dtype: Dtype) -> Result<()> {
+        let state = self
+            .datasets
+            .get(dataset)
+            .ok_or_else(|| TimeSeriesError::IntegrityError(format!("dataset {dataset} missing")))?;
+        super::check_dtype(hash, state.dtype, dtype)
+    }
+
+    fn array_shape_locked(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
         let loc = self
             .by_hash
             .get(hash)
             .ok_or(TimeSeriesError::NotFound)?
             .clone();
         match loc {
-            Location::Standalone { var } => {
-                let ds = self.dataset(&var)?;
-                Ok((dtype_of_dataset(&ds)?, ds.shape()))
-            }
+            Location::Standalone { var } => Ok(self.dataset(&var)?.shape()),
             Location::Packed { dataset, .. } => {
                 let state = self.datasets.get(&dataset).ok_or_else(|| {
                     TimeSeriesError::IntegrityError(format!("dataset {dataset} missing"))
                 })?;
                 let mut shape = vec![state.length];
                 shape.extend_from_slice(&state.element_shape);
-                Ok((state.dtype, shape))
+                Ok(shape)
             }
         }
     }
@@ -1059,6 +1080,7 @@ impl Inner {
     fn read_window_block_locked(
         &self,
         hash: &[u8; 32],
+        dtype: Dtype,
         count_axis: usize,
         start: usize,
         len: usize,
@@ -1086,7 +1108,6 @@ impl Inner {
                         dims[count_axis]
                     )));
                 }
-                let dtype = dtype_of_dataset(&ds)?;
                 let ranges: Vec<Range<usize>> = dims
                     .iter()
                     .enumerate()
@@ -1115,7 +1136,7 @@ impl StorageBackend for Hdf5Backend {
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution: Period,
+        group: PackGroup,
         layout: ArrayLayout,
     ) -> Result<bool> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
@@ -1124,7 +1145,7 @@ impl StorageBackend for Hdf5Backend {
             return Ok(false);
         }
         match layout {
-            ArrayLayout::Packed => inner.put_packed(hash, data, resolution)?,
+            ArrayLayout::Packed => inner.put_packed(hash, data, group)?,
             ArrayLayout::Standalone => inner.put_standalone(hash, data, None)?,
             ArrayLayout::StandaloneWindowed { count_axis } => {
                 inner.put_standalone(hash, data, Some(count_axis))?
@@ -1138,38 +1159,57 @@ impl StorageBackend for Hdf5Backend {
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<Vec<bool>> {
         let mut inner = self.inner.lock().expect("mutex poisoned");
         inner.ensure_writable()?;
-        inner.put_packed_block(hashes, arrays, resolution)
+        inner.put_packed_block(hashes, arrays, group)
+    }
+
+    fn has_pack_group(
+        &self,
+        dtype: Dtype,
+        element_shape: &[usize],
+        length: usize,
+        group: PackGroup,
+    ) -> bool {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        inner
+            .dataset_groups
+            .contains_key(&(dtype, element_shape.to_vec(), length, group))
     }
 
     #[tracing::instrument(skip(self, hash))]
-    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray> {
+    fn get_array(&self, hash: &[u8; 32], dtype: Dtype) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_locked(hash, None)
+        inner.read_locked(hash, dtype, None)
     }
 
     #[tracing::instrument(skip(self, hash), fields(start = range.start, end = range.end))]
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray> {
+    fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_locked(hash, Some(range))
+        inner.read_locked(hash, dtype, Some(range))
     }
 
     #[tracing::instrument(skip(self, hashes, out), fields(n = hashes.len(), index))]
-    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+    fn read_index_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_index_locked(hashes, index, out)
+        inner.read_index_locked(hashes, dtype, index, out)
     }
 
     #[tracing::instrument(skip(self, hashes), fields(n = hashes.len()))]
-    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
+    fn read_arrays(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_arrays_locked(hashes)
+        inner.read_arrays_locked(hashes, dtypes)
     }
 
-    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>> {
         let inner = self.inner.lock().expect("mutex poisoned");
         inner.array_shape_locked(hash)
     }
@@ -1178,13 +1218,14 @@ impl StorageBackend for Hdf5Backend {
     fn read_window_block_into(
         &self,
         hash: &[u8; 32],
+        dtype: Dtype,
         count_axis: usize,
         window_start: usize,
         len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner.read_window_block_locked(hash, count_axis, window_start, len, out)
+        inner.read_window_block_locked(hash, dtype, count_axis, window_start, len, out)
     }
 
     fn remove_array(&mut self, hash: &[u8; 32]) -> Result<()> {
@@ -1251,15 +1292,15 @@ impl StorageBackend for Hdf5Backend {
             slots_reclaimed: reclaimed,
             datasets_dropped: 0,
             feature_sets_reclaimed: 0,
+            timestamp_sets_reclaimed: 0,
         })
     }
 
-    fn verify(&self) -> Result<IntegrityReport> {
+    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport> {
         let inner = self.inner.lock().expect("mutex poisoned");
         let mut errors = Vec::new();
-        let hashes: Vec<[u8; 32]> = inner.by_hash.keys().copied().collect();
-        for hash in hashes {
-            match inner.read_locked(&hash, None) {
+        for &(hash, dtype) in arrays {
+            match inner.read_locked(&hash, dtype, None) {
                 Ok(arr) => {
                     let recomputed = array_hash(&arr);
                     if recomputed != hash {
@@ -1270,7 +1311,12 @@ impl StorageBackend for Hdf5Backend {
                         ));
                     }
                 }
-                Err(e) => errors.push(format!("read error: {e}")),
+                Err(TimeSeriesError::NotFound) => errors.push(format!(
+                    "dangling reference: the catalog references array {} but the array \
+                     file does not hold it",
+                    hash_hex(&hash),
+                )),
+                Err(e) => errors.push(format!("read error for array {}: {e}", hash_hex(&hash))),
             }
         }
         Ok(IntegrityReport { errors })
@@ -1303,6 +1349,7 @@ mod tests {
     use super::*;
     use crate::hash::array_hash;
     use crate::types::array::TypedArray;
+    use crate::types::period::Period;
 
     fn f64_array(shape: Vec<usize>, seed: f64) -> TypedArray {
         let n: usize = shape.iter().product();
@@ -1310,8 +1357,14 @@ mod tests {
         TypedArray::from_f64(shape, &vals)
     }
 
-    fn res() -> Period {
-        Period::from_iso8601("PT1H").unwrap()
+    /// The packed pool every regular-series test writes into.
+    fn res() -> PackGroup {
+        PackGroup::Regular(Period::from_iso8601("PT1H").unwrap())
+    }
+
+    /// A distinct irregular pool, keyed by a stand-in timestamp-vector hash.
+    fn cohort(tag: u8) -> PackGroup {
+        PackGroup::Irregular([tag; 32])
     }
 
     #[test]
@@ -1327,18 +1380,22 @@ mod tests {
             assert!(be.put_array(&hb, &b, res(), ArrayLayout::Packed).unwrap());
             // Duplicate put is a no-op.
             assert!(!be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
-            assert_eq!(be.get_array(&ha).unwrap(), a);
-            assert_eq!(be.get_array(&hb).unwrap(), b);
-            let slice = be.get_slice(&ha, 6..18).unwrap();
+            assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+            assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), b);
+            let slice = be.get_slice(&ha, Dtype::F64, 6..18).unwrap();
             assert_eq!(slice.shape, vec![12]);
             assert_eq!(slice.bytes, a.bytes[6 * 8..18 * 8]);
             be.flush().unwrap();
         }
         // Reopen: index rebuilt from the hash companions.
         let be = Hdf5Backend::open(&path, true).unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.get_array(&hb).unwrap(), b);
-        assert!(be.verify().unwrap().ok());
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), b);
+        assert!(
+            be.verify(&[(ha, Dtype::F64), (hb, Dtype::F64)])
+                .unwrap()
+                .ok()
+        );
     }
 
     #[test]
@@ -1352,15 +1409,148 @@ mod tests {
         let written = be.put_packed_block(&hashes, &refs, res()).unwrap();
         assert!(written.iter().all(|&w| w));
         // read_arrays gathers all columns from one hyperslab per dataset.
-        let out = be.read_arrays(&hashes).unwrap();
+        let out = be
+            .read_arrays(&hashes, &vec![Dtype::F64; hashes.len()])
+            .unwrap();
         assert_eq!(out, arrays);
         // read_index_into returns each column's element block at one timestep.
         let mut buf = Vec::new();
-        be.read_index_into(&hashes, 5, &mut buf).unwrap();
+        be.read_index_into(&hashes, Dtype::F64, 5, &mut buf)
+            .unwrap();
         let elem = 3 * 8;
         for (i, a) in arrays.iter().enumerate() {
             assert_eq!(buf[i * elem..(i + 1) * elem], a.bytes[5 * elem..6 * elem]);
         }
+    }
+
+    /// Irregular series pool by their timestamp-vector hash, so two cohorts at
+    /// the same dtype/shape/length are distinct datasets — and each is a real
+    /// packed pool, with columns addressable at one timestamp.
+    #[test]
+    fn irregular_cohorts_pack_separately_and_survive_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![8], 0.0);
+        let b = f64_array(vec![8], 100.0);
+        // Same shape and length as the pair above, but a different time axis.
+        let c = f64_array(vec![8], 200.0);
+        let (ha, hb, hc) = (array_hash(&a), array_hash(&b), array_hash(&c));
+
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_packed_block(&[ha, hb], &[&a, &b], cohort(1))
+            .unwrap();
+        be.put_array(&hc, &c, cohort(2), ArrayLayout::Packed)
+            .unwrap();
+        assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(1)));
+        assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(2)));
+        // A cohort nothing has written yet, and the regular pool at the same
+        // dtype/shape/length, are both absent: the pools cannot bleed together.
+        assert!(!be.has_pack_group(Dtype::F64, &[], 8, cohort(3)));
+        assert!(!be.has_pack_group(Dtype::F64, &[], 8, res()));
+
+        let dataset_of = |be: &Hdf5Backend, hash| match be.locate(&hash).unwrap() {
+            ArrayLocation::Packed { dataset, column } => (dataset, column),
+            other => panic!("expected a packed location, got {other:?}"),
+        };
+        let (ds_a, col_a) = dataset_of(&be, ha);
+        let (ds_b, col_b) = dataset_of(&be, hb);
+        let (ds_c, _) = dataset_of(&be, hc);
+        assert_eq!(ds_a, ds_b, "one cohort shares one dataset");
+        assert_ne!(col_a, col_b, "and each member gets its own column");
+        assert_ne!(ds_a, ds_c, "distinct time axes never share a dataset");
+        assert!(ds_a.contains("nsts_f64_s_8_"));
+
+        // The cohort's columns are gathered at one timestamp in a single read —
+        // the whole point of packing them.
+        let mut buf = Vec::new();
+        be.read_index_into(&[ha, hb], Dtype::F64, 5, &mut buf)
+            .unwrap();
+        assert_eq!(buf[..8], a.bytes[5 * 8..6 * 8]);
+        assert_eq!(buf[8..], b.bytes[5 * 8..6 * 8]);
+        drop(be);
+
+        // Reopen: the pools are rebuilt from the dataset names, so a later add
+        // joins the same cohort rather than starting a parallel one.
+        let mut be = Hdf5Backend::open(&path, false).unwrap();
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert!(be.has_pack_group(Dtype::F64, &[], 8, cohort(1)));
+        let d = f64_array(vec![8], 300.0);
+        let hd = array_hash(&d);
+        be.put_array(&hd, &d, cohort(1), ArrayLayout::Packed)
+            .unwrap();
+        // The block write sized that first dataset to its batch, so it is full
+        // and this add spills — into a sibling of the *same* pool, which is what
+        // the rebuilt index has to get right.
+        let spilled = dataset_of(&be, hd).0;
+        assert_ne!(spilled, ds_a);
+        let leaf = |path: &str| path.rsplit('/').next().unwrap().to_string();
+        assert_eq!(
+            parse_dataset_name(&leaf(&spilled)).unwrap(),
+            (Dtype::F64, vec![], 8, cohort(1))
+        );
+        assert!(
+            be.verify(&[(ha, Dtype::F64), (hb, Dtype::F64), (hd, Dtype::F64)])
+                .unwrap()
+                .ok()
+        );
+    }
+
+    /// `bool` and `u8` are the same byte on disk and the HDF5 type descriptor
+    /// cannot tell them apart — which is exactly why the dtype comes from the
+    /// caller (the catalog) rather than from the file. Each reads back as what
+    /// it was written as, and the content hash that addresses it survives.
+    #[test]
+    fn standalone_bool_and_u8_are_distinguished_by_the_caller_dtype() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let bools = TypedArray::from_slice(vec![4], &[true, false, true, true]).unwrap();
+        let bytes = TypedArray::from_slice(vec![4], &[1u8, 0, 1, 1]).unwrap();
+        // Byte-identical, yet distinct arrays: `array_hash` mixes in the dtype,
+        // so they content-address to different datasets rather than colliding.
+        assert_eq!(bools.bytes, bytes.bytes);
+        let (hb, hu) = (array_hash(&bools), array_hash(&bytes));
+        assert_ne!(hb, hu);
+
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(&hb, &bools, res(), ArrayLayout::Standalone)
+            .unwrap();
+        be.put_array(&hu, &bytes, res(), ArrayLayout::Standalone)
+            .unwrap();
+        assert_eq!(be.get_array(&hb, Dtype::Bool).unwrap(), bools);
+        assert_eq!(be.get_array(&hu, Dtype::U8).unwrap(), bytes);
+        assert_eq!(be.array_shape(&hb).unwrap(), vec![4]);
+        drop(be);
+
+        // And across a reopen, where the in-memory index is rebuilt from the file.
+        let be = Hdf5Backend::open(&path, false).unwrap();
+        assert_eq!(be.get_array(&hb, Dtype::Bool).unwrap(), bools);
+        let read = be.get_array(&hu, Dtype::U8).unwrap();
+        assert_eq!(read, bytes);
+        assert_eq!(array_hash(&read), hu, "content address must round-trip");
+        assert!(
+            be.verify(&[(hb, Dtype::Bool), (hu, Dtype::U8)])
+                .unwrap()
+                .ok()
+        );
+    }
+
+    /// A packed dataset knows its own dtype (it is in the dataset name), so a
+    /// caller whose catalog disagrees is told, rather than handed misread bytes.
+    #[test]
+    fn a_packed_read_rejects_a_dtype_the_dataset_contradicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.h5");
+        let a = f64_array(vec![4], 0.0);
+        let ha = array_hash(&a);
+        let mut be = Hdf5Backend::create(&path, Compression::default()).unwrap();
+        be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
+
+        let err = be.get_array(&ha, Dtype::I64).unwrap_err();
+        assert!(
+            matches!(&err, TimeSeriesError::IntegrityError(m)
+                if m.contains("stored as f64") && m.contains("catalog says i64")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1378,11 +1568,12 @@ mod tests {
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
         )
         .unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.array_shape(&ha).unwrap(), (Dtype::F64, vec![6, 4]));
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.array_shape(&ha).unwrap(), vec![6, 4]);
         // Window block: windows 1..3 along axis 1.
         let mut buf = Vec::new();
-        be.read_window_block_into(&ha, 1, 1, 2, &mut buf).unwrap();
+        be.read_window_block_into(&ha, Dtype::F64, 1, 1, 2, &mut buf)
+            .unwrap();
         let mut expect = Vec::new();
         for h in 0..6 {
             expect.extend_from_slice(&a.bytes[(h * 4 + 1) * 8..(h * 4 + 3) * 8]);
@@ -1406,7 +1597,7 @@ mod tests {
             ArrayLayout::StandaloneWindowed { count_axis: 1 },
         )
         .unwrap();
-        assert_eq!(be.get_array(&hb).unwrap(), big);
+        assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), big);
         {
             let inner = be.inner.lock().unwrap();
             let ds = inner
@@ -1417,9 +1608,13 @@ mod tests {
         // Reopen keeps both readable.
         drop(be);
         let be = Hdf5Backend::open(&path, false).unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.get_array(&hb).unwrap(), big);
-        assert!(be.verify().unwrap().ok());
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.get_array(&hb, Dtype::F64).unwrap(), big);
+        assert!(
+            be.verify(&[(ha, Dtype::F64), (hb, Dtype::F64)])
+                .unwrap()
+                .ok()
+        );
     }
 
     #[test]
@@ -1443,7 +1638,10 @@ mod tests {
         be.remove_array(&hf).unwrap();
         assert!(!be.contains(&ha).unwrap());
         assert!(!be.contains(&hf).unwrap());
-        assert!(matches!(be.get_array(&ha), Err(TimeSeriesError::NotFound)));
+        assert!(matches!(
+            be.get_array(&ha, Dtype::F64),
+            Err(TimeSeriesError::NotFound)
+        ));
         // Re-adding reuses the freed packed slot / tombstoned standalone var.
         assert!(be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap());
         assert!(
@@ -1455,8 +1653,8 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(be.get_array(&ha).unwrap(), a);
-        assert_eq!(be.get_array(&hf).unwrap(), f);
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
+        assert_eq!(be.get_array(&hf, Dtype::F64).unwrap(), f);
     }
 
     #[test]
@@ -1470,7 +1668,7 @@ mod tests {
             be.put_array(&ha, &a, res(), ArrayLayout::Packed).unwrap();
         }
         let mut be = Hdf5Backend::open(&path, true).unwrap();
-        assert_eq!(be.get_array(&ha).unwrap(), a);
+        assert_eq!(be.get_array(&ha, Dtype::F64).unwrap(), a);
         let b = f64_array(vec![4], 5.0);
         let hb = array_hash(&b);
         assert!(matches!(

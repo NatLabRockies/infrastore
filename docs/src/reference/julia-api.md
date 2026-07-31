@@ -38,7 +38,7 @@ Exported names (types first, then functions):
 `remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
 `remove_time_series!`, `rename_time_series!`, `replace_owner!`,
 `replace_parent_child_component_id!`, `replace_supplemental_attribute_component_id!`, `static_grid`,
-`static_groups`, `static_read!`, `static_summary`, `static_values`,
+`static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
 `supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
 `transform_single_time_series!`, `verify_integrity`.
 
@@ -155,8 +155,11 @@ end
 domain object on read; the store stores it verbatim and never interprets it. `add_time_series!`
 reads `name` off the object (it is not a call argument), so the same array can be stored under
 different names; its `ext=` keyword defaults to the object's `ext`. `data` keeps its Julia element
-type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, `Int64`, `Int32`, `UInt64`,
-`Bool`) and converts to row-major bytes on the way down.
+type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, the signed and unsigned integer
+widths, `Bool`) and converts to row-major bytes on the way down. An `element_type=` keyword declares
+what the elements _mean_ when they are not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, …
+— see [Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
+`nothing` for plain scalars.
 
 ## Result Types
 
@@ -166,9 +169,10 @@ immutable, compares and hashes by value (so results can go straight into a `Set`
 series type are `nothing`.
 
 Two conventions hold across every one of them: a `time_series_type` field holds the **Julia type**
-(`SingleTimeSeries`, `Deterministic`, …), ready to pass to `get_time_series`, and a `dtype` field
-holds the **Julia element type** (`Float64`, `Bool`, …). An `owner_category` field is an
-`OwnerCategory`, never a string.
+(`SingleTimeSeries`, `Deterministic`, …), ready to pass to `get_time_series`, and a reader group's
+`dtype` field holds the **Julia element type** (`Float64`, `Bool`, …). Metadata instead carries the
+store's canonical `element_type` **string**, which names both the meaning and (through it) the
+dtype. An `owner_category` field is an `OwnerCategory`, never a string.
 
 ```julia
 struct TimeSeriesMetadata                    # get_metadata / list_time_series
@@ -185,7 +189,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     count             :: Union{Nothing,Int}        # forecasts
     length            :: Union{Nothing,Int}        # static series
     percentiles       :: Union{Nothing,Vector{Float64}}   # Probabilistic
-    dtype             :: Type
+    element_type      :: String              # "f64", "tuple(3,f64)", "piecewise_linear", …
     element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
     features          :: Dict{String,Any}
     units             :: Union{Nothing,String}
@@ -213,12 +217,14 @@ than absent, so no field is silently dropped by the addressing path taken.
 | `SupplementalAttributeTypeCount`  | `supplemental_attribute_counts_by_type`   | `attribute_type`, `count`                                                                                                                         |
 | `SupplementalAttributeSummaryRow` | `supplemental_attribute_summary`          | `component_type`, `attribute_type`, `count`                                                                                                       |
 | `ForecastParameters`              | `get_forecast_parameters`                 | `horizon`, `interval`, `count`, `resolution`, `initial_timestamp` (all `nothing` when nothing matches)                                            |
-| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution`, `length`                                                                                                       |
+| `StaticGrid`                      | `static_grid`, `check_static_consistency` | `initial_timestamp`, `resolution` (`nothing` for an irregular reader), `length`                                                                   |
 | `ForecastTimeline`                | `forecast_timeline`                       | `initial_timestamp`, `resolution`, `interval`, `count`                                                                                            |
 | `CompressionSettings`             | `get_compression`                         | `compression` (`:deflate` / `:none`), `level`, `shuffle`                                                                                          |
 
-`StaticGrid` is shared by `static_grid` (a reader's master grid) and `check_static_consistency` (one
-per resolution present) — the same concept, so the same type.
+`StaticGrid` is shared by `static_grid` (a reader's timeline) and `check_static_consistency` (one
+per resolution present) — the same concept, so the same type. Its `resolution` is `nothing` only for
+a `NonSequentialTimeSeries` reader, whose timeline is an explicit list of instants rather than a
+grid; enumerate it with `static_timestamps`.
 
 ## Static Series
 
@@ -325,9 +331,9 @@ as its first argument exactly like `get_time_series`: `SingleTimeSeries`, `NonSe
 `time_series_type` reports which form was found. `interval` is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a `SingleTimeSeries`, the same shorthand
 `has_time_series` and `remove_time_series!` use. Since every form returns the same struct, `ext`,
-`dtype`, `owner_type`, and `percentiles` are available whichever type was asked for and whichever
-way the record was reached (for a forecast, `element_shape` is the stored array's trailing dims
-after its first axis).
+`element_type`, `owner_type`, and `percentiles` are available whichever type was asked for and
+whichever way the record was reached (for a forecast, `element_shape` is the stored array's trailing
+dims after its first axis).
 
 ```julia
 get_metadata(store, 42, Component, "load"; resolution = Hour(1))
@@ -339,9 +345,9 @@ get_array_by_hash(store, data_hash::Vector{UInt8}, ::Type{T}=Float64) -> Vector{
 ```
 
 Fetches the flattened array for a 32-byte content hash, decoded as element type `T`. Combine with
-`get_metadata` (for the dtype and shape) to read values without holding a `TimeSeriesKey`. Every
-`data_hash` in this API is these same 32 bytes, so any metadata record or `ArrayGroupRow` feeds it
-directly; `bytes2hex` gives the display form.
+`get_metadata` (for the element type and shape) to read values without holding a `TimeSeriesKey`.
+Every `data_hash` in this API is these same 32 bytes, so any metadata record or `ArrayGroupRow`
+feeds it directly; `bytes2hex` gives the display form.
 
 ### Key-based variants
 
@@ -400,8 +406,8 @@ the type has no materialized form.
 
 Dense forecasts are constructed as `Deterministic`, `Probabilistic`, or `Scenarios` structs (see
 [Types](#types)) and added through the generic `add_time_series!`. Each struct wraps a native
-`AbstractArray` of any element type and dimensionality — the binding derives the stored dtype and
-dims and converts to row-major bytes, just like the static `add_time_series!` (see the
+`AbstractArray` of any supported element type and dimensionality — the binding derives the stored
+dtype and dims and converts to row-major bytes, just like the static `add_time_series!` (see the
 [data model](../explanation/data-model.md#forecasts) for the conventional shapes).
 
 The forecast `name` comes from the struct, e.g.
@@ -555,37 +561,45 @@ instant) prefer a reader — see [Readers](#readers-per-timestamp-iteration) bel
 
 `get_time_series` returns a whole series or forecast struct. For the simulation access pattern —
 _walk every timestamp and, at each, read the value of every series_ — use a **reader** instead. A
-reader is built once over a filter, pins one resolution, and reuses output buffers that each read
-overwrites in place, so a tight loop allocates almost nothing. There are two: `StaticReader` for
-`SingleTimeSeries`, and `ForecastReader` for forecasts. Both follow the same lifecycle: build →
-inspect the layout once → `*_read!(t)` in a loop → pull values per group/entry.
+reader is built once over a filter, pins one timeline, and reuses output buffers that each read
+overwrites in place, so a tight loop allocates almost nothing. There are two: `StaticReader` for the
+static types, and `ForecastReader` for forecasts. Both follow the same lifecycle: build → inspect
+the layout once → `*_read!(t)` in a loop → pull values per group/entry.
 
 ### StaticReader
 
-Reads the value of every matching `SingleTimeSeries` at one timestamp. Results are **columnar**:
-series are partitioned into `(dtype, element_shape)` groups, and each group's values come back as
-one dense `(num_columns, element_dims...)` array.
+Reads the value of every matching static series at one timestamp. Results are **columnar**: series
+are partitioned into `(dtype, element_shape)` groups, and each group's values come back as one dense
+`(num_columns, element_dims...)` array.
 
 ```julia
-build_static_reader(store; resolution::Period, owner_id=nothing,
+build_static_reader(store; resolution::Union{Nothing,Period}=nothing,
+                    time_series_type::Type=SingleTimeSeries, owner_id=nothing,
                     owner_category=nothing, name=nothing, features=Dict()) -> StaticReader
 
-static_grid(reader)   -> StaticGrid  # initial_timestamp::DateTime, resolution::Period, length::Int
-static_groups(reader) -> Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
-static_read!(reader, t::DateTime) -> reader   # fills buffers; errors if t is off the grid
+static_grid(reader)       -> StaticGrid  # .initial_timestamp, .resolution (or nothing), .length
+static_timestamps(reader) -> Vector{DateTime}  # every instant on the timeline, in order
+static_groups(reader)     -> Vector{StaticGroup}  # each: .dtype, .element_shape, .keys
+static_read!(reader, t::DateTime) -> reader  # fills buffers; errors if t is off the timeline
 static_values(reader, group_index::Integer) -> Array
        # (num_columns, element_dims...); column j is static_groups(reader)[group_index].keys[j]
 ```
 
-All matched series must share one grid (`initial_timestamp` + `length`); the build validates this
-and errors on divergence, so there is no presence mask — every column has a value at every valid
+All matched series must share one timeline — one grid (`initial_timestamp` + `length`) for
+`SingleTimeSeries`, one timestamp vector for `NonSequentialTimeSeries`. The build validates this and
+errors on divergence, so there is no presence mask — every column has a value at every valid
 timestamp.
+
+`resolution` is required for `SingleTimeSeries` (one resolution per reader) and must be omitted for
+`time_series_type=NonSequentialTimeSeries`, which has none; `static_grid(reader).resolution` is then
+`nothing`. Iterating `static_timestamps` covers either kind, so one loop serves both:
 
 ```julia
 reader = build_static_reader(store; resolution = Hour(1))
-grid = static_grid(reader)
-for k in 0:(grid.length - 1)
-    static_read!(reader, grid.initial_timestamp + grid.resolution * k)
+# ...or, for irregular series:
+# reader = build_static_reader(store; time_series_type = NonSequentialTimeSeries)
+for t in static_timestamps(reader)
+    static_read!(reader, t)
     for (gi, g) in enumerate(static_groups(reader))
         vals = static_values(reader, gi)   # column j ↔ g.keys[j]
     end
@@ -712,8 +726,8 @@ and independent, and combine as a conjunction; with none set the whole store is 
   filter).
 - `features` — match keys whose features include all the given entries (subset match).
 
-Physical storage detail (`data_hash`, `dtype`, `ext`, `percentiles`) is not on a key — read it via
-`get_metadata` / `list_time_series`.
+Physical storage detail (`data_hash`, `element_type`, `ext`, `percentiles`) is not on a key — read
+it via `get_metadata` / `list_time_series`.
 
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,

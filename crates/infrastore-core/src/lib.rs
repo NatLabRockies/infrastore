@@ -2,6 +2,7 @@
 //!
 //! Static time-series types are available through [`TimeSeriesData`].
 
+pub mod codec;
 pub mod error;
 pub mod reader;
 pub mod storage;
@@ -10,13 +11,18 @@ pub mod types;
 pub mod version;
 
 // Implementation-detail modules. The intended public surface is the root
-// re-exports below; these modules hold the catalog store and hashing internals
-// (`MetadataStore`, `MetadataFilter`, the association identity/family types, the
-// feature-set cache, the transaction-taking free functions, and the hashing
-// helpers), which are not part of the supported API.
+// re-exports below; these modules hold the catalog store, hashing, and
+// timestamp-encoding internals (`MetadataStore`, `MetadataFilter`, the
+// association identity/family types, the shared-set cache, the
+// transaction-taking free functions, the hashing helpers, and the canonical
+// timestamp codec), which are not part of the supported API.
 pub(crate) mod hash;
 pub(crate) mod metadata;
+pub(crate) mod timestamps;
 
+pub use codec::{
+    DecodedValues, LinearFunction, QuadraticFunction, StepFunction, XyPoint, decode, encode,
+};
 pub use error::{Result, TimeSeriesError};
 // The two hashing utilities a binding genuinely needs: `array_hash` to
 // content-address an array and `hash_hex` to render a 32-byte hash as hex.
@@ -29,10 +35,12 @@ pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, Windo
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
     AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
-    TimeSeriesCounts, TimeSeriesCountsDetailed, catalog_sqlite_path,
+    TimeSeriesCounts, TimeSeriesCountsDetailed, TransformOutcome, TransformPolicy,
+    catalog_sqlite_path,
 };
 pub use types::{
     array::{Dtype, Element, TypedArray},
+    element_type::ElementType,
     key::{
         ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
         TimeSeriesKey,

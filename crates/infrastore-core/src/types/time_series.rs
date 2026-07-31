@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::array::TypedArray;
+use super::element_type::ElementType;
 use super::period::Period;
 
 /// Discriminator for the six time series types defined in the spec.
@@ -83,6 +84,21 @@ impl TimeSeriesType {
             5 => TimeSeriesType::Scenarios,
             _ => return None,
         })
+    }
+
+    /// How many leading array dims come *before* the per-step element shape.
+    ///
+    /// Static series are `[length, *E]`; a `Deterministic` stacks windows as
+    /// `[H, count, *E]`; `Probabilistic` and `Scenarios` add a percentile /
+    /// scenario axis in front, giving `[P, H, count, *E]`. Anything that has to
+    /// find the per-step element dims in a raw shape — element-type validation,
+    /// the codecs — asks here rather than re-deriving the layout.
+    pub fn leading_dims(self) -> usize {
+        match self {
+            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries => 1,
+            TimeSeriesType::Deterministic | TimeSeriesType::DeterministicSingleTimeSeries => 2,
+            TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => 3,
+        }
     }
 
     /// The inclusive `(low, high)` code range a *request* for `self` matches.
@@ -169,6 +185,28 @@ pub struct SingleTimeSeries {
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
+    /// for a binding to reconstruct its domain objects; the store never
+    /// interprets it. End users are not expected to set it.
+    pub ext: Option<String>,
 }
 
 impl SingleTimeSeries {
@@ -179,13 +217,38 @@ impl SingleTimeSeries {
         name: impl Into<String>,
     ) -> Self {
         let length = data.length();
+        let element_type = ElementType::Scalar(data.dtype);
         Self {
             initial_timestamp,
             resolution: resolution.into(),
             length,
             data,
             name: name.into(),
+            element_type,
+            units: None,
+            ext: None,
         }
+    }
+}
+
+impl SingleTimeSeries {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque extension payload carried through to the metadata row.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ext = Some(ext.into());
+        self
     }
 }
 
@@ -199,6 +262,28 @@ pub struct NonSequentialTimeSeries {
     pub length: usize,
     pub data: TypedArray,
     pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
+    /// for a binding to reconstruct its domain objects; the store never
+    /// interprets it. End users are not expected to set it.
+    pub ext: Option<String>,
 }
 
 impl NonSequentialTimeSeries {
@@ -217,12 +302,37 @@ impl NonSequentialTimeSeries {
         if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err("timestamps must be strictly increasing".to_string());
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             timestamps,
             length,
             data,
             name: name.into(),
+            element_type,
+            units: None,
+            ext: None,
         })
+    }
+}
+
+impl NonSequentialTimeSeries {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque extension payload carried through to the metadata row.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ext = Some(ext.into());
+        self
     }
 }
 
@@ -240,6 +350,28 @@ pub struct Deterministic {
     /// Shape `[H, count, *E]`.
     pub data: TypedArray,
     pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
+    /// for a binding to reconstruct its domain objects; the store never
+    /// interprets it. End users are not expected to set it.
+    pub ext: Option<String>,
 }
 
 impl Deterministic {
@@ -278,6 +410,7 @@ impl Deterministic {
                 data.shape
             ));
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             initial_timestamp,
             resolution,
@@ -286,6 +419,9 @@ impl Deterministic {
             count,
             data,
             name: name.into(),
+            element_type,
+            units: None,
+            ext: None,
         })
     }
 }
@@ -304,6 +440,49 @@ pub struct Probabilistic {
     /// Shape `[num_percentiles, H, count, *E]`.
     pub data: TypedArray,
     pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
+    /// for a binding to reconstruct its domain objects; the store never
+    /// interprets it. End users are not expected to set it.
+    pub ext: Option<String>,
+}
+
+impl Deterministic {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque extension payload carried through to the metadata row.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ext = Some(ext.into());
+        self
+    }
 }
 
 impl Probabilistic {
@@ -351,6 +530,7 @@ impl Probabilistic {
                 data.shape
             ));
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             initial_timestamp,
             resolution,
@@ -360,6 +540,9 @@ impl Probabilistic {
             percentiles,
             data,
             name: name.into(),
+            element_type,
+            units: None,
+            ext: None,
         })
     }
 }
@@ -378,6 +561,49 @@ pub struct Scenarios {
     /// Shape `[scenario_count, H, count, *E]`.
     pub data: TypedArray,
     pub name: String,
+    /// What the stored elements mean and how one timestep is laid out.
+    ///
+    /// Always concrete: a constructor resolves it to `Scalar(data.dtype)`, which
+    /// is what an ordinary numeric series is, and `with_element_type` replaces
+    /// it. There is deliberately no "undeclared" spelling — it would be a second
+    /// way to say `Scalar(dtype)`, and a series written that way would not
+    /// compare equal to the same series read back.
+    ///
+    /// Assigning a new `data` array without updating this is a mismatch the
+    /// store rejects on write; build the series again instead.
+    pub element_type: ElementType,
+    /// User-declared units label for the values (e.g. `"MW"`), or `None`.
+    ///
+    /// Set by whoever creates the series and returned unchanged on read. The
+    /// store never interprets or validates it, and it is not part of a series'
+    /// identity: it cannot be filtered on, and two series differing only in
+    /// their label are a duplicate.
+    pub units: Option<String>,
+    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
+    /// for a binding to reconstruct its domain objects; the store never
+    /// interprets it. End users are not expected to set it.
+    pub ext: Option<String>,
+}
+
+impl Probabilistic {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque extension payload carried through to the metadata row.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ext = Some(ext.into());
+        self
+    }
 }
 
 impl Scenarios {
@@ -413,6 +639,7 @@ impl Scenarios {
                 data.shape
             ));
         }
+        let element_type = ElementType::Scalar(data.dtype);
         Ok(Self {
             initial_timestamp,
             resolution,
@@ -422,6 +649,9 @@ impl Scenarios {
             scenario_count,
             data,
             name: name.into(),
+            element_type,
+            units: None,
+            ext: None,
         })
     }
 }
@@ -464,6 +694,27 @@ fn validate_forecast_periods(
     Ok(())
 }
 
+impl Scenarios {
+    /// Declare the logical element type of the array. Validated on commit
+    /// against the array's dtype and per-step shape.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.element_type = element_type;
+        self
+    }
+
+    /// Set the user-declared units label.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.units = Some(units.into());
+        self
+    }
+
+    /// Set the opaque extension payload carried through to the metadata row.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ext = Some(ext.into());
+        self
+    }
+}
+
 /// Runtime variant container for all supported time-series types.
 ///
 /// `DeterministicSingleTimeSeries` is synthesized into `Deterministic` on
@@ -496,6 +747,104 @@ impl TimeSeriesData {
             TimeSeriesData::Probabilistic(p) => &p.name,
             TimeSeriesData::Scenarios(s) => &s.name,
         }
+    }
+
+    /// The element type of the wrapped series — always concrete, defaulting to
+    /// plain scalars of the array's own dtype.
+    pub fn element_type(&self) -> ElementType {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.element_type,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.element_type,
+            TimeSeriesData::Deterministic(d) => d.element_type,
+            TimeSeriesData::Probabilistic(p) => p.element_type,
+            TimeSeriesData::Scenarios(s) => s.element_type,
+        }
+    }
+
+    /// The user-declared units label, or `None`.
+    pub fn units(&self) -> Option<&str> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.units.as_deref(),
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.units.as_deref(),
+            TimeSeriesData::Deterministic(d) => d.units.as_deref(),
+            TimeSeriesData::Probabilistic(p) => p.units.as_deref(),
+            TimeSeriesData::Scenarios(s) => s.units.as_deref(),
+        }
+    }
+
+    /// The opaque extension payload, or `None`.
+    pub fn ext(&self) -> Option<&str> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.ext.as_deref(),
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.ext.as_deref(),
+            TimeSeriesData::Deterministic(d) => d.ext.as_deref(),
+            TimeSeriesData::Probabilistic(p) => p.ext.as_deref(),
+            TimeSeriesData::Scenarios(s) => s.ext.as_deref(),
+        }
+    }
+
+    /// Declare the logical element type of the wrapped series.
+    pub fn with_element_type(mut self, element_type: ElementType) -> Self {
+        self.set_element_type(element_type);
+        self
+    }
+
+    /// Set the user-declared units label on the wrapped series.
+    pub fn with_units(mut self, units: impl Into<String>) -> Self {
+        self.set_units(Some(units.into()));
+        self
+    }
+
+    /// Set the opaque extension payload on the wrapped series.
+    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
+        self.set_ext(Some(ext.into()));
+        self
+    }
+
+    /// Set the element type in place.
+    pub fn set_element_type(&mut self, element_type: ElementType) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.element_type = element_type,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.element_type = element_type,
+            TimeSeriesData::Deterministic(d) => d.element_type = element_type,
+            TimeSeriesData::Probabilistic(p) => p.element_type = element_type,
+            TimeSeriesData::Scenarios(s) => s.element_type = element_type,
+        }
+    }
+
+    /// Set the units label in place.
+    pub fn set_units(&mut self, units: Option<String>) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.units = units,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.units = units,
+            TimeSeriesData::Deterministic(d) => d.units = units,
+            TimeSeriesData::Probabilistic(p) => p.units = units,
+            TimeSeriesData::Scenarios(s) => s.units = units,
+        }
+    }
+
+    /// Set the extension payload in place.
+    pub fn set_ext(&mut self, ext: Option<String>) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.ext = ext,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.ext = ext,
+            TimeSeriesData::Deterministic(d) => d.ext = ext,
+            TimeSeriesData::Probabilistic(p) => p.ext = ext,
+            TimeSeriesData::Scenarios(s) => s.ext = ext,
+        }
+    }
+
+    /// Set the descriptive attributes in place. Used on the read path to fill
+    /// a reconstructed series in from its catalog row.
+    pub fn set_descriptors(
+        &mut self,
+        element_type: ElementType,
+        units: Option<String>,
+        ext: Option<String>,
+    ) {
+        self.set_element_type(element_type);
+        self.set_units(units);
+        self.set_ext(ext);
     }
 
     pub fn as_single(&self) -> Option<&SingleTimeSeries> {

@@ -113,13 +113,15 @@ const _AddableTimeSeries = Union{
 
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
-                     features=Dict(), units=nothing, ext=ts.ext) -> TimeSeriesKey
+                     features=Dict(), element_type=ts.element_type,
+                     units=ts.units, ext=ts.ext) -> TimeSeriesKey
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
 `Deterministic`, `Probabilistic`, or `Scenarios`) and return its
 [`TimeSeriesKey`](@ref). `owner_id` identifies the owning component /
 supplemental attribute (a signed 64-bit integer). The association `name` comes
-from the time series object (`ts.name`).
+from the time series object (`ts.name`), as do its `element_type` and `units`
+labels.
 
 A `features` key that shadows a field of a time series or of the key that
 addresses one (`name`, `resolution`, `owner_id`, …) is rejected: those names are
@@ -475,6 +477,8 @@ function get_time_series(
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
     out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_single(
         store.handle::Ptr{Cvoid},
@@ -490,6 +494,8 @@ function get_time_series(
         out_data::Ref{Ptr{UInt8}},
         out_data_len::Ref{UInt64},
         out_ext::Ref{Ptr{Cchar}},
+        out_element_type::Ref{Ptr{Cchar}},
+        out_units::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
@@ -507,10 +513,18 @@ function get_time_series(
     initial = _from_unix_ms(out_initial[])
     resolution = _take_period(out_resolution[])
     ext = _take_cstr(out_ext[])
-    return SingleTimeSeries(initial, resolution, data, _key_name(key); ext=ext)
+    element_type = _take_cstr(out_element_type[])
+    units = _take_cstr(out_units[])
+    return SingleTimeSeries(
+        initial, resolution, data, _key_name(key);
+        ext=ext, element_type=element_type, units=units,
+    )
 end
 
-# Reconstruct one SingleTimeSeries from a bulk-read result slot.
+# Reconstruct one SingleTimeSeries from a bulk-read result slot. Like the other
+# bulk reconstructors it carries `ext`, `element_type`, and `units`: those live on
+# the series, and the bulk-result getters return them, so a series read in bulk
+# and the same series read individually produce equal structs.
 function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_initial = Ref{Int64}(0);
     out_resolution = Ref{Ptr{Cchar}}(C_NULL)
@@ -519,6 +533,9 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL);
     out_data_len = Ref{UInt64}(0)
+    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_single(
             result::Ptr{Cvoid},
@@ -530,6 +547,9 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
             out_shape_len::Ref{UInt64},
             out_data::Ref{Ptr{UInt8}},
             out_data_len::Ref{UInt64},
+            out_ext::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
+            out_units::Ref{Ptr{Cchar}},
         )::Int32
     )
     dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
@@ -542,12 +562,15 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     )::Cvoid
     data = _decode_array(bytes, out_dtype[], dims)
     return SingleTimeSeries(
-        _from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name
+        _from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name;
+        ext=_take_cstr(out_ext[]),
+        element_type=_take_cstr(out_element_type[]),
+        units=_take_cstr(out_units[]),
     )
 end
 
-# Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (no
-# ext: a bulk read carries array data, not the metadata row).
+# Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (carrying
+# `ext` / `element_type` / `units`, as `_bulk_single` does).
 function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_ts = Ref{Ptr{Int64}}(C_NULL);
     out_ts_len = Ref{UInt64}(0)
@@ -556,6 +579,9 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL);
     out_data_len = Ref{UInt64}(0)
+    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_non_sequential(
             result::Ptr{Cvoid},
@@ -567,6 +593,9 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
             out_shape_len::Ref{UInt64},
             out_data::Ref{Ptr{UInt8}},
             out_data_len::Ref{UInt64},
+            out_ext::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
+            out_units::Ref{Ptr{Cchar}},
         )::Int32
     )
     ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
@@ -582,11 +611,17 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
         out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
     )::Cvoid
     data = _decode_array(bytes, out_dtype[], dims)
-    return NonSequentialTimeSeries(_from_unix_ms.(ts_ms), data, name)
+    return NonSequentialTimeSeries(
+        _from_unix_ms.(ts_ms), data, name;
+        ext=_take_cstr(out_ext[]),
+        element_type=_take_cstr(out_element_type[]),
+        units=_take_cstr(out_units[]),
+    )
 end
 
 # Reconstruct one forecast (Deterministic / Probabilistic / Scenarios) from a
-# bulk-read result slot; `type_code` is the ts_type discriminant.
+# bulk-read result slot; `type_code` is the ts_type discriminant. As above, the
+# descriptive attributes come back with the data.
 function _bulk_forecast(
     result::Ptr{Cvoid}, idx::Integer, type_code::Integer, name::AbstractString
 )
@@ -603,6 +638,9 @@ function _bulk_forecast(
     out_byte_len = Ref{UInt64}(0)
     out_pct = Ref{Ptr{Float64}}(C_NULL);
     out_pct_len = Ref{UInt64}(0)
+    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_forecast(
             result::Ptr{Cvoid},
@@ -620,6 +658,9 @@ function _bulk_forecast(
             out_byte_len::Ref{UInt64},
             out_pct::Ref{Ptr{Float64}},
             out_pct_len::Ref{UInt64},
+            out_ext::Ref{Ptr{Cchar}},
+            out_element_type::Ref{Ptr{Cchar}},
+            out_units::Ref{Ptr{Cchar}},
         )::Int32
     )
     nd = Int(out_ndims[])
@@ -646,14 +687,24 @@ function _bulk_forecast(
     horizon = _take_period(out_horizon[]);
     interval = _take_period(out_interval[])
     count = Int(out_count[])
+    ext = _take_cstr(out_ext[])
+    element_type = _take_cstr(out_element_type[])
+    units = _take_cstr(out_units[])
     if type_code == INFRASTORE_TYPE_PROBABILISTIC
         return Probabilistic(
-            initial, resolution, horizon, interval, count, percentiles, data, name
+            initial, resolution, horizon, interval, count, percentiles, data, name;
+            ext=ext, element_type=element_type, units=units,
         )
     elseif type_code == INFRASTORE_TYPE_SCENARIOS
-        return Scenarios(initial, resolution, horizon, interval, count, data, name)
+        return Scenarios(
+            initial, resolution, horizon, interval, count, data, name;
+            ext=ext, element_type=element_type, units=units,
+        )
     else
-        return Deterministic(initial, resolution, horizon, interval, count, data, name)
+        return Deterministic(
+            initial, resolution, horizon, interval, count, data, name;
+            ext=ext, element_type=element_type, units=units,
+        )
     end
 end
 
@@ -728,6 +779,8 @@ function get_time_series(
     out_data_len = Ref{UInt64}(0)
     lt_buf = Vector{UInt8}(undef, 256)
     out_lt_len = Ref{UInt64}(0)
+    out_element_type = Ref{Ptr{Cchar}}(C_NULL)
+    out_units = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_non_sequential(
         store.handle::Ptr{Cvoid},
@@ -745,6 +798,8 @@ function get_time_series(
         lt_buf::Ptr{UInt8},
         UInt64(length(lt_buf))::UInt64,
         out_lt_len::Ref{UInt64},
+        out_element_type::Ref{Ptr{Cchar}},
+        out_units::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
@@ -766,6 +821,11 @@ function get_time_series(
     data = _decode_array(bytes, out_dtype[], dims)
     n = min(Int(out_lt_len[]), length(lt_buf))
     ext = n == 0 ? nothing : String(lt_buf[1:n])
+    element_type = _take_cstr(out_element_type[])
+    units = _take_cstr(out_units[])
     name = _key_name(key)
-    return NonSequentialTimeSeries(_from_unix_ms.(timestamp_ms), data, name; ext=ext)
+    return NonSequentialTimeSeries(
+        _from_unix_ms.(timestamp_ms), data, name;
+        ext=ext, element_type=element_type, units=units,
+    )
 end

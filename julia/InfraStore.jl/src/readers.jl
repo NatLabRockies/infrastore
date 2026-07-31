@@ -48,10 +48,11 @@ struct StaticGroup
 end
 
 """
-A prepared reader over the `SingleTimeSeries` matching a build filter. Build
-with [`build_static_reader`], read a timestamp with [`static_read!`], then pull
-each group's values with [`static_values`]. Inspect the layout via
-[`static_groups`] / [`static_grid`].
+A prepared reader over the static series matching a build filter — either the
+`SingleTimeSeries` on one grid, or the `NonSequentialTimeSeries` on one timestamp
+vector. Build with [`build_static_reader`], read a timestamp with
+[`static_read!`], then pull each group's values with [`static_values`]. Inspect
+the layout via [`static_groups`] / [`static_grid`] / [`static_timestamps`].
 """
 mutable struct StaticReader
     handle::Ptr{Cvoid}
@@ -114,31 +115,45 @@ function _static_group_layout(handle::Ptr{Cvoid}, gi::Integer)
 end
 
 """
-    build_static_reader(store; resolution, owner_id=nothing,
-                        owner_category=nothing, name=nothing, features=Dict())
+    build_static_reader(store; resolution=nothing, time_series_type=SingleTimeSeries,
+                        owner_id=nothing, owner_category=nothing, name=nothing,
+                        features=Dict())
 
-Build a [`StaticReader`] over the `SingleTimeSeries` matching the filter.
-`resolution` (a `Period`) is required — one resolution per reader. The matched
-series must share one grid (`initial_timestamp` + `length`).
+Build a [`StaticReader`] over the static series matching the filter.
+
+For `SingleTimeSeries` (the default) `resolution` (a `Period`) is required — one
+resolution per reader — and the matched series must share one grid
+(`initial_timestamp` + `length`). For `time_series_type=NonSequentialTimeSeries`
+pass no `resolution`: an irregular series has none, and the matched series must
+instead share one timestamp vector (read it with [`static_timestamps`]), which is
+also what pools their arrays on disk.
 """
 function build_static_reader(
     store::Store;
-    resolution::Period,
+    resolution::Union{Nothing, Period}=nothing,
+    time_series_type::Type=SingleTimeSeries,
     owner_id::Union{Nothing, Integer}=nothing,
     owner_category::Union{Nothing, OwnerCategory}=nothing,
     name::Union{Nothing, AbstractString}=nothing,
     features::AbstractDict=Dict{String, Any}(),
 )
+    time_series_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
+        InvalidParameterError(
+            "build_static_reader handles the static types (SingleTimeSeries / " *
+            "NonSequentialTimeSeries); got $time_series_type",
+        ),
+    )
     has_owner = owner_id !== nothing
     owner_arg = has_owner ? Int64(owner_id) : Int64(0)
     has_category = owner_category !== nothing
     category_arg = has_category ? _category_int(owner_category) : Int32(0)
     name_arg = name === nothing ? C_NULL : String(name)
-    resolution_iso = _period_to_iso(resolution)
+    resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_static_reader(
         store.handle::Ptr{Cvoid},
+        _type_code(time_series_type)::Int32,
         has_owner::Bool,
         owner_arg::Int64,
         has_category::Bool,
@@ -163,8 +178,10 @@ end
 """
     static_grid(reader) -> StaticGrid
 
-The reader's master grid. Valid timestamps are `initial_timestamp + k·resolution`
-for `k in 0:length-1`.
+The reader's timeline. For a `SingleTimeSeries` reader the valid timestamps are
+`initial_timestamp + k·resolution` for `k in 0:length-1`. For a
+`NonSequentialTimeSeries` reader `resolution` is `nothing` — there is no constant
+step — and [`static_timestamps`] gives the instants themselves.
 """
 function static_grid(reader::StaticReader)
     out_initial = Ref{Int64}(0)
@@ -182,6 +199,33 @@ function static_grid(reader::StaticReader)
 end
 
 """
+    static_timestamps(reader) -> Vector{DateTime}
+
+Every timestamp on the reader's timeline, in order. The only way to enumerate an
+irregular timeline, and equivalent to walking the grid for a regular one — so a
+loop written against it works for either kind of reader.
+"""
+function static_timestamps(reader::StaticReader)
+    out_len = Ref{UInt64}(0)
+    _check(
+        @ccall lib_path().infrastore_static_reader_timestamps(
+            reader.handle::Ptr{Cvoid}, C_NULL::Ptr{Int64}, UInt64(0)::UInt64,
+            out_len::Ref{UInt64},
+        )::Int32
+    )
+    millis = Vector{Int64}(undef, Int(out_len[]))
+    if out_len[] > 0
+        _check(
+            @ccall lib_path().infrastore_static_reader_timestamps(
+                reader.handle::Ptr{Cvoid}, millis::Ptr{Int64},
+                UInt64(length(millis))::UInt64, out_len::Ref{UInt64},
+            )::Int32
+        )
+    end
+    return [_from_unix_ms(ms) for ms in millis]
+end
+
+"""
     static_groups(reader) -> Vector{StaticGroup}
 
 The reader's columnar groups (resolved once at build time). Each [`StaticGroup`]
@@ -193,7 +237,7 @@ static_groups(reader::StaticReader) = reader.groups
     static_read!(reader, t::DateTime) -> reader
 
 Read the value of every series at `t`, filling the reader's buffers. Throws if
-`t` is off the reader's grid. Follow with [`static_values`] per group.
+`t` is off the reader's timeline. Follow with [`static_values`] per group.
 """
 function static_read!(reader::StaticReader, t::DateTime)
     _check(

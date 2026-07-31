@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use infrastore_core::{
-    Deterministic, Dtype, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
+    Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
     KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
     Probabilistic, Scenarios, SingleTimeSeries, SingleTimeSeriesKey, StaticSummaryRow,
     TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
@@ -264,7 +264,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .unwrap_or_default(),
         features: Some(features_to_pb(&m.features)),
         units: m.units.clone(),
-        dtype: m.dtype.code(),
+        element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
         ext: m.ext.clone(),
         percentiles: m.percentiles.clone().unwrap_or_default(),
@@ -329,11 +329,11 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         } else {
             Some(m.percentiles)
         },
-        // Error on an unknown dtype (matching the data-decode path) rather than
-        // silently coercing to F64.
-        dtype: Dtype::from_code(m.dtype).ok_or(ConvertError::InvalidValue {
-            field: "dtype",
-            message: format!("unknown dtype code {}", m.dtype),
+        // Error on an unparseable element_type (matching the data-decode path)
+        // rather than silently coercing to f64 scalars.
+        element_type: ElementType::parse(&m.element_type).ok_or(ConvertError::InvalidValue {
+            field: "element_type",
+            message: format!("unknown element_type {:?}", m.element_type),
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
         ext: m.ext,
@@ -344,20 +344,24 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 
 /// Encode a [`TimeSeriesData`] into the wire-shape used by `GetResp`.
 ///
+/// The `element_type` comes off the data itself: a read fills it in from the
+/// association row, so the caller needs no second catalog lookup to describe
+/// what the bytes mean.
+///
 /// `GetResp.ext` is left empty on every variant, and that is not an omission:
 /// `ext` belongs to the association row ([`TimeSeriesMetadata::ext`], which
-/// [`metadata_to_pb`] does carry), not to the time-series values, so a
-/// `TimeSeriesData` has no `ext` for this function to forward. A gRPC caller
-/// reads `ext` from `GetMetadata` or `ListTimeSeries`. Pinned by
+/// [`metadata_to_pb`] does carry), so a gRPC caller reads it from `GetMetadata`
+/// or `ListTimeSeries` rather than from the values. Pinned by
 /// `ext_is_always_empty_in_get_resp`; see the proto comment on field 10.
 pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
+    let element_type = data.element_type();
     match data {
         TimeSeriesData::SingleTimeSeries(s) => pb::GetResp {
             initial_timestamp_rfc3339: s.initial_timestamp.to_rfc3339(),
             resolution: s.resolution.to_iso8601(),
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            dtype: s.data.dtype.code(),
+            element_type: element_type.to_string(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
@@ -373,7 +377,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             resolution: String::new(),
             length: s.length as u64,
             shape: s.data.shape.iter().map(|d| *d as u64).collect(),
-            dtype: s.data.dtype.code(),
+            element_type: element_type.to_string(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
@@ -389,7 +393,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             resolution: d.resolution.to_iso8601(),
             length: d.data.shape[0] as u64,
             shape: d.data.shape.iter().map(|x| *x as u64).collect(),
-            dtype: d.data.dtype.code(),
+            element_type: element_type.to_string(),
             value_bytes: d.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
             timestamps_rfc3339: Vec::new(),
@@ -405,7 +409,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             resolution: p.resolution.to_iso8601(),
             length: p.data.shape[0] as u64,
             shape: p.data.shape.iter().map(|x| *x as u64).collect(),
-            dtype: p.data.dtype.code(),
+            element_type: element_type.to_string(),
             value_bytes: p.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
             timestamps_rfc3339: Vec::new(),
@@ -421,7 +425,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             resolution: s.resolution.to_iso8601(),
             length: s.data.shape[0] as u64,
             shape: s.data.shape.iter().map(|x| *x as u64).collect(),
-            dtype: s.data.dtype.code(),
+            element_type: element_type.to_string(),
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
             timestamps_rfc3339: Vec::new(),
@@ -446,17 +450,19 @@ pub fn get_resp_to_time_series_data(
         }
     })?;
     let shape: Vec<usize> = resp.shape.iter().map(|d| *d as usize).collect();
-    let dtype = Dtype::from_code(resp.dtype).ok_or(ConvertError::InvalidValue {
-        field: "dtype",
-        message: format!("unknown dtype code {}", resp.dtype),
-    })?;
+    let element_type =
+        ElementType::parse(&resp.element_type).ok_or(ConvertError::InvalidValue {
+            field: "element_type",
+            message: format!("unknown element_type {:?}", resp.element_type),
+        })?;
+    let dtype = element_type.physical_dtype();
     let data = TypedArray::new(dtype, shape, resp.value_bytes).map_err(|e| {
         ConvertError::InvalidValue {
             field: "value_bytes",
             message: e,
         }
     })?;
-    match ts_type {
+    let series: Result<TimeSeriesData, ConvertError> = match ts_type {
         pb::TimeSeriesType::SingleTimeSeries => {
             let initial_timestamp = DateTime::parse_from_rfc3339(&resp.initial_timestamp_rfc3339)
                 .map(|d| d.with_timezone(&Utc))?;
@@ -466,6 +472,12 @@ pub fn get_resp_to_time_series_data(
                 length: resp.length as usize,
                 data,
                 name,
+                // Overwritten below, along with every other variant's.
+                element_type,
+                // The response carries no units or ext field, so those stay
+                // unset rather than being invented here.
+                units: None,
+                ext: None,
             }))
         }
         pb::TimeSeriesType::NonSequentialTimeSeries => {
@@ -539,7 +551,12 @@ pub fn get_resp_to_time_series_data(
             })?;
             Ok(TimeSeriesData::Scenarios(scen))
         }
-    }
+    };
+    // The wire carries the element type, so a read over gRPC reports the same
+    // one a local read would. Applied here rather than per branch because the
+    // constructors resolve it to plain scalars of the array's dtype, which is
+    // right only when that is what the server actually sent.
+    Ok(series?.with_element_type(element_type))
 }
 
 // ---- Helpers ----
@@ -733,7 +750,7 @@ mod tests {
             timestamps_rfc3339: Vec::new(),
             features: Some(pb::Features::default()),
             units: None,
-            dtype: Dtype::F64.code(),
+            element_type: "f64".into(),
             element_shape: Vec::new(),
             ext: None,
             percentiles: Vec::new(),
@@ -752,13 +769,16 @@ mod tests {
     }
 
     #[test]
-    fn unknown_dtype_in_metadata_errors() {
+    fn unknown_element_type_in_metadata_errors() {
         let mut pb = base_pb_metadata();
-        pb.dtype = 99; // not a valid Dtype code
+        pb.element_type = "float64".into(); // not a valid element_type spelling
         let err = metadata_from_pb(pb).unwrap_err();
         assert!(matches!(
             err,
-            ConvertError::InvalidValue { field: "dtype", .. }
+            ConvertError::InvalidValue {
+                field: "element_type",
+                ..
+            }
         ));
     }
 
@@ -962,7 +982,7 @@ mod tests {
         .unwrap();
         let original = TimeSeriesData::Scenarios(scen);
         let resp = time_series_data_to_get_resp(&original);
-        assert_eq!(resp.dtype, Dtype::I64.code());
+        assert_eq!(resp.element_type, "i64");
 
         let roundtripped = get_resp_to_time_series_data(resp, "test".to_string()).unwrap();
         assert_eq!(roundtripped, original);
@@ -1012,20 +1032,13 @@ mod convert_coverage_tests {
         TypedArray::new(dtype, shape, pattern_bytes(dtype, n)).unwrap()
     }
 
-    const ALL_DTYPES: [Dtype; 6] = [
-        Dtype::F64,
-        Dtype::F32,
-        Dtype::I64,
-        Dtype::I32,
-        Dtype::U64,
-        Dtype::Bool,
-    ];
+    const ALL_DTYPES: &[Dtype] = Dtype::ALL;
 
     // ---- Dtype matrix ------------------------------------------------------
 
     #[test]
     fn every_dtype_round_trips_through_get_resp() {
-        for dtype in ALL_DTYPES {
+        for &dtype in ALL_DTYPES {
             let data = typed(dtype, vec![3]);
             let original = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
                 t0(),
@@ -1034,7 +1047,11 @@ mod convert_coverage_tests {
                 "load",
             ));
             let resp = time_series_data_to_get_resp(&original);
-            assert_eq!(resp.dtype, dtype.code(), "{dtype:?}: code on the wire");
+            assert_eq!(
+                resp.element_type,
+                dtype.as_str(),
+                "{dtype:?}: element_type on the wire"
+            );
             assert_eq!(resp.value_bytes, data.bytes, "{dtype:?}: bytes");
 
             let back = get_resp_to_time_series_data(resp, "load".to_string()).unwrap();
@@ -1044,7 +1061,7 @@ mod convert_coverage_tests {
 
     #[test]
     fn every_dtype_round_trips_through_metadata() {
-        for dtype in ALL_DTYPES {
+        for &dtype in ALL_DTYPES {
             let meta = TimeSeriesMetadata {
                 owner_id: 1,
                 owner_type: "Generator".into(),
@@ -1062,19 +1079,19 @@ mod convert_coverage_tests {
                 features: Features::new(),
                 units: None,
                 percentiles: None,
-                dtype,
+                element_type: ElementType::Scalar(dtype),
                 element_shape: vec![],
                 ext: None,
             };
             let pb = metadata_to_pb(&meta);
-            assert_eq!(pb.dtype, dtype.code(), "{dtype:?}");
+            assert_eq!(pb.element_type, dtype.as_str(), "{dtype:?}");
             assert_eq!(metadata_from_pb(pb).unwrap(), meta, "{dtype:?}");
         }
     }
 
     #[test]
     fn every_dtype_round_trips_in_a_forecast() {
-        for dtype in ALL_DTYPES {
+        for &dtype in ALL_DTYPES {
             // shape [H=2, count=3]
             let data = typed(dtype, vec![2, 3]);
             let det = Deterministic::new(
@@ -1089,14 +1106,14 @@ mod convert_coverage_tests {
             .unwrap();
             let original = TimeSeriesData::Deterministic(det);
             let resp = time_series_data_to_get_resp(&original);
-            assert_eq!(resp.dtype, dtype.code(), "{dtype:?}");
+            assert_eq!(resp.element_type, dtype.as_str(), "{dtype:?}");
             let back = get_resp_to_time_series_data(resp, "det".to_string()).unwrap();
             assert_eq!(back, original, "{dtype:?}");
         }
     }
 
     #[test]
-    fn an_unknown_dtype_code_in_a_get_resp_errors() {
+    fn an_unknown_element_type_in_a_get_resp_errors() {
         let data = typed(Dtype::F64, vec![3]);
         let original = TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
             t0(),
@@ -1105,10 +1122,13 @@ mod convert_coverage_tests {
             "load",
         ));
         let mut resp = time_series_data_to_get_resp(&original);
-        resp.dtype = 99;
+        resp.element_type = "float64".into();
         assert!(matches!(
             get_resp_to_time_series_data(resp, "load".to_string()),
-            Err(ConvertError::InvalidValue { field: "dtype", .. })
+            Err(ConvertError::InvalidValue {
+                field: "element_type",
+                ..
+            })
         ));
     }
 
@@ -1203,7 +1223,7 @@ mod convert_coverage_tests {
             features: Features::new(),
             units: None,
             percentiles: None,
-            dtype: Dtype::F64,
+            element_type: ElementType::default(),
             element_shape: vec![],
             ext: None,
         };
@@ -1243,7 +1263,7 @@ mod convert_coverage_tests {
             features: Features::new(),
             units: None,
             percentiles: None,
-            dtype: Dtype::F64,
+            element_type: ElementType::default(),
             element_shape: vec![],
             ext: None,
         };
@@ -1559,7 +1579,7 @@ mod convert_coverage_tests {
             features: Features::new(),
             units: Some("MW".into()),
             percentiles: None,
-            dtype: Dtype::F64,
+            element_type: ElementType::default(),
             element_shape: vec![],
             ext: Some("QuadraticFunctionData".into()),
         };
@@ -1750,7 +1770,7 @@ mod convert_coverage_tests {
             features: Features::new(),
             units: None,
             percentiles: None,
-            dtype: Dtype::F64,
+            element_type: ElementType::default(),
             element_shape: vec![],
             ext: None,
         });

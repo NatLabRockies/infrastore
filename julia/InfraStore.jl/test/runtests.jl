@@ -183,21 +183,22 @@ end
     end
 end
 
-@testset "dtype-parameterized arrays" begin
+@testset "element-type-parameterized arrays" begin
     store = Store(in_memory=true)
     res = Hour(1)
     t0 = DateTime(2024, 1, 1)
 
-    # Int64 scalar series round-trips with its dtype.
+    # Int64 scalar series round-trips with its element type, which for a plain
+    # numeric series is just the dtype spelling.
     add_time_series!(
         store,
         1001,
         "Generator",
         Component,
-        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"; ext="Int64"),
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "load"),
     )
     m = get_metadata(store, 1001, Component, "load"; resolution=res)
-    @test m.dtype == Int64
+    @test m.element_type == "i64"
     @test get_array_by_hash(store, m.data_hash, Int64) == Int64[10, 20, 30]
 
     # Multi-dim element tuple (4 steps × 3 coeffs) round-trips, row-major correct.
@@ -207,10 +208,15 @@ end
         1002,
         "Generator",
         Component,
-        SingleTimeSeries(t0, res, A, "cost"; ext="QuadraticFunctionData"),
+        SingleTimeSeries(t0, res, A, "cost"; element_type="quadratic_function"),
     )
     mq = get_metadata(store, 1002, Component, "cost"; resolution=res)
-    @test mq.dtype == Float64
+    @test mq.element_type == "quadratic_function"
+    # A value read carries the element type back too, so a caller can decode the
+    # rows without a second metadata lookup.
+    @test get_time_series(
+        SingleTimeSeries, store, 1002, Component, "cost"; resolution=res
+    ).element_type == "quadratic_function"
     flat = get_array_by_hash(store, mq.data_hash, Float64)
     @test permutedims(reshape(flat, (3, 4)), (2, 1)) == A
 end
@@ -501,7 +507,7 @@ end
         store, 400, "Generator", Component, SingleTimeSeries(t0, res, underlying, "dst")
     )
 
-    n = transform_single_time_series!(store, hor, ivl)
+    n = transform_single_time_series!(store, hor, ivl).transformed
     @test n == 1
 
     # Asking for `Deterministic` resolves the stored DST: the transform is a
@@ -1330,6 +1336,70 @@ end
 
     # Off-grid read throws.
     @test_throws InfraStore.InvalidParameterError static_read!(r, t0 + Minute(30))
+
+    # A regular grid enumerates the same way an irregular timeline does.
+    @test static_timestamps(r) == [t0 + Hour(k) for k in 0:3]
+    @test grid.resolution == res
+end
+
+@testset "static reader over an irregular cohort" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2030, 1, 1)
+    # Three instants with no constant step between them; two components observe
+    # the same ones, so they share a time axis (and one packed dataset).
+    stamps = [t0, t0 + Minute(37), t0 + Hour(9)]
+    add_time_series!(
+        store,
+        2,
+        "Gen",
+        Component,
+        NonSequentialTimeSeries(stamps, [20.0, 21.0, 22.0], "outage"),
+    )
+    add_time_series!(
+        store,
+        1,
+        "Gen",
+        Component,
+        NonSequentialTimeSeries(stamps, [10.0, 11.0, 12.0], "outage"),
+    )
+
+    r = build_static_reader(store; time_series_type=NonSequentialTimeSeries)
+    grid = static_grid(r)
+    @test grid.length == 3
+    @test grid.initial_timestamp == t0
+    # No constant step to report; the instants come from `static_timestamps`.
+    @test grid.resolution === nothing
+    @test static_timestamps(r) == stamps
+
+    groups = static_groups(r)
+    @test length(groups) == 1
+    @test [key_info(k).owner_id for k in groups[1].keys] == [1, 2]
+
+    for (i, t) in enumerate(stamps)
+        static_read!(r, t)
+        @test static_values(r, 1) == [9.0 + i, 19.0 + i]
+    end
+
+    # Between two instants there is no value, so the read throws rather than
+    # picking a neighbour.
+    @test_throws InfraStore.InvalidParameterError static_read!(r, t0 + Minute(1))
+    # A resolution filter makes no sense for an irregular reader.
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=NonSequentialTimeSeries, resolution=Hour(1)
+    )
+    # And a series on a different axis cannot join the cohort.
+    add_time_series!(
+        store,
+        3,
+        "Gen",
+        Component,
+        NonSequentialTimeSeries(
+            [t0, t0 + Minute(38), t0 + Hour(9)], [1.0, 2.0, 3.0], "outage"
+        ),
+    )
+    @test_throws InfraStore.InvalidParameterError build_static_reader(
+        store; time_series_type=NonSequentialTimeSeries
+    )
 end
 
 @testset "ForecastReader: windows incl. multidim element shape" begin
@@ -1606,7 +1676,7 @@ end
     @test length(rows) == 1
     @test rows[1].units == "MW"
     @test rows[1].ext == "Profile"
-    @test rows[1].dtype == Float64
+    @test rows[1].element_type == "f64"
 
     # Probabilistic metadata exposes percentiles + units without a data fetch.
     prob = Probabilistic(
@@ -1970,7 +2040,7 @@ end
         store, 2001, "Generator", Component, SingleTimeSeries(t0, res, u, "u64")
     )
     mu = get_metadata(store, 2001, Component, "u64"; resolution=res)
-    @test mu.dtype == UInt64
+    @test mu.element_type == "u64"
     @test get_array_by_hash(store, mu.data_hash, UInt64) == u
     @test get_time_series(SingleTimeSeries, store, 2001, Component, "u64").data == u
 
@@ -1979,7 +2049,7 @@ end
         store, 2002, "Generator", Component, SingleTimeSeries(t0, res, i, "i32")
     )
     mi = get_metadata(store, 2002, Component, "i32"; resolution=res)
-    @test mi.dtype == Int32
+    @test mi.element_type == "i32"
     @test get_array_by_hash(store, mi.data_hash, Int32) == i
     got = get_time_series(SingleTimeSeries, store, 2002, Component, "i32")
     @test eltype(got.data) == Int32
@@ -1990,7 +2060,7 @@ end
         store, 2003, "Generator", Component, SingleTimeSeries(t0, res, b, "bools")
     )
     mb = get_metadata(store, 2003, Component, "bools"; resolution=res)
-    @test mb.dtype == Bool
+    @test mb.element_type == "bool"
     @test get_array_by_hash(store, mb.data_hash, Bool) == b
 
     f = Float32[1.5, -2.25, 3.125]
@@ -1998,7 +2068,7 @@ end
         store, 2004, "Generator", Component, SingleTimeSeries(t0, res, f, "f32")
     )
     mf = get_metadata(store, 2004, Component, "f32"; resolution=res)
-    @test mf.dtype == Float32
+    @test mf.element_type == "f32"
     @test get_array_by_hash(store, mf.data_hash, Float32) == f
 end
 
@@ -2719,7 +2789,7 @@ end
     @test md.time_series_type == SingleTimeSeries
     # Fields that do not apply to a static series are `nothing`, not zero.
     @test md.horizon === nothing && md.count === nothing && md.percentiles === nothing
-    @test md.dtype == Float64
+    @test md.element_type == "f64"
     @test md.element_shape == ()
     @test md.ext == "Profile"
     @test md.units == "MW"
@@ -2737,7 +2807,7 @@ end
     @test fmd.count == 2
     # A forecast record carries `dtype` and `owner_type` too — one export, one
     # struct, so no field is dropped by the type or addressing path taken.
-    @test fmd.dtype == Float64
+    @test fmd.element_type == "f64"
     @test fmd.owner_type == "Generator"
     # The family sentinel resolves to whichever concrete type is stored.
     @test get_metadata(Deterministic, store, 1, Component, "fc") == fmd
@@ -2770,7 +2840,7 @@ end
     @test mrow isa TimeSeriesMetadata
     @test mrow.owner_type == "Generator"
     @test mrow.owner_category == Component
-    @test mrow.dtype == Float64
+    @test mrow.element_type == "f64"
     @test mrow.element_shape == ()
     @test mrow.percentiles === nothing
     @test mrow.units == "MW"
@@ -2845,7 +2915,7 @@ end
     # `ext` reaches a Probabilistic: the metadata surface no longer drops fields
     # depending on which getter was called.
     @test pmd.ext == "percentile-ext"
-    @test pmd.dtype == Float64
+    @test pmd.element_type == "f64"
     @test pmd == only(list_time_series(store))
 
     row = only(list_time_series(store))
@@ -2910,12 +2980,12 @@ end
         @test md.time_series_type == T
         @test md.name == name
         @test md.owner_type == "Generator"
-        @test md.dtype == Float64
+        @test md.element_type == "f64"
     end
 
     # A transform-derived DST is addressable by its own type, and through the
     # family sentinel alongside it.
-    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 1
     dst = get_metadata(DeterministicSingleTimeSeries, store, 1, Component, "a")
     @test dst.time_series_type == DeterministicSingleTimeSeries
     @test get_metadata(Deterministic, store, 1, Component, "a") == dst
@@ -2985,7 +3055,7 @@ end
     # A transform-derived DST stays a DST through a copy (a read-then-write
     # round trip would flatten it into a dense Deterministic). Both stored
     # SingleTimeSeries — "a" and the copy renamed onto the Bus — transform.
-    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 2
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 2
     copy_time_series!(
         DeterministicSingleTimeSeries,
         store,
@@ -3088,7 +3158,7 @@ end
     )
 
     # The family sentinel picks whichever concrete type is stored.
-    @test transform_single_time_series!(store, Hour(2), Hour(1)) == 1
+    @test transform_single_time_series!(store, Hour(2), Hour(1)).transformed == 1
     @test key_info(
         get_time_series_key(Deterministic, store, 1, Component, "a"; resolution=res)
     ).time_series_type == DeterministicSingleTimeSeries
@@ -3145,4 +3215,194 @@ end
     # Committing what was never begun is an error, not a silent no-op.
     @test_throws InfraStore.InvalidParameterError commit_transaction!(store)
     @test_throws InfraStore.InvalidParameterError rollback_transaction!(store)
+end
+
+@testset "units is declared on the struct and returned on read" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    hor, ivl, count = Hour(2), Hour(1), 3
+
+    # A units label declared at construction reaches the store without being
+    # passed to add_time_series!, and comes back on the reconstructed struct.
+    sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load"; units="MW")
+    k = add_time_series!(store, 1, "Generator", Component, sts)
+    @test get_metadata(store, key_info(k).owner_id, Component, "load"; resolution=res).units ==
+        "MW"
+    @test get_time_series(store, k).units == "MW"
+
+    # It survives a sliced read too (the label describes the values, not the window).
+    @test get_time_series(store, k; time_range=(t0 + Hour(2), t0 + Hour(5))).units == "MW"
+
+    # Omitting it leaves `nothing` end to end -- the user decides whether that
+    # means unknown or dimensionless; the store neither fills it in nor guesses.
+    plain = SingleTimeSeries(t0, res, collect(1.0:8.0), "unitless")
+    @test plain.units === nothing
+    kp = add_time_series!(store, 1, "Generator", Component, plain)
+    @test get_time_series(store, kp).units === nothing
+
+    # Non-sequential.
+    stamps = [t0, t0 + Hour(1), t0 + Hour(4)]
+    ns = NonSequentialTimeSeries(stamps, Float64[1, 2, 3], "events"; units="MWh")
+    kn = add_time_series!(store, 2, "Generator", Component, ns)
+    @test get_time_series(NonSequentialTimeSeries, store, kn).units == "MWh"
+
+    # All three forecast types.
+    det_data = Float64[h * 10 + c for h in 1:2, c in 1:3]
+    kd = add_time_series!(
+        store, 3, "Generator", Component,
+        Deterministic(t0, res, hor, ivl, count, det_data, "fc"; units="MW"),
+    )
+    @test get_time_series(Deterministic, store, kd).units == "MW"
+
+    pcts = [0.1, 0.9]
+    prob_data = Float64[p + h + c for p in 1:2, h in 1:2, c in 1:3]
+    kpr = add_time_series!(
+        store, 4, "Generator", Component,
+        Probabilistic(t0, res, hor, ivl, count, pcts, prob_data, "pf"; units="MW"),
+    )
+    @test get_time_series(Probabilistic, store, kpr).units == "MW"
+
+    scen_data = Float64[s + h + c for s in 1:2, h in 1:2, c in 1:3]
+    ks = add_time_series!(
+        store, 5, "Generator", Component,
+        Scenarios(t0, res, hor, ivl, count, scen_data, "sc"; units="MW"),
+    )
+    @test get_time_series(Scenarios, store, ks).units == "MW"
+
+    # An explicit kwarg still wins over the struct's field: the kwarg is the
+    # lower-level write API and predates the field.
+    over = SingleTimeSeries(t0, res, collect(1.0:8.0), "override"; units="MW")
+    ko = add_time_series!(store, 6, "Generator", Component, over; units="kW")
+    @test get_time_series(store, ko).units == "kW"
+
+    # units is not identity: two series differing only in their label collide.
+    a = SingleTimeSeries(t0, res, collect(1.0:8.0), "dup"; units="MW")
+    b = SingleTimeSeries(t0, res, collect(1.0:8.0), "dup"; units="kW")
+    add_time_series!(store, 7, "Generator", Component, a)
+    @test_throws InfraStore.DuplicateTimeSeriesError add_time_series!(
+        store, 7, "Generator", Component, b
+    )
+
+    # ...and it cannot be smuggled in as a feature.
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 8, "Generator", Component,
+        SingleTimeSeries(t0, res, collect(1.0:8.0), "feat");
+        features=Dict("units" => "MW"),
+    )
+end
+
+@testset "bulk reads carry the same descriptors as per-key reads" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    hor, ivl, count = Hour(2), Hour(1), 3
+
+    ks = TimeSeriesKey[]
+    push!(
+        ks,
+        add_time_series!(store, 1, "Generator", Component,
+            SingleTimeSeries(t0, res, collect(1.0:8.0), "load"; units="MW", ext="Profile"),
+        ),
+    )
+    push!(
+        ks,
+        add_time_series!(store, 2, "Generator", Component,
+            NonSequentialTimeSeries([t0, t0 + Hour(1), t0 + Hour(4)], Float64[1, 2, 3],
+                "events"; units="MWh", ext="Events")),
+    )
+    push!(
+        ks,
+        add_time_series!(store, 3, "Generator", Component,
+            Deterministic(t0, res, hor, ivl, count,
+                Float64[h * 10 + c for h in 1:2, c in 1:3], "fc"; units="MW", ext="Fc")),
+    )
+
+    # A bulk read and a per-key read of the same series must agree on every
+    # descriptive attribute -- they describe the values, not the access path.
+    bulk = bulk_read(store, ks)
+    for (k, b) in zip(ks, bulk)
+        single = get_time_series(key_info(k).time_series_type, store, k)
+        @test b.units == single.units
+        @test b.ext == single.ext
+        @test b.element_type == single.element_type
+    end
+    @test bulk[1].units == "MW" && bulk[1].ext == "Profile"
+    @test bulk[2].units == "MWh" && bulk[2].ext == "Events"
+    @test bulk[3].units == "MW" && bulk[3].ext == "Fc"
+
+    # Unset stays unset through the bulk path too.
+    kp = add_time_series!(store, 4, "Generator", Component,
+        SingleTimeSeries(t0, res, collect(1.0:8.0), "bare"))
+    b = only(bulk_read(store, [kp]))
+    @test b.units === nothing
+    @test b.ext === nothing
+end
+
+@testset "transform_single_time_series! reports its full outcome" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    add_time_series!(
+        store, 500, "Generator", Component,
+        SingleTimeSeries(t0, res, Float64[i for i in 0:7], "load"),
+    )
+
+    out = transform_single_time_series!(store, Hour(4), Hour(2))
+    @test out isa InfraStore.TransformOutcome
+    @test out.transformed == 1
+    @test out.sources == 1
+    @test out.interval == Hour(2)
+    @test !out.interval_normalized
+
+    # An empty store distinguishes "nothing to do" from "everything skipped".
+    empty_store = Store(in_memory=true)
+    empty_out = transform_single_time_series!(empty_store, Hour(4), Hour(2))
+    @test empty_out.sources == 0
+    @test empty_out.transformed == 0
+end
+
+@testset "transform policy flags select the client contract" begin
+    t0 = DateTime(2024, 6, 1)
+    res = Hour(1)
+    vals = Float64[i for i in 0:7]
+
+    # normalize_single_window: a horizon spanning the series is stored as the
+    # zero interval rather than verbatim.
+    verbatim = Store(in_memory=true)
+    add_time_series!(
+        verbatim, 600, "Generator", Component, SingleTimeSeries(t0, res, vals, "load")
+    )
+    out = transform_single_time_series!(verbatim, Hour(8), Hour(8))
+    @test out.interval_normalized
+    @test out.interval == Hour(8)
+
+    normalized = Store(in_memory=true)
+    add_time_series!(
+        normalized, 600, "Generator", Component, SingleTimeSeries(t0, res, vals, "load")
+    )
+    out = transform_single_time_series!(
+        normalized, Hour(8), Hour(8); normalize_single_window=true
+    )
+    @test out.interval_normalized
+    @test out.interval == Second(0)
+
+    # require_uniform_forecast_grid: two resolutions deriving different counts
+    # are one grid too many for InfrastructureSystems.jl, but fine by default.
+    mixed() = begin
+        s = Store(in_memory=true)
+        add_time_series!(
+            s, 1, "Generator", Component,
+            SingleTimeSeries(t0, Hour(1), Float64[i for i in 0:23], "hourly"),
+        )
+        add_time_series!(
+            s, 2, "Generator", Component,
+            SingleTimeSeries(t0, Hour(2), Float64[i for i in 0:23], "two_hourly"),
+        )
+        s
+    end
+    @test transform_single_time_series!(mixed(), Hour(4), Hour(2)).transformed == 2
+    @test_throws InfraStore.InvalidParameterError transform_single_time_series!(
+        mixed(), Hour(4), Hour(2); require_uniform_forecast_grid=true
+    )
 end

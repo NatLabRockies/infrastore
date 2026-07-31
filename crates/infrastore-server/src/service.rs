@@ -163,6 +163,8 @@ impl CatalogStoreSvc for CatalogStoreService {
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339)?;
         let store = self.store.lock().await;
         let data = store.get_time_series(&key, time_range).map_err(map_err)?;
+        // The read already stamped the row's element type onto `data`, so the
+        // response describes what its bytes mean without a second catalog trip.
         Ok(Response::new(time_series_data_to_get_resp(&data)))
     }
 

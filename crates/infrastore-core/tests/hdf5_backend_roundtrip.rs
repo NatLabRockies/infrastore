@@ -48,7 +48,6 @@ fn hdf5_store_round_trip_reopen_and_persist() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(24, 100.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store
@@ -58,7 +57,6 @@ fn hdf5_store_round_trip_reopen_and_persist() {
                 OwnerCategory::Component,
                 TimeSeriesData::Deterministic(forecast(12, 4, 0.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();

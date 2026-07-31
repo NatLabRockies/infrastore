@@ -8,11 +8,12 @@ use std::ops::Range;
 
 use crate::error::{Result, TimeSeriesError};
 use crate::types::array::{Dtype, TypedArray};
-use crate::types::period::Period;
 
 pub mod common;
 pub mod hdf5;
 pub mod memory;
+
+pub(crate) use common::PackGroup;
 
 // The concrete backends and the trait seam are internal: the public surface is
 // `Store`, which owns a boxed backend. (The `common` module stays `pub` so
@@ -137,6 +138,12 @@ pub struct CompactionReport {
     /// unreachable rows until a compaction sweeps them, exactly as deleted
     /// arrays leave unreachable HDF5 datasets behind.
     pub feature_sets_reclaimed: usize,
+    /// Content-addressed timestamp vectors in the SQLite catalog that no
+    /// association referenced any more, and were deleted. Shared and swept for
+    /// exactly the same reasons as `feature_sets_reclaimed`: removing the last
+    /// `NonSequentialTimeSeries` on a time axis leaves that axis behind as an
+    /// unreachable row until a compaction reclaims it.
+    pub timestamp_sets_reclaimed: usize,
 }
 
 /// The result of [`crate::Store::verify_integrity`]: one message per array whose
@@ -193,29 +200,57 @@ impl std::fmt::Display for ArrayLocation {
 /// Each array is identified by its 32-byte content hash. Implementations are
 /// responsible for any deduplication, slot management, or compaction; the
 /// `Store` layer above drives them through this trait.
+///
+/// **Every read takes the array's `dtype` from the caller.** A backend does not
+/// infer it from what it stored: the HDF5 type descriptor cannot distinguish
+/// `bool` from `u8`, and it says nothing at all about what the elements *mean*.
+/// The catalog owns that (`element_type`, whose `physical_dtype` is what lands
+/// here), so the two artifacts cannot drift — a store's `.h5` is not readable
+/// without its `.sqlite` in any case. A backend that does know the dtype
+/// independently (the packed pool encodes it in the dataset name) treats the
+/// caller's value as an assertion and errors on a mismatch.
 pub(crate) trait StorageBackend: Send + Sync {
     /// Insert an array. If `hash` already exists, this is a no-op (the existing
     /// data is reused for content addressing) and `false` is returned; a write
     /// of new content returns `true`. The array's dtype + shape travel with it;
-    /// `resolution` keys the packed storage pool.
+    /// `group` names the time axis whose packed pool it joins, and is ignored
+    /// for the standalone layouts.
     ///
     /// `layout` selects the physical placement: [`ArrayLayout::Packed`]
-    /// column-packs with other same-shaped arrays (SingleTimeSeries / DST),
-    /// while the standalone variants store a self-contained multi-dimensional
-    /// variable (irregular series and native forecasts), differing only in how
-    /// the variable is chunked.
+    /// column-packs with the other arrays on `group`'s time axis, while the
+    /// standalone variants store a self-contained multi-dimensional variable
+    /// (native forecasts, and irregular series on an unshared axis), differing
+    /// only in how the variable is chunked.
     fn put_array(
         &mut self,
         hash: &[u8; 32],
         data: &TypedArray,
-        resolution: Period,
+        group: PackGroup,
         layout: ArrayLayout,
     ) -> Result<bool>;
+
+    /// Whether a packed pool for `group` at this `(dtype, element_shape,
+    /// length)` already exists.
+    ///
+    /// The write path asks before packing an irregular series: a pool is a win
+    /// only once several columns share it (its timestamp-major chunking spreads
+    /// one array over `length` chunks), so a series whose time axis nothing else
+    /// uses is better off standalone. The default is `false` — a backend with no
+    /// packed representation has no pools to join.
+    fn has_pack_group(
+        &self,
+        _dtype: Dtype,
+        _element_shape: &[usize],
+        _length: usize,
+        _group: PackGroup,
+    ) -> bool {
+        false
+    }
 
     /// Insert a block of same-shaped packed arrays in one operation.
     ///
     /// `hashes[i]` is the content hash of `arrays[i]`; every array must share one
-    /// `(dtype, element_shape, length)` and the given `resolution` (the caller —
+    /// `(dtype, element_shape, length)` and the given `group` (the caller —
     /// the buffered bulk-add — guarantees this by grouping). Hashes already
     /// stored, and duplicates within the block, are written only once (content
     /// addressing); the returned `Vec<bool>` is aligned to `hashes` and is `true`
@@ -230,17 +265,17 @@ pub(crate) trait StorageBackend: Send + Sync {
         &mut self,
         hashes: &[[u8; 32]],
         arrays: &[&TypedArray],
-        resolution: Period,
+        group: PackGroup,
     ) -> Result<Vec<bool>> {
         hashes
             .iter()
             .zip(arrays)
-            .map(|(hash, data)| self.put_array(hash, data, resolution, ArrayLayout::Packed))
+            .map(|(hash, data)| self.put_array(hash, data, group, ArrayLayout::Packed))
             .collect()
     }
 
-    /// Fetch the full array for `hash`.
-    fn get_array(&self, hash: &[u8; 32]) -> Result<TypedArray>;
+    /// Fetch the full array for `hash`, decoding its bytes as `dtype`.
+    fn get_array(&self, hash: &[u8; 32], dtype: Dtype) -> Result<TypedArray>;
 
     /// Read many full arrays at once, returning one [`TypedArray`] per input hash
     /// in order (duplicate hashes each yield a copy).
@@ -251,12 +286,17 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// out, rather than re-reading every chunk once per series. This is the bulk
     /// counterpart to the per-timestamp [`Self::read_index_into`]: it amortizes
     /// the decompression cost of whole-series reads across a batch.
-    fn read_arrays(&self, hashes: &[[u8; 32]]) -> Result<Vec<TypedArray>> {
-        hashes.iter().map(|h| self.get_array(h)).collect()
+    /// `dtypes` is parallel to `hashes`.
+    fn read_arrays(&self, hashes: &[[u8; 32]], dtypes: &[Dtype]) -> Result<Vec<TypedArray>> {
+        hashes
+            .iter()
+            .zip(dtypes)
+            .map(|(h, &dtype)| self.get_array(h, dtype))
+            .collect()
     }
 
     /// Fetch a slice of the array along axis 0 (the time axis). End is exclusive.
-    fn get_slice(&self, hash: &[u8; 32], range: Range<usize>) -> Result<TypedArray>;
+    fn get_slice(&self, hash: &[u8; 32], dtype: Dtype, range: Range<usize>) -> Result<TypedArray>;
 
     /// Read the value at a single time `index` for a set of co-located arrays,
     /// appending the result to `out` in `hashes` order.
@@ -269,22 +309,26 @@ pub(crate) trait StorageBackend: Send + Sync {
     ///
     /// The default reads each array's one-step slice individually; the on-disk
     /// backend overrides this to read a whole packed-dataset row per hyperslab.
-    fn read_index_into(&self, hashes: &[[u8; 32]], index: usize, out: &mut Vec<u8>) -> Result<()> {
+    fn read_index_into(
+        &self,
+        hashes: &[[u8; 32]],
+        dtype: Dtype,
+        index: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         out.clear();
         for hash in hashes {
-            let step = self.get_slice(hash, index..index + 1)?;
+            let step = self.get_slice(hash, dtype, index..index + 1)?;
             out.extend_from_slice(&step.bytes);
         }
         Ok(())
     }
 
-    /// The stored `(dtype, shape)` of an array, ideally without reading its data.
-    /// Used by the forecast reader to plan window slicing. The default reads the
-    /// whole array; the on-disk backend overrides it to inspect dimensions only.
-    fn array_shape(&self, hash: &[u8; 32]) -> Result<(Dtype, Vec<usize>)> {
-        let arr = self.get_array(hash)?;
-        Ok((arr.dtype, arr.shape))
-    }
+    /// The stored shape of an array, ideally without reading its data. Used by
+    /// the forecast reader to plan window slicing. Needs no `dtype`: a shape is
+    /// element-count-per-axis, which every backend records independently of how
+    /// wide an element is.
+    fn array_shape(&self, hash: &[u8; 32]) -> Result<Vec<usize>>;
 
     /// Read a contiguous block of `len` forecast windows starting at
     /// `window_start`: the `window_start..window_start + len` slice along
@@ -299,12 +343,13 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn read_window_block_into(
         &self,
         hash: &[u8; 32],
+        dtype: Dtype,
         count_axis: usize,
         window_start: usize,
         len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        let arr = self.get_array(hash)?;
+        let arr = self.get_array(hash, dtype)?;
         out.clear();
         write_window_block(&arr, count_axis, window_start, len, out)
     }
@@ -317,11 +362,12 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn read_range_into(
         &self,
         hash: &[u8; 32],
+        dtype: Dtype,
         start: usize,
         len: usize,
         out: &mut Vec<u8>,
     ) -> Result<()> {
-        let slice = self.get_slice(hash, start..start + len)?;
+        let slice = self.get_slice(hash, dtype, start..start + len)?;
         out.clear();
         out.extend_from_slice(&slice.bytes);
         Ok(())
@@ -348,8 +394,15 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// Reclaim space from removed arrays.
     fn compact(&mut self) -> Result<CompactionReport>;
 
-    /// Validate stored hashes match recomputed hashes of stored data.
-    fn verify(&self) -> Result<IntegrityReport>;
+    /// Validate that each `(hash, dtype)` the caller names reads back and
+    /// rehashes to its recorded hash.
+    ///
+    /// The caller supplies the list from the catalog, which is the only place
+    /// an array's element typing is recorded. Arrays the backend holds but the
+    /// catalog does not reference are therefore not checked: they are
+    /// unreachable, nothing can read them, and nothing says what their bytes
+    /// mean. [`Self::compact`] is what reports them.
+    fn verify(&self, arrays: &[([u8; 32], Dtype)]) -> Result<IntegrityReport>;
 
     /// Flush any in-memory state to disk (no-op for in-memory backends).
     fn flush(&mut self) -> Result<()>;
@@ -360,6 +413,22 @@ pub(crate) trait StorageBackend: Send + Sync {
     fn compression(&self) -> Compression {
         Compression::None
     }
+}
+
+/// Reject a read whose caller-supplied dtype disagrees with one the backend
+/// independently knows (the packed pool's dataset name, or an in-memory array's
+/// own tag). Only reachable if the catalog and the array store have drifted, so
+/// it is an integrity error rather than a bad argument.
+pub(crate) fn check_dtype(hash: &[u8; 32], stored: Dtype, requested: Dtype) -> Result<()> {
+    if stored != requested {
+        return Err(TimeSeriesError::IntegrityError(format!(
+            "array {} is stored as {} but the catalog says {}",
+            crate::hash::hash_hex(hash),
+            stored.as_str(),
+            requested.as_str(),
+        )));
+    }
+    Ok(())
 }
 
 /// Copy the contiguous block of `len` windows starting at `start` along

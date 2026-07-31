@@ -6,16 +6,17 @@ use std::path::{Path, PathBuf};
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
-    AssociationIdentity, FeatureSetCache, MetadataFilter, MetadataStore, ParentChildAssociation,
-    ParentChildFilter, SeriesFamily, SupplementalAttributeAssociation, SupplementalAttributeFilter,
+    AssociationIdentity, MetadataFilter, MetadataStore, ParentChildAssociation, ParentChildFilter,
+    SeriesFamily, SharedSetCache, SupplementalAttributeAssociation, SupplementalAttributeFilter,
     SupplementalAttributeSummaryRow, TypeMatch, references_to_in_tx, typed_references_to_in_tx,
 };
 use crate::reader::{ForecastReader, StaticReader};
 use crate::storage::{
     ArrayLayout, ArrayLocation, CompactionReport, Compression, Hdf5Backend, IntegrityReport,
-    MemoryBackend, StorageBackend,
+    MemoryBackend, PackGroup, StorageBackend,
 };
 use crate::types::array::{Dtype, TypedArray};
+use crate::types::element_type::ElementType;
 use crate::types::key::{
     ForecastTimeSeriesKey, KeyIdentity, NonSequentialTimeSeriesKey, SingleTimeSeriesKey,
     TimeSeriesKey,
@@ -115,18 +116,17 @@ pub struct AddRequest {
     pub owner_category: OwnerCategory,
     pub data: TimeSeriesData,
     pub features: Features,
-    pub units: Option<String>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never interprets it.
-    pub ext: Option<String>,
 }
 
 impl AddRequest {
-    /// Start a request with empty features and no units or extension payload. Chain
-    /// [`Self::with_features`], [`Self::with_units`], and
-    /// [`Self::with_ext`] to set the optional fields. This is the
-    /// ergonomic constructor for [`Store::add`] and [`BulkAdd::push`]; unlike the
-    /// wide [`Store::add_time_series`] signature it preserves `ext`.
+    /// Start a request with empty features. Chain [`Self::with_features`] to
+    /// set them.
+    ///
+    /// A series' descriptive attributes — `element_type`, `units`, and `ext` —
+    /// live on the [`TimeSeriesData`] itself, not here: they describe the data,
+    /// so they travel with it and come back on a read. Set them with the
+    /// `with_element_type` / `with_units` / `with_ext` builders on the concrete
+    /// series type before wrapping it in a request.
     pub fn new(
         owner_id: i64,
         owner_type: impl Into<String>,
@@ -139,26 +139,12 @@ impl AddRequest {
             owner_category,
             data,
             features: Features::new(),
-            units: None,
-            ext: None,
         }
     }
 
     /// Set the feature set.
     pub fn with_features(mut self, features: Features) -> Self {
         self.features = features;
-        self
-    }
-
-    /// Set the units label.
-    pub fn with_units(mut self, units: impl Into<String>) -> Self {
-        self.units = Some(units.into());
-        self
-    }
-
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
         self
     }
 }
@@ -198,6 +184,287 @@ pub struct ForecastParameters {
     pub count: Option<usize>,
     pub resolution: Option<Period>,
     pub initial_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// How a caller wants [`Store::transform_single_time_series`] to run: the rules
+/// it applies on top of the eligibility checks everyone gets, plus whether to
+/// commit.
+///
+/// The two rules encode a *client's* contract rather than a storage invariant:
+/// the store itself is happy to hold forecasts on more than one grid, and both
+/// single-window interval encodings are legal. InfrastructureSystems.jl is
+/// stricter on both counts, so it opts in. `Default` is the permissive,
+/// committing behavior.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TransformPolicy {
+    /// Run every check and report what *would* happen, writing nothing. The
+    /// returned [`TransformOutcome::transformed`] is the count a committing run
+    /// would produce. This is how a caller answers "would this transform
+    /// succeed?" without a trial-and-rollback.
+    pub dry_run: bool,
+    /// Store a single-window request (an interval equal to a horizon that spans
+    /// the whole series) as the zero interval rather than verbatim. The
+    /// interval is part of the association identity, so this decides which form
+    /// later lookups must use.
+    pub normalize_single_window: bool,
+    /// Require the derived grid to match any forecast already stored at the
+    /// same `(resolution, interval)`, and require every resolution in scope to
+    /// derive the same `count` and `initial_timestamp` — i.e. one system, one
+    /// forecast grid.
+    pub require_uniform_forecast_grid: bool,
+}
+
+/// Outcome of [`Store::transform_single_time_series`].
+///
+/// `interval` is the interval actually stored, which differs from the
+/// requested one when a single-window request was normalized (see
+/// `interval_normalized`). Bindings that surface a warning for that case read
+/// it off this struct rather than re-deriving the condition.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TransformOutcome {
+    /// `DeterministicSingleTimeSeries` rows written.
+    pub transformed: usize,
+    /// `SingleTimeSeries` the filter matched, before idempotent skips. Zero
+    /// means there was nothing to transform.
+    pub sources: usize,
+    /// The stored interval, after single-window normalization.
+    pub interval: Period,
+    /// True when the requested `interval` equalled the horizon and that horizon
+    /// spanned the whole series, so the interval was normalized to zero.
+    pub interval_normalized: bool,
+}
+
+/// The window parameters `transform_single_time_series` will write, derived
+/// once per resolution from the catalog's distinct static grids.
+///
+/// This is the entirety of the transform's parameter validation. It is built
+/// from one `DISTINCT` query, so its cost scales with the number of distinct
+/// resolutions in the store — not the number of series — which is what lets the
+/// transform validate a 100,000-series store without listing it.
+struct TransformPlan {
+    /// What to write for each resolution in scope. Sources are looked up here
+    /// instead of recomputing, and under a permissive policy resolutions may
+    /// legitimately differ.
+    by_resolution: HashMap<Period, GridPlan>,
+    /// The first resolution's parameters — the representative used for the
+    /// outcome and, under `require_uniform_forecast_grid`, the values every
+    /// other resolution was checked against.
+    interval: Period,
+    count: usize,
+    interval_normalized: bool,
+    horizon: Period,
+    initial_timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// One resolution's derived window parameters.
+#[derive(Debug, Clone, Copy)]
+struct GridPlan {
+    interval: Period,
+    count: usize,
+}
+
+impl TransformPlan {
+    /// Derive the plan, or `None` when no `SingleTimeSeries` is in scope.
+    ///
+    /// `horizon` and `interval` are the requested values and are already known
+    /// to be regular periods.
+    fn derive(
+        grids: &[StaticConsistency],
+        horizon: Period,
+        requested_interval: Period,
+        policy: TransformPolicy,
+    ) -> Result<Option<Self>> {
+        let Some(first) = grids.first() else {
+            return Ok(None);
+        };
+
+        let mut by_resolution = HashMap::with_capacity(grids.len());
+        let mut agreed: Option<(Period, usize)> = None;
+        let mut interval_normalized = false;
+
+        for grid in grids {
+            // The wording matches what InfrastructureSystems.jl raised before
+            // this check moved into the store; `compute_h`'s own message is not
+            // appended, as it restates the same two periods.
+            let h = compute_h(horizon, grid.resolution).map_err(|_| {
+                TimeSeriesError::InvalidParameter(format!(
+                    "horizon {} is not evenly divisible by resolution {}",
+                    horizon.to_iso8601(),
+                    grid.resolution.to_iso8601()
+                ))
+            })?;
+            if h > grid.length {
+                return Err(TimeSeriesError::InvalidParameter(format!(
+                    "horizon {} ({h} steps) exceeds the SingleTimeSeries length ({}) \
+                     at resolution {}",
+                    horizon.to_iso8601(),
+                    grid.length,
+                    grid.resolution.to_iso8601()
+                )));
+            }
+
+            // A horizon that spans the whole series leaves no room for a second
+            // window, so a request to step by exactly one horizon means "one
+            // window". Both encodings are legal and the caller chose one; the
+            // case is reported either way so callers can warn.
+            let single_window = grid.length == h && requested_interval == horizon;
+            let (interval, normalized) = if single_window {
+                let stored = if policy.normalize_single_window {
+                    Period::zero()
+                } else {
+                    requested_interval
+                };
+                (stored, true)
+            } else {
+                // Mixed period kinds have no ordering; `divide_into` below
+                // rejects them with a message naming the real problem.
+                if requested_interval.same_kind(&horizon)
+                    && period_ms(requested_interval) > period_ms(horizon)
+                {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "interval {} is longer than the horizon {}, which would leave \
+                         gaps between windows",
+                        requested_interval.to_iso8601(),
+                        horizon.to_iso8601()
+                    )));
+                }
+                (requested_interval, false)
+            };
+            interval_normalized |= normalized;
+
+            let count = if interval.is_zero() {
+                // A zero interval is the explicit single-window request (the
+                // encoding InfrastructureSystems.jl writes for directly-added
+                // single-window forecasts): the one window must cover the whole
+                // series. Normalization above only produces a zero interval when
+                // it already does, so this only rejects an explicit request.
+                if h != grid.length {
+                    return Err(TimeSeriesError::InvalidParameter(format!(
+                        "a zero interval derives a single window covering the whole \
+                         series, but horizon {} ({h} steps) does not span the \
+                         SingleTimeSeries length ({}) at resolution {}",
+                        horizon.to_iso8601(),
+                        grid.length,
+                        grid.resolution.to_iso8601()
+                    )));
+                }
+                1
+            } else {
+                let interval_steps = grid.resolution.divide_into(&interval).map_err(|_| {
+                    TimeSeriesError::InvalidParameter(format!(
+                        "interval {} must be zero or a positive integer multiple of \
+                         resolution {}",
+                        interval.to_iso8601(),
+                        grid.resolution.to_iso8601()
+                    ))
+                })?;
+                (grid.length - h) / interval_steps + 1
+            };
+
+            // Under `require_uniform_forecast_grid` one transform produces one
+            // forecast grid, so resolutions deriving different window counts or
+            // starts are rejected rather than silently written. Without it the
+            // store is happy to hold both, and each resolution keeps its own.
+            match agreed {
+                None => agreed = Some((interval, count)),
+                Some((agreed_interval, agreed_count)) if policy.require_uniform_forecast_grid => {
+                    if agreed_interval != interval || agreed_count != count {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "transform would produce forecasts with different window \
+                             parameters per resolution: {} gives count {} at interval {}, \
+                             {} gives count {} at interval {}",
+                            first.resolution.to_iso8601(),
+                            agreed_count,
+                            agreed_interval.to_iso8601(),
+                            grid.resolution.to_iso8601(),
+                            count,
+                            interval.to_iso8601(),
+                        )));
+                    }
+                    if grid.initial_timestamp != first.initial_timestamp {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "transform is not supported when SingleTimeSeries have \
+                             different initial timestamps: {} at resolution {} vs {} at \
+                             resolution {}",
+                            first.initial_timestamp,
+                            first.resolution.to_iso8601(),
+                            grid.initial_timestamp,
+                            grid.resolution.to_iso8601(),
+                        )));
+                    }
+                }
+                Some(_) => {}
+            }
+            by_resolution.insert(grid.resolution, GridPlan { interval, count });
+        }
+
+        let (interval, count) = agreed.expect("grids is non-empty");
+        Ok(Some(TransformPlan {
+            by_resolution,
+            interval,
+            count,
+            interval_normalized,
+            horizon,
+            initial_timestamp: first.initial_timestamp,
+        }))
+    }
+
+    /// The derived parameters for a source's resolution.
+    fn for_resolution(&self, resolution: Period) -> Result<GridPlan> {
+        self.by_resolution.get(&resolution).copied().ok_or_else(|| {
+            // The grid query and the source listing use the same filters, so a
+            // miss means the catalog changed underneath the transform.
+            TimeSeriesError::IntegrityError(format!(
+                "no static grid was derived for resolution {}",
+                resolution.to_iso8601()
+            ))
+        })
+    }
+
+    /// Reject a plan that disagrees with a forecast already in the store. A
+    /// default (all-`None`) `ForecastParameters` means nothing is stored at this
+    /// `(resolution, interval)`, so there is nothing to disagree with.
+    fn check_compatible_with(&self, existing: &ForecastParameters) -> Result<()> {
+        let Some(existing_count) = existing.count else {
+            return Ok(());
+        };
+        if existing_count != self.count {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "derived forecast count {} does not match the stored forecast count {}",
+                self.count, existing_count
+            )));
+        }
+        if let Some(ts) = existing.initial_timestamp
+            && ts != self.initial_timestamp
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "derived forecast initial_timestamp {} does not match the stored \
+                 forecast initial_timestamp {ts}",
+                self.initial_timestamp
+            )));
+        }
+        if let Some(h) = existing.horizon
+            && h != self.horizon
+        {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "derived forecast horizon {} does not match the stored forecast \
+                 horizon {}",
+                self.horizon.to_iso8601(),
+                h.to_iso8601()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Milliseconds in a regular period. `Months` has no fixed millisecond span, so
+/// it maps to its month count — callers compare only same-kind periods, having
+/// rejected irregular ones up front.
+fn period_ms(p: Period) -> i64 {
+    match p {
+        Period::Fixed(d) => d.num_milliseconds(),
+        Period::Months(m) => m as i64,
+    }
 }
 
 /// Bookkeeping for an open cross-operation transaction (see
@@ -495,7 +762,6 @@ impl Store {
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-        units: Option<String>,
     ) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![AddRequest {
             owner_id,
@@ -503,15 +769,14 @@ impl Store {
             owner_category,
             data,
             features,
-            units,
-            ext: None,
         }])
         .map(|mut keys| keys.remove(0))
     }
 
-    /// Add one time series from an [`AddRequest`], preserving every field
-    /// including `ext` (which [`Self::add_time_series`] cannot set).
-    /// Routed through the same per-column path as [`Self::add_time_series`].
+    /// Add one time series from an [`AddRequest`]. Equivalent to
+    /// [`Self::add_time_series`] — both preserve the series' `element_type`,
+    /// `units`, and `ext`, since those travel on the [`TimeSeriesData`] itself.
+    /// Routed through the same per-column path.
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![request])
             .map(|mut keys| keys.remove(0))
@@ -541,22 +806,31 @@ impl Store {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
 
+        // Derive (and validate) every item's parts before writing anything, so a
+        // bad request part-way through the batch cannot leave an array behind.
+        let mut parts: Vec<RequestParts> = items
+            .iter()
+            .map(build_request_parts)
+            .collect::<Result<_>>()?;
+        resolve_irregular_layouts(&*self.backend, &items, &mut parts);
+
         // Stage backend writes so we can roll them back on metadata error.
         let mut staged_hashes: Vec<[u8; 32]> = Vec::with_capacity(items.len());
         let tx = self.metadata.savepoint()?;
         let mut keys = Vec::with_capacity(items.len());
-        // Feature sets are shared, and a batch typically spans only a handful of
-        // distinct ones; write each once rather than once per item.
-        let mut feature_sets = FeatureSetCache::default();
+        // Feature sets and timestamp vectors are shared, and a batch typically
+        // spans only a handful of distinct ones; write each once rather than
+        // once per item.
+        let mut shared_sets = SharedSetCache::default();
 
-        for item in &items {
+        for (item, part) in items.iter().zip(parts) {
             let RequestParts {
                 hash,
-                resolution,
+                group,
                 layout,
                 meta,
                 key,
-            } = build_request_parts(item)?;
+            } = part;
             let data = request_array(item);
 
             let already_present = self.backend.contains(&hash)?;
@@ -567,12 +841,12 @@ impl Store {
                 already_present,
                 "backend put_array",
             );
-            self.backend.put_array(&hash, data, resolution, layout)?;
+            self.backend.put_array(&hash, data, group, layout)?;
             if !already_present {
                 staged_hashes.push(hash);
             }
 
-            match insert_association(&tx, &meta, &mut feature_sets) {
+            match insert_association(&tx, &meta, &mut shared_sets) {
                 Ok(()) => {
                     keys.push(key);
                 }
@@ -627,42 +901,37 @@ impl Store {
         }
 
         // Derive parts (validates + hashes) for every item, aligned to `items`.
-        let parts: Vec<RequestParts> = items
+        let mut parts: Vec<RequestParts> = items
             .iter()
             .map(build_request_parts)
             .collect::<Result<_>>()?;
+        resolve_irregular_layouts(&*self.backend, &items, &mut parts);
         let mut staged_hashes: Vec<[u8; 32]> = Vec::new();
 
-        // Group packed inputs by (dtype, element_shape, length, resolution); each
-        // group is written as one or more batch-sized blocks. Standalone inputs
-        // (irregular series and dense forecasts) keep the per-array path.
-        let mut packed_groups: HashMap<(Dtype, Vec<usize>, usize, Period), Vec<usize>> =
-            HashMap::new();
+        // Group packed inputs by their pool — `(dtype, element_shape, length)`
+        // plus the time axis — and write each as one or more batch-sized blocks.
+        // Standalone inputs (dense forecasts, and irregular series on an
+        // unshared axis) keep the per-array path.
+        let mut packed_groups: HashMap<PoolKey, Vec<usize>> = HashMap::new();
         for (i, p) in parts.iter().enumerate() {
             let array = request_array(&items[i]);
             if p.layout.is_packed() {
                 packed_groups
-                    .entry((
-                        array.dtype,
-                        array.element_shape().to_vec(),
-                        array.length(),
-                        p.resolution,
-                    ))
+                    .entry(pool_key(array, p.group))
                     .or_default()
                     .push(i);
             } else {
                 let already = self.backend.contains(&p.hash)?;
-                self.backend
-                    .put_array(&p.hash, array, p.resolution, p.layout)?;
+                self.backend.put_array(&p.hash, array, p.group, p.layout)?;
                 if !already {
                     staged_hashes.push(p.hash);
                 }
             }
         }
-        for (group, idxs) in &packed_groups {
+        for (pool, idxs) in &packed_groups {
             let hashes: Vec<[u8; 32]> = idxs.iter().map(|&i| parts[i].hash).collect();
             let arrays: Vec<&TypedArray> = idxs.iter().map(|&i| request_array(&items[i])).collect();
-            let written = self.backend.put_packed_block(&hashes, &arrays, group.3)?;
+            let written = self.backend.put_packed_block(&hashes, &arrays, pool.3)?;
             for (j, &i) in idxs.iter().enumerate() {
                 if written[j] {
                     staged_hashes.push(parts[i].hash);
@@ -672,9 +941,9 @@ impl Store {
 
         // Insert associations in input order; roll the whole batch back on error.
         let tx = self.metadata.savepoint()?;
-        let mut feature_sets = FeatureSetCache::default();
+        let mut shared_sets = SharedSetCache::default();
         for p in &parts {
-            if let Err(e) = insert_association(&tx, &p.meta, &mut feature_sets) {
+            if let Err(e) = insert_association(&tx, &p.meta, &mut shared_sets) {
                 drop(tx);
                 for staged in &staged_hashes {
                     let _ = self.backend.remove_array(staged);
@@ -953,6 +1222,22 @@ impl Store {
         meta: &TimeSeriesMetadata,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
+        // `element_type`, `units`, and `ext` describe the series but live on the
+        // catalog row, not in the array bytes. Filling them in here — once, for
+        // every variant — is what makes a read round-trip what a write declared.
+        let mut data = self.materialize_array(meta, time_range)?;
+        data.set_descriptors(meta.element_type, meta.units.clone(), meta.ext.clone());
+        Ok(data)
+    }
+
+    /// The array-reconstruction half of [`Self::materialize_time_series`]: builds
+    /// the variant from the stored bytes and the row's shape/time fields. The
+    /// descriptive attributes are left unset for the caller to fill in.
+    fn materialize_array(
+        &self,
+        meta: &TimeSeriesMetadata,
+        time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<TimeSeriesData> {
         tracing::debug!(ts_type = ?meta.time_series_type, "metadata loaded");
         match meta.time_series_type {
             TimeSeriesType::SingleTimeSeries => {
@@ -970,7 +1255,9 @@ impl Store {
 
                 let (data, sliced_initial, sliced_length) = match time_range {
                     None => {
-                        let data = self.backend.get_array(&meta.data_hash)?;
+                        let data = self
+                            .backend
+                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                         (data, initial, length)
                     }
                     Some((start, end)) => {
@@ -990,9 +1277,11 @@ impl Store {
                             .ceil_steps(initial, end)
                             .min(length)
                             .max(start_idx);
-                        let data = self
-                            .backend
-                            .get_slice(&meta.data_hash, start_idx..end_idx)?;
+                        let data = self.backend.get_slice(
+                            &meta.data_hash,
+                            meta.element_type.physical_dtype(),
+                            start_idx..end_idx,
+                        )?;
                         let new_initial =
                             resolution
                                 .add_to(initial, start_idx as i64)
@@ -1011,6 +1300,13 @@ impl Store {
                     length: sliced_length,
                     data,
                     name: meta.name.clone(),
+                    // The descriptors are filled in by
+                    // `materialize_time_series`; the element type is set here
+                    // too because it has no "unset" spelling, and this is the
+                    // value that call resolves to anyway.
+                    element_type: meta.element_type,
+                    units: None,
+                    ext: None,
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
@@ -1030,16 +1326,22 @@ impl Store {
                 }
 
                 let (data, timestamps) = match time_range {
-                    None => (self.backend.get_array(&meta.data_hash)?, timestamps),
+                    None => (
+                        self.backend
+                            .get_array(&meta.data_hash, meta.element_type.physical_dtype())?,
+                        timestamps,
+                    ),
                     Some((start, end)) => {
                         if end < start {
                             return Err(TimeSeriesError::InvalidParameter("end < start".into()));
                         }
                         let start_idx = timestamps.partition_point(|t| *t < start);
                         let end_idx = timestamps.partition_point(|t| *t < end);
-                        let data = self
-                            .backend
-                            .get_slice(&meta.data_hash, start_idx..end_idx)?;
+                        let data = self.backend.get_slice(
+                            &meta.data_hash,
+                            meta.element_type.physical_dtype(),
+                            start_idx..end_idx,
+                        )?;
                         (data, timestamps[start_idx..end_idx].to_vec())
                     }
                 };
@@ -1048,7 +1350,9 @@ impl Store {
                 Ok(TimeSeriesData::NonSequentialTimeSeries(series))
             }
             TimeSeriesType::Deterministic => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Deterministic")?;
                 let resolution = required_resolution(meta, "Deterministic")?;
                 let horizon = required_horizon(meta, "Deterministic")?;
@@ -1078,7 +1382,9 @@ impl Store {
             }
 
             TimeSeriesType::Probabilistic => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Probabilistic")?;
                 let resolution = required_resolution(meta, "Probabilistic")?;
                 let horizon = required_horizon(meta, "Probabilistic")?;
@@ -1113,7 +1419,9 @@ impl Store {
             }
 
             TimeSeriesType::Scenarios => {
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "Scenarios")?;
                 let resolution = required_resolution(meta, "Scenarios")?;
                 let horizon = required_horizon(meta, "Scenarios")?;
@@ -1154,7 +1462,9 @@ impl Store {
                 // The stored array is the underlying STS 1-D-like array, shape
                 // [total_len, *E]. Synthesize a Deterministic of shape
                 // [H, count, *E] by gathering windows.
-                let arr = self.backend.get_array(&meta.data_hash)?;
+                let arr = self
+                    .backend
+                    .get_array(&meta.data_hash, meta.element_type.physical_dtype())?;
                 let initial = required_initial(meta, "DeterministicSingleTimeSeries")?;
                 let resolution = required_resolution(meta, "DeterministicSingleTimeSeries")?;
                 let horizon = required_horizon(meta, "DeterministicSingleTimeSeries")?;
@@ -1268,37 +1578,83 @@ impl Store {
             .collect()
     }
 
-    /// Build a [`StaticReader`] over the `SingleTimeSeries` matching `filter`.
+    /// Build a [`StaticReader`] over the static series matching `filter`.
     ///
-    /// The filter must pin a resolution (one resolution per reader). All matched
-    /// series must share one grid (`initial_timestamp` + `length`); this is
-    /// validated here and errors on divergence, which is what lets the per-read
-    /// path skip presence checks. The reader is then driven with
-    /// [`Self::static_read`]. See [`crate::reader`].
+    /// Every column in a reader must share one timeline, so which type the
+    /// filter names decides what has to hold:
+    ///
+    /// * `SingleTimeSeries` (the default): the filter must pin a resolution —
+    ///   one resolution per reader — and every matched series must share one
+    ///   grid (`initial_timestamp` + `length`).
+    /// * `NonSequentialTimeSeries`: every matched series must lie on one
+    ///   *timestamp vector*. Irregular series carry no resolution, so a
+    ///   resolution filter is rejected rather than silently matching nothing.
+    ///   The cohort is resolved from the catalog's interned vectors, which is
+    ///   also what pools those arrays on disk — so a reader over a cohort reads
+    ///   each timestamp as one packed hyperslab, exactly as for a regular grid.
+    ///
+    /// Divergence is an error either way, which is what lets the per-read path
+    /// skip presence checks. Drive the reader with [`Self::static_read`]. See
+    /// [`crate::reader`].
     pub fn build_static_reader(&self, mut filter: ListFilter) -> Result<StaticReader> {
-        if filter.resolution.is_none() {
-            return Err(TimeSeriesError::InvalidParameter(
-                "build_static_reader requires a resolution filter (one resolution per reader)"
-                    .into(),
-            ));
-        }
-        // SingleTimeSeries-only; accept an explicit matching type, reject others.
-        match filter.time_series_type {
-            None | Some(TimeSeriesType::SingleTimeSeries) => {
-                filter.time_series_type = Some(TimeSeriesType::SingleTimeSeries);
+        let ts_type = filter
+            .time_series_type
+            .unwrap_or(TimeSeriesType::SingleTimeSeries);
+        filter.time_series_type = Some(ts_type);
+        match ts_type {
+            TimeSeriesType::SingleTimeSeries => {
+                if filter.resolution.is_none() {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "build_static_reader requires a resolution filter for SingleTimeSeries \
+                         (one resolution per reader)"
+                            .into(),
+                    ));
+                }
+                let rows = self.list_time_series(filter)?;
+                let timeline = crate::reader::regular_timeline(&rows)?;
+                crate::reader::build_groups(timeline, rows)
             }
-            Some(other) => {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "build_static_reader handles SingleTimeSeries only; got {}",
-                    other.as_str()
-                )));
+            TimeSeriesType::NonSequentialTimeSeries => {
+                if filter.resolution.is_some() {
+                    return Err(TimeSeriesError::InvalidParameter(
+                        "build_static_reader takes no resolution filter for \
+                         NonSequentialTimeSeries: an irregular series has none, so the filter \
+                         would match nothing. Its timeline is the timestamp vector its cohort \
+                         shares."
+                            .into(),
+                    ));
+                }
+                // Rows without their (identical, per-row) timestamp copies, plus
+                // the distinct vectors they reference: one cohort is the whole
+                // requirement, and the vector itself is then decoded once.
+                let (rows, cohorts) = self.metadata.list_timeline_cohorts(&filter.into())?;
+                let hash = match cohorts.as_slice() {
+                    [hash] => *hash,
+                    [] => {
+                        return Err(TimeSeriesError::InvalidParameter(
+                            "build_static_reader: no NonSequentialTimeSeries match the filter"
+                                .into(),
+                        ));
+                    }
+                    many => {
+                        return Err(TimeSeriesError::InvalidParameter(format!(
+                            "StaticReader requires a uniform timeline; the {} matched \
+                             NonSequentialTimeSeries lie on {} different timestamp vectors. \
+                             Narrow the filter (by name, owner, or features) to one of them.",
+                            rows.len(),
+                            many.len()
+                        )));
+                    }
+                };
+                let timestamps = self.metadata.timestamps_for_hash(&hash)?;
+                crate::reader::build_groups(crate::reader::Timeline::Irregular { timestamps }, rows)
             }
+            other => Err(TimeSeriesError::InvalidParameter(format!(
+                "build_static_reader handles the static types (SingleTimeSeries / \
+                 NonSequentialTimeSeries); got {}",
+                other.as_str()
+            ))),
         }
-        let rows = self.list_time_series(filter)?;
-        let (initial, resolution, length, groups) = crate::reader::build_groups(rows)?;
-        Ok(StaticReader::from_parts(
-            initial, resolution, length, groups,
-        ))
     }
 
     /// Read the value of every series in `reader` at timestamp `at`, filling the
@@ -1312,7 +1668,9 @@ impl Store {
     ) -> Result<()> {
         let index = reader.index_at(at)?;
         for group in reader.groups_mut() {
-            group.fill(|hashes, out| self.backend.read_index_into(hashes, index, out))?;
+            group.fill(|hashes, dtype, out| {
+                self.backend.read_index_into(hashes, dtype, index, out)
+            })?;
         }
         reader.mark_read(at);
         Ok(())
@@ -1361,7 +1719,7 @@ impl Store {
         filter.time_series_type = Some(reported);
         let mut items = Vec::new();
         for m in self.list_time_series(filter)? {
-            let (_dtype, shape) = self.backend.array_shape(&m.data_hash)?;
+            let shape = self.backend.array_shape(&m.data_hash)?;
             items.push((m, shape));
         }
         crate::reader::build_forecast_entries(reported, items)
@@ -1386,10 +1744,12 @@ impl Store {
         for slot in reader.slots_mut() {
             slot.read_window(
                 window,
-                |hash, count_axis, start, len, out| {
-                    backend.read_window_block_into(hash, count_axis, start, len, out)
+                |hash, dtype, count_axis, start, len, out| {
+                    backend.read_window_block_into(hash, dtype, count_axis, start, len, out)
                 },
-                |hash, start, len, out| backend.read_range_into(hash, start, len, out),
+                |hash, dtype, start, len, out| {
+                    backend.read_range_into(hash, dtype, start, len, out)
+                },
             )?;
         }
         reader.mark_read(at);
@@ -1402,10 +1762,11 @@ impl Store {
     /// are read in one decompress-once pass per dataset via
     /// [`StorageBackend::read_arrays`], rather than re-reading every chunk once per
     /// series — the read-side complement to the timestamp-major layout, where a
-    /// single full-series read is otherwise the slow direction. Other types are
-    /// standalone arrays with no batching benefit, so they reuse the per-key
-    /// [`Self::get_time_series`] path. No time-range slicing — each series is
-    /// returned in full.
+    /// single full-series read is otherwise the slow direction. Other types get
+    /// no batching benefit on the array side — they are standalone, or one
+    /// column of a cohort dataset — so they are rebuilt one at a time, but from
+    /// the metadata this call already loaded. No time-range slicing — each
+    /// series is returned in full.
     #[tracing::instrument(skip(self, keys), fields(count = keys.len()))]
     pub fn bulk_read(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesData>> {
         let metas: Vec<TimeSeriesMetadata> = keys
@@ -1415,15 +1776,18 @@ impl Store {
 
         // Batch the packed SingleTimeSeries reads; everything else is standalone
         // and reuses the per-key reconstruction.
-        let single_hashes: Vec<[u8; 32]> = metas
+        let (single_hashes, single_dtypes): (Vec<[u8; 32]>, Vec<Dtype>) = metas
             .iter()
             .filter(|m| m.time_series_type == TimeSeriesType::SingleTimeSeries)
-            .map(|m| m.data_hash)
-            .collect();
-        let mut single_arrays = self.backend.read_arrays(&single_hashes)?.into_iter();
+            .map(|m| (m.data_hash, m.element_type.physical_dtype()))
+            .unzip();
+        let mut single_arrays = self
+            .backend
+            .read_arrays(&single_hashes, &single_dtypes)?
+            .into_iter();
 
         let mut out = Vec::with_capacity(keys.len());
-        for (meta, key) in metas.iter().zip(keys) {
+        for meta in &metas {
             if meta.time_series_type == TimeSeriesType::SingleTimeSeries {
                 let data = single_arrays.next().ok_or_else(|| {
                     TimeSeriesError::IntegrityError(
@@ -1447,9 +1811,19 @@ impl Store {
                     length,
                     data,
                     name: meta.name.clone(),
+                    // This fast path bypasses `materialize_time_series`, so the
+                    // descriptors come straight off the row it already loaded.
+                    element_type: meta.element_type,
+                    units: meta.units.clone(),
+                    ext: meta.ext.clone(),
                 }));
             } else {
-                out.push(self.get_time_series(key, None)?);
+                // Materialize from the row already in hand rather than calling
+                // `get_time_series`, which would look the key up a second time.
+                // For a `NonSequentialTimeSeries` that second lookup also
+                // re-fetched and re-decoded the row's timestamp vector, so a
+                // bulk read of N irregular series did 2N of both.
+                out.push(self.materialize_time_series(meta, None)?);
             }
         }
         Ok(out)
@@ -1480,6 +1854,13 @@ impl Store {
     /// `RustTimeSeriesStore`) to reconstruct a typed metadata object on read.
     pub fn get_metadata(&self, key: &KeyIdentity) -> Result<TimeSeriesMetadata> {
         self.metadata.get_by_key(key)
+    }
+
+    /// [`Self::get_metadata`] for many keys, in order. Errors with `NotFound` if
+    /// any key is missing. The companion to [`Self::bulk_read`] for callers that
+    /// need each series' metadata (its `element_type`, say) alongside the values.
+    pub fn get_metadata_bulk(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesMetadata>> {
+        keys.iter().map(|k| self.metadata.get_by_key(k)).collect()
     }
 
     /// Resolve a forecast addressed by attributes plus a requested
@@ -1581,8 +1962,14 @@ impl Store {
     /// Fetch the full stored array for a content hash. The metadata-owning
     /// binding resolves a key to its `data_hash`, then calls this to read the
     /// underlying values.
+    ///
+    /// How to decode the bytes comes from the catalog, not the array file: the
+    /// `element_type` of some association referencing `hash`. `NotFound` if no
+    /// association does — an array nothing points at cannot be typed, and so
+    /// cannot be read.
     pub fn get_array_by_hash(&self, hash: &[u8; 32]) -> Result<TypedArray> {
-        self.backend.get_array(hash)
+        let element_type = self.metadata.element_type_for_hash(hash)?;
+        self.backend.get_array(hash, element_type.physical_dtype())
     }
 
     /// Where a content hash's array physically lives in the backing file.
@@ -1620,19 +2007,74 @@ impl Store {
     /// `(length - horizon_steps) / interval_steps + 1`.
     ///
     /// All-or-nothing: if any series is too short to fit a single horizon window
-    /// or has an incompatible `interval`, nothing is committed. Returns the
-    /// number of series transformed.
+    /// or has an incompatible `interval`, nothing is committed.
+    ///
+    /// Every eligibility rule lives here rather than in the callers. Beyond the
+    /// per-series checks, the window parameters are validated once per
+    /// *resolution* off the catalog's distinct static grids (see
+    /// [`Store::check_static_consistency`]), which is what makes the whole
+    /// validation independent of how many series are stored:
+    ///
+    /// - every `SingleTimeSeries` at a resolution must share one
+    ///   `(initial_timestamp, length)` grid;
+    /// - a requested `interval` equal to a horizon that spans the whole series
+    ///   describes a single window. There are two legal encodings for that and
+    ///   the interval is part of the association identity, so the caller picks:
+    ///   `policy.normalize_single_window` stores it as the zero interval (what
+    ///   InfrastructureSystems.jl looks up by), while `false` stores the
+    ///   requested interval verbatim. Either way the case is reported via
+    ///   [`TransformOutcome::interval_normalized`];
+    /// - an `interval` longer than the horizon is rejected — it would leave gaps
+    ///   between windows;
+    /// - every resolution in scope must agree on the derived `count` and
+    ///   `initial_timestamp`, so one transform yields one forecast grid;
+    /// - that grid must match any forecast already in the store at the same
+    ///   `(resolution, interval)`.
     pub fn transform_single_time_series(
         &mut self,
         horizon: impl Into<Period>,
         interval: impl Into<Period>,
         owner_category: Option<OwnerCategory>,
         resolution: Option<Period>,
-    ) -> Result<usize> {
-        if self.read_only {
+        policy: TransformPolicy,
+    ) -> Result<TransformOutcome> {
+        // A dry run writes nothing, so it is legal against a read-only store —
+        // which is exactly where a caller wants to ask "would this work?".
+        if self.read_only && !policy.dry_run {
             return Err(TimeSeriesError::ReadOnlyStore);
         }
-        let (horizon, interval) = (horizon.into(), interval.into());
+        let (horizon, requested_interval) = (horizon.into(), interval.into());
+
+        // Validate the window parameters against the distinct static grids —
+        // one `DISTINCT` query returning a row per resolution — instead of
+        // per series. `horizon`/`interval` eligibility and the derived `count`
+        // depend only on `(resolution, initial_timestamp, length)`, so this is
+        // O(resolutions) no matter how many series are stored, and it doubles
+        // as the per-resolution grid-uniformity check.
+        let grids = self.static_grids(resolution, owner_category)?;
+        let Some(plan) = TransformPlan::derive(&grids, horizon, requested_interval, policy)? else {
+            // No SingleTimeSeries in scope: nothing to do, and nothing to fail.
+            return Ok(TransformOutcome {
+                transformed: 0,
+                sources: 0,
+                interval: requested_interval,
+                interval_normalized: false,
+            });
+        };
+        let interval = plan.interval;
+
+        // Under the uniform-grid policy the derived grid must also match any
+        // forecast already stored at the same (resolution, interval): one
+        // system holds one forecast grid, so a transform that would produce a
+        // second one is rejected before any write.
+        if policy.require_uniform_forecast_grid {
+            for (&res, grid) in &plan.by_resolution {
+                let existing_params =
+                    self.get_forecast_parameters(Some(res), Some(grid.interval))?;
+                plan.check_compatible_with(&existing_params)?;
+            }
+        }
+
         // Push the owner-category and resolution restrictions into SQL rather
         // than listing every SingleTimeSeries and discarding the misses: a store
         // whose components are transformed one resolution at a time should not
@@ -1660,7 +2102,6 @@ impl Store {
         // stored `features_hash` column directly: the identity test needs the
         // hash, not the features themselves, so this skips hydrating (and
         // re-hashing) the features of every forecast already in the store.
-        let interval_iso = interval.to_iso8601();
         let existing_dst: HashMap<AssociationIdentity, Option<Period>> = self
             .metadata
             .list_identities(TimeSeriesType::DeterministicSingleTimeSeries)?
@@ -1700,57 +2141,26 @@ impl Store {
                     src.name
                 )));
             }
+            // No per-series arithmetic: `TransformPlan` already validated the
+            // horizon and derived the window parameters from the catalog's
+            // distinct grids, which cover exactly these sources. Re-deriving
+            // them here would be a `divide_into` per series for an answer
+            // already known.
             let resolution = required_resolution(src, "transform_single_time_series")?;
-            let total_len = src.length.ok_or_else(|| {
-                TimeSeriesError::IntegrityError("SingleTimeSeries missing length".into())
-            })?;
-            let h = compute_h(horizon, resolution).map_err(TimeSeriesError::InvalidParameter)?;
-            if h == 0 || h > total_len {
-                return Err(TimeSeriesError::InvalidParameter(format!(
-                    "horizon ({h} steps) exceeds SingleTimeSeries length ({total_len}) \
-                     for '{}'",
-                    src.name
-                )));
-            }
-            // A zero interval is the explicit single-window request (the
-            // encoding InfrastructureSystems.jl writes for directly-added
-            // single-window forecasts): the one window must cover the whole
-            // series, so it is only accepted when the horizon spans it.
-            let count = if interval.is_zero() {
-                if h != total_len {
-                    return Err(TimeSeriesError::InvalidParameter(format!(
-                        "a zero interval derives a single window covering the whole \
-                         series, but horizon ({h} steps) does not span SingleTimeSeries \
-                         length ({total_len}) for '{}'",
-                        src.name
-                    )));
-                }
-                1
-            } else {
-                let interval_steps = resolution.divide_into(&interval).map_err(|_| {
-                    TimeSeriesError::InvalidParameter(format!(
-                        "interval ({}) must be zero or a positive integer multiple of \
-                         resolution ({})",
-                        interval.to_iso8601(),
-                        resolution.to_iso8601()
-                    ))
-                })?;
-                (total_len - h) / interval_steps + 1
-            };
-            // The requested interval is stored verbatim, including both
-            // single-window encodings — `interval == horizon` (clients that
-            // map the empty interval to the horizon on write and back on
-            // read) and the explicit zero interval
-            // (InfrastructureSystems.jl's `Second(0)`). A derived view keeps
-            // whichever encoding its client writes so that client can find it
-            // by the identity it wrote. The identity/idempotency check below
-            // uses the stored form.
+            let GridPlan { interval, count } = plan.for_resolution(resolution)?;
+            // The interval is stored in whichever single-window encoding the
+            // caller's policy selected — verbatim (`interval == horizon`, for
+            // clients that map the empty interval to the horizon on write and
+            // back on read) or the explicit zero interval
+            // (InfrastructureSystems.jl's `Second(0)`). It is part of the
+            // identity, so the stored form is what later lookups must use, and
+            // the idempotency check below uses it too.
             let src_key = AssociationIdentity {
                 owner_id: src.owner_id,
                 owner_category: src.owner_category,
                 name: src.name.clone(),
                 resolution: src_resolution_iso,
-                interval: Some(interval_iso.clone()),
+                interval: Some(interval.to_iso8601()),
                 features_hash: src_features_hash,
             };
             if let Some(existing_horizon) = existing_dst.get(&src_key) {
@@ -1784,12 +2194,23 @@ impl Store {
             });
         }
 
+        if policy.dry_run {
+            // Every check has run against the rows that would be written; the
+            // caller only wanted the verdict.
+            return Ok(TransformOutcome {
+                transformed: new_metas.len(),
+                sources: sources.len(),
+                interval,
+                interval_normalized: plan.interval_normalized,
+            });
+        }
+
         let tx = self.metadata.savepoint()?;
         // One cache for the whole batch: every derived row shares its source's
         // feature set, and sources overwhelmingly share sets with each other, so
         // the feature-set writes collapse to a handful regardless of how many
         // series are transformed.
-        let mut feature_sets = FeatureSetCache::default();
+        let mut feature_sets = SharedSetCache::default();
         for meta in &new_metas {
             if let Err(e) = MetadataStore::insert_batched(&tx, meta, &mut feature_sets) {
                 drop(tx);
@@ -1797,7 +2218,12 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(new_metas.len())
+        Ok(TransformOutcome {
+            transformed: new_metas.len(),
+            sources: sources.len(),
+            interval,
+            interval_normalized: plan.interval_normalized,
+        })
     }
 
     /// True iff an association with exactly this key identity exists.
@@ -1962,7 +2388,22 @@ impl Store {
         &self,
         resolution: Option<Period>,
     ) -> Result<Vec<StaticConsistency>> {
-        let rows = self.metadata.distinct_single_grids(resolution)?;
+        self.static_grids(resolution, None)
+    }
+
+    /// [`Self::check_static_consistency`] scoped to one owner category.
+    ///
+    /// `transform_single_time_series` needs this: it derives forecasts for one
+    /// category, so a supplemental attribute's series on a different grid must
+    /// not fail a component-only transform.
+    fn static_grids(
+        &self,
+        resolution: Option<Period>,
+        owner_category: Option<OwnerCategory>,
+    ) -> Result<Vec<StaticConsistency>> {
+        let rows = self
+            .metadata
+            .distinct_single_grids(resolution, owner_category)?;
         let mut out: Vec<StaticConsistency> = Vec::with_capacity(rows.len());
         for (res, ts, len) in rows {
             // Rows arrive ordered by resolution, so a divergent grid shows up
@@ -2331,6 +2772,7 @@ impl Store {
         let mut report = self.backend.compact()?;
         let tx = self.metadata.savepoint()?;
         report.feature_sets_reclaimed = MetadataStore::sweep_orphan_feature_sets(&tx)?;
+        report.timestamp_sets_reclaimed = MetadataStore::sweep_orphan_timestamp_sets(&tx)?;
         tx.commit()?;
         Ok(report)
     }
@@ -2367,7 +2809,16 @@ impl Store {
     /// are expected states, not corruption — see
     /// `docs/src/reference/file-format.md`).
     pub fn verify_integrity(&self) -> Result<IntegrityReport> {
-        self.backend.verify()
+        let (referenced, mut errors) = self.metadata.referenced_arrays()?;
+        let arrays: Vec<([u8; 32], Dtype)> = referenced
+            .into_iter()
+            .map(|(hash, element_type)| (hash, element_type.physical_dtype()))
+            .collect();
+        let mut report = self.backend.verify(&arrays)?;
+        // Catalog-side problems lead: a row too malformed to name an array is
+        // why the array-side sweep skipped it.
+        errors.append(&mut report.errors);
+        Ok(IntegrityReport { errors })
     }
 
     pub fn flush(&mut self) -> Result<()> {
@@ -2423,33 +2874,45 @@ impl Store {
             let mut backend = Hdf5Backend::create(path, self.compression())?;
             // Plan each distinct array's layout before writing: packed is only
             // valid for arrays that every referencing association reads as a
-            // series along axis 0 (SingleTimeSeries and its derived DST views).
-            // Dense forecasts and non-sequential series must stay standalone —
-            // the forecast window read path rejects packed arrays.
-            let mut plans: HashMap<[u8; 32], (ArrayLayout, Period)> = HashMap::new();
-            for (key, hash) in self.list_keys_with_hash(ListFilter::default())? {
-                let layout = array_layout_for(key.time_series_type());
-                // The resolution only groups the packed on-disk layout; reads
-                // locate arrays by content hash, so the fallback for
-                // resolution-less (non-sequential) series is harmless.
-                let resolution = key
-                    .resolution()
-                    .unwrap_or_else(|| Period::fixed(chrono::Duration::nanoseconds(1)));
+            // series along axis 0 (the static types). Dense forecasts must stay
+            // standalone — the forecast window read path rejects packed arrays.
+            let mut plans: HashMap<[u8; 32], ArrayPlan> = HashMap::new();
+            for meta in self.list_time_series(ListFilter::default())? {
+                let plan = ArrayPlan {
+                    layout: array_layout_for(meta.time_series_type),
+                    pool: pool_key_of(&meta),
+                };
                 plans
-                    .entry(hash)
+                    .entry(meta.data_hash)
                     // A hash shared across keys must use a standalone layout if
                     // any referencing key is standalone (the window read rejects
                     // packed); the first non-packed layout wins and sticks.
-                    .and_modify(|(l, _)| {
-                        if l.is_packed() {
-                            *l = layout;
+                    .and_modify(|existing| {
+                        if existing.layout.is_packed() {
+                            existing.layout = plan.layout;
                         }
                     })
-                    .or_insert((layout, resolution));
+                    .or_insert(plan);
             }
-            for (hash, (layout, resolution)) in &plans {
-                let array = self.backend.get_array(hash)?;
-                backend.put_array(hash, &array, *resolution, *layout)?;
+            // Same bet as the write path: a pool only pays once several arrays
+            // share it, and here the whole store is in hand, so cohort sizes are
+            // exact rather than batch-local.
+            let mut cohort: HashMap<PoolKey, usize> = HashMap::new();
+            for plan in plans.values().filter(|p| p.layout.is_packed()) {
+                *cohort.entry(plan.pool.clone()).or_default() += 1;
+            }
+            for (hash, plan) in &plans {
+                let mut layout = plan.layout;
+                if matches!(plan.pool.3, PackGroup::Irregular(_))
+                    && cohort.get(&plan.pool).copied().unwrap_or(0) < 2
+                {
+                    layout = ArrayLayout::Standalone;
+                }
+                let element_type = self.metadata.element_type_for_hash(hash)?;
+                let array = self
+                    .backend
+                    .get_array(hash, element_type.physical_dtype())?;
+                backend.put_array(hash, &array, plan.pool.3, layout)?;
             }
             backend.flush()?;
         }
@@ -2486,7 +2949,6 @@ impl BulkAdd<'_> {
         owner_category: OwnerCategory,
         data: TimeSeriesData,
         features: Features,
-        units: Option<String>,
     ) -> &mut Self {
         self.push(AddRequest {
             owner_id,
@@ -2494,8 +2956,6 @@ impl BulkAdd<'_> {
             owner_category,
             data,
             features,
-            units,
-            ext: None,
         })
     }
 
@@ -2537,14 +2997,25 @@ impl Drop for BulkAdd<'_> {
 /// block-write path ([`Store::bulk_add`]).
 struct RequestParts {
     hash: [u8; 32],
-    resolution: Period,
+    /// The packed pool this array belongs in — its resolution for a regular
+    /// series, its interned timestamp vector for an irregular one. Carried even
+    /// when `layout` is standalone (where the backend ignores it), so the write
+    /// paths can group by it before deciding.
+    group: PackGroup,
     layout: ArrayLayout,
     meta: TimeSeriesMetadata,
     key: TimeSeriesKey,
 }
 
-/// The physical storage layout for a time-series type's backing array. The
-/// count-axis choices for dense forecasts mirror the forecast reader's
+/// The physical storage layout for a time-series type's backing array.
+///
+/// Both static types pack: their arrays are read a timestamp at a time across
+/// every series, which is exactly what the timestamp-major packed chunking
+/// serves. They differ only in what pools them — see [`PackGroup`] — and an
+/// irregular series can still be demoted to standalone when nothing shares its
+/// time axis (see [`resolve_irregular_layouts`]).
+///
+/// The count-axis choices for dense forecasts mirror the forecast reader's
 /// [`WindowRead::Dense`](crate::reader) slicing (`Deterministic` → axis 1,
 /// `Probabilistic` / `Scenarios` → axis 2), so writes and reads agree on which
 /// axis the windows lie along.
@@ -2553,7 +3024,7 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
         TimeSeriesType::SingleTimeSeries | TimeSeriesType::DeterministicSingleTimeSeries => {
             ArrayLayout::Packed
         }
-        TimeSeriesType::NonSequentialTimeSeries => ArrayLayout::Standalone,
+        TimeSeriesType::NonSequentialTimeSeries => ArrayLayout::Packed,
         TimeSeriesType::Deterministic => ArrayLayout::StandaloneWindowed { count_axis: 1 },
         TimeSeriesType::Probabilistic | TimeSeriesType::Scenarios => {
             ArrayLayout::StandaloneWindowed { count_axis: 2 }
@@ -2562,19 +3033,20 @@ fn array_layout_for(ts_type: TimeSeriesType) -> ArrayLayout {
 }
 
 /// Derive the [`RequestParts`] for one request, validating where required
-/// (`NonSequentialTimeSeries` timestamps). `SingleTimeSeries` is packed; every
-/// other type is stored standalone.
+/// (`NonSequentialTimeSeries` timestamps). The static types are packed; the
+/// forecasts are stored standalone.
 fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     // Every write funnels through here (per-column adds and buffered bulk adds
     // alike), which makes it the one place the reserved-feature-name rule has
     // to hold.
     validate_features(&item.features)?;
-    let (hash, resolution, layout, meta, key) = match &item.data {
+    let element_type = resolve_element_type(item)?;
+    let (hash, group, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
             let hash = array_hash(&single.data);
             (
                 hash,
-                single.resolution,
+                PackGroup::Regular(single.resolution),
                 array_layout_for(TimeSeriesType::SingleTimeSeries),
                 TimeSeriesMetadata {
                     owner_id: item.owner_id,
@@ -2591,11 +3063,11 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     count: None,
                     timestamps: None,
                     features: item.features.clone(),
-                    units: item.units.clone(),
+                    units: item.data.units().map(str::to_owned),
                     percentiles: None,
-                    dtype: single.data.dtype,
+                    element_type,
                     element_shape: single.data.element_shape().to_vec(),
-                    ext: item.ext.clone(),
+                    ext: item.data.ext().map(str::to_owned),
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -2613,9 +3085,10 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
             let hash = array_hash(&non_sequential.data);
             (
                 hash,
-                // Non-sequential series are stored standalone, so the
-                // resolution (which keys the packed pool) is unused.
-                Period::Months(0),
+                // An irregular series has no resolution to pool by; its cohort
+                // is every series on the same explicit time axis, which the
+                // catalog already content-addresses.
+                PackGroup::Irregular(crate::hash::timestamps_hash(&non_sequential.timestamps)),
                 array_layout_for(TimeSeriesType::NonSequentialTimeSeries),
                 TimeSeriesMetadata {
                     owner_id: item.owner_id,
@@ -2632,11 +3105,11 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     count: None,
                     timestamps: Some(non_sequential.timestamps.clone()),
                     features: item.features.clone(),
-                    units: item.units.clone(),
+                    units: item.data.units().map(str::to_owned),
                     percentiles: None,
-                    dtype: non_sequential.data.dtype,
+                    element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
-                    ext: item.ext.clone(),
+                    ext: item.data.ext().map(str::to_owned),
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -2653,7 +3126,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         // [`Store::transform_single_time_series`].
         TimeSeriesData::Deterministic(det) => (
             array_hash(&det.data),
-            det.resolution,
+            PackGroup::Regular(det.resolution),
             array_layout_for(TimeSeriesType::Deterministic),
             forecast_metadata(
                 item,
@@ -2665,6 +3138,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 det.interval,
                 det.count,
                 &det.data,
+                element_type,
                 None,
             ),
             forecast_key(
@@ -2680,7 +3154,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         ),
         TimeSeriesData::Probabilistic(prob) => (
             array_hash(&prob.data),
-            prob.resolution,
+            PackGroup::Regular(prob.resolution),
             array_layout_for(TimeSeriesType::Probabilistic),
             forecast_metadata(
                 item,
@@ -2692,6 +3166,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 prob.interval,
                 prob.count,
                 &prob.data,
+                element_type,
                 Some(prob.percentiles.clone()),
             ),
             forecast_key(
@@ -2707,7 +3182,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
         ),
         TimeSeriesData::Scenarios(scen) => (
             array_hash(&scen.data),
-            scen.resolution,
+            PackGroup::Regular(scen.resolution),
             array_layout_for(TimeSeriesType::Scenarios),
             forecast_metadata(
                 item,
@@ -2719,6 +3194,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                 scen.interval,
                 scen.count,
                 &scen.data,
+                element_type,
                 None,
             ),
             forecast_key(
@@ -2735,11 +3211,94 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     };
     Ok(RequestParts {
         hash,
-        resolution,
+        group,
         layout,
         meta,
         key,
     })
+}
+
+/// What a packed pool is keyed by: the array's physical shape plus the time
+/// axis it lies on. Two arrays land in the same HDF5 dataset iff these match.
+type PoolKey = (Dtype, Vec<usize>, usize, PackGroup);
+
+/// One distinct array's placement, as planned by [`Store::persist_to`] before it
+/// rewrites an in-memory store to disk.
+struct ArrayPlan {
+    layout: ArrayLayout,
+    pool: PoolKey,
+}
+
+/// The pool a stored row's array belongs to, read off its catalog metadata.
+///
+/// An irregular row is pooled by its timestamp vector and a regular one by its
+/// resolution. A row with neither — a shape no static or forecast type produces
+/// — takes an arbitrary resolution: it can only be standalone, where the group
+/// is ignored, and reads locate arrays by content hash regardless.
+fn pool_key_of(meta: &TimeSeriesMetadata) -> PoolKey {
+    let group = match (&meta.timestamps, meta.resolution) {
+        (Some(timestamps), _) => PackGroup::Irregular(crate::hash::timestamps_hash(timestamps)),
+        (None, Some(resolution)) => PackGroup::Regular(resolution),
+        (None, None) => PackGroup::Regular(Period::fixed(chrono::Duration::nanoseconds(1))),
+    };
+    (
+        meta.element_type.physical_dtype(),
+        meta.element_shape.clone(),
+        meta.length.unwrap_or(0),
+        group,
+    )
+}
+
+fn pool_key(array: &TypedArray, group: PackGroup) -> PoolKey {
+    (
+        array.dtype,
+        array.element_shape().to_vec(),
+        array.length(),
+        group,
+    )
+}
+
+/// Settle each irregular request's layout, demoting the ones whose time axis
+/// nothing else shares back to standalone.
+///
+/// Packing is what makes a timestamp-major sweep across components cheap, and it
+/// is the right default for irregular series precisely because they tend to
+/// arrive in cohorts on one event timeline. But it is a bet that the pool will
+/// be more than one column wide: a packed dataset spreads a single array across
+/// `length` chunks, so a cohort of one pays far more per-chunk overhead than the
+/// one standalone dataset it replaces. This settles the bet from what is
+/// knowable at write time — how many requests in this batch share the axis, plus
+/// whether the store already holds a pool for it.
+///
+/// Getting it "wrong" costs space, never correctness: reads resolve an array by
+/// content hash and handle either layout, and a group can hold columns of both
+/// (see `Hdf5Backend::read_index_locked`). So a cohort that arrives one series
+/// at a time simply leaves its first member standalone and packs the rest.
+fn resolve_irregular_layouts(
+    backend: &dyn StorageBackend,
+    items: &[AddRequest],
+    parts: &mut [RequestParts],
+) {
+    let mut in_batch: HashMap<PoolKey, usize> = HashMap::new();
+    for (item, part) in items.iter().zip(parts.iter()) {
+        if matches!(part.group, PackGroup::Irregular(_)) {
+            *in_batch
+                .entry(pool_key(request_array(item), part.group))
+                .or_default() += 1;
+        }
+    }
+    for (item, part) in items.iter().zip(parts.iter_mut()) {
+        if !matches!(part.group, PackGroup::Irregular(_)) {
+            continue;
+        }
+        let array = request_array(item);
+        let key = pool_key(array, part.group);
+        let shared = in_batch.get(&key).copied().unwrap_or(0) > 1
+            || backend.has_pack_group(key.0, &key.1, key.2, key.3);
+        if !shared {
+            part.layout = ArrayLayout::Standalone;
+        }
+    }
 }
 
 /// The value array backing a request, regardless of time-series type.
@@ -2761,7 +3320,7 @@ fn request_array(item: &AddRequest) -> &TypedArray {
 fn insert_association(
     tx: &rusqlite::Connection,
     meta: &TimeSeriesMetadata,
-    cache: &mut FeatureSetCache,
+    cache: &mut SharedSetCache,
 ) -> Result<()> {
     let conflict = if meta.time_series_type == TimeSeriesType::Deterministic {
         crate::metadata::forecast_family_conflict(
@@ -2816,6 +3375,7 @@ fn forecast_metadata(
     interval: Period,
     count: usize,
     data: &TypedArray,
+    element_type: ElementType,
     percentiles: Option<Vec<f64>>,
 ) -> TimeSeriesMetadata {
     TimeSeriesMetadata {
@@ -2833,12 +3393,29 @@ fn forecast_metadata(
         count: Some(count),
         timestamps: None,
         features: item.features.clone(),
-        units: item.units.clone(),
+        units: item.data.units().map(str::to_owned),
         percentiles,
-        dtype: data.dtype,
+        element_type,
         element_shape: data.element_shape().to_vec(),
-        ext: item.ext.clone(),
+        ext: item.data.ext().map(str::to_owned),
     }
+}
+
+/// The element type a request writes — the one the series carries, which a
+/// constructor resolved to plain scalars of the array's dtype unless the caller
+/// declared otherwise.
+///
+/// Always validated against the array, so the store never persists a row that
+/// misdescribes its own bytes. That also catches a series whose `data` was
+/// replaced after construction without updating its element type: the check
+/// reports the disagreement rather than silently re-deriving one.
+fn resolve_element_type(item: &AddRequest) -> Result<ElementType> {
+    let declared = item.data.element_type();
+    declared.validate_array(
+        request_array(item),
+        item.data.time_series_type().leading_dims(),
+    )?;
+    Ok(declared)
 }
 
 /// Build the key returned for a dense forecast added via

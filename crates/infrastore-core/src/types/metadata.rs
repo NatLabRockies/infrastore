@@ -4,6 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::element_type::ElementType;
 use super::period::Period;
 use super::time_series::TimeSeriesType;
 use crate::error::{Result, TimeSeriesError};
@@ -132,8 +133,13 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "count",
     "data",
     "data_hash",
+    // `dtype` no longer names a metadata field -- `element_type` replaced it --
+    // but it stays reserved: it is still the spelling of a `TypedArray`'s
+    // physical type in every binding, so allowing it as a feature name would
+    // reintroduce exactly the shadowing this list exists to prevent.
     "dtype",
     "element_shape",
+    "element_type",
     "ext",
     "features",
     "horizon",
@@ -197,15 +203,16 @@ pub struct TimeSeriesMetadata {
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,
 
-    // Physical element typing of the stored array.
-    /// Element dtype of the stored array.
-    pub dtype: super::array::Dtype,
+    // Element typing of the stored array.
+    /// What the stored elements mean and how one timestep is laid out. The
+    /// physical dtype of the bytes is [`ElementType::physical_dtype`]; this is
+    /// the single source of truth for both.
+    pub element_type: ElementType,
     /// Per-step element shape (trailing dims after time); empty = scalar.
     pub element_shape: Vec<usize>,
-    /// Opaque, package-owned extension payload stored verbatim (typically a
-    /// JSON object such as `{"function_type":"QuadraticFunctionData"}` that a
-    /// binding writes and reads to reconstruct its domain objects). The store
-    /// never parses or interprets it; end users are not expected to set it.
+    /// Opaque, package-owned extension payload stored verbatim. The store never
+    /// parses or interprets it; end users are not expected to set it. Element
+    /// typing does *not* belong here — that is [`Self::element_type`].
     pub ext: Option<String>,
 }
 
@@ -295,7 +302,7 @@ mod tests {
             features: Features::new(),
             units: None,
             percentiles: None,
-            dtype: single.data.dtype,
+            element_type: ElementType::Scalar(single.data.dtype),
             element_shape: vec![],
             ext: None,
         };

@@ -49,7 +49,6 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
         store.flush().unwrap();
@@ -66,7 +65,7 @@ fn monthly_calendar_resolution_round_trips_on_disk_and_reader() {
     let mut reader = store
         .build_static_reader(ListFilter::new().resolution(Period::Months(1)))
         .unwrap();
-    assert_eq!(reader.resolution(), Period::Months(1));
+    assert_eq!(reader.resolution(), Some(Period::Months(1)));
     store
         .static_read(
             &mut reader,
@@ -98,9 +97,8 @@ fn add_and_get_round_trip() {
             42,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(s.clone()),
+            TimeSeriesData::SingleTimeSeries(s.clone()).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         )
         .unwrap();
 
@@ -110,6 +108,72 @@ fn add_and_get_round_trip() {
     assert_eq!(single.length, 24);
     assert_eq!(single.initial_timestamp, s.initial_timestamp);
     assert_eq!(single.resolution, s.resolution);
+}
+
+/// A series read back compares equal to the one written, field for field.
+///
+/// This is why `element_type` is not an `Option`: while it was, an ordinary
+/// numeric series was constructed as "undeclared" and read back as
+/// `Scalar(f64)` — two spellings of the same fact, which the derived
+/// `PartialEq` (and every binding's `==`, which delegates to it) called
+/// unequal.
+#[test]
+fn a_series_reads_back_equal_to_the_one_written() {
+    let mut store = create_store(None, true).unwrap();
+
+    // The plain case: nothing declared, so the constructor resolves the element
+    // type and the read must agree with what it chose.
+    let plain = series(2024, 24, 100.0);
+    let key = store
+        .add_time_series(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(plain.clone()),
+            Features::new(),
+        )
+        .unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    assert_eq!(got.element_type(), plain.element_type);
+    assert_eq!(got.as_single().unwrap(), &plain);
+
+    // And with every descriptor set, since those travel on the series too.
+    let described = TimeSeriesData::SingleTimeSeries(series(2024, 24, 7.0))
+        .with_units("MW")
+        .with_ext(r#"{"source":"test"}"#);
+    let key = store
+        .add_time_series(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            described.clone(),
+            Features::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_time_series(key.identity(), None).unwrap(),
+        described
+    );
+
+    // An irregular series round-trips the same way.
+    let stamps = vec![
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 37, 0).unwrap(),
+    ];
+    let irregular =
+        NonSequentialTimeSeries::new(stamps, TypedArray::from_f64(vec![2], &[1.0, 2.0]), "outage")
+            .unwrap();
+    let key = store
+        .add_time_series(
+            3,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::NonSequentialTimeSeries(irregular.clone()),
+            Features::new(),
+        )
+        .unwrap();
+    let got = store.get_time_series(key.identity(), None).unwrap();
+    assert_eq!(got.as_non_sequential().unwrap(), &irregular);
 }
 
 #[test]
@@ -124,7 +188,6 @@ fn duplicate_key_rejected() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -135,7 +198,6 @@ fn duplicate_key_rejected() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::DuplicateTimeSeries));
@@ -154,7 +216,6 @@ fn features_disambiguate_keys() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s1.clone()),
             features_with_year(2030),
-            None,
         )
         .unwrap();
     store
@@ -164,7 +225,6 @@ fn features_disambiguate_keys() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s2.clone()),
             features_with_year(2035),
-            None,
         )
         .unwrap();
 
@@ -198,7 +258,6 @@ fn deduplication_via_content_addressing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
     store
@@ -208,7 +267,6 @@ fn deduplication_via_content_addressing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -260,7 +318,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
     let k2 = store
@@ -270,7 +327,6 @@ fn remove_keeps_array_when_other_refs_exist() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -301,7 +357,6 @@ fn bulk_add_atomic_rollback() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -313,9 +368,6 @@ fn bulk_add_atomic_rollback() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_ok.clone()),
             features: Features::new(),
-            units: None,
-
-            ext: None,
         },
         AddRequest {
             owner_id: 1,
@@ -323,9 +375,6 @@ fn bulk_add_atomic_rollback() {
             owner_category: OwnerCategory::Component,
             data: TimeSeriesData::SingleTimeSeries(s_dup.clone()),
             features: Features::new(),
-            units: None,
-
-            ext: None,
         },
     ];
     let err = store.add_time_series_bulk(bulk).unwrap_err();
@@ -353,7 +402,6 @@ fn time_range_slicing() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -382,7 +430,6 @@ fn clear_by_owner() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s.clone()),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -417,7 +464,6 @@ fn read_only_blocks_writes() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -432,7 +478,6 @@ fn read_only_blocks_writes() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(s),
             Features::new(),
-            None,
         )
         .unwrap_err();
     assert!(matches!(err, TimeSeriesError::ReadOnlyStore));
@@ -460,7 +505,6 @@ fn distinct_resolutions_returned_sorted() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -493,9 +537,8 @@ fn non_sequential_round_trip_and_time_slice() {
             7,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::NonSequentialTimeSeries(series),
+            TimeSeriesData::NonSequentialTimeSeries(series).with_units("MW"),
             Features::new(),
-            Some("MW".into()),
         )
         .unwrap();
 
@@ -553,7 +596,6 @@ fn duplicate_non_sequential_key_is_rejected() {
             OwnerCategory::Component,
             TimeSeriesData::NonSequentialTimeSeries(series),
             Features::new(),
-            None,
         );
         if values[0] == 1.0 {
             result.unwrap();
@@ -580,7 +622,6 @@ fn list_keys_with_hash_groups_shared_arrays() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
                 Features::new(),
-                None,
             )
             .unwrap();
     }
@@ -592,7 +633,6 @@ fn list_keys_with_hash_groups_shared_arrays() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0)),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -638,7 +678,6 @@ fn copy_time_series_shares_the_array_and_renames() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
             Features::new(),
-            None,
         )
         .unwrap();
 
@@ -671,12 +710,17 @@ fn copy_time_series_preserves_deterministic_single_type() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
             Features::new(),
-            None,
         )
         .unwrap();
     // Derive the DeterministicSingleTimeSeries view over the stored SingleTimeSeries.
     store
-        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
         .unwrap();
 
     let dst_src = store
@@ -719,7 +763,6 @@ fn copy_time_series_rejects_a_duplicate_destination() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 24, 0.0)),
             Features::new(),
-            None,
         )
         .unwrap();
     let src = only_key(&store, 1);
@@ -760,7 +803,6 @@ fn deleting_one_sharer_leaves_the_others_features_intact() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
                 features.clone(),
-                None,
             )
             .unwrap();
     }
@@ -813,7 +855,6 @@ fn compact_reclaims_feature_sets_left_unreachable_by_deletion() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
             features.clone(),
-            None,
         )
         .unwrap();
 
@@ -849,13 +890,19 @@ fn transform_reuses_the_sources_feature_set() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(series(2024, 8, owner as f64)),
                 features.clone(),
-                None,
             )
             .unwrap();
     }
     let n = store
-        .transform_single_time_series(Duration::hours(4), Duration::hours(1), None, None)
-        .unwrap();
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .transformed;
     assert_eq!(n, 5);
 
     // Every DST shares its source's set, so no set is orphaned and each derived
@@ -898,7 +945,6 @@ fn static_consistency_is_checked_per_resolution() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(s),
                 Features::new(),
-                None,
             )
             .unwrap();
     };
@@ -941,4 +987,209 @@ fn static_consistency_is_checked_per_resolution() {
         .unwrap();
     assert_eq!(ok.len(), 1);
     assert_eq!(ok[0].length, 8);
+}
+
+/// Timestamp vectors are content-addressed and shared, exactly like feature
+/// sets: a cohort of irregular series on one time axis stores that axis once,
+/// and it is reclaimed only when the last of them goes.
+#[test]
+fn a_shared_timestamp_vector_is_stored_once_and_swept_when_orphaned() {
+    let mut store = create_store(None, true).unwrap();
+    let stamps: Vec<_> = (0..64)
+        .map(|k| {
+            Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 7 + k % 3)
+        })
+        .collect();
+
+    let mut keys = Vec::new();
+    for owner in 1..=8i64 {
+        let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
+        let ns = NonSequentialTimeSeries::new(
+            stamps.clone(),
+            TypedArray::from_f64(vec![values.len()], &values),
+            "outage",
+        )
+        .unwrap();
+        keys.push(
+            store
+                .add_time_series(
+                    owner,
+                    "Generator",
+                    OwnerCategory::Component,
+                    TimeSeriesData::NonSequentialTimeSeries(ns),
+                    Features::new(),
+                )
+                .unwrap(),
+        );
+    }
+
+    // Every series reads back its own copy of the shared axis.
+    for key in &keys {
+        match store.get_time_series(key.identity(), None).unwrap() {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        }
+    }
+
+    // Still referenced by all eight, so there is nothing to sweep; and removing
+    // seven of them leaves the axis alive for the eighth.
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+    for key in &keys[..7] {
+        store.remove_time_series(key.identity()).unwrap();
+    }
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+    match store.get_time_series(keys[7].identity(), None).unwrap() {
+        TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    }
+
+    // The last reference goes: now the vector is unreachable and one row is
+    // swept. Idempotent afterwards, like the feature-set sweep.
+    store.remove_time_series(keys[7].identity()).unwrap();
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 1);
+    assert_eq!(store.compact().unwrap().timestamp_sets_reclaimed, 0);
+}
+
+/// The size guard behind interning: a catalog holding many irregular series on
+/// one long time axis must scale with the *number of distinct axes*, not with
+/// rows × timestamps. Storing the vector inline as RFC3339 JSON (24 bytes per
+/// timestamp, as this store used to) would put ~2.4 MB in the catalog here.
+#[test]
+fn the_catalog_does_not_scale_with_rows_times_timestamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let sqlite = infrastore_core::catalog_sqlite_path(&path);
+    let stamps: Vec<_> = (0..2_000)
+        .map(|k| Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap() + Duration::minutes(k * 5))
+        .collect();
+
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        let mut bulk = store.bulk_add();
+        for owner in 1..=50i64 {
+            let values: Vec<f64> = (0..stamps.len()).map(|i| owner as f64 + i as f64).collect();
+            let ns = NonSequentialTimeSeries::new(
+                stamps.clone(),
+                TypedArray::from_f64(vec![values.len()], &values),
+                "outage",
+            )
+            .unwrap();
+            bulk.push(infrastore_core::AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::NonSequentialTimeSeries(ns),
+            ));
+        }
+        bulk.commit().unwrap();
+        store.flush().unwrap();
+    }
+
+    let bytes = std::fs::metadata(&sqlite).unwrap().len();
+    assert!(
+        bytes < 400_000,
+        "50 series on one 2000-point axis put {bytes} bytes in the catalog; the axis should be \
+         stored once, not once per row"
+    );
+
+    // And it still reads back intact.
+    let store = open_store(path.as_path(), true).unwrap();
+    let keys = store.list_keys(ListFilter::new()).unwrap();
+    assert_eq!(keys.len(), 50);
+    match store.get_time_series(keys[0].identity(), None).unwrap() {
+        TimeSeriesData::NonSequentialTimeSeries(ns) => assert_eq!(ns.timestamps, stamps),
+        other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+    }
+}
+
+/// More distinct time axes than the catalog's decode memo can hold, read in an
+/// order that churns it. Each series must come back on *its own* axis: a memo
+/// that returned another vector for a hash would corrupt every irregular read
+/// that hit it, and only a working-set-exceeding test can catch that.
+#[test]
+fn many_distinct_time_axes_survive_the_decode_memo() {
+    let mut store = create_store(None, true).unwrap();
+    let t0 = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    // Deliberately more than the memo's capacity, each axis distinct in both
+    // spacing and extent so a mix-up cannot go unnoticed.
+    let axes: Vec<Vec<_>> = (1..=9i64)
+        .map(|a| {
+            (0..(3 + a))
+                .map(|k| t0 + Duration::minutes(a * 13 + k * a))
+                .collect()
+        })
+        .collect();
+
+    let mut keys = Vec::new();
+    for (i, stamps) in axes.iter().enumerate() {
+        // Two series per axis, so the shared-axis path is exercised as well.
+        for owner in 0..2i64 {
+            let values: Vec<f64> = (0..stamps.len())
+                .map(|k| (i * 100) as f64 + owner as f64 + k as f64)
+                .collect();
+            let ns = NonSequentialTimeSeries::new(
+                stamps.clone(),
+                TypedArray::from_f64(vec![values.len()], &values),
+                "outage",
+            )
+            .unwrap();
+            keys.push((
+                i,
+                owner,
+                store
+                    .add_time_series(
+                        i as i64 * 10 + owner,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::NonSequentialTimeSeries(ns),
+                        Features::new(),
+                    )
+                    .unwrap(),
+            ));
+        }
+    }
+
+    let check =
+        |store: &infrastore_core::Store, i: usize, owner: i64, key: &KeyIdentity| match store
+            .get_time_series(key, None)
+            .unwrap()
+        {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => {
+                assert_eq!(ns.timestamps, axes[i], "axis {i}");
+                assert_eq!(
+                    ns.data.to_f64_vec().unwrap()[0],
+                    (i * 100) as f64 + owner as f64
+                );
+            }
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        };
+
+    // Forwards, then backwards (worst case for a recency-ordered memo), then
+    // interleaved with a repeatedly-read hot axis.
+    for (i, owner, key) in &keys {
+        check(&store, *i, *owner, key.identity());
+    }
+    for (i, owner, key) in keys.iter().rev() {
+        check(&store, *i, *owner, key.identity());
+    }
+    for (i, owner, key) in &keys {
+        check(&store, 0, 0, keys[0].2.identity());
+        check(&store, *i, *owner, key.identity());
+    }
+
+    // And through the bulk path, which resolves them all in one call.
+    let identities: Vec<KeyIdentity> = keys.iter().map(|(_, _, k)| k.identity().clone()).collect();
+    let refs: Vec<&KeyIdentity> = identities.iter().collect();
+    for (series, (i, owner, _)) in store.bulk_read(&refs).unwrap().iter().zip(&keys) {
+        match series {
+            TimeSeriesData::NonSequentialTimeSeries(ns) => {
+                assert_eq!(ns.timestamps, axes[*i], "axis {i} via bulk_read");
+                assert_eq!(
+                    ns.data.to_f64_vec().unwrap()[0],
+                    (*i * 100) as f64 + *owner as f64
+                );
+            }
+            other => panic!("expected a NonSequentialTimeSeries, got {other:?}"),
+        }
+    }
 }

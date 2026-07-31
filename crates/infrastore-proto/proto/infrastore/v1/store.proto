@@ -101,10 +101,15 @@ message TimeSeriesMetadata {
   Features        features                       = 14;
   optional string units                          = 16;
   // Element typing.
-  int32           dtype                          = 17;       // Dtype code
+  reserved 17;  // was: int32 dtype (Dtype code), superseded by element_type
   repeated uint64 element_shape                  = 18;       // per-step trailing dims
   optional string ext                   = 19;       // opaque package-owned payload
   repeated double percentiles                    = 20;        // Probabilistic only
+  // Canonical ElementType string: a dtype spelling ("f64", "i64", ...) for
+  // plain scalars, else "tuple(N,dtype)" or a function-data kind
+  // ("linear_function", "quadratic_function", "piecewise_linear",
+  // "piecewise_step"). The physical dtype of the bytes is derived from it.
+  string          element_type                   = 21;
 }
 
 // ---- ListTimeSeries ----
@@ -139,7 +144,7 @@ message GetResp {
   reserved 5;  // was: repeated double values (replaced by dtype + value_bytes)
   TimeSeriesType     time_series_type            = 6;
   repeated string    timestamps_rfc3339          = 7;
-  int32              dtype                       = 8;        // Dtype code
+  reserved 8;  // was: int32 dtype (Dtype code), superseded by element_type
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
   // Unused: always the empty string. `ext` is a property of the association
   // row, not of the time-series values, so the read path has no value to put
@@ -155,6 +160,10 @@ message GetResp {
   uint64             count                       = 13;
   repeated double    percentiles                 = 14;       // Probabilistic only
   uint64             scenario_count              = 15;       // Scenarios only
+  // Canonical ElementType string; see TimeSeriesMetadata.element_type. Decoding
+  // stays client-side: the server ships raw `value_bytes` plus `shape` and this
+  // field, and a codec turns them into per-timestep values.
+  string             element_type                = 16;
 }
 
 // ---- GetTimeSeriesKeys ----

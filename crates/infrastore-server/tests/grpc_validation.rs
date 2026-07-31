@@ -79,7 +79,6 @@ fn add(store: &mut Store, owner: i64, data: TimeSeriesData) {
             OwnerCategory::Component,
             data,
             Features::new(),
-            None,
         )
         .unwrap();
 }

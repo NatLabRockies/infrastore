@@ -7,7 +7,8 @@
 #
 # `time_series_type` fields hold the Julia type (`SingleTimeSeries`,
 # `Deterministic`, ...), so they can be passed straight to `get_time_series`;
-# `dtype` fields hold the Julia element type (`Float64`, `Bool`, ...).
+# Reader `dtype` fields hold the Julia element type (`Float64`, `Bool`, ...);
+# metadata carries the logical `element_type` string instead.
 
 """
     TimeSeriesMetadata
@@ -30,7 +31,8 @@ anything but a `Probabilistic`).
 - `initial_timestamp`, `resolution`, `length` — the static time grid.
 - `horizon`, `interval`, `count` — the forecast window geometry.
 - `percentiles` — the stored percentile vector of a `Probabilistic`.
-- `dtype`, `element_shape` — the Julia element type and per-timestep shape (an
+- `element_type`, `element_shape` — the canonical element-type string (`"f64"`,
+  `"tuple(3,f64)"`, `"piecewise_linear"`, …) and the per-timestep shape (an
   empty tuple for scalar elements; for a forecast, the stored array's trailing
   dims after its first axis).
 - `features` — the feature dictionary (empty when none).
@@ -50,7 +52,7 @@ struct TimeSeriesMetadata
     count::Union{Nothing, Int}
     length::Union{Nothing, Int}
     percentiles::Union{Nothing, Vector{Float64}}
-    dtype::Type
+    element_type::String
     element_shape::Tuple{Vararg{Int}}
     features::Dict{String, Any}
     units::Union{Nothing, String}
@@ -81,7 +83,7 @@ recorded for it. `length` applies to static series, `horizon` / `interval` /
 `count` to forecasts; the fields that do not apply to a row's
 `time_series_type` are `nothing`.
 
-Physical storage detail (`data_hash`, `dtype`, `ext`, `percentiles`) is not part
+Physical storage detail (`data_hash`, `element_type`, `ext`, `percentiles`) is not part
 of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
 or the `get_*_metadata` functions.
 """
@@ -253,10 +255,14 @@ A shared static time grid: the valid timestamps are `initial_timestamp +
 k·resolution` for `k in 0:length-1`. Returned by [`static_grid`](@ref) for a
 [`StaticReader`], and by [`check_static_consistency`](@ref) once per resolution
 present in the store.
+
+`resolution` is `nothing` only for a `NonSequentialTimeSeries` reader, whose
+timeline is an explicit list of instants rather than a grid — enumerate it with
+[`static_timestamps`](@ref).
 """
 struct StaticGrid
     initial_timestamp::DateTime
-    resolution::Period
+    resolution::Union{Nothing, Period}
     length::Int
 end
 
