@@ -1481,10 +1481,11 @@ impl Store {
     /// are read in one decompress-once pass per dataset via
     /// [`StorageBackend::read_arrays`], rather than re-reading every chunk once per
     /// series — the read-side complement to the timestamp-major layout, where a
-    /// single full-series read is otherwise the slow direction. Other types are
-    /// standalone arrays with no batching benefit, so they reuse the per-key
-    /// [`Self::get_time_series`] path. No time-range slicing — each series is
-    /// returned in full.
+    /// single full-series read is otherwise the slow direction. Other types get
+    /// no batching benefit on the array side — they are standalone, or one
+    /// column of a cohort dataset — so they are rebuilt one at a time, but from
+    /// the metadata this call already loaded. No time-range slicing — each
+    /// series is returned in full.
     #[tracing::instrument(skip(self, keys), fields(count = keys.len()))]
     pub fn bulk_read(&self, keys: &[&KeyIdentity]) -> Result<Vec<TimeSeriesData>> {
         let metas: Vec<TimeSeriesMetadata> = keys
@@ -1505,7 +1506,7 @@ impl Store {
             .into_iter();
 
         let mut out = Vec::with_capacity(keys.len());
-        for (meta, key) in metas.iter().zip(keys) {
+        for meta in &metas {
             if meta.time_series_type == TimeSeriesType::SingleTimeSeries {
                 let data = single_arrays.next().ok_or_else(|| {
                     TimeSeriesError::IntegrityError(
@@ -1536,7 +1537,12 @@ impl Store {
                     ext: meta.ext.clone(),
                 }));
             } else {
-                out.push(self.get_time_series(key, None)?);
+                // Materialize from the row already in hand rather than calling
+                // `get_time_series`, which would look the key up a second time.
+                // For a `NonSequentialTimeSeries` that second lookup also
+                // re-fetched and re-decoded the row's timestamp vector, so a
+                // bulk read of N irregular series did 2N of both.
+                out.push(self.materialize_time_series(meta, None)?);
             }
         }
         Ok(out)
