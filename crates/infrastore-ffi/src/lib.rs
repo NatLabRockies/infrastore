@@ -196,11 +196,74 @@ unsafe fn cstr_to_period(p: *const c_char) -> Result<core_lib::Period, i32> {
 }
 
 /// Allocate an owned C string the caller must release with [`infrastore_string_free`].
-/// An interior NUL (never present in an ISO-8601 period) yields a null pointer.
+///
+/// Only for strings from the library's own canonical vocabularies (ISO-8601
+/// periods, `element_type` spellings), which never contain an interior NUL; a
+/// NUL yields a null pointer. User-supplied attributes (`ext`, `units`) go
+/// through [`opt_attr_cstring`] instead, which reports the NUL as an error
+/// rather than silently returning "unset".
 fn owned_cstr(s: &str) -> *mut c_char {
     match std::ffi::CString::new(s) {
         Ok(c) => c.into_raw(),
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Build the owned C string for an optional user-supplied attribute (`ext` /
+/// `units`). `None` stays `None` (emitted as a null pointer). An interior NUL
+/// cannot cross the C ABI as a string; it is reported as an integrity error so
+/// the caller never mistakes a present attribute for an unset one. The value is
+/// kept as a `CString` (dropped on any later early return) and only released to
+/// the caller with [`into_raw_or_null`] once the whole call has succeeded.
+fn opt_attr_cstring(s: Option<&str>) -> Result<Option<std::ffi::CString>, i32> {
+    match s {
+        None => Ok(None),
+        Some(s) => std::ffi::CString::new(s).map(Some).map_err(|_| {
+            set_error(
+                "string attribute contains an interior NUL byte and cannot be returned over \
+                 the C ABI",
+            );
+            INFRASTORE_ERR_INTEGRITY
+        }),
+    }
+}
+
+/// Hand an optional `CString` to the caller: null for `None`, otherwise an
+/// owned pointer released with [`infrastore_string_free`].
+fn into_raw_or_null(c: Option<std::ffi::CString>) -> *mut c_char {
+    c.map_or(std::ptr::null_mut(), std::ffi::CString::into_raw)
+}
+
+/// Hand a `Vec`'s contents to the caller as a heap buffer whose allocation is
+/// exactly `len` elements, returning `(ptr, len)`.
+///
+/// The matching `infrastore_buffer_free_*` / `infrastore_keys_buffer_free`
+/// reconstructs a `Box<[T]>` from `(ptr, len)`, so the handed-out allocation
+/// must have capacity == length. `into_boxed_slice` guarantees that
+/// (reallocating if the vector carried excess capacity), which makes the
+/// contract structural instead of depending on how each producer happened to
+/// build its vector. An empty vector yields a dangling (non-null, aligned)
+/// pointer with length 0, which the free functions handle.
+fn vec_into_raw<T>(v: Vec<T>) -> (*mut T, u64) {
+    let len = v.len() as u64;
+    let ptr = Box::into_raw(v.into_boxed_slice()) as *mut T;
+    (ptr, len)
+}
+
+/// Reclaim and drop a buffer previously produced by [`vec_into_raw`].
+///
+/// # Safety
+///
+/// `ptr` must be null or a pointer returned by [`vec_into_raw`] with exactly
+/// `len` elements, not previously freed.
+unsafe fn free_raw_buffer<T>(ptr: *mut T, len: u64) {
+    if !ptr.is_null() {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                ptr,
+                len as usize,
+            )))
+        };
     }
 }
 
@@ -858,47 +921,42 @@ pub unsafe extern "C" fn infrastore_store_get_single(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let initial_ms = match datetime_to_unix_ms(single.initial_timestamp) {
-        Some(n) => n,
-        None => {
-            set_error("initial_timestamp out of i64 millisecond range");
-            return INFRASTORE_ERR_INTEGRITY;
-        }
-    };
     // The extension payload lives on the metadata row, not on the reconstructed
     // series; the row came back with the data from the single catalog lookup.
+    // Both attribute strings are built first, before anything is handed to the
+    // caller: they are the only fallible step left, and holding them as
+    // `CString`s means an early return drops them instead of leaking.
     let ext_cstr = if out_ext.is_null() {
-        std::ptr::null_mut()
+        None
     } else {
-        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
+        match opt_attr_cstring(meta.ext.as_deref()) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
+    // The units label likewise lives on the metadata row, not on the series.
+    let units_cstr = if out_units.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(meta.units.as_deref()) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
     };
     let element_type_cstr = if out_element_type.is_null() {
         std::ptr::null_mut()
     } else {
         owned_cstr(&meta.element_type.to_string())
     };
-    // The units label likewise lives on the metadata row, not on the series.
-    let units_cstr = if out_units.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.units
-            .as_deref()
-            .map_or(std::ptr::null_mut(), owned_cstr)
-    };
     let resolution_cstr = period_cstr(single.resolution);
     let dtype = single.data.dtype;
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
-    let mut shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
-    let shape_len = shape.len() as u64;
-    let shape_ptr = shape.as_mut_ptr();
-    std::mem::forget(shape);
+    let shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
+    let (shape_ptr, shape_len) = vec_into_raw(shape);
     // Native little-endian element bytes, returned as an owned u8 buffer.
-    let mut bytes = single.data.bytes;
-    let data_len = bytes.len() as u64;
-    let data_ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
+    let (data_ptr, data_len) = vec_into_raw(single.data.bytes);
     unsafe {
-        *out_initial_ts_unix_ms = initial_ms;
+        *out_initial_ts_unix_ms = datetime_to_unix_ms(single.initial_timestamp);
         *out_resolution = resolution_cstr;
         *out_dtype = dtype.code();
         *out_shape = shape_ptr;
@@ -906,13 +964,13 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         *out_data = data_ptr;
         *out_data_byte_len = data_len;
         if !out_ext.is_null() {
-            *out_ext = ext_cstr;
+            *out_ext = into_raw_or_null(ext_cstr);
         }
         if !out_element_type.is_null() {
             *out_element_type = element_type_cstr;
         }
         if !out_units.is_null() {
-            *out_units = units_cstr;
+            *out_units = into_raw_or_null(units_cstr);
         }
     }
     INFRASTORE_OK
@@ -926,9 +984,13 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 ///
 /// `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
 /// N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
-/// and `out_data` carry the row-major element bytes. `out_ext` is the association's opaque
-/// extension payload, copied into a caller-allocated buffer of `ext_cap` bytes; the full length is
-/// reported in `out_ext_len` so the caller can probe with a null/zero-capacity buffer first.
+/// and `out_data` carry the row-major element bytes.
+///
+/// `out_ext`, when non-null, receives the association's opaque extension payload
+/// from the metadata row: null when the series carries no `ext`, otherwise an
+/// owned C string the caller must free with `infrastore_string_free` — the same
+/// convention as `infrastore_store_get_single`. (Earlier revisions copied it into a
+/// caller-sized buffer, which invited silent truncation.)
 ///
 /// `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
 /// string the caller must free with `infrastore_string_free`. It is what says how to read the
@@ -943,9 +1005,11 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 ///
 /// # Safety
 ///
-/// `handle` and `key` must be live handles created by this library. Every output pointer must be
-/// valid for writing its indicated value. Returned buffers must each be released exactly once with
-/// the matching free function and returned length.
+/// `handle` and `key` must be live handles created by this library. Every output pointer except
+/// `out_ext`, `out_element_type`, and `out_units` must be valid for writing its indicated value;
+/// those three may be null to skip them. Returned buffers must each be released exactly once with
+/// the matching free function and returned length, and a non-null `*out_ext` /
+/// `*out_element_type` / `*out_units` exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_non_sequential(
@@ -961,9 +1025,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     out_shape_len: *mut u64,
     out_data: *mut *mut u8,
     out_data_byte_len: *mut u64,
-    out_ext: *mut c_char,
-    ext_cap: u64,
-    out_ext_len: *mut u64,
+    out_ext: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
     out_units: *mut *mut c_char,
 ) -> i32 {
@@ -977,7 +1039,6 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         || out_shape_len.is_null()
         || out_data.is_null()
         || out_data_byte_len.is_null()
-        || out_ext_len.is_null()
     {
         return INFRASTORE_ERR_NULL_POINTER;
     }
@@ -1009,47 +1070,43 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     };
     // The extension payload lives on the metadata row, not on the reconstructed
     // series; the row came back with the data from the single catalog lookup.
-    let ext = meta.ext.unwrap_or_default();
+    // The attribute strings are the only fallible step and are built first, as
+    // `CString`s, so an early return drops them instead of leaking.
+    let ext_cstr = if out_ext.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(meta.ext.as_deref()) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
+    // The units label likewise lives on the metadata row, not on the series.
+    let units_cstr = if out_units.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(meta.units.as_deref()) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
     let element_type_cstr = if out_element_type.is_null() {
         std::ptr::null_mut()
     } else {
         owned_cstr(&meta.element_type.to_string())
     };
-    // The units label likewise lives on the metadata row, not on the series.
-    let units_cstr = if out_units.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.units
-            .as_deref()
-            .map_or(std::ptr::null_mut(), owned_cstr)
-    };
-    let mut timestamps = match series
+    let timestamps: Vec<i64> = series
         .timestamps
         .iter()
-        .map(|timestamp| datetime_to_unix_ms(*timestamp).ok_or(INFRASTORE_ERR_INTEGRITY))
-        .collect::<std::result::Result<Vec<_>, _>>()
-    {
-        Ok(timestamps) => timestamps,
-        Err(code) => {
-            set_error("timestamp out of i64 millisecond range");
-            return code;
-        }
-    };
-    let timestamps_len = timestamps.len() as u64;
-    let timestamps_ptr = timestamps.as_mut_ptr();
-    std::mem::forget(timestamps);
+        .map(|timestamp| datetime_to_unix_ms(*timestamp))
+        .collect();
+    let (timestamps_ptr, timestamps_len) = vec_into_raw(timestamps);
 
     // Full array shape `[length, *element_shape]`, returned as an owned i64 buffer.
-    let mut shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
-    let shape_len = shape.len() as u64;
-    let shape_ptr = shape.as_mut_ptr();
-    std::mem::forget(shape);
+    let shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
+    let (shape_ptr, shape_len) = vec_into_raw(shape);
 
     let dtype = series.data.dtype.code();
-    let mut bytes = series.data.bytes;
-    let data_byte_len = bytes.len() as u64;
-    let data_ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
+    let (data_ptr, data_byte_len) = vec_into_raw(series.data.bytes);
     unsafe {
         *out_timestamps = timestamps_ptr;
         *out_timestamps_len = timestamps_len;
@@ -1058,12 +1115,14 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
-        write_str_out(&ext, out_ext, ext_cap, out_ext_len);
+        if !out_ext.is_null() {
+            *out_ext = into_raw_or_null(ext_cstr);
+        }
         if !out_element_type.is_null() {
             *out_element_type = element_type_cstr;
         }
         if !out_units.is_null() {
-            *out_units = units_cstr;
+            *out_units = into_raw_or_null(units_cstr);
         }
     }
     INFRASTORE_OK
@@ -1257,10 +1316,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_parameters(
                 *out_interval = opt_period_cstr(p.interval);
                 *out_count = p.count.map(|c| c as i64).unwrap_or(-1);
                 *out_resolution = opt_period_cstr(p.resolution);
-                *out_initial_ms = p
-                    .initial_timestamp
-                    .and_then(datetime_to_unix_ms)
-                    .unwrap_or(-1);
+                *out_initial_ms = p.initial_timestamp.map(datetime_to_unix_ms).unwrap_or(-1);
             }
             INFRASTORE_OK
         }
@@ -1308,7 +1364,7 @@ pub unsafe extern "C" fn infrastore_store_check_static_consistency(
         .map(|g| {
             serde_json::json!({
                 "resolution": g.resolution.to_iso8601(),
-                "initial_timestamp_ms": datetime_to_unix_ms(g.initial_timestamp).unwrap_or(0),
+                "initial_timestamp_ms": datetime_to_unix_ms(g.initial_timestamp),
                 "length": g.length as i64,
             })
         })
@@ -1688,7 +1744,7 @@ pub unsafe extern "C" fn infrastore_store_static_summary(
             o.insert(
                 "initial_timestamp_ms".into(),
                 r.initial_timestamp
-                    .and_then(datetime_to_unix_ms)
+                    .map(datetime_to_unix_ms)
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
@@ -1752,7 +1808,7 @@ pub unsafe extern "C" fn infrastore_store_forecast_summary(
             o.insert(
                 "initial_timestamp_ms".into(),
                 r.initial_timestamp
-                    .and_then(datetime_to_unix_ms)
+                    .map(datetime_to_unix_ms)
                     .map(Value::from)
                     .unwrap_or(Value::Null),
             );
@@ -2322,10 +2378,7 @@ pub unsafe extern "C" fn infrastore_store_get_array_by_hash(
     // Hand back the raw little-endian element bytes + dtype; the caller
     // interprets them according to the requested element type.
     let dtype = array.dtype.code();
-    let mut buf: Vec<u8> = array.bytes;
-    let len = buf.len() as u64;
-    let p = buf.as_mut_ptr();
-    std::mem::forget(buf);
+    let (p, len) = vec_into_raw(array.bytes);
     unsafe {
         *out_dtype = dtype;
         *out_data = p;
@@ -3309,6 +3362,11 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
 /// The three live on the series itself, so a bulk-read result carries them just
 /// as a per-key read does — the two paths must not disagree.
 ///
+/// All-or-nothing: both attribute strings are built first (an interior NUL in
+/// `ext` / `units` fails with `INFRASTORE_ERR_INTEGRITY` before anything is
+/// written), then everything is written. Callers invoke this *before* handing
+/// any other buffer to the caller, so a failure here leaks nothing.
+///
 /// # Safety
 ///
 /// Each non-null pointer must be valid for writing one pointer.
@@ -3319,10 +3377,26 @@ unsafe fn emit_descriptors(
     out_ext: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
     out_units: *mut *mut c_char,
-) {
+) -> i32 {
+    let ext_c = if out_ext.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(ext) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
+    let units_c = if out_units.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(units) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
     unsafe {
         if !out_ext.is_null() {
-            *out_ext = ext.map_or(std::ptr::null_mut(), owned_cstr);
+            *out_ext = into_raw_or_null(ext_c);
         }
         // Unlike `ext` and `units`, the element type is never absent — a series
         // always carries a concrete one — so this is always a string.
@@ -3330,9 +3404,10 @@ unsafe fn emit_descriptors(
             *out_element_type = owned_cstr(&element_type.to_string());
         }
         if !out_units.is_null() {
-            *out_units = units.map_or(std::ptr::null_mut(), owned_cstr);
+            *out_units = into_raw_or_null(units_c);
         }
     }
+    INFRASTORE_OK
 }
 
 /// The number of series held by a bulk-read result handle, or `-1` if `result`
@@ -3419,32 +3494,9 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let initial_ms = match datetime_to_unix_ms(single.initial_timestamp) {
-        Some(n) => n,
-        None => {
-            set_error("initial_timestamp out of i64 millisecond range");
-            return INFRASTORE_ERR_INTEGRITY;
-        }
-    };
-    let resolution_cstr = period_cstr(single.resolution);
-    let dtype = single.data.dtype;
-    // Owned copies so the result handle stays intact for repeated reads.
-    let mut shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
-    let shape_len = shape.len() as u64;
-    let shape_ptr = shape.as_mut_ptr();
-    std::mem::forget(shape);
-    let mut bytes = single.data.bytes.clone();
-    let data_len = bytes.len() as u64;
-    let data_ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
-    unsafe {
-        *out_initial_ts_unix_ms = initial_ms;
-        *out_resolution = resolution_cstr;
-        *out_dtype = dtype.code();
-        *out_shape = shape_ptr;
-        *out_shape_len = shape_len;
-        *out_data = data_ptr;
-        *out_data_byte_len = data_len;
+    // Descriptors first: the only fallible step, and it writes nothing on
+    // failure, so no other handed-out buffer can be orphaned by it.
+    let code = unsafe {
         emit_descriptors(
             single.ext.as_deref(),
             single.element_type,
@@ -3452,7 +3504,25 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
             out_ext,
             out_element_type,
             out_units,
-        );
+        )
+    };
+    if code != INFRASTORE_OK {
+        return code;
+    }
+    let resolution_cstr = period_cstr(single.resolution);
+    let dtype = single.data.dtype;
+    // Owned copies so the result handle stays intact for repeated reads.
+    let shape: Vec<i64> = single.data.shape.iter().map(|&d| d as i64).collect();
+    let (shape_ptr, shape_len) = vec_into_raw(shape);
+    let (data_ptr, data_len) = vec_into_raw(single.data.bytes.clone());
+    unsafe {
+        *out_initial_ts_unix_ms = datetime_to_unix_ms(single.initial_timestamp);
+        *out_resolution = resolution_cstr;
+        *out_dtype = dtype.code();
+        *out_shape = shape_ptr;
+        *out_shape_len = shape_len;
+        *out_data = data_ptr;
+        *out_data_byte_len = data_len;
     }
     INFRASTORE_OK
 }
@@ -3630,30 +3700,31 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    let mut timestamps = match series
+    // Descriptors first: the only fallible step, and it writes nothing on
+    // failure, so no other handed-out buffer can be orphaned by it.
+    let code = unsafe {
+        emit_descriptors(
+            series.ext.as_deref(),
+            series.element_type,
+            series.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        )
+    };
+    if code != INFRASTORE_OK {
+        return code;
+    }
+    let timestamps: Vec<i64> = series
         .timestamps
         .iter()
-        .map(|t| datetime_to_unix_ms(*t).ok_or(INFRASTORE_ERR_INTEGRITY))
-        .collect::<std::result::Result<Vec<_>, _>>()
-    {
-        Ok(t) => t,
-        Err(code) => {
-            set_error("timestamp out of i64 millisecond range");
-            return code;
-        }
-    };
-    let timestamps_len = timestamps.len() as u64;
-    let timestamps_ptr = timestamps.as_mut_ptr();
-    std::mem::forget(timestamps);
-    let mut shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
-    let shape_len = shape.len() as u64;
-    let shape_ptr = shape.as_mut_ptr();
-    std::mem::forget(shape);
+        .map(|t| datetime_to_unix_ms(*t))
+        .collect();
+    let (timestamps_ptr, timestamps_len) = vec_into_raw(timestamps);
+    let shape: Vec<i64> = series.data.shape.iter().map(|&d| d as i64).collect();
+    let (shape_ptr, shape_len) = vec_into_raw(shape);
     let dtype = series.data.dtype.code();
-    let mut bytes = series.data.bytes.clone();
-    let data_byte_len = bytes.len() as u64;
-    let data_ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
+    let (data_ptr, data_byte_len) = vec_into_raw(series.data.bytes.clone());
     unsafe {
         *out_timestamps = timestamps_ptr;
         *out_timestamps_len = timestamps_len;
@@ -3662,14 +3733,6 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
         *out_shape_len = shape_len;
         *out_data = data_ptr;
         *out_data_byte_len = data_byte_len;
-        emit_descriptors(
-            series.ext.as_deref(),
-            series.element_type,
-            series.units.as_deref(),
-            out_ext,
-            out_element_type,
-            out_units,
-        );
     }
     INFRASTORE_OK
 }
@@ -3754,14 +3817,24 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             return INFRASTORE_ERR_INVALID_PARAMETER;
         }
     };
-    // Captured before `data` is moved into the emitter; written only on success
-    // so a failed emit does not hand back strings the caller never frees.
-    let (ext, element_type, units) = (
-        data.ext().map(str::to_owned),
-        data.element_type(),
-        data.units().map(str::to_owned),
-    );
+    // Descriptors first: the only fallible step left (the item was verified to
+    // be a forecast variant above, and `emit_forecast_data` is infallible for
+    // those), and it writes nothing on failure, so no handed-out buffer can be
+    // orphaned by it.
     let code = unsafe {
+        emit_descriptors(
+            data.ext(),
+            data.element_type(),
+            data.units(),
+            out_ext,
+            out_element_type,
+            out_units,
+        )
+    };
+    if code != INFRASTORE_OK {
+        return code;
+    }
+    unsafe {
         emit_forecast_data(
             data,
             out_initial_ts_unix_ms,
@@ -3778,20 +3851,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             out_percentiles,
             out_percentiles_len,
         )
-    };
-    if code == INFRASTORE_OK {
-        unsafe {
-            emit_descriptors(
-                ext.as_deref(),
-                element_type,
-                units.as_deref(),
-                out_ext,
-                out_element_type,
-                out_units,
-            )
-        };
     }
-    code
 }
 
 /// Free a bulk-read result handle created by `infrastore_store_bulk_read_single` or
@@ -4125,27 +4185,39 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
         Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
-    // The association's `ext` payload lives on the metadata row; the row came
-    // back with the data from the single catalog lookup.
-    let ext_cstr = if out_ext.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
-    };
-    let element_type_cstr = if out_element_type.is_null() {
-        std::ptr::null_mut()
-    } else {
-        owned_cstr(&meta.element_type.to_string())
-    };
-    // The units label likewise comes off that row.
-    let units_cstr = if out_units.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.units
-            .as_deref()
-            .map_or(std::ptr::null_mut(), owned_cstr)
-    };
+    // Only forecast variants reach the emitter; reject anything else up front,
+    // before any allocation is handed to the caller.
+    if !matches!(
+        data,
+        core_lib::TimeSeriesData::Deterministic(_)
+            | core_lib::TimeSeriesData::Probabilistic(_)
+            | core_lib::TimeSeriesData::Scenarios(_)
+    ) {
+        set_error(format!(
+            "key identifies a {} time series; use the matching read function",
+            data.time_series_type().as_str()
+        ));
+        return INFRASTORE_ERR_INVALID_PARAMETER;
+    }
+    // The association's `ext` / `units` live on the metadata row; the row came
+    // back with the data from the single catalog lookup. Descriptors are
+    // emitted first: they are the only fallible step, and they write nothing on
+    // failure, so no handed-out buffer can be orphaned. After them the emit is
+    // infallible for the forecast variants verified above.
     let code = unsafe {
+        emit_descriptors(
+            meta.ext.as_deref(),
+            meta.element_type,
+            meta.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        )
+    };
+    if code != INFRASTORE_OK {
+        return code;
+    }
+    unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
             data,
@@ -4163,26 +4235,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
             out_percentiles,
             out_percentiles_len,
         )
-    };
-    if code == INFRASTORE_OK {
-        if !out_ext.is_null() {
-            unsafe { *out_ext = ext_cstr };
-        }
-        if !out_element_type.is_null() {
-            unsafe { *out_element_type = element_type_cstr };
-        }
-        if !out_units.is_null() {
-            unsafe { *out_units = units_cstr };
-        }
-    } else {
-        // Don't leak the metadata strings when the emit fails after the fetch.
-        for owned in [ext_cstr, element_type_cstr, units_cstr] {
-            if !owned.is_null() {
-                unsafe { drop(std::ffi::CString::from_raw(owned)) };
-            }
-        }
     }
-    code
 }
 
 /// Shared emitter: write a forecast `TimeSeriesData` value into the C out-params
@@ -4215,26 +4268,14 @@ unsafe fn emit_forecast_data(
 
     match data {
         core_lib::TimeSeriesData::Deterministic(det) => {
-            let initial_ms = match datetime_to_unix_ms(det.initial_timestamp) {
-                Some(n) => n,
-                None => {
-                    set_error("initial_timestamp out of i64 millisecond range");
-                    return INFRASTORE_ERR_INTEGRITY;
-                }
-            };
-            let mut dims: Vec<u64> = det.data.shape.iter().map(|&d| d as u64).collect();
-            let ndims = dims.len() as u64;
-            let dims_ptr = dims.as_mut_ptr();
-            std::mem::forget(dims);
+            let dims: Vec<u64> = det.data.shape.iter().map(|&d| d as u64).collect();
+            let (dims_ptr, ndims) = vec_into_raw(dims);
 
             let dtype = det.data.dtype.code();
-            let mut bytes = det.data.bytes;
-            let byte_len = bytes.len() as u64;
-            let data_ptr = bytes.as_mut_ptr();
-            std::mem::forget(bytes);
+            let (data_ptr, byte_len) = vec_into_raw(det.data.bytes);
 
             unsafe {
-                *out_initial_ts_unix_ms = initial_ms;
+                *out_initial_ts_unix_ms = datetime_to_unix_ms(det.initial_timestamp);
                 *out_resolution = period_cstr(det.resolution);
                 *out_horizon = period_cstr(det.horizon);
                 *out_interval = period_cstr(det.interval);
@@ -4251,31 +4292,16 @@ unsafe fn emit_forecast_data(
             INFRASTORE_OK
         }
         core_lib::TimeSeriesData::Probabilistic(prob) => {
-            let initial_ms = match datetime_to_unix_ms(prob.initial_timestamp) {
-                Some(n) => n,
-                None => {
-                    set_error("initial_timestamp out of i64 millisecond range");
-                    return INFRASTORE_ERR_INTEGRITY;
-                }
-            };
-            let mut dims: Vec<u64> = prob.data.shape.iter().map(|&d| d as u64).collect();
-            let ndims = dims.len() as u64;
-            let dims_ptr = dims.as_mut_ptr();
-            std::mem::forget(dims);
+            let dims: Vec<u64> = prob.data.shape.iter().map(|&d| d as u64).collect();
+            let (dims_ptr, ndims) = vec_into_raw(dims);
 
             let dtype = prob.data.dtype.code();
-            let mut bytes = prob.data.bytes;
-            let byte_len = bytes.len() as u64;
-            let data_ptr = bytes.as_mut_ptr();
-            std::mem::forget(bytes);
+            let (data_ptr, byte_len) = vec_into_raw(prob.data.bytes);
 
-            let mut pct = prob.percentiles;
-            let pct_len = pct.len() as u64;
-            let pct_ptr = pct.as_mut_ptr();
-            std::mem::forget(pct);
+            let (pct_ptr, pct_len) = vec_into_raw(prob.percentiles);
 
             unsafe {
-                *out_initial_ts_unix_ms = initial_ms;
+                *out_initial_ts_unix_ms = datetime_to_unix_ms(prob.initial_timestamp);
                 *out_resolution = period_cstr(prob.resolution);
                 *out_horizon = period_cstr(prob.horizon);
                 *out_interval = period_cstr(prob.interval);
@@ -4292,28 +4318,16 @@ unsafe fn emit_forecast_data(
             INFRASTORE_OK
         }
         core_lib::TimeSeriesData::Scenarios(scen) => {
-            let initial_ms = match datetime_to_unix_ms(scen.initial_timestamp) {
-                Some(n) => n,
-                None => {
-                    set_error("initial_timestamp out of i64 millisecond range");
-                    return INFRASTORE_ERR_INTEGRITY;
-                }
-            };
             let scenario_count = scen.scenario_count;
 
-            let mut dims: Vec<u64> = scen.data.shape.iter().map(|&d| d as u64).collect();
-            let ndims = dims.len() as u64;
-            let dims_ptr = dims.as_mut_ptr();
-            std::mem::forget(dims);
+            let dims: Vec<u64> = scen.data.shape.iter().map(|&d| d as u64).collect();
+            let (dims_ptr, ndims) = vec_into_raw(dims);
 
             let dtype = scen.data.dtype.code();
-            let mut bytes = scen.data.bytes;
-            let byte_len = bytes.len() as u64;
-            let data_ptr = bytes.as_mut_ptr();
-            std::mem::forget(bytes);
+            let (data_ptr, byte_len) = vec_into_raw(scen.data.bytes);
 
             unsafe {
-                *out_initial_ts_unix_ms = initial_ms;
+                *out_initial_ts_unix_ms = datetime_to_unix_ms(scen.initial_timestamp);
                 *out_resolution = period_cstr(scen.resolution);
                 *out_horizon = period_cstr(scen.horizon);
                 *out_interval = period_cstr(scen.interval);
@@ -4467,27 +4481,39 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
         Ok(pair) => pair,
         Err(e) => return map_core_error(e),
     };
-    // The association's `ext` payload lives on the metadata row; the row came
-    // back with the data from the single catalog lookup.
-    let ext_cstr = if out_ext.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.ext.as_deref().map_or(std::ptr::null_mut(), owned_cstr)
-    };
-    let element_type_cstr = if out_element_type.is_null() {
-        std::ptr::null_mut()
-    } else {
-        owned_cstr(&meta.element_type.to_string())
-    };
-    // The units label likewise comes off that row.
-    let units_cstr = if out_units.is_null() {
-        std::ptr::null_mut()
-    } else {
-        meta.units
-            .as_deref()
-            .map_or(std::ptr::null_mut(), owned_cstr)
-    };
+    // Only forecast variants reach the emitter; reject anything else up front,
+    // before any allocation is handed to the caller.
+    if !matches!(
+        data,
+        core_lib::TimeSeriesData::Deterministic(_)
+            | core_lib::TimeSeriesData::Probabilistic(_)
+            | core_lib::TimeSeriesData::Scenarios(_)
+    ) {
+        set_error(format!(
+            "key identifies a {} time series; use the matching read function",
+            data.time_series_type().as_str()
+        ));
+        return INFRASTORE_ERR_INVALID_PARAMETER;
+    }
+    // The association's `ext` / `units` live on the metadata row; the row came
+    // back with the data from the single catalog lookup. Descriptors are
+    // emitted first: they are the only fallible step, and they write nothing on
+    // failure, so no handed-out buffer can be orphaned. After them the emit is
+    // infallible for the forecast variants verified above.
     let code = unsafe {
+        emit_descriptors(
+            meta.ext.as_deref(),
+            meta.element_type,
+            meta.units.as_deref(),
+            out_ext,
+            out_element_type,
+            out_units,
+        )
+    };
+    if code != INFRASTORE_OK {
+        return code;
+    }
+    unsafe {
         *out_matched_type = matched_type;
         emit_forecast_data(
             data,
@@ -4505,26 +4531,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
             out_percentiles,
             out_percentiles_len,
         )
-    };
-    if code == INFRASTORE_OK {
-        if !out_ext.is_null() {
-            unsafe { *out_ext = ext_cstr };
-        }
-        if !out_element_type.is_null() {
-            unsafe { *out_element_type = element_type_cstr };
-        }
-        if !out_units.is_null() {
-            unsafe { *out_units = units_cstr };
-        }
-    } else {
-        // Don't leak the metadata strings when the emit fails after the fetch.
-        for owned in [ext_cstr, element_type_cstr, units_cstr] {
-            if !owned.is_null() {
-                unsafe { drop(std::ffi::CString::from_raw(owned)) };
-            }
-        }
     }
-    code
 }
 
 /// Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,
@@ -4561,7 +4568,8 @@ pub unsafe extern "C" fn infrastore_make_key_from_attrs(
         set_error("out_key pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let mut key = match unsafe {
+    // `build_typed_key_from_attrs` already parses and sets `interval`.
+    let key = match unsafe {
         build_typed_key_from_attrs(
             owner_id,
             owner_category,
@@ -4573,10 +4581,6 @@ pub unsafe extern "C" fn infrastore_make_key_from_attrs(
         )
     } {
         Ok(k) => k,
-        Err(c) => return c,
-    };
-    key.interval = match unsafe { cstr_to_optional_period(interval) } {
-        Ok(i) => i,
         Err(c) => return c,
     };
     let handle = Box::new(InfraStoreKeyHandle { inner: key });
@@ -4632,7 +4636,7 @@ pub unsafe extern "C" fn infrastore_store_get_time_series_keys(
         Ok(k) => k,
         Err(e) => return map_core_error(e),
     };
-    let mut handles: Vec<*mut InfraStoreKeyHandle> = keys
+    let handles: Vec<*mut InfraStoreKeyHandle> = keys
         .into_iter()
         .map(|k| {
             Box::into_raw(Box::new(InfraStoreKeyHandle {
@@ -4640,15 +4644,14 @@ pub unsafe extern "C" fn infrastore_store_get_time_series_keys(
             }))
         })
         .collect();
-    // Keep capacity == length so `infrastore_keys_buffer_free` can reconstruct the Vec.
-    handles.shrink_to_fit();
     let len = handles.len() as u64;
+    // An empty listing is reported as null (no free needed); otherwise the
+    // handed-out allocation is exactly `len` elements (see `vec_into_raw`),
+    // which is what `infrastore_keys_buffer_free` reconstructs.
     let ptr = if handles.is_empty() {
         ptr::null_mut()
     } else {
-        let p = handles.as_mut_ptr();
-        std::mem::forget(handles);
-        p
+        vec_into_raw(handles).0
     };
     unsafe {
         *out_keys = ptr;
@@ -4710,7 +4713,7 @@ fn key_to_map(k: &core_lib::TimeSeriesKey) -> serde_json::Map<String, Value> {
     o.insert(
         "initial_timestamp_ms".into(),
         initial_timestamp
-            .and_then(datetime_to_unix_ms)
+            .map(datetime_to_unix_ms)
             .map(Value::from)
             .unwrap_or(Value::Null),
     );
@@ -4781,7 +4784,7 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
     o.insert(
         "initial_timestamp_ms".into(),
         m.initial_timestamp
-            .and_then(datetime_to_unix_ms)
+            .map(datetime_to_unix_ms)
             .map(Value::from)
             .unwrap_or(Value::Null),
     );
@@ -5418,10 +5421,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
 /// this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_keys_buffer_free(ptr: *mut *mut InfraStoreKeyHandle, len: u64) {
-    if !ptr.is_null() {
-        let len = len as usize;
-        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
-    }
+    unsafe { free_raw_buffer(ptr, len) };
 }
 
 /// Serialize a key's `Features` map to a JSON object string of plain scalar
@@ -5526,10 +5526,7 @@ pub unsafe extern "C" fn infrastore_key_attributes(
 /// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_buffer_free_u64(ptr: *mut u64, len: u64) {
-    if !ptr.is_null() {
-        let len = len as usize;
-        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
-    }
+    unsafe { free_raw_buffer(ptr, len) };
 }
 
 /// True iff a time series of `ts_type` with the given attributes exists.
@@ -6582,10 +6579,7 @@ pub unsafe extern "C" fn infrastore_key_identity_hash(
 /// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_buffer_free_f64(ptr: *mut f64, len: u64) {
-    if !ptr.is_null() {
-        let len = len as usize;
-        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
-    }
+    unsafe { free_raw_buffer(ptr, len) };
 }
 
 /// Free a `u8` buffer returned by `infrastore_store_get_array_by_hash`.
@@ -6596,10 +6590,7 @@ pub unsafe extern "C" fn infrastore_buffer_free_f64(ptr: *mut f64, len: u64) {
 /// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_buffer_free_u8(ptr: *mut u8, len: u64) {
-    if !ptr.is_null() {
-        let len = len as usize;
-        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
-    }
+    unsafe { free_raw_buffer(ptr, len) };
 }
 
 /// Free an `i64` buffer returned by `infrastore_store_get_non_sequential`.
@@ -6610,10 +6601,7 @@ pub unsafe extern "C" fn infrastore_buffer_free_u8(ptr: *mut u8, len: u64) {
 /// have been freed previously and must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn infrastore_buffer_free_i64(ptr: *mut i64, len: u64) {
-    if !ptr.is_null() {
-        let len = len as usize;
-        unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
-    }
+    unsafe { free_raw_buffer(ptr, len) };
 }
 
 // ---- Error message --------------------------------------------------------
@@ -6746,8 +6734,11 @@ fn build_time_range(present: bool, start_ms: i64, end_ms: i64) -> Result<Option<
     Ok(Some((start, end)))
 }
 
-fn datetime_to_unix_ms(dt: DateTime<Utc>) -> Option<i64> {
-    Some(dt.timestamp_millis())
+/// Unix milliseconds for a UTC datetime. Infallible: chrono's `DateTime<Utc>`
+/// range (about ±262,000 years) is far inside what an `i64` of milliseconds
+/// represents, so `timestamp_millis` cannot overflow.
+fn datetime_to_unix_ms(dt: DateTime<Utc>) -> i64 {
+    dt.timestamp_millis()
 }
 
 use chrono::TimeZone;
@@ -6949,15 +6940,8 @@ pub unsafe extern "C" fn infrastore_static_reader_grid(
         set_error("an out pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let initial = match datetime_to_unix_ms(reader.inner.initial_timestamp()) {
-        Some(n) => n,
-        None => {
-            set_error("initial_timestamp out of i64 millisecond range");
-            return INFRASTORE_ERR_INTEGRITY;
-        }
-    };
     unsafe {
-        *out_initial_ms = initial;
+        *out_initial_ms = datetime_to_unix_ms(reader.inner.initial_timestamp());
         *out_resolution = opt_period_cstr(reader.inner.resolution());
         *out_length = reader.inner.length() as u64;
     }
@@ -6996,16 +6980,7 @@ pub unsafe extern "C" fn infrastore_static_reader_timestamps(
         set_error("out_len is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let mut millis = Vec::with_capacity(reader.inner.length());
-    for t in reader.inner.timestamps() {
-        match datetime_to_unix_ms(t) {
-            Some(ms) => millis.push(ms),
-            None => {
-                set_error("a timeline timestamp is out of i64 millisecond range");
-                return INFRASTORE_ERR_INTEGRITY;
-            }
-        }
-    }
+    let millis: Vec<i64> = reader.inner.timestamps().map(datetime_to_unix_ms).collect();
     unsafe { write_i64_slice_out(&millis, buf, cap, out_len) };
     INFRASTORE_OK
 }
@@ -7334,15 +7309,8 @@ pub unsafe extern "C" fn infrastore_forecast_reader_timeline(
         set_error("an out pointer is null");
         return INFRASTORE_ERR_NULL_POINTER;
     }
-    let initial = match datetime_to_unix_ms(reader.inner.initial_timestamp()) {
-        Some(n) => n,
-        None => {
-            set_error("initial_timestamp out of i64 millisecond range");
-            return INFRASTORE_ERR_INTEGRITY;
-        }
-    };
     unsafe {
-        *out_initial_ms = initial;
+        *out_initial_ms = datetime_to_unix_ms(reader.inner.initial_timestamp());
         *out_resolution = period_cstr(reader.inner.resolution());
         *out_interval = period_cstr(reader.inner.interval());
         *out_count = reader.inner.count() as u64;
@@ -8078,6 +8046,97 @@ mod abi_tests {
         );
         assert!(!store.is_null());
         store
+    }
+
+    /// A NonSequentialTimeSeries `ext` far larger than any fixed buffer
+    /// round-trips exactly through `infrastore_store_get_non_sequential`, which
+    /// returns it as an owned string (the earlier caller-sized-buffer form
+    /// invited silent truncation).
+    #[test]
+    fn non_sequential_ext_round_trips_untruncated() {
+        let store = abi_create_in_memory();
+        let long_ext: String = "{\"payload\":\"".to_string() + &"x".repeat(4096) + "\"}";
+
+        let owner_type = CString::new("Gen").unwrap();
+        let name = CString::new("irregular").unwrap();
+        let et = CString::new("f64").unwrap();
+        let ext_c = CString::new(long_ext.clone()).unwrap();
+        let timestamps: Vec<i64> = vec![0, 3_600_000, 10_800_000];
+        let bytes = to_le(&[1.0, 2.0, 3.0]);
+        let dims = [3u64];
+        let mut key: *mut InfraStoreKeyHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_add_non_sequential(
+                    store,
+                    7,
+                    owner_type.as_ptr(),
+                    0,
+                    name.as_ptr(),
+                    timestamps.as_ptr(),
+                    timestamps.len() as u64,
+                    et.as_ptr(),
+                    1,
+                    dims.as_ptr(),
+                    bytes.as_ptr(),
+                    bytes.len() as u64,
+                    ext_c.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut key,
+                )
+            },
+            INFRASTORE_OK
+        );
+
+        let mut ts_ptr: *mut i64 = ptr::null_mut();
+        let mut ts_len = 0u64;
+        let mut dtype = -1i32;
+        let mut shape_ptr: *mut i64 = ptr::null_mut();
+        let mut shape_len = 0u64;
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut data_len = 0u64;
+        let mut ext_out: *mut c_char = ptr::null_mut();
+        let mut units_out: *mut c_char = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_get_non_sequential(
+                    store,
+                    key,
+                    false,
+                    0,
+                    0,
+                    &mut ts_ptr,
+                    &mut ts_len,
+                    &mut dtype,
+                    &mut shape_ptr,
+                    &mut shape_len,
+                    &mut data_ptr,
+                    &mut data_len,
+                    &mut ext_out,
+                    ptr::null_mut(), // skip element_type
+                    &mut units_out,
+                )
+            },
+            INFRASTORE_OK
+        );
+        assert_eq!(ts_len, 3);
+        assert!(!ext_out.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(ext_out) }.to_str().unwrap(),
+            long_ext
+        );
+        // No units were set, so the out-param reports "unset" as null.
+        assert!(units_out.is_null());
+
+        unsafe {
+            infrastore_buffer_free_i64(ts_ptr, ts_len);
+            infrastore_buffer_free_i64(shape_ptr, shape_len);
+            infrastore_buffer_free_u8(data_ptr, data_len);
+            infrastore_string_free(ext_out);
+            infrastore_key_free(key);
+            infrastore_store_free(store);
+        }
     }
 
     // ---- Store lifecycle through the ABI ----------------------------------

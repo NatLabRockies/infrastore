@@ -122,10 +122,9 @@ shape, and raw-byte buffers (free with `infrastore_buffer_free_i64`, `infrastore
 and `infrastore_buffer_free_u8`) plus the dtype code and, in `out_element_type`, the canonical
 element-type string. The shape is the full `[length, *element_shape]` array shape (the first dim is
 time, so callers can recover an N-dimensional per-step element shape). `out_ext` is the optional
-opaque package-owned payload copied into a caller-allocated buffer of `ext_cap` bytes, with the full
-length reported in `out_ext_len` — probe with a NULL/zero-capacity buffer first, then call again
-with a buffer of that length (as `infrastore_store_get_single` documents for its shape and `ext`
-outputs).
+opaque package-owned payload, returned as an owned C string of its full length (NULL when unset;
+free with `infrastore_string_free`) — the same convention as `infrastore_store_get_single`. Earlier
+revisions copied it into a caller-sized buffer, which invited silent truncation.
 
 ```c
 int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
@@ -144,9 +143,9 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     int32_t *out_dtype,
                                     int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                                     uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
-                                    char *out_ext, uint64_t ext_cap,
-                                    uint64_t *out_ext_len,
-                                    char **out_element_type);  /* optional; infrastore_string_free */
+                                    char **out_ext,           /* optional (NULL skips); owned, infrastore_string_free */
+                                    char **out_element_type,  /* optional (NULL skips); owned, same free */
+                                    char **out_units);        /* optional (NULL skips); owned, same free */
 ```
 
 ## Attribute-Based Access

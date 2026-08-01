@@ -87,7 +87,7 @@ function transform_single_time_series!(
     out_interval = Vector{UInt8}(undef, 64)
     out_normalized = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_transform_single_time_series(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         _period_to_iso(horizon)::Cstring,
         _period_to_iso(interval)::Cstring,
         cat::Int32,
@@ -132,7 +132,7 @@ function has_time_series(
     features_json = _features_arg(features)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_typed(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         name::Cstring,
@@ -168,7 +168,7 @@ function remove_time_series!(
     interval_iso = _period_to_cstr(interval)
     features_json = _features_arg(features)
     code = @ccall lib_path().infrastore_store_remove_typed(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         name::Cstring,
@@ -216,7 +216,7 @@ function copy_time_series!(
     features_json = _features_arg(features)
     renamed = new_name === nothing ? C_NULL : new_name
     code = @ccall lib_path().infrastore_store_copy_time_series(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         name::Cstring,
@@ -287,7 +287,7 @@ function _get_forecast_raw(
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast(
-            store.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
             Int64(owner_id)::Int64,
             _category_int(owner_category)::Int32,
             name::Cstring,
@@ -361,50 +361,45 @@ function _decode_forecast_outputs(
     out_element_type,
     out_units,
 )
-    # Copy dims and free FFI buffer.
-    nd = Int(out_ndims[])
-    dims_raw = unsafe_wrap(Array, out_dims[], nd; own=false)
-    dims = Int.(copy(dims_raw))
-    @ccall lib_path().infrastore_buffer_free_u64(
-        out_dims[]::Ptr{UInt64}, out_ndims[]::UInt64
-    )::Cvoid
-
-    # Copy data bytes and free FFI buffer.
-    n_bytes = Int(out_byte_len[])
-    bytes_raw = unsafe_wrap(Array, out_data[], n_bytes; own=false)
-    bytes = copy(bytes_raw)
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_byte_len[]::UInt64
-    )::Cvoid
-
-    # Percentiles (Probabilistic only; null for others).
-    np = Int(out_pct_len[])
-    percentiles = if np > 0 && out_pct[] != C_NULL
-        p = copy(unsafe_wrap(Array, out_pct[], np; own=false))
-        @ccall lib_path().infrastore_buffer_free_f64(
-            out_pct[]::Ptr{Float64}, out_pct_len[]::UInt64
-        )::Cvoid
-        p
-    else
-        Float64[]
+    # Copy everything inside try/finally: every FFI allocation is released
+    # exactly once in the `finally`, so an exception mid-decode cannot leak the
+    # rest.
+    try
+        dims = Int.(unsafe_wrap(Array, out_dims[], Int(out_ndims[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
+        # Percentiles (Probabilistic only; null for others).
+        percentiles = if Int(out_pct_len[]) > 0 && out_pct[] != C_NULL
+            copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
+        else
+            Float64[]
+        end
+        return (
+            initial_timestamp=_from_unix_ms(out_initial[]),
+            resolution=_peek_period(out_res[]),
+            horizon=_peek_period(out_horizon[]),
+            interval=_peek_period(out_interval[]),
+            count=Int(out_count[]),
+            scenario_count=Int(out_scen[]),
+            dims=dims,
+            bytes=bytes,
+            dtype_code=out_dtype[],
+            percentiles=percentiles,
+            matched_type=Int(out_matched[]),
+            ext=_peek_cstr(out_ext[]),
+            element_type=_peek_cstr(out_element_type[]),
+            units=_peek_cstr(out_units[]),
+        )
+    finally
+        _free_u64(out_dims[], out_ndims[])
+        _free_u8(out_data[], out_byte_len[])
+        _free_f64(out_pct[], out_pct_len[])
+        _free_cstr(out_res[])
+        _free_cstr(out_horizon[])
+        _free_cstr(out_interval[])
+        _free_cstr(out_ext[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
     end
-
-    return (
-        initial_timestamp=_from_unix_ms(out_initial[]),
-        resolution=_take_period(out_res[]),
-        horizon=_take_period(out_horizon[]),
-        interval=_take_period(out_interval[]),
-        count=Int(out_count[]),
-        scenario_count=Int(out_scen[]),
-        dims=dims,
-        bytes=bytes,
-        dtype_code=out_dtype[],
-        percentiles=percentiles,
-        matched_type=Int(out_matched[]),
-        ext=_take_cstr(out_ext[]),
-        element_type=_take_cstr(out_element_type[]),
-        units=_take_cstr(out_units[]),
-    )
 end
 
 # Key-based counterpart of `_get_forecast_raw`: reads via the key handle
@@ -438,8 +433,8 @@ function _get_forecast_raw(
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast_by_key(
-            store.handle::Ptr{Cvoid},
-            key.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
+            key::Ptr{Cvoid},
             time_range_present::Bool,
             range_start_ms::Int64,
             range_end_ms::Int64,

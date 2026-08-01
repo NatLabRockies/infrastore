@@ -26,11 +26,14 @@ end
 
 function _finalize_batch(b::AddBatch)
     if b.handle != C_NULL
-        @ccall lib_path().infrastore_batch_free(b.handle::Ptr{Cvoid})::Cvoid
+        @ccall lib_path().infrastore_batch_free(b::Ptr{Cvoid})::Cvoid
         b.handle = C_NULL
     end
     return nothing
 end
+
+# Root the batch for the duration of a ccall (see the note in store.jl).
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, b::AddBatch) = b.handle
 
 Base.length(b::AddBatch) = b.count
 
@@ -51,7 +54,7 @@ function add_time_series!(
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = @ccall lib_path().infrastore_batch_add_single(
-        batch.handle::Ptr{Cvoid},
+        batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
         _category_int(owner_category)::Int32,
@@ -88,7 +91,7 @@ function add_time_series!(
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = @ccall lib_path().infrastore_batch_add_non_sequential(
-        batch.handle::Ptr{Cvoid},
+        batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
         _category_int(owner_category)::Int32,
@@ -193,7 +196,7 @@ function _batch_add_dense_forecast!(
     dims = UInt64[size(data)...]
     bytes = _row_major_bytes(data)
     code = @ccall lib_path().infrastore_batch_add_forecast(
-        batch.handle::Ptr{Cvoid},
+        batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
         _category_int(owner_category)::Int32,
@@ -233,7 +236,7 @@ function add_time_series!(
     dims = UInt64[size(ts.data)...]
     bytes = _row_major_bytes(ts.data)
     code = @ccall lib_path().infrastore_batch_add_probabilistic(
-        batch.handle::Ptr{Cvoid},
+        batch::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         owner_type::Cstring,
         _category_int(owner_category)::Int32,
@@ -270,8 +273,8 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_add_batch(
-        store.handle::Ptr{Cvoid},
-        batch.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
+        batch::Ptr{Cvoid},
         out_keys::Ref{Ptr{Ptr{Cvoid}}},
         out_len::Ref{UInt64},
     )::Int32
@@ -282,13 +285,16 @@ function add_time_series_bulk!(store::Store, batch::AddBatch)
     if n > 0
         # Copy each owned handle into a finalized wrapper, then free the array
         # buffer (the wrappers own the handles and free them via infrastore_key_free).
-        raw = unsafe_wrap(Array, out_keys[], n; own=false)
-        for i in 1:n
-            keys[i] = TimeSeriesKey(raw[i])
+        try
+            raw = unsafe_wrap(Array, out_keys[], n; own=false)
+            for i in 1:n
+                keys[i] = TimeSeriesKey(raw[i])
+            end
+        finally
+            @ccall lib_path().infrastore_keys_buffer_free(
+                out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
+            )::Cvoid
         end
-        @ccall lib_path().infrastore_keys_buffer_free(
-            out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
-        )::Cvoid
     end
     return keys
 end

@@ -115,6 +115,20 @@ end
     @test got_attr.ext == "LinearFunctionData"
 end
 
+@testset "non-sequential ext round-trips untruncated at any length" begin
+    # Regression: the reader once copied `ext` into a fixed 256-byte buffer,
+    # silently truncating longer payloads (and appending a stray NUL). A JSON
+    # ext payload comfortably exceeds that.
+    store = Store(in_memory=true)
+    timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 2)]
+    long_ext = "{\"payload\":\"" * "x"^4096 * "\"}"
+    series = NonSequentialTimeSeries(timestamps, Float64[1.0, 2.0], "big-ext"; ext=long_ext)
+    key = add_time_series!(store, 11, "Generator", Component, series)
+    got = get_time_series(NonSequentialTimeSeries, store, key)
+    @test got.ext == long_ext
+    @test length(got.ext) == length(long_ext)
+end
+
 @testset "attribute-based metadata + hash access" begin
     store = Store(in_memory=true)
     initial = DateTime(2024, 1, 1)

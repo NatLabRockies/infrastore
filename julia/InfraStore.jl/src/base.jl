@@ -13,7 +13,7 @@ function Base.:(==)(a::TimeSeriesKey, b::TimeSeriesKey)
     out = Ref{Bool}(false)
     _check(
         @ccall lib_path().infrastore_key_eq(
-            a.handle::Ptr{Cvoid}, b.handle::Ptr{Cvoid}, out::Ref{Bool}
+            a::Ptr{Cvoid}, b::Ptr{Cvoid}, out::Ref{Bool}
         )::Int32
     )
     return out[]
@@ -23,7 +23,7 @@ function Base.hash(k::TimeSeriesKey, h::UInt)
     out = Ref{UInt64}(0)
     _check(
         @ccall lib_path().infrastore_key_identity_hash(
-            k.handle::Ptr{Cvoid}, out::Ref{UInt64}
+            k::Ptr{Cvoid}, out::Ref{UInt64}
         )::Int32
     )
     return hash(out[], h)

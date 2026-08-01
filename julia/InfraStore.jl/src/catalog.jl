@@ -55,7 +55,7 @@ function get_time_series_keys(
     out_keys = Ref{Ptr{Ptr{Cvoid}}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_get_time_series_keys(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         out_keys::Ref{Ptr{Ptr{Cvoid}}},
@@ -67,13 +67,16 @@ function get_time_series_keys(
     if n > 0
         # Copy each owned handle into a finalized wrapper, then free the array
         # buffer (the wrappers own the handles and free them via infrastore_key_free).
-        raw = unsafe_wrap(Array, out_keys[], n; own=false)
-        for i in 1:n
-            keys[i] = TimeSeriesKey(raw[i])
+        try
+            raw = unsafe_wrap(Array, out_keys[], n; own=false)
+            for i in 1:n
+                keys[i] = TimeSeriesKey(raw[i])
+            end
+        finally
+            @ccall lib_path().infrastore_keys_buffer_free(
+                out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
+            )::Cvoid
         end
-        @ccall lib_path().infrastore_keys_buffer_free(
-            out_keys[]::Ptr{Ptr{Cvoid}}, out_len[]::UInt64
-        )::Cvoid
     end
     return keys
 end
@@ -257,7 +260,7 @@ function _filter_list_json(
     )
     return _owned_str(
         (out_json, out_len) -> @ccall $fptr(
-            store.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
             has_owner::Bool,
             owner_arg::Int64,
             has_category::Bool,
@@ -354,7 +357,7 @@ function remove_by_filter!(
     )
     out_removed = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_remove_by_filter(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         has_owner::Bool,
         owner_arg::Int64,
         has_category::Bool,
@@ -411,7 +414,7 @@ function key_info(key::TimeSeriesKey)
     # Probe the string lengths (type, resolution, owner id, and owner category are
     # filled on this call too).
     code = @ccall lib_path().infrastore_key_attributes(
-        key.handle::Ptr{Cvoid},
+        key::Ptr{Cvoid},
         out_type::Ref{Int32},
         out_res::Ref{Ptr{Cchar}},
         out_owner::Ref{Int64},
@@ -430,7 +433,7 @@ function key_info(key::TimeSeriesKey)
     name_buf = Vector{UInt8}(undef, Int(name_len[]) + 1)
     feat_buf = Vector{UInt8}(undef, Int(feat_len[]) + 1)
     code = @ccall lib_path().infrastore_key_attributes(
-        key.handle::Ptr{Cvoid},
+        key::Ptr{Cvoid},
         out_type::Ref{Int32},
         out_res::Ref{Ptr{Cchar}},
         out_owner::Ref{Int64},
@@ -526,7 +529,7 @@ end
 
 function remove_time_series!(store::Store, key::TimeSeriesKey)
     code = @ccall lib_path().infrastore_store_remove(
-        store.handle::Ptr{Cvoid}, key.handle::Ptr{Cvoid}
+        store::Ptr{Cvoid}, key::Ptr{Cvoid}
     )::Int32
     _check(code)
     return nothing
@@ -543,7 +546,7 @@ function remove_time_series!(store::Store, keys::Vector{TimeSeriesKey})
     handles = Ptr{Cvoid}[k.handle for k in keys]
     out_removed = Ref{UInt64}(0)
     code = GC.@preserve keys @ccall lib_path().infrastore_store_remove_bulk(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         handles::Ptr{Ptr{Cvoid}},
         UInt64(length(handles))::UInt64,
         out_removed::Ref{UInt64},
@@ -555,7 +558,7 @@ end
 function has_time_series(store::Store, key::TimeSeriesKey)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has(
-        store.handle::Ptr{Cvoid}, key.handle::Ptr{Cvoid}, out::Ref{Bool}
+        store::Ptr{Cvoid}, key::Ptr{Cvoid}, out::Ref{Bool}
     )::Int32
     _check(code)
     return out[]
@@ -591,7 +594,7 @@ function has_any_time_series(
     )
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_any_by_filter(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         has_owner::Bool,
         owner_arg::Int64,
         has_category::Bool,
@@ -618,7 +621,7 @@ function get_counts(store::Store)
     b = Ref{Int64}(0);
     c = Ref{Int64}(0)
     code = @ccall lib_path().infrastore_store_counts(
-        store.handle::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}
+        store::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}
     )::Int32
     _check(code)
     return TimeSeriesCounts(Int(a[]), Int(b[]), Int(c[]))
@@ -634,7 +637,7 @@ catalog query in the core.
 function counts_by_type(store::Store)
     json = _probe(
         (buf, cap, out_len) -> @ccall lib_path().infrastore_store_counts_by_type(
-            store.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,
             out_len::Ref{UInt64},
@@ -656,7 +659,7 @@ Number of distinct stored arrays (content hashes); series that share an array
 function num_distinct_arrays(store::Store)
     out = Ref{Int64}(0)
     code = @ccall lib_path().infrastore_store_num_distinct_arrays(
-        store.handle::Ptr{Cvoid}, out::Ref{Int64}
+        store::Ptr{Cvoid}, out::Ref{Int64}
     )::Int32
     _check(code)
     return Int(out[])
@@ -674,7 +677,7 @@ function time_series_counts(store::Store)
     c = Ref{Int64}(0);
     d = Ref{Int64}(0)
     code = @ccall lib_path().infrastore_store_counts_detailed(
-        store.handle::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}, d::Ref{Int64}
+        store::Ptr{Cvoid}, a::Ref{Int64}, b::Ref{Int64}, c::Ref{Int64}, d::Ref{Int64}
     )::Int32
     _check(code)
     return TimeSeriesCountsDetailed(Int(a[]), Int(b[]), Int(c[]), Int(d[]))
@@ -699,7 +702,7 @@ function list_owner_ids(
     cat = _category_int(owner_category)
     json = _probe(
         (buf, cap, out_len) -> @ccall lib_path().infrastore_store_list_owner_ids(
-            store.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
             cat::Int32,
             has_type::Bool,
             type_arg::Int32,
@@ -752,7 +755,7 @@ presentation table (e.g. a DataFrame).
 function static_summary(store::Store)
     json = _probe(
         (buf, cap, out_len) -> @ccall lib_path().infrastore_store_static_summary(
-            store.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,
             out_len::Ref{UInt64},
@@ -771,7 +774,7 @@ window_count)` with `count` = the number of associations in the group.
 function forecast_summary(store::Store)
     json = _probe(
         (buf, cap, out_len) -> @ccall lib_path().infrastore_store_forecast_summary(
-            store.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,
             out_len::Ref{UInt64},
