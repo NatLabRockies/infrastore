@@ -3244,7 +3244,7 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
     let items = std::mem::take(&mut batch.items);
     match store.inner.add_time_series_bulk(items) {
         Ok(keys) => {
-            let mut handles: Vec<*mut InfraStoreKeyHandle> = keys
+            let handles: Vec<*mut InfraStoreKeyHandle> = keys
                 .into_iter()
                 .map(|k| {
                     Box::into_raw(Box::new(InfraStoreKeyHandle {
@@ -3252,15 +3252,15 @@ pub unsafe extern "C" fn infrastore_store_add_batch(
                     }))
                 })
                 .collect();
-            // Keep capacity == length so `infrastore_keys_buffer_free` can reconstruct the Vec.
-            handles.shrink_to_fit();
             let len = handles.len() as u64;
+            // An empty batch is reported as null (no free needed); otherwise the
+            // handed-out allocation is exactly `len` elements (see
+            // `vec_into_raw`), which is what `infrastore_keys_buffer_free`
+            // reconstructs.
             let ptr = if handles.is_empty() {
                 ptr::null_mut()
             } else {
-                let p = handles.as_mut_ptr();
-                std::mem::forget(handles);
-                p
+                vec_into_raw(handles).0
             };
             unsafe {
                 *out_keys = ptr;
