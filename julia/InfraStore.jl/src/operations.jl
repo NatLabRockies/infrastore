@@ -96,12 +96,38 @@ function _take_period(ptr::Ptr{Cchar})
     return (s=_take_cstr(ptr); s === nothing ? nothing : _iso_to_period(s))
 end
 
-# Decode a probe-then-fetch caller buffer (`buf`, byte length `len`) written by a
-# `write_str_out`-style FFI out-param. An empty string means the field is unset,
-# returned as `nothing`.
-function _take_buffer_string(buf::Vector{UInt8}, len::Integer)
-    n = min(Int(len), length(buf))
-    return n == 0 ? nothing : String(buf[1:n])
+# Read an owned C string WITHOUT freeing it (`nothing` for null). For the
+# multi-buffer decode paths, which release every FFI allocation in a single
+# `finally` block so that an exception mid-decode cannot leak the rest.
+_peek_cstr(ptr::Ptr{Cchar}) = ptr == C_NULL ? nothing : unsafe_string(ptr)
+
+# `_peek_cstr` + ISO-8601 parse; `nothing` if null. The pointer is still owned
+# by the caller's `finally` block.
+function _peek_period(ptr::Ptr{Cchar})
+    return (s=_peek_cstr(ptr); s === nothing ? nothing : _iso_to_period(s))
+end
+
+# Null-tolerant frees for FFI-owned allocations, used from `finally` blocks.
+function _free_cstr(ptr::Ptr{Cchar})
+    @ccall lib_path().infrastore_string_free(ptr::Ptr{Cchar})::Cvoid
+end
+function _free_i64(ptr::Ptr{Int64}, len::Integer)
+    @ccall lib_path().infrastore_buffer_free_i64(
+        ptr::Ptr{Int64}, UInt64(len)::UInt64
+    )::Cvoid
+end
+function _free_u8(ptr::Ptr{UInt8}, len::Integer)
+    @ccall lib_path().infrastore_buffer_free_u8(ptr::Ptr{UInt8}, UInt64(len)::UInt64)::Cvoid
+end
+function _free_u64(ptr::Ptr{UInt64}, len::Integer)
+    @ccall lib_path().infrastore_buffer_free_u64(
+        ptr::Ptr{UInt64}, UInt64(len)::UInt64
+    )::Cvoid
+end
+function _free_f64(ptr::Ptr{Float64}, len::Integer)
+    @ccall lib_path().infrastore_buffer_free_f64(
+        ptr::Ptr{Float64}, UInt64(len)::UInt64
+    )::Cvoid
 end
 
 # The concrete time series types `add_time_series!` accepts (a
@@ -174,8 +200,8 @@ get_metadata(Scenarios, store, 42, Component, "wind"; resolution=Hour(1))
 function get_metadata(store::Store, key::TimeSeriesKey)
     json = _probe(
         (buf, cap, out_len) -> @ccall lib_path().infrastore_store_get_metadata_by_key(
-            store.handle::Ptr{Cvoid},
-            key.handle::Ptr{Cvoid},
+            store::Ptr{Cvoid},
+            key::Ptr{Cvoid},
             buf::Ptr{UInt8},
             cap::UInt64,
             out_len::Ref{UInt64},
@@ -251,8 +277,8 @@ Rename the series identified by `key` to `new_name`, returning the renamed key
 function rename_time_series!(store::Store, key::TimeSeriesKey, new_name::AbstractString)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_rename(
-        store.handle::Ptr{Cvoid},
-        key.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
+        key::Ptr{Cvoid},
         String(new_name)::Cstring,
         out_key::Ref{Ptr{Cvoid}},
     )::Int32
@@ -295,7 +321,7 @@ function get_time_series_key(
     features_json = isempty(features) ? C_NULL : JSON.json(features)
     out_key = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_resolve_forecast_key(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         name::Cstring,
@@ -324,19 +350,18 @@ function get_array_by_hash(
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_len = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_get_array_by_hash(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         data_hash::Ptr{UInt8},
         out_dtype::Ref{Int32},
         out_data::Ref{Ptr{UInt8}},
         out_len::Ref{UInt64},
     )::Int32
     _check(code)
-    nbytes = Int(out_len[])
-    raw = unsafe_wrap(Array, out_data[], nbytes; own=false)
-    bytes = copy(raw)
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_len[]::UInt64
-    )::Cvoid
+    bytes = try
+        copy(unsafe_wrap(Array, out_data[], Int(out_len[]); own=false))
+    finally
+        _free_u8(out_data[], out_len[])
+    end
     return collect(reinterpret(T, bytes))
 end
 
@@ -355,7 +380,7 @@ function count_array_references(store::Store, data_hash::Vector{UInt8})
     out_sts = Ref{UInt64}(0)
     out_dst = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_count_array_references(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         data_hash::Ptr{UInt8},
         out_sts::Ref{UInt64},
         out_dst::Ref{UInt64},
@@ -396,7 +421,7 @@ function has_time_series(
     features_json = isempty(features) ? C_NULL : JSON.json(features)
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_by_attrs(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         name::Cstring,
@@ -425,7 +450,7 @@ function has_for_owner(
     out = Ref{Bool}(false)
     use_type = time_series_type !== nothing
     code = @ccall lib_path().infrastore_store_has_for_owner(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         (use_type ? _filter_type_code(time_series_type) : Int32(0))::Int32,
@@ -453,7 +478,7 @@ function remove_time_series!(
     resolution_iso = _period_to_cstr(resolution)
     features_json = isempty(features) ? C_NULL : JSON.json(features)
     code = @ccall lib_path().infrastore_store_remove_by_attrs(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         Int64(owner_id)::Int64,
         _category_int(owner_category)::Int32,
         name::Cstring,
@@ -481,8 +506,8 @@ function get_time_series(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_single(
-        store.handle::Ptr{Cvoid},
-        key.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
+        key::Ptr{Cvoid},
         tr_present::Bool,
         tr_start::Int64,
         tr_end::Int64,
@@ -499,26 +524,30 @@ function get_time_series(
     )::Int32
     _check(code)
 
-    # Full array shape [length, *element_shape] (row-major dims), then bytes.
-    dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    @ccall lib_path().infrastore_buffer_free_i64(
-        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
-    )::Cvoid
-    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
-    )::Cvoid
-
-    data = _decode_array(bytes, out_dtype[], dims)
-    initial = _from_unix_ms(out_initial[])
-    resolution = _take_period(out_resolution[])
-    ext = _take_cstr(out_ext[])
-    element_type = _take_cstr(out_element_type[])
-    units = _take_cstr(out_units[])
-    return SingleTimeSeries(
-        initial, resolution, data, _key_name(key);
-        ext=ext, element_type=element_type, units=units,
-    )
+    # Decode inside try/finally: every FFI allocation is released exactly once
+    # in the `finally`, so an exception mid-decode cannot leak the rest.
+    try
+        # Full array shape [length, *element_shape] (row-major dims), then bytes.
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        data = _decode_array(bytes, out_dtype[], dims)
+        return SingleTimeSeries(
+            _from_unix_ms(out_initial[]),
+            _peek_period(out_resolution[]),
+            data,
+            _key_name(key);
+            ext=_peek_cstr(out_ext[]),
+            element_type=_peek_cstr(out_element_type[]),
+            units=_peek_cstr(out_units[]),
+        )
+    finally
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+        _free_cstr(out_resolution[])
+        _free_cstr(out_ext[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
+    end
 end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot. Like the other
@@ -552,21 +581,24 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
             out_units::Ref{Ptr{Cchar}},
         )::Int32
     )
-    dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    @ccall lib_path().infrastore_buffer_free_i64(
-        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
-    )::Cvoid
-    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
-    )::Cvoid
-    data = _decode_array(bytes, out_dtype[], dims)
-    return SingleTimeSeries(
-        _from_unix_ms(out_initial[]), _take_period(out_resolution[]), data, name;
-        ext=_take_cstr(out_ext[]),
-        element_type=_take_cstr(out_element_type[]),
-        units=_take_cstr(out_units[]),
-    )
+    try
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        data = _decode_array(bytes, out_dtype[], dims)
+        return SingleTimeSeries(
+            _from_unix_ms(out_initial[]), _peek_period(out_resolution[]), data, name;
+            ext=_peek_cstr(out_ext[]),
+            element_type=_peek_cstr(out_element_type[]),
+            units=_peek_cstr(out_units[]),
+        )
+    finally
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+        _free_cstr(out_resolution[])
+        _free_cstr(out_ext[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
+    end
 end
 
 # Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (carrying
@@ -598,25 +630,25 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
             out_units::Ref{Ptr{Cchar}},
         )::Int32
     )
-    ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
-    @ccall lib_path().infrastore_buffer_free_i64(
-        out_ts[]::Ptr{Int64}, out_ts_len[]::UInt64
-    )::Cvoid
-    dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    @ccall lib_path().infrastore_buffer_free_i64(
-        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
-    )::Cvoid
-    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
-    )::Cvoid
-    data = _decode_array(bytes, out_dtype[], dims)
-    return NonSequentialTimeSeries(
-        _from_unix_ms.(ts_ms), data, name;
-        ext=_take_cstr(out_ext[]),
-        element_type=_take_cstr(out_element_type[]),
-        units=_take_cstr(out_units[]),
-    )
+    try
+        ts_ms = copy(unsafe_wrap(Array, out_ts[], Int(out_ts_len[]); own=false))
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        data = _decode_array(bytes, out_dtype[], dims)
+        return NonSequentialTimeSeries(
+            _from_unix_ms.(ts_ms), data, name;
+            ext=_peek_cstr(out_ext[]),
+            element_type=_peek_cstr(out_element_type[]),
+            units=_peek_cstr(out_units[]),
+        )
+    finally
+        _free_i64(out_ts[], out_ts_len[])
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+        _free_cstr(out_ext[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
+    end
 end
 
 # Reconstruct one forecast (Deterministic / Probabilistic / Scenarios) from a
@@ -663,33 +695,36 @@ function _bulk_forecast(
             out_units::Ref{Ptr{Cchar}},
         )::Int32
     )
-    nd = Int(out_ndims[])
-    dims = Int.(copy(unsafe_wrap(Array, out_dims[], nd; own=false)))
-    @ccall lib_path().infrastore_buffer_free_u64(
-        out_dims[]::Ptr{UInt64}, out_ndims[]::UInt64
-    )::Cvoid
-    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_byte_len[]::UInt64
-    )::Cvoid
-    percentiles = if Int(out_pct_len[]) > 0 && out_pct[] != C_NULL
-        p = copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
-        @ccall lib_path().infrastore_buffer_free_f64(
-            out_pct[]::Ptr{Float64}, out_pct_len[]::UInt64
-        )::Cvoid
-        p
-    else
-        Float64[]
+    local data, initial, resolution, horizon, interval, count, percentiles
+    local ext, element_type, units
+    try
+        dims = Int.(unsafe_wrap(Array, out_dims[], Int(out_ndims[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
+        percentiles = if Int(out_pct_len[]) > 0 && out_pct[] != C_NULL
+            copy(unsafe_wrap(Array, out_pct[], Int(out_pct_len[]); own=false))
+        else
+            Float64[]
+        end
+        data = _decode_array(bytes, out_dtype[], dims)
+        initial = _from_unix_ms(out_initial[])
+        resolution = _peek_period(out_res[])
+        horizon = _peek_period(out_horizon[])
+        interval = _peek_period(out_interval[])
+        count = Int(out_count[])
+        ext = _peek_cstr(out_ext[])
+        element_type = _peek_cstr(out_element_type[])
+        units = _peek_cstr(out_units[])
+    finally
+        _free_u64(out_dims[], out_ndims[])
+        _free_u8(out_data[], out_byte_len[])
+        _free_f64(out_pct[], out_pct_len[])
+        _free_cstr(out_res[])
+        _free_cstr(out_horizon[])
+        _free_cstr(out_interval[])
+        _free_cstr(out_ext[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
     end
-    data = _decode_array(bytes, out_dtype[], dims)
-    initial = _from_unix_ms(out_initial[]);
-    resolution = _take_period(out_res[])
-    horizon = _take_period(out_horizon[]);
-    interval = _take_period(out_interval[])
-    count = Int(out_count[])
-    ext = _take_cstr(out_ext[])
-    element_type = _take_cstr(out_element_type[])
-    units = _take_cstr(out_units[])
     if type_code == INFRASTORE_TYPE_PROBABILISTIC
         return Probabilistic(
             initial, resolution, horizon, interval, count, percentiles, data, name;
@@ -730,7 +765,7 @@ function bulk_read(
     out_result = Ref{Ptr{Cvoid}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = GC.@preserve keys key_handles @ccall lib_path().infrastore_store_bulk_read(
-        store.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
         key_handles::Ptr{Ptr{Cvoid}},
         UInt64(n)::UInt64,
         tr_present::Bool,
@@ -777,14 +812,16 @@ function get_time_series(
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
-    lt_buf = Vector{UInt8}(undef, 256)
-    out_lt_len = Ref{UInt64}(0)
+    # `ext` comes back as an owned C string of its full length, like every other
+    # getter. (An earlier revision copied it into a fixed 256-byte buffer, which
+    # silently truncated any longer payload.)
+    out_ext = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_non_sequential(
-        store.handle::Ptr{Cvoid},
-        key.handle::Ptr{Cvoid},
+        store::Ptr{Cvoid},
+        key::Ptr{Cvoid},
         tr_present::Bool,
         tr_start::Int64,
         tr_end::Int64,
@@ -795,37 +832,32 @@ function get_time_series(
         out_shape_len::Ref{UInt64},
         out_data::Ref{Ptr{UInt8}},
         out_data_len::Ref{UInt64},
-        lt_buf::Ptr{UInt8},
-        UInt64(length(lt_buf))::UInt64,
-        out_lt_len::Ref{UInt64},
+        out_ext::Ref{Ptr{Cchar}},
         out_element_type::Ref{Ptr{Cchar}},
         out_units::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
-    timestamp_ms = copy(
-        unsafe_wrap(Array, out_timestamps[], Int(out_timestamps_len[]); own=false)
-    )
-    @ccall lib_path().infrastore_buffer_free_i64(
-        out_timestamps[]::Ptr{Int64}, out_timestamps_len[]::UInt64
-    )::Cvoid
-    # Full array shape [length, *element_shape] (row-major dims), then bytes.
-    dims = Int.(copy(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false)))
-    @ccall lib_path().infrastore_buffer_free_i64(
-        out_shape[]::Ptr{Int64}, out_shape_len[]::UInt64
-    )::Cvoid
-    bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
-    @ccall lib_path().infrastore_buffer_free_u8(
-        out_data[]::Ptr{UInt8}, out_data_len[]::UInt64
-    )::Cvoid
-    data = _decode_array(bytes, out_dtype[], dims)
-    n = min(Int(out_lt_len[]), length(lt_buf))
-    ext = n == 0 ? nothing : String(lt_buf[1:n])
-    element_type = _take_cstr(out_element_type[])
-    units = _take_cstr(out_units[])
-    name = _key_name(key)
-    return NonSequentialTimeSeries(
-        _from_unix_ms.(timestamp_ms), data, name;
-        ext=ext, element_type=element_type, units=units,
-    )
+    try
+        timestamp_ms = copy(
+            unsafe_wrap(Array, out_timestamps[], Int(out_timestamps_len[]); own=false)
+        )
+        # Full array shape [length, *element_shape] (row-major dims), then bytes.
+        dims = Int.(unsafe_wrap(Array, out_shape[], Int(out_shape_len[]); own=false))
+        bytes = copy(unsafe_wrap(Array, out_data[], Int(out_data_len[]); own=false))
+        data = _decode_array(bytes, out_dtype[], dims)
+        return NonSequentialTimeSeries(
+            _from_unix_ms.(timestamp_ms), data, _key_name(key);
+            ext=_peek_cstr(out_ext[]),
+            element_type=_peek_cstr(out_element_type[]),
+            units=_peek_cstr(out_units[]),
+        )
+    finally
+        _free_i64(out_timestamps[], out_timestamps_len[])
+        _free_i64(out_shape[], out_shape_len[])
+        _free_u8(out_data[], out_data_len[])
+        _free_cstr(out_ext[])
+        _free_cstr(out_element_type[])
+        _free_cstr(out_units[])
+    end
 end

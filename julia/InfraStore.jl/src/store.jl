@@ -11,7 +11,7 @@ end
 
 function _finalize_key(k::TimeSeriesKey)
     if k.handle != C_NULL
-        @ccall lib_path().infrastore_key_free(k.handle::Ptr{Cvoid})::Cvoid
+        @ccall lib_path().infrastore_key_free(k::Ptr{Cvoid})::Cvoid
         k.handle = C_NULL
     end
 end
@@ -29,10 +29,19 @@ end
 
 function close!(s::Store)
     if s.handle != C_NULL
-        @ccall lib_path().infrastore_store_free(s.handle::Ptr{Cvoid})::Cvoid
+        @ccall lib_path().infrastore_store_free(s::Ptr{Cvoid})::Cvoid
         s.handle = C_NULL
     end
 end
+
+# Root the wrapper for the duration of a ccall. Passing the object itself (with
+# a declared C type of `Ptr{Cvoid}`) routes through `unsafe_convert`, and the
+# ccall machinery keeps the object — and therefore its Rust handle — alive until
+# the foreign call returns. Passing `x.handle` would extract the bare pointer
+# without rooting `x`, so a GC after the object's last syntactic use could run
+# its finalizer (freeing the handle) while the call is still using it.
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, k::TimeSeriesKey) = k.handle
+Base.unsafe_convert(::Type{Ptr{Cvoid}}, s::Store) = s.handle
 
 """
     Store(; in_memory=true, path=nothing,
@@ -45,6 +54,15 @@ HDF5 file on disk.
 `:deflate` (default) applies DEFLATE at `compression_level` (0–9) with optional
 byte `shuffle`; `:none` disables compression. The setting is ignored for
 in-memory stores and is persisted so later appends reuse it.
+
+!!! warning "Not thread-safe"
+    A `Store` (and any reader built from it) must not be used from two tasks or
+    threads concurrently: the Rust core mutates the handle without
+    synchronization, so concurrent calls are undefined behavior, not just a
+    race on results. Confine a store to one task, or guard every call with your
+    own lock. Per-call locking inside this package would not make interleaved
+    logical operations (e.g. two tasks sharing one transaction) correct, so it
+    deliberately provides none.
 """
 function Store(;
     in_memory::Bool=true,
@@ -143,7 +161,7 @@ a transaction to the span that actually needs atomicity.
 function begin_transaction!(store::Store)
     _check(
         @ccall lib_path().infrastore_store_begin_transaction(
-            store.handle::Ptr{Cvoid}
+            store::Ptr{Cvoid}
         )::Int32
     )
     return nothing
@@ -158,7 +176,7 @@ whole span durable. Errors if no transaction is open.
 function commit_transaction!(store::Store)
     _check(
         @ccall lib_path().infrastore_store_commit_transaction(
-            store.handle::Ptr{Cvoid}
+            store::Ptr{Cvoid}
         )::Int32
     )
     return nothing
@@ -173,7 +191,7 @@ Errors if no transaction is open.
 function rollback_transaction!(store::Store)
     _check(
         @ccall lib_path().infrastore_store_rollback_transaction(
-            store.handle::Ptr{Cvoid}
+            store::Ptr{Cvoid}
         )::Int32
     )
     return nothing
@@ -188,7 +206,7 @@ function in_transaction(store::Store)
     out = Ref{Bool}(false)
     _check(
         @ccall lib_path().infrastore_store_in_transaction(
-            store.handle::Ptr{Cvoid}, out::Ref{Bool}
+            store::Ptr{Cvoid}, out::Ref{Bool}
         )::Int32
     )
     return out[]

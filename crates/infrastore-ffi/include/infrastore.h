@@ -284,9 +284,13 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
  *
  * `out_shape` returns the full array shape `[length, *element_shape]` (so callers can recover an
  * N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
- * and `out_data` carry the row-major element bytes. `out_ext` is the association's opaque
- * extension payload, copied into a caller-allocated buffer of `ext_cap` bytes; the full length is
- * reported in `out_ext_len` so the caller can probe with a null/zero-capacity buffer first.
+ * and `out_data` carry the row-major element bytes.
+ *
+ * `out_ext`, when non-null, receives the association's opaque extension payload
+ * from the metadata row: null when the series carries no `ext`, otherwise an
+ * owned C string the caller must free with `infrastore_string_free` — the same
+ * convention as `infrastore_store_get_single`. (Earlier revisions copied it into a
+ * caller-sized buffer, which invited silent truncation.)
  *
  * `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
  * string the caller must free with `infrastore_string_free`. It is what says how to read the
@@ -301,9 +305,11 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
  *
  * # Safety
  *
- * `handle` and `key` must be live handles created by this library. Every output pointer must be
- * valid for writing its indicated value. Returned buffers must each be released exactly once with
- * the matching free function and returned length.
+ * `handle` and `key` must be live handles created by this library. Every output pointer except
+ * `out_ext`, `out_element_type`, and `out_units` must be valid for writing its indicated value;
+ * those three may be null to skip them. Returned buffers must each be released exactly once with
+ * the matching free function and returned length, and a non-null `*out_ext` /
+ * `*out_element_type` / `*out_units` exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
                                             const struct InfraStoreKey *key,
@@ -317,9 +323,7 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
                                             uint64_t *out_shape_len,
                                             uint8_t **out_data,
                                             uint64_t *out_data_byte_len,
-                                            char *out_ext,
-                                            uint64_t ext_cap,
-                                            uint64_t *out_ext_len,
+                                            char **out_ext,
                                             char **out_element_type,
                                             char **out_units);
 
