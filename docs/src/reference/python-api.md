@@ -37,12 +37,16 @@ def create(
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
     catalog: str | None = None,     # "attached" or "memory"; None matches the backend
+    overwrite: bool = False,        # discard an artifact already at `path`
 ) -> Store: ...
 
 @classmethod
 def open(
     cls, path: str, read_only: bool = False, catalog: str = "attached"
 ) -> Store: ...
+
+@classmethod
+def open_copy(cls, src: str, dest: str, catalog: str = "attached") -> Store: ...
 ```
 
 - `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
@@ -57,9 +61,20 @@ def open(
   `in_memory=True`, else `"attached"` — so existing call sites are unchanged. An unknown `catalog`
   raises `InvalidParameterError`. See
   [Where the Catalog Lives](../explanation/storage-model.md#where-the-catalog-lives).
+- `create(path=...)` raises `StoreExistsError` if `path` or `path + ".sqlite"` already holds a
+  store. Creating there would discard the arrays while keeping the catalog, leaving a store that
+  reopens cleanly with every array missing — see
+  [protecting a saved artifact](../explanation/storage-model.md#protecting-a-saved-artifact).
+  `overwrite=True` discards both halves on purpose; it is rejected for `in_memory=True`, which has
+  no artifact to replace.
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
 - `open(path, catalog="memory")` — loads the catalog into RAM; the HDF5 half is still opened in
   place. `store.catalog` reports the mode.
+- `open_copy(src, dest)` — copies both halves to `dest` and opens the copy read-write, leaving `src`
+  untouched. **This is the safe way to load a store you intend to change.** `open()` defaults to
+  read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+  so an interrupted write is unrecoverable. Change the copy and `persist_to(src)` — one atomic
+  rename replaces the original. Raises `StoreExistsError` if `dest` already holds a store.
 
 The store is also a context manager: `with Store.create(...) as store:` closes it on exit.
 `store.close()` drops the underlying handle and releases its files; subsequent operations raise
@@ -172,6 +187,12 @@ def compact(self) -> dict: ...
 def verify_integrity(self) -> dict: ...
 # {"ok": bool, "errors": list[str]}
 def flush(self) -> None: ...
+def persist_to(self, path: str) -> None: ...
+def persist_catalog(self) -> None: ...
+# Writes an in-memory catalog to this store's own <path>.sqlite, stamped to
+# match the HDF5 file already beside it. Unlike persist_to, copies no arrays:
+# they are already in place. A checkpoint, not a mode switch — the catalog
+# stays in RAM. For catalog="attached" this is flush().
 
 # -- transactions --
 # Span several operations so they all take effect or none do. Removals are
@@ -738,6 +759,8 @@ All inherit from `TimeSeriesError`:
 | `IncompatibleFormatError`   | Store written in an incompatible on-disk format       |
 | `IncompatibleForecastError` | Forecast parameters clash with existing forecasts     |
 | `StorageError`              | SQLite catalog or serialization failure               |
+| `StoreExistsError`          | Creating a store where one already exists             |
+| `MismatchedArtifactError`   | The `.h5` and `.sqlite` halves came from two saves    |
 
 A malformed ISO 8601 period string raises `InvalidParameterError` (inside the hierarchy). Only a
 period argument that is neither a `timedelta` nor a `str` raises a plain `TypeError`, which

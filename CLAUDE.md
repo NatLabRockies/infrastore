@@ -219,18 +219,34 @@ cargo run -p infrastore-server -- --config my_server.toml
   backend.
 - `CatalogMode` decides where the catalog lives while a store is open, independently of the backend.
   `Attached` (default) makes it the `.sqlite` file, with WAL and durability on every commit.
-  `InMemory` holds it in RAM and writes it only at `persist_to`; arrays still stream to the HDF5
-  file, so it does not require the data to fit in memory. It exists for a consumer building a store
-  in a scratch directory beside its own volatile state (infrasys does exactly this), where a crash
-  loses that state anyway. `MemoryBackend` + `Attached` is rejected.
+  `InMemory` holds it in RAM and writes it only at `persist_to` or `persist_catalog`; arrays still
+  stream to the HDF5 file, so it does not require the data to fit in memory. It exists for a
+  consumer building a store in a scratch directory beside its own volatile state (infrasys does
+  exactly this), where a crash loses that state anyway. `MemoryBackend` + `Attached` is rejected.
+  `persist_catalog` writes only the `.sqlite` half, stamped to match the HDF5 file already beside it
+  — the cheap way to land an in-memory catalog when the arrays are already in place (`persist_to` to
+  another path has to copy them). The CLI calls it at the end of every `add`/`init`, because one
+  command per process means a catalog still in RAM at exit is lost, not deferred.
 - The two halves carry a matching **generation stamp** — the HDF5 root attribute
   `catalog_generation` and the catalog's `catalog_identity` table. `persist_to` stages both halves,
   fsyncs, and renames them into place; because two renames cannot be atomic together, a fresh stamp
   per save makes an interrupted save fail loudly on the next open (`MismatchedArtifact`) instead of
   reading as a valid store. A failed save may still have destroyed the destination — retry from the
   live store rather than assuming the target survived. `compact` rewrites only the HDF5 half and
-  must therefore _preserve_ the existing stamp, never mint one. Both halves of the stamp are
-  additive, so an unstamped (older) artifact skips the check rather than failing.
+  must therefore _preserve_ the existing stamp, never mint one. _Both_ halves unstamped (an artifact
+  predating the stamp) still opens; exactly _one_ stamped half is a `MismatchedArtifact`, because
+  every path that writes a stamp writes both together. Each save stages through a uniquely tagged
+  sibling (`<target>.persist-<tag>`, `<store>.h5.repack-<tag>`) — nothing locks a `persist_to`
+  destination, so a fixed name would let two savers publish each other's partial files. The cost is
+  that an interrupted save's temps are no longer swept by the next one.
+- **Creating a store where one already exists is refused** (`TimeSeriesError::StoreExists`),
+  checking both halves. Creating truncates the HDF5 file but only _opens_ the catalog, then stamps
+  both to match, so without the guard a re-run of a build script produced an empty array file paired
+  with the old catalog's rows — opens cleanly, lists every series, every array dangling.
+  `create_replacing` (`overwrite=True` / `overwrite=true` in the bindings) is the explicit
+  destructive form. `Store::open_copy` copies both halves and opens the copy, so a consumer that
+  means to change a user's artifact never attaches to it read-write; HDF5 has no journal, so an
+  interrupted in-place write is unrecoverable. Both shipped consumers already do this by hand.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
   it and update format documentation and compatibility tests.

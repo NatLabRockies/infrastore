@@ -38,16 +38,31 @@ pub fn create_store_with_compression(
     in_memory: bool,
     compression: Compression,
 ) -> Result<Store>
+pub fn create_store_replacing(
+    path: &Path,
+    compression: Compression,
+    catalog: CatalogMode,
+) -> Result<Store>
 pub fn open_store(path: &Path, read_only: bool) -> Result<Store>
+pub fn open_store_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<Store>
 ```
 
 - `create_store(None, true)` — in-memory store, no filesystem I/O.
-- `create_store(Some(path), false)` — creates `path` (HDF5) and `path.sqlite` (metadata).
+- `create_store(Some(path), false)` — creates `path` (HDF5) and `path.sqlite` (metadata). **Fails
+  with [`StoreExists`](#errors) if either half is already there**; see
+  [protecting a saved artifact](../explanation/storage-model.md#protecting-a-saved-artifact) for why
+  creating over an existing store is refused rather than allowed to truncate it.
 - `create_store_with_compression(...)` — as above but with an explicit HDF5 compression policy.
+- `create_store_replacing(...)` — discards any artifact already at `path`, both halves plus the
+  catalog's `-wal`/`-shm` sidecars, then creates. Destructive and not atomic: an interrupted call
+  can leave neither the old store nor the new one.
 - `open_store(path, read_only)` — opens an existing pair. `read_only = true` rejects all writes.
+- `open_store_copy(src, dest, catalog)` — copies both halves to `dest` and opens the copy
+  read-write, leaving `src` untouched. The safe way to load a store you intend to change: mutating
+  an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.
 
-`Store::create` / `Store::create_with_compression` / `Store::open` are the inherent-method
-equivalents.
+`Store::create` / `Store::create_with_compression` / `Store::create_replacing` / `Store::open` /
+`Store::open_copy` are the inherent-method equivalents.
 
 ```rust
 pub enum Compression {
@@ -363,6 +378,10 @@ can be moved between threads, but sharing one requires external synchronization 
   existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
   (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
   reproduces every series — static, forecast, non-sequential — without per-type reconstruction.
+- **`persist_catalog`** — Writes an in-memory catalog to this store's own `<path>.sqlite`, stamped
+  to match the HDF5 file already beside it. Unlike `persist_to`, copies no arrays: they are already
+  in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
+  `CatalogMode::Attached` store this is `flush`.
 
 ### Introspection
 
@@ -1256,6 +1275,13 @@ pub enum TimeSeriesError {
     /// The store on disk was written in a different, incompatible on-disk
     /// format. There is no in-place upgrade; see the file-format reference.
     IncompatibleFormat { found: String, expected: &'static str },
+    /// The two halves do not carry the same generation stamp, so they came from
+    /// different saves. Both unstamped (an artifact predating the stamp) is
+    /// legal; exactly one stamped is not. `"none"` renders a missing stamp.
+    MismatchedArtifact { h5: String, sqlite: String },
+    /// A store already exists where one was about to be created. See
+    /// [`create_store`](#constructors).
+    StoreExists { path: String },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Serde(serde_json::Error),

@@ -354,11 +354,16 @@ no descriptor file for them to sit beside.
 command creates (`none`, `deflate`, or `deflate:LEVEL` with `--no-shuffle` to disable byte-shuffle);
 passing it for an existing store is an error, since the persisted policy governs.
 
-`--catalog` decides where the SQLite catalog lives while the store is open. `attached` (the default)
-commits to `<store>.sqlite` as it goes, so an interrupted load keeps what it had already written.
-`in-memory` holds the catalog in RAM and writes it only at `persist` — much faster for a bulk load,
-and it loses _everything_ if the process dies first: arrays still stream to the `.h5` file, but
-without a catalog they are unreachable.
+`--catalog` decides where the SQLite catalog lives **while the command runs**. `attached` (the
+default) commits to `<store>.sqlite` as it goes, so an interrupted load keeps what it had already
+written. `in-memory` holds the catalog in RAM instead of journaling every commit — much faster for a
+bulk load, and it loses _everything_ if the process dies before the command finishes: arrays still
+stream to the `.h5` file, but without a catalog they are unreachable.
+
+Either way the command writes the catalog out before it exits, so the store is complete when it
+returns. The modes cannot differ on that: the CLI runs one command per process, so a catalog still
+in RAM at exit is not deferred, it is gone — no later `persist` could write _that_ process's
+catalog.
 
 ### Selectors
 

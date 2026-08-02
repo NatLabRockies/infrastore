@@ -38,6 +38,8 @@ create_exception!(infrastore, ConnectionError, TimeSeriesError);
 create_exception!(infrastore, IncompatibleFormatError, TimeSeriesError);
 create_exception!(infrastore, IncompatibleForecastError, TimeSeriesError);
 create_exception!(infrastore, StorageError, TimeSeriesError);
+create_exception!(infrastore, StoreExistsError, TimeSeriesError);
+create_exception!(infrastore, MismatchedArtifactError, TimeSeriesError);
 
 fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
     use core_lib::TimeSeriesError as E;
@@ -55,6 +57,8 @@ fn map_err(e: core_lib::TimeSeriesError) -> PyErr {
             "forecast parameters are incompatible with existing forecasts",
         ),
         ref e @ E::IncompatibleFormat { .. } => IncompatibleFormatError::new_err(e.to_string()),
+        ref e @ E::StoreExists { .. } => StoreExistsError::new_err(e.to_string()),
+        ref e @ E::MismatchedArtifact { .. } => MismatchedArtifactError::new_err(e.to_string()),
         E::Io(e) => IoError::new_err(e.to_string()),
         E::Sqlite(e) => StorageError::new_err(format!("sqlite: {e}")),
         E::Serde(e) => StorageError::new_err(format!("serde: {e}")),
@@ -1371,12 +1375,20 @@ impl PyStore {
     ///
     /// `catalog` places the SQLite catalog: `"attached"` writes it to
     /// `<path>.sqlite`, where every commit is durable, and `"memory"` holds it
-    /// in RAM so it reaches disk only through `persist_to()` — nothing survives
-    /// a crash, which suits building a store in a scratch directory beside
-    /// volatile state. Arrays stream to the HDF5 file either way. The default
-    /// matches the backend: `"memory"` when `in_memory=True`, else `"attached"`.
+    /// in RAM so it reaches disk only through `persist_to()` or
+    /// `persist_catalog()` — nothing survives a crash, which suits building a
+    /// store in a scratch directory beside volatile state. Arrays stream to the
+    /// HDF5 file either way. The default matches the backend: `"memory"` when
+    /// `in_memory=True`, else `"attached"`.
+    ///
+    /// Raises `StoreExistsError` if `path` (or `<path>.sqlite`) already holds a
+    /// store: creating there would discard its arrays while keeping its
+    /// catalog, leaving a store that reopens cleanly with every array missing.
+    /// Pass `overwrite=True` to discard the existing artifact on purpose, or use
+    /// `Store.open()` to keep it.
     #[classmethod]
-    #[pyo3(signature = (path=None, *, in_memory=false, compression="deflate", compression_level=3, shuffle=true, catalog=None))]
+    #[pyo3(signature = (path=None, *, in_memory=false, compression="deflate", compression_level=3, shuffle=true, catalog=None, overwrite=false))]
+    #[allow(clippy::too_many_arguments)]
     fn create(
         _cls: &Bound<'_, pyo3::types::PyType>,
         path: Option<PathBuf>,
@@ -1385,6 +1397,7 @@ impl PyStore {
         compression_level: u8,
         shuffle: bool,
         catalog: Option<&str>,
+        overwrite: bool,
     ) -> PyResult<Self> {
         let compression = parse_compression(compression, compression_level, shuffle)?;
         let catalog = parse_catalog(catalog, in_memory)?;
@@ -1392,9 +1405,57 @@ impl PyStore {
             Some(p) if !in_memory => p.display().to_string(),
             _ => "in-memory".to_string(),
         };
-        let store =
-            core_lib::create_store_with_catalog(path.as_deref(), in_memory, compression, catalog)
-                .map_err(map_err)?;
+        let store = match (overwrite, in_memory) {
+            (true, true) => {
+                return Err(InvalidParameterError::new_err(
+                    "overwrite=True is meaningless for an in-memory store: there is no artifact to replace",
+                ));
+            }
+            (true, false) => {
+                let path = path.as_deref().ok_or_else(|| {
+                    InvalidParameterError::new_err("path is required when in_memory=False")
+                })?;
+                core_lib::create_store_replacing(path, compression, catalog)
+            }
+            (false, _) => core_lib::create_store_with_catalog(
+                path.as_deref(),
+                in_memory,
+                compression,
+                catalog,
+            ),
+        }
+        .map_err(map_err)?;
+        Ok(Self {
+            inner: Some(store),
+            read_only: false,
+            descr,
+        })
+    }
+
+    /// Copy the store at `src` to `dest` and open the copy read-write.
+    ///
+    /// Both halves are copied, so `dest` is a complete, independent store, and
+    /// `src` is never opened for writing.
+    ///
+    /// This is the safe way to load a store you care about and then change it.
+    /// `Store.open(path)` defaults to read-write, and every mutation then lands
+    /// in that file directly — HDF5 has no journal and no repair tool, so an
+    /// interrupted write there is unrecoverable. Working on a copy and calling
+    /// `persist_to(src)` leaves the original intact until one atomic rename
+    /// replaces it.
+    ///
+    /// Raises `StoreExistsError` if `dest` already holds a store.
+    #[classmethod]
+    #[pyo3(signature = (src, dest, *, catalog="attached"))]
+    fn open_copy(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        src: PathBuf,
+        dest: PathBuf,
+        catalog: &str,
+    ) -> PyResult<Self> {
+        let catalog = parse_catalog(Some(catalog), false)?;
+        let descr = dest.display().to_string();
+        let store = core_lib::open_store_copy(&src, &dest, catalog).map_err(map_err)?;
         Ok(Self {
             inner: Some(store),
             read_only: false,
@@ -2507,6 +2568,22 @@ impl PyStore {
         self.store_mut()?.persist_to(&path).map_err(map_err)
     }
 
+    /// Write an in-memory catalog to this store's own `<path>.sqlite`, pairing
+    /// it with the HDF5 file already there.
+    ///
+    /// `persist_to()` aimed at another path copies the arrays; this writes only
+    /// the catalog, because the arrays are already where they belong. That makes
+    /// `catalog="memory"` usable for what it is good for — skipping per-commit
+    /// journaling during a bulk load — without copying the array file to land
+    /// the result.
+    ///
+    /// A checkpoint, not a mode switch: the catalog stays in memory, and later
+    /// changes are again RAM-only until the next call. For `catalog="attached"`
+    /// this is `flush()`.
+    fn persist_catalog(&mut self) -> PyResult<()> {
+        self.store_mut()?.persist_catalog().map_err(map_err)
+    }
+
     /// Resolve a forecast addressed by attributes plus a requested type to its
     /// concrete key. `requested_type` is a `TimeSeriesType`;
     /// `TimeSeriesType.Deterministic` also matches a stored
@@ -3307,6 +3384,11 @@ fn infrastore(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<IncompatibleForecastError>(),
     )?;
     m.add("StorageError", py.get_type::<StorageError>())?;
+    m.add("StoreExistsError", py.get_type::<StoreExistsError>())?;
+    m.add(
+        "MismatchedArtifactError",
+        py.get_type::<MismatchedArtifactError>(),
+    )?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(init_tracing, m)?)?;

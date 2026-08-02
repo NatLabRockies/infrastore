@@ -57,6 +57,8 @@ const INFRASTORE_ERR_READ_ONLY = Int32(7)
 const INFRASTORE_ERR_IO = Int32(8)
 const INFRASTORE_ERR_INCOMPATIBLE_FORMAT = Int32(9)
 const INFRASTORE_ERR_DUPLICATE_ASSOCIATION = Int32(10)
+const INFRASTORE_ERR_STORE_EXISTS = Int32(11)
+const INFRASTORE_ERR_MISMATCHED_ARTIFACT = Int32(12)
 const INFRASTORE_ERR_INTERNAL = Int32(99)
 
 # ---- Owner category --------------------------------------------------------
@@ -99,6 +101,28 @@ struct IncompatibleFormatError <: TimeSeriesException
 end
 
 struct IOError <: TimeSeriesException
+    msg::String;
+end
+
+"""
+    StoreExistsError
+
+A store already exists where one was about to be created. Creating there would
+discard its arrays while keeping its catalog, leaving a store that reopens
+cleanly with every array missing. Open it instead, or pass `overwrite=true`.
+"""
+struct StoreExistsError <: TimeSeriesException
+    msg::String;
+end
+
+"""
+    MismatchedArtifactError
+
+The HDF5 file and its `.sqlite` catalog do not carry the same generation stamp,
+so they are halves of two different saves — one was copied, replaced, or created
+without the other, or a save was interrupted between writing them.
+"""
+struct MismatchedArtifactError <: TimeSeriesException
     msg::String;
 end
 
@@ -146,6 +170,10 @@ function _check(code::Int32)
         throw(IncompatibleFormatError(msg))
     elseif code == INFRASTORE_ERR_IO
         throw(IOError(msg))
+    elseif code == INFRASTORE_ERR_STORE_EXISTS
+        throw(StoreExistsError(msg))
+    elseif code == INFRASTORE_ERR_MISMATCHED_ARTIFACT
+        throw(MismatchedArtifactError(msg))
     else
         throw(GenericError(msg, code))
     end

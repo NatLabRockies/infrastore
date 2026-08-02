@@ -382,8 +382,17 @@ struct Inner {
 }
 
 impl Hdf5Backend {
+    /// Create a new array file at `path`, which must not exist.
+    ///
+    /// Exclusive rather than truncating on purpose. A truncating create is what
+    /// let a store be built over an existing artifact, emptying the HDF5 half
+    /// while the catalog beside it survived — see
+    /// [`Store::create_with_catalog`](crate::Store::create_with_catalog), which
+    /// rejects that case with its own message. This is the backstop behind that
+    /// check, and the guard that keeps a staged temporary from being written on
+    /// top of a leftover with the same name.
     pub fn create(path: &Path, compression: Compression) -> Result<Self> {
-        let file = file_builder().create(path).map_err(map_h5)?;
+        let file = file_builder().create_excl(path).map_err(map_h5)?;
         write_str_attr(&file, "data_format_version", DATA_FORMAT_VERSION)?;
         write_str_attr(&file, COMPRESSION_ATTR, &compression.encode())?;
         write_str_attr(&file, BACKEND_ATTR, BACKEND_NAME)?;

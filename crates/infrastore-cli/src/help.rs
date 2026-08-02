@@ -48,8 +48,10 @@ Examples:
   infrastore --store demo.h5 init --compression deflate:6
   infrastore --store demo.h5 init --catalog in-memory
 
---catalog in-memory keeps the catalog in RAM until `persist` writes it out:
-much faster for a bulk load, and everything is lost if the process dies first.";
+--catalog in-memory holds the catalog in RAM for the duration of the command
+instead of journaling every commit: much faster for a bulk load, and everything
+is lost if the process dies before it finishes. Either way the command writes
+the catalog out before it exits, so the store is complete when it returns.";
 
 pub const MERGE: &str = "\
 Examples:

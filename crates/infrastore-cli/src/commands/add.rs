@@ -233,7 +233,12 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     }
     if let Some(store) = store.as_mut() {
         total += flush(store, &mut pending, opts.replace, &mut added)?;
-        store.flush().map_err(|e| e.to_string())?;
+        // `persist_catalog` rather than `flush`, because one of these is a
+        // per-process store. An in-memory catalog that is never written before
+        // this command exits is not "not yet durable" — it is gone, and every
+        // array this load streamed to the HDF5 file is unreachable. For an
+        // attached catalog this *is* `flush`.
+        store.persist_catalog().map_err(|e| e.to_string())?;
     }
     progress.finish();
 

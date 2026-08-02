@@ -91,9 +91,33 @@ pub fn create_store_with_catalog(
     Store::create_with_catalog(path, in_memory, compression, catalog)
 }
 
+/// Create a store at `path`, discarding any artifact already there.
+///
+/// The destructive counterpart to [`create_store_with_catalog`], which refuses
+/// an existing artifact. See [`Store::create_replacing`].
+pub fn create_store_replacing(
+    path: &std::path::Path,
+    compression: Compression,
+    catalog: CatalogMode,
+) -> Result<Store> {
+    Store::create_replacing(path, compression, catalog)
+}
+
 /// Open an existing store from disk.
 pub fn open_store(path: &std::path::Path, read_only: bool) -> Result<Store> {
     Store::open(path, read_only)
+}
+
+/// Copy the artifact at `src` to `dest` and open the copy read-write.
+///
+/// The safe way to load a store and then change it: the original is never
+/// opened for writing. See [`Store::open_copy`].
+pub fn open_store_copy(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    catalog: CatalogMode,
+) -> Result<Store> {
+    Store::open_copy(src, dest, catalog)
 }
 
 /// Open an existing store from disk with an explicit catalog placement.

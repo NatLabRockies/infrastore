@@ -33,6 +33,13 @@ pub const INFRASTORE_ERR_INCOMPATIBLE_FORMAT: i32 = 9;
 /// The endpoint pair of an association is already associated. Distinct from
 /// `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity.
 pub const INFRASTORE_ERR_DUPLICATE_ASSOCIATION: i32 = 10;
+/// A store already exists where one was about to be created. Creating there
+/// would discard its arrays while keeping its catalog, leaving a store that
+/// reopens cleanly with every array missing.
+pub const INFRASTORE_ERR_STORE_EXISTS: i32 = 11;
+/// The HDF5 file and its catalog do not carry the same generation stamp: they
+/// are halves of two different saves.
+pub const INFRASTORE_ERR_MISMATCHED_ARTIFACT: i32 = 12;
 pub const INFRASTORE_ERR_INTERNAL: i32 = 99;
 
 thread_local! {
@@ -58,6 +65,8 @@ fn map_core_error(e: core_lib::TimeSeriesError) -> i32 {
         E::ReadOnlyStore => INFRASTORE_ERR_READ_ONLY,
         E::Io(_) => INFRASTORE_ERR_IO,
         E::IncompatibleFormat { .. } => INFRASTORE_ERR_INCOMPATIBLE_FORMAT,
+        E::StoreExists { .. } => INFRASTORE_ERR_STORE_EXISTS,
+        E::MismatchedArtifact { .. } => INFRASTORE_ERR_MISMATCHED_ARTIFACT,
         _ => INFRASTORE_ERR_INTERNAL,
     };
     set_error(e.to_string());
@@ -389,18 +398,9 @@ pub unsafe extern "C" fn infrastore_store_create_with_compression(
             return code;
         }
     };
-    let compression = match compression_kind {
-        0 => core_lib::Compression::None,
-        1 => core_lib::Compression::Deflate {
-            level: deflate_level,
-            shuffle,
-        },
-        other => {
-            set_error(format!(
-                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
+    let compression = match compression_from_code(compression_kind, deflate_level, shuffle) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     let store =
         match core_lib::create_store_with_compression(path.as_deref(), in_memory, compression) {
@@ -443,6 +443,31 @@ pub unsafe extern "C" fn infrastore_store_open(
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
+}
+
+/// Translate a `compression_kind` code plus its parameters into a core
+/// [`Compression`](core_lib::Compression).
+///
+/// `0` = none (uncompressed), `1` = DEFLATE at `deflate_level` (0–9) with byte `shuffle` when
+/// non-zero. Level validation is left to the core so the message stays in one place.
+fn compression_from_code(
+    kind: u8,
+    deflate_level: u8,
+    shuffle: bool,
+) -> std::result::Result<core_lib::Compression, i32> {
+    match kind {
+        0 => Ok(core_lib::Compression::None),
+        1 => Ok(core_lib::Compression::Deflate {
+            level: deflate_level,
+            shuffle,
+        }),
+        other => {
+            set_error(format!(
+                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
+            ));
+            Err(INFRASTORE_ERR_INVALID_PARAMETER)
+        }
+    }
 }
 
 /// Translate a `catalog_mode` code into a core [`CatalogMode`](core_lib::CatalogMode).
@@ -496,18 +521,9 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
             return code;
         }
     };
-    let compression = match compression_kind {
-        0 => core_lib::Compression::None,
-        1 => core_lib::Compression::Deflate {
-            level: deflate_level,
-            shuffle,
-        },
-        other => {
-            set_error(format!(
-                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
-            ));
-            return INFRASTORE_ERR_INVALID_PARAMETER;
-        }
+    let compression = match compression_from_code(compression_kind, deflate_level, shuffle) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     let catalog = match catalog_from_code(catalog_mode) {
         Ok(c) => c,
@@ -519,6 +535,115 @@ pub unsafe extern "C" fn infrastore_store_create_with_catalog(
             Ok(s) => s,
             Err(e) => return map_core_error(e),
         };
+    let handle = Box::new(InfraStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    INFRASTORE_OK
+}
+
+/// Create a store at `path`, discarding any artifact already there.
+///
+/// The destructive counterpart to `infrastore_store_create_with_catalog`, which fails with
+/// `INFRASTORE_ERR_STORE_EXISTS` when either half of a store is already at the path. Both halves go
+/// — the HDF5 file, `<path>.sqlite`, and the catalog's `-wal`/`-shm` sidecars — because leaving the
+/// catalog would pair a fresh, empty array file with the old catalog's rows.
+///
+/// Not atomic: the old artifact is removed before the new one exists, so an interrupted call can
+/// leave neither. For callers whose explicit intent is to discard the destination.
+///
+/// `compression_kind`, `deflate_level`, `shuffle`, and `catalog_mode` are as in
+/// `infrastore_store_create_with_catalog`.
+///
+/// # Safety
+///
+/// `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
+/// one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_create_replacing(
+    path: *const c_char,
+    compression_kind: u8,
+    deflate_level: u8,
+    shuffle: bool,
+    catalog_mode: u8,
+    out: *mut *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let path = match unsafe { cstr_to_str(path) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid path string");
+            return code;
+        }
+    };
+    let compression = match compression_from_code(compression_kind, deflate_level, shuffle) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let catalog = match catalog_from_code(catalog_mode) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let store = match core_lib::create_store_replacing(&path, compression, catalog) {
+        Ok(s) => s,
+        Err(e) => return map_core_error(e),
+    };
+    let handle = Box::new(InfraStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    INFRASTORE_OK
+}
+
+/// Copy the store at `src` to `dest` and open the copy read-write.
+///
+/// Both halves are copied, so `dest` is a complete, independent store, and `src` is never opened
+/// for writing. This is the safe way to load a store and then change it: opening the original
+/// read-write puts every mutation into that file, and HDF5 has no journal and no repair tool, so an
+/// interrupted write there is unrecoverable. Working on the copy and calling
+/// `infrastore_store_persist` back over the original replaces it with one atomic rename.
+///
+/// Fails with `INFRASTORE_ERR_STORE_EXISTS` if `dest` already holds either half of a store.
+///
+/// # Safety
+///
+/// `src` and `dest` must point to valid, null-terminated UTF-8 strings, and `out` must be valid for
+/// writing one pointer. The returned handle must be released exactly once with
+/// `infrastore_store_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_open_copy(
+    src: *const c_char,
+    dest: *const c_char,
+    catalog_mode: u8,
+    out: *mut *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let src = match unsafe { cstr_to_str(src) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid src path string");
+            return code;
+        }
+    };
+    let dest = match unsafe { cstr_to_str(dest) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid dest path string");
+            return code;
+        }
+    };
+    let catalog = match catalog_from_code(catalog_mode) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let store = match core_lib::open_store_copy(&src, &dest, catalog) {
+        Ok(s) => s,
+        Err(e) => return map_core_error(e),
+    };
     let handle = Box::new(InfraStoreHandle { inner: store });
     unsafe { *out = Box::into_raw(handle) };
     INFRASTORE_OK
@@ -2216,6 +2341,30 @@ pub unsafe extern "C" fn infrastore_store_persist(
         }
     };
     match store.inner.persist_to(&path) {
+        Ok(()) => INFRASTORE_OK,
+        Err(e) => map_core_error(e),
+    }
+}
+
+/// Write an in-memory catalog to this store's own `<path>.sqlite`, pairing it with the HDF5 file
+/// already there.
+///
+/// `infrastore_store_persist` aimed at another path copies the arrays; this writes only the
+/// catalog, because the arrays are already where they belong. That is what makes `catalog_mode=1`
+/// usable for what it is good for — skipping per-commit journaling during a bulk load — without
+/// copying the array file to land the result.
+///
+/// A checkpoint, not a mode switch: the catalog stays in memory and later changes are again
+/// RAM-only until the next call. For an attached catalog this is `infrastore_store_flush`.
+///
+/// # Safety
+///
+/// `handle` must be a live store handle returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_persist_catalog(handle: *mut InfraStoreHandle) -> i32 {
+    clear_error();
+    let store = deref_handle!(mut handle);
+    match store.inner.persist_catalog() {
         Ok(()) => INFRASTORE_OK,
         Err(e) => map_core_error(e),
     }

@@ -33,9 +33,9 @@ Exported names (types first, then functions):
 `key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`,
 `list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
 `list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
-`list_time_series`, `num_distinct_arrays`, `open_store`, `persist!`, `read_only`,
-`rollback_transaction!`, `transaction`, `begin_transaction!`, `commit_transaction!`,
-`remove_by_filter!`, `remove_parent_child_associations!`,
+`list_time_series`, `num_distinct_arrays`, `open_copy`, `open_store`, `persist!`,
+`persist_catalog!`, `read_only`, `rollback_transaction!`, `transaction`, `begin_transaction!`,
+`commit_transaction!`, `remove_by_filter!`, `remove_parent_child_associations!`,
 `remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
 `replace_owner!`, `replace_parent_child_component_id!`,
 `replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
@@ -49,9 +49,12 @@ Exported names (types first, then functions):
 Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
         compression_level::Integer=3, shuffle::Bool=true,
-        catalog::Union{Nothing,Symbol,AbstractString}=nothing) -> Store
+        catalog::Union{Nothing,Symbol,AbstractString}=nothing,
+        overwrite::Bool=false) -> Store
 open_store(path::AbstractString; read_only::Bool=false,
            catalog::Union{Symbol,AbstractString}=:attached) -> Store
+open_copy(src::AbstractString, dest::AbstractString;
+          catalog::Union{Symbol,AbstractString}=:attached) -> Store
 catalog_mode(store::Store) -> Symbol
 ```
 
@@ -62,12 +65,24 @@ catalog_mode(store::Store) -> Symbol
   reused on later appends; it is ignored for in-memory stores. An unknown `compression` throws
   `ArgumentError`.
 - `catalog=:attached` makes the catalog the `.sqlite` file, where every commit is durable;
-  `catalog=:memory` holds it in RAM so it reaches disk only through `persist!`. Arrays stream to the
-  HDF5 file either way. The default (`nothing`) matches the backend — `:memory` when `in_memory` is
-  true, else `:attached` — so existing call sites are unchanged. An unknown `catalog` throws
-  `ArgumentError`. See
+  `catalog=:memory` holds it in RAM so it reaches disk only through `persist!` or
+  `persist_catalog!`. Arrays stream to the HDF5 file either way. The default (`nothing`) matches the
+  backend — `:memory` when `in_memory` is true, else `:attached` — so existing call sites are
+  unchanged. An unknown `catalog` throws `ArgumentError`. See
   [Where the Catalog Lives](../explanation/storage-model.md#where-the-catalog-lives).
+- `Store(in_memory=false, path=...)` throws `StoreExistsError` if `path` or `$path.sqlite` already
+  holds a store. Creating there would discard the arrays while keeping the catalog, leaving a store
+  that reopens cleanly with every array missing — see
+  [protecting a saved artifact](../explanation/storage-model.md#protecting-a-saved-artifact).
+  `overwrite=true` discards both halves on purpose; it throws `ArgumentError` for an in-memory
+  store, which has no artifact to replace.
 - `open_store(path; read_only=true)` — opens an existing on-disk pair.
+- `open_copy(src, dest)` — copies both halves to `dest` and opens the copy read-write, leaving `src`
+  untouched. **This is the safe way to load a store you intend to change.** `open_store` defaults to
+  read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+  so an interrupted write is unrecoverable. Change the copy and `persist!(store, src)` — one atomic
+  rename replaces the original. Throws `StoreExistsError` if `dest` already holds a store. Has a
+  do-block form.
 - `catalog_mode(store)` returns `:attached` or `:memory`.
 
 The store registers a finalizer; close it eagerly with `close!(store)`.
@@ -700,6 +715,11 @@ verify_integrity(store) -> Int    # number of integrity errors; 0 == intact
 compact!(store) -> CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
                                       # .h5 file from the live set and replaces it (single writer)
 flush!(store) -> Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
+persist!(store, path) -> Nothing  # write both halves to `path` + `$path.sqlite`, replacing them
+persist_catalog!(store) -> Nothing  # write an in-memory catalog to this store's own $path.sqlite,
+                                    # stamped to match the .h5 already beside it. Copies no arrays:
+                                    # they are already in place. A checkpoint, not a mode switch;
+                                    # for catalog=:attached this is flush!.
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only
@@ -925,6 +945,8 @@ All subtype `TimeSeriesException`:
 | `ReadOnlyStoreError`        | `INFRASTORE_ERR_READ_ONLY`                                                                         |
 | `IncompatibleFormatError`   | `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`                                                               |
 | `IOError`                   | `INFRASTORE_ERR_IO`                                                                                |
+| `StoreExistsError`          | `INFRASTORE_ERR_STORE_EXISTS`                                                                      |
+| `MismatchedArtifactError`   | `INFRASTORE_ERR_MISMATCHED_ARTIFACT`                                                               |
 | `GenericError`              | Any other non-zero code (carries the numeric `code`)                                               |
 
 The message text comes from the FFI layer's thread-local error buffer.

@@ -587,18 +587,33 @@ fn an_in_memory_catalog_reaches_disk_only_at_persist() {
             "in-memory",
         ],
     );
-    // The arrays streamed to the .h5 file, but no catalog was written beside it.
+    // The catalog was held in RAM for the load and written once at the end, so
+    // the command still leaves a complete, readable artifact. It has to: the CLI
+    // runs one command per process, and a catalog still in RAM at exit is lost
+    // along with every array it names. (This used to defer the write to a later
+    // `persist` invocation — a different process, whose catalog was empty, so
+    // the load silently produced an unreadable store.)
     assert!(store.exists());
     assert!(
-        !dir.path().join("mem.h5.sqlite").exists(),
-        "an in-memory catalog must not create the sqlite half until persist"
+        dir.path().join("mem.h5.sqlite").exists(),
+        "the catalog must reach disk before the command exits"
+    );
+    let listed = run(&store, &["list"]);
+    assert!(
+        listed.contains("load"),
+        "the loaded series is addressable:\n{listed}"
     );
 
-    // Persisting from a fresh in-memory open writes the pair.
+    // And it saves elsewhere like any other store.
     let dest = dir.path().join("saved.h5");
     let out = run(&store, &["persist", "--dest", dest.to_str().unwrap()]);
     assert!(out.contains("Persisted"), "{out}");
     assert!(dest.exists() && dir.path().join("saved.h5.sqlite").exists());
+    let saved = run(&dest, &["list"]);
+    assert!(
+        saved.contains("load"),
+        "the saved copy carries the data:\n{saved}"
+    );
 }
 
 // --- D: discovery ----------------------------------------------------------

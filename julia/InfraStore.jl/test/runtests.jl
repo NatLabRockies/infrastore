@@ -3539,3 +3539,77 @@ end
         mixed(), Hour(4), Hour(2); require_uniform_forecast_grid=true
     )
 end
+
+# ---------------------------------------------------------------------------
+# Guards protecting an artifact that is already on disk
+# ---------------------------------------------------------------------------
+
+@testset "creating over a saved store is refused" begin
+    mktempdir() do dir
+        path = joinpath(dir, "system.h5")
+        Store(in_memory=false, path=path) do store
+            add_time_series!(
+                store, 1, "Generator", Component,
+                SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+            )
+            persist_catalog!(store)
+        end
+        before = filesize(path)
+
+        # Truncating the arrays while the catalog survives would leave a store
+        # that opens cleanly with every array missing.
+        @test_throws InfraStore.StoreExistsError Store(in_memory=false, path=path)
+        @test filesize(path) == before
+
+        # overwrite=true discards both halves on purpose.
+        Store(in_memory=false, path=path, overwrite=true) do store
+            @test isempty(list_keys(store))
+        end
+    end
+end
+
+@testset "open_copy leaves the source alone" begin
+    mktempdir() do dir
+        src = joinpath(dir, "system.h5")
+        dest = joinpath(dir, "scratch.h5")
+        Store(in_memory=false, path=src) do store
+            add_time_series!(
+                store, 1, "Generator", Component,
+                SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+            )
+            persist_catalog!(store)
+        end
+        original = read(src)
+
+        open_copy(src, dest) do copy
+            @test length(list_keys(copy)) == 1
+            add_time_series!(
+                copy, 2, "Generator", Component,
+                SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+            )
+            flush!(copy)
+        end
+        @test read(src) == original
+
+        # A destination that already holds a store is refused, like a create.
+        @test_throws InfraStore.StoreExistsError open_copy(src, dest)
+    end
+end
+
+@testset "persist_catalog! pairs an in-memory catalog with the arrays beside it" begin
+    mktempdir() do dir
+        path = joinpath(dir, "scratch.h5")
+        store = Store(in_memory=false, path=path, catalog=:memory)
+        add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+        )
+        @test !isfile(path * ".sqlite")
+        persist_catalog!(store)
+        close!(store)
+
+        open_store(path; read_only=true) do reopened
+            @test length(list_keys(reopened)) == 1
+        end
+    end
+end

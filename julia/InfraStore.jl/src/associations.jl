@@ -769,6 +769,29 @@ function persist!(store::Store, path::AbstractString)
 end
 
 """
+    persist_catalog!(store)
+
+Write an in-memory catalog to the store's own `\$path.sqlite`, pairing it with
+the HDF5 file already there.
+
+[`persist!`](@ref) aimed at another path copies the arrays; this writes only the
+catalog, because the arrays are already where they belong. That is what makes
+`catalog = :memory` usable for what it is good for — skipping per-commit
+journaling during a bulk load — without copying the array file to land the
+result.
+
+A checkpoint, not a mode switch: the catalog stays in memory, and later changes
+are again RAM-only until the next call. For `catalog = :attached` this is
+[`flush!`](@ref).
+"""
+function persist_catalog!(store::Store)
+    _check(
+        @ccall lib_path().infrastore_store_persist_catalog(store::Ptr{Cvoid})::Int32
+    )
+    return nothing
+end
+
+"""
     clear!(store; owner_id=nothing, owner_category=nothing)
 
 Remove all time series (data + metadata) from the store, or only those belonging

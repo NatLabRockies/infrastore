@@ -1124,25 +1124,23 @@ fn verify_integrity_keeps_going_past_a_catalog_row_it_cannot_use() {
 }
 
 #[test]
-fn opening_a_store_whose_sqlite_half_is_missing_creates_an_empty_catalog() {
-    // PIN: the two artifacts are one logical store, but nothing enforces that.
-    // Deleting the catalog and opening read-write silently yields a store with
-    // the arrays still on disk and *no* time series — a torn artifact reads as
-    // an empty one rather than erroring.
-    let (_dir, path, key) = store_on_disk();
+fn opening_a_store_whose_sqlite_half_is_missing_errors() {
+    // The two files are one logical store, and the paired generation stamp is
+    // what enforces it. A read-write open still *creates* the missing catalog,
+    // but the fresh one is unstamped while the HDF5 half is stamped, so the pair
+    // is rejected. Before that check this read back as an empty store with the
+    // arrays sitting unreachable on disk — a torn artifact presenting itself as
+    // a valid, empty one.
+    let (_dir, path, _key) = store_on_disk();
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
-    let store = open_store(path.as_path(), false).unwrap();
+    let err = open_store(path.as_path(), false)
+        .err()
+        .expect("a store missing its catalog must not open");
     assert!(
-        store.list_keys(ListFilter::new()).unwrap().is_empty(),
-        "PIN: the catalog is recreated empty, not restored"
+        matches!(err, TimeSeriesError::MismatchedArtifact { .. }),
+        "expected MismatchedArtifact, got {err:?}"
     );
-    assert!(matches!(
-        store.get_metadata(key.identity()),
-        Err(TimeSeriesError::NotFound)
-    ));
-    // The array is still physically present, so it is now unreachable garbage.
-    assert!(store.verify_integrity().unwrap().ok());
 }
 
 #[test]
@@ -1713,8 +1711,16 @@ fn repack_temp_of(h5: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(p)
 }
 
+/// Compaction stages through a uniquely named sibling, so a leftover from an
+/// interrupted one neither blocks it nor gets written over.
+///
+/// The staging name used to be a fixed `<store>.h5.repack`, which self-cleaned
+/// but meant two writers stage through one path — and the same fixed-name
+/// reasoning applied to `persist_to`, where nothing locks the destination at
+/// all. The trade for uniqueness is that an abandoned temp now survives:
+/// nothing can distinguish it from a concurrent staging still in flight.
 #[test]
-fn compact_clears_a_stale_repack_temp_file() {
+fn compact_stages_through_a_unique_temp_and_leaves_a_stale_one_alone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.h5");
     let mut store = create_store(Some(path.as_path()), false).unwrap();
@@ -1730,14 +1736,28 @@ fn compact_clears_a_stale_repack_temp_file() {
     store.flush().unwrap();
 
     // What a compaction interrupted between the rewrite and the rename leaves
-    // behind. It is not a valid store file; the next compaction must clear it
-    // rather than trip over it.
-    let tmp = repack_temp_of(&path);
-    std::fs::write(&tmp, b"leftover from a crashed compaction").unwrap();
+    // behind. It is not a valid store file, and compaction must neither trip
+    // over it nor mistake it for its own staging area.
+    let stale = repack_temp_of(&path);
+    std::fs::write(&stale, b"leftover from a crashed compaction").unwrap();
 
     store.compact().unwrap();
-    assert!(!tmp.exists(), "stale temp file survived a compaction");
     assert!(store.verify_integrity().unwrap().ok());
+    assert!(
+        stale.exists(),
+        "an unrelated leftover must be left alone, not reused or deleted"
+    );
+    // A compaction that ran to completion cleans up after itself.
+    let strays: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".repack-"))
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "compaction left its own staged temp behind: {strays:?}"
+    );
 }
 
 #[test]

@@ -350,7 +350,10 @@ pub fn init(
         ));
     }
     let mut store = store_access::open_writable_with(store_path, compression, catalog)?;
-    store.flush().map_err(|e| e.to_string())?;
+    // Lands the catalog beside the arrays whichever mode was chosen, so the
+    // command leaves a complete artifact rather than a half of one. See
+    // `CatalogChoice`.
+    store.persist_catalog().map_err(|e| e.to_string())?;
     println!(
         "{}",
         color::header(&format!(
@@ -358,15 +361,6 @@ pub fn init(
             store_path.display()
         ))
     );
-    if catalog == store_access::CatalogChoice::InMemory {
-        println!(
-            "{}",
-            color::dim(
-                "The catalog stays in RAM: run `infrastore persist --dest <path.h5>` when \
-                 the load is done, or the arrays will be unreachable."
-            )
-        );
-    }
     Ok(())
 }
 
