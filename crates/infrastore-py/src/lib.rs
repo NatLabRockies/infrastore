@@ -77,6 +77,34 @@ fn parse_compression(algorithm: &str, level: u8, shuffle: bool) -> PyResult<core
     }
 }
 
+/// Translate the Python-facing `catalog` argument into a core
+/// [`CatalogMode`](core_lib::CatalogMode).
+///
+/// `None` means "whatever matches the backend", which is what these constructors
+/// did before the argument existed: an in-memory store has no file for a catalog
+/// to sit beside, and an on-disk one has always kept its catalog in
+/// `<path>.sqlite`. Passing it explicitly is what unlocks the new combination —
+/// arrays in an HDF5 file, catalog in RAM.
+fn parse_catalog(catalog: Option<&str>, in_memory: bool) -> PyResult<core_lib::CatalogMode> {
+    match catalog {
+        None if in_memory => Ok(core_lib::CatalogMode::InMemory),
+        None => Ok(core_lib::CatalogMode::Attached),
+        Some("attached") => Ok(core_lib::CatalogMode::Attached),
+        Some("memory") => Ok(core_lib::CatalogMode::InMemory),
+        Some(other) => Err(InvalidParameterError::new_err(format!(
+            "unknown catalog '{other}', expected 'attached' or 'memory'"
+        ))),
+    }
+}
+
+/// The `catalog` spelling for a core [`CatalogMode`](core_lib::CatalogMode).
+fn catalog_name(catalog: core_lib::CatalogMode) -> &'static str {
+    match catalog {
+        core_lib::CatalogMode::Attached => "attached",
+        core_lib::CatalogMode::InMemory => "memory",
+    }
+}
+
 // ---- Enums ----------------------------------------------------------------
 
 #[pyclass(
@@ -1340,8 +1368,15 @@ impl PyStore {
     /// (default) applies DEFLATE at `compression_level` (0–9) with optional
     /// byte `shuffle`; `"none"` disables compression. The setting is ignored
     /// for in-memory stores and is persisted so later appends reuse it.
+    ///
+    /// `catalog` places the SQLite catalog: `"attached"` writes it to
+    /// `<path>.sqlite`, where every commit is durable, and `"memory"` holds it
+    /// in RAM so it reaches disk only through `persist_to()` — nothing survives
+    /// a crash, which suits building a store in a scratch directory beside
+    /// volatile state. Arrays stream to the HDF5 file either way. The default
+    /// matches the backend: `"memory"` when `in_memory=True`, else `"attached"`.
     #[classmethod]
-    #[pyo3(signature = (path=None, *, in_memory=false, compression="deflate", compression_level=3, shuffle=true))]
+    #[pyo3(signature = (path=None, *, in_memory=false, compression="deflate", compression_level=3, shuffle=true, catalog=None))]
     fn create(
         _cls: &Bound<'_, pyo3::types::PyType>,
         path: Option<PathBuf>,
@@ -1349,14 +1384,16 @@ impl PyStore {
         compression: &str,
         compression_level: u8,
         shuffle: bool,
+        catalog: Option<&str>,
     ) -> PyResult<Self> {
         let compression = parse_compression(compression, compression_level, shuffle)?;
+        let catalog = parse_catalog(catalog, in_memory)?;
         let descr = match &path {
             Some(p) if !in_memory => p.display().to_string(),
             _ => "in-memory".to_string(),
         };
         let store =
-            core_lib::create_store_with_compression(path.as_deref(), in_memory, compression)
+            core_lib::create_store_with_catalog(path.as_deref(), in_memory, compression, catalog)
                 .map_err(map_err)?;
         Ok(Self {
             inner: Some(store),
@@ -1366,15 +1403,23 @@ impl PyStore {
     }
 
     /// Open an existing store from disk. `read_only=True` blocks all writes.
+    ///
+    /// `catalog="memory"` reads `<path>.sqlite` into RAM and leaves the file
+    /// alone; later mutations reach disk only through `persist_to()`. The HDF5
+    /// half is still opened in place, so a caller that means to leave the
+    /// original untouched until an explicit save must open a copy.
     #[classmethod]
-    #[pyo3(signature = (path, *, read_only=false))]
+    #[pyo3(signature = (path, *, read_only=false, catalog="attached"))]
     fn open(
         _cls: &Bound<'_, pyo3::types::PyType>,
         path: PathBuf,
         read_only: bool,
+        catalog: &str,
     ) -> PyResult<Self> {
+        let catalog = parse_catalog(Some(catalog), false)?;
         let descr = path.display().to_string();
-        let store = core_lib::open_store(&path, read_only).map_err(map_err)?;
+        let store =
+            core_lib::open_store_with_catalog(&path, read_only, catalog).map_err(map_err)?;
         Ok(Self {
             inner: Some(store),
             read_only,
@@ -1385,6 +1430,12 @@ impl PyStore {
     #[getter]
     fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Where this store's catalog lives: `"attached"` or `"memory"`.
+    #[getter]
+    fn catalog(&self) -> PyResult<&'static str> {
+        Ok(catalog_name(self.store()?.catalog_mode()))
     }
 
     /// Close the store, dropping the underlying handle and flushing/releasing

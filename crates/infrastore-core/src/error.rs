@@ -37,6 +37,14 @@ pub enum TimeSeriesError {
         expected: &'static str,
     },
 
+    #[error(
+        "the HDF5 file and its catalog carry different generation stamps \
+         ({h5} vs {sqlite}); they are halves of two different saves, most likely \
+         because a save was interrupted between writing the two files or because \
+         one of them was copied without the other"
+    )]
+    MismatchedArtifact { h5: String, sqlite: String },
+
     #[error("store is read-only")]
     ReadOnlyStore,
 

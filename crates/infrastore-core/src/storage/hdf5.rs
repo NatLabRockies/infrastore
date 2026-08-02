@@ -56,6 +56,16 @@ use super::{ArrayLocation, BackendStats, CompactionReport, IntegrityReport, Stor
 pub(crate) const BACKEND_ATTR: &str = "storage_backend";
 pub(crate) const BACKEND_NAME: &str = "hdf5";
 
+/// Root attribute pairing this file with one catalog. Written on create and
+/// re-minted by each `Store::persist_to`; the matching value lives in the
+/// catalog's `catalog_identity` table, and `Store::open` refuses a pair whose
+/// stamps disagree.
+///
+/// Additive, so it does not bump `DATA_FORMAT_VERSION`: an older build ignores
+/// an unknown root attribute, and a store written before the stamp existed has
+/// none, which reads as "unstamped" and skips the check.
+pub(crate) const GENERATION_ATTR: &str = "catalog_generation";
+
 /// Standalone arrays at or below this size use HDF5's compact layout (data in
 /// the object header, no chunk index, no filters). The format limit on a
 /// compact dataset is 64 KiB including type/space metadata; stay safely under.
@@ -300,6 +310,16 @@ fn write_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
         .map_err(map_h5)?
         .write_scalar(&v)
         .map_err(map_h5)
+}
+
+/// [`write_str_attr`], but tolerating an existing attribute. HDF5 has no
+/// overwrite for a scalar string attribute — the value is sized at creation —
+/// so the old one is deleted first.
+fn replace_str_attr(file: &h5::File, name: &str, value: &str) -> Result<()> {
+    if file.attr(name).is_ok() {
+        file.delete_attr(name).map_err(map_h5)?;
+    }
+    write_str_attr(file, name, value)
 }
 
 fn read_str_attr(file: &h5::File, name: &str) -> Option<String> {
@@ -1407,9 +1427,33 @@ impl StorageBackend for Hdf5Backend {
         inner.file.flush().map_err(map_h5)
     }
 
+    fn generation(&self) -> Option<String> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        read_str_attr(&inner.file, GENERATION_ATTR)
+    }
+
+    fn set_generation(&mut self, generation: &str) -> Result<()> {
+        let inner = self.inner.lock().expect("mutex poisoned");
+        if inner.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        replace_str_attr(&inner.file, GENERATION_ATTR, generation)
+    }
+
     fn compression(&self) -> Compression {
         Hdf5Backend::compression(self)
     }
+}
+
+/// Write `generation` into the file at `path`, replacing any existing stamp.
+///
+/// Opens the file directly rather than through [`Hdf5Backend::open`], which
+/// would build the whole dataset index to set one root attribute. Used by
+/// `Store::persist_to` to stamp a freshly staged copy.
+pub(crate) fn stamp_generation(path: &Path, generation: &str) -> Result<()> {
+    let file = file_builder().open_rw(path).map_err(map_h5)?;
+    replace_str_attr(&file, GENERATION_ATTR, generation)?;
+    file.flush().map_err(map_h5)
 }
 
 /// True iff the file at `path` was written by this backend (sniffed from the

@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{Result, TimeSeriesError};
 use crate::hash::array_hash;
 use crate::metadata::{
@@ -492,12 +494,85 @@ struct OpenTxn {
     pending_free: HashSet<[u8; 32]>,
 }
 
+/// Where a store's SQLite catalog lives, independent of where its arrays live.
+///
+/// The two axes are orthogonal: arrays can sit in an HDF5 file while the
+/// catalog sits in RAM. That combination is the point of [`Self::InMemory`] —
+/// see its docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatalogMode {
+    /// The catalog *is* the `<store>.sqlite` file: WAL journaling, and every
+    /// committed mutation is durable as soon as the OS writes it back. Other
+    /// processes holding the same artifact see those commits.
+    ///
+    /// The default, and what a long-lived on-disk store wants — the CLI mutates
+    /// one command per process and relies on each one landing.
+    #[default]
+    Attached,
+    /// The catalog is held in `:memory:`, loaded from `<store>.sqlite` on open
+    /// and written back only by [`Store::persist_to`]. Mutations pay no
+    /// journaling and no fsync, and **nothing survives a crash**.
+    ///
+    /// For a consumer that builds a store in a scratch directory beside its own
+    /// in-RAM state and only cares about durability at an explicit save: a crash
+    /// loses that state regardless, so journaling the scratch catalog buys
+    /// nothing. Arrays still stream to the HDF5 file, so this does not require
+    /// the data to fit in memory.
+    InMemory,
+}
+
+/// The catalog placement that reproduces pre-[`CatalogMode`] behavior for a
+/// given `in_memory` flag: an in-memory store has always held its catalog in
+/// RAM, and an on-disk one has always kept it in `<path>.sqlite`. Keeps the
+/// constructors that predate the enum meaning exactly what they used to.
+fn default_catalog(in_memory: bool) -> CatalogMode {
+    if in_memory {
+        CatalogMode::InMemory
+    } else {
+        CatalogMode::Attached
+    }
+}
+
+/// Mint a fresh generation stamp for an artifact pair — see
+/// [`GENERATION_ATTR`](crate::storage::hdf5::GENERATION_ATTR) and the
+/// `catalog_identity` DDL.
+///
+/// This only has to be unlikely to repeat across saves on one machine, not
+/// globally unique, so it is a hash of wall clock, pid, and a per-process
+/// counter rather than a real UUID — which keeps `uuid` and `rand` out of the
+/// dependency graph (and out of `deny.toml`'s license review). The counter
+/// carries the case two saves land inside one clock tick.
+fn mint_generation() -> String {
+    use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = Sha256::new();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    hasher.finalize()[..16]
+        .iter()
+        .fold(String::with_capacity(32), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
 pub struct Store {
     backend: Box<dyn StorageBackend>,
     metadata: MetadataStore,
     read_only: bool,
     /// Filesystem path for the HDF5 array file (None if `in_memory`).
     file_path: Option<PathBuf>,
+    /// Where the catalog lives. Decides whether mutations are durable on commit
+    /// or only at [`Self::persist_to`], and which half of `persist_to` runs.
+    catalog: CatalogMode,
     /// `Some` while a cross-operation transaction is open.
     txn: Option<OpenTxn>,
 }
@@ -521,49 +596,122 @@ impl Store {
         in_memory: bool,
         compression: Compression,
     ) -> Result<Self> {
+        Self::create_with_catalog(path, in_memory, compression, default_catalog(in_memory))
+    }
+
+    /// Like [`Self::create_with_compression`], but places the catalog
+    /// explicitly. See [`CatalogMode`].
+    ///
+    /// `in_memory=true` admits only [`CatalogMode::InMemory`]: there is no
+    /// artifact on disk for a catalog file to sit beside.
+    ///
+    /// With `in_memory=false` and [`CatalogMode::InMemory`] no `<path>.sqlite`
+    /// is created at all — arrays stream to the HDF5 file while the catalog
+    /// stays in RAM until [`Self::persist_to`] writes the pair. Note that such a
+    /// half-artifact reopened with [`CatalogMode::Attached`] reads as an *empty*
+    /// store rather than failing, because a read-write open of a missing catalog
+    /// creates a fresh one.
+    pub fn create_with_catalog(
+        path: Option<&Path>,
+        in_memory: bool,
+        compression: Compression,
+        catalog: CatalogMode,
+    ) -> Result<Self> {
         compression.validate()?;
         if in_memory {
+            if catalog == CatalogMode::Attached {
+                return Err(TimeSeriesError::InvalidParameter(
+                    "an in-memory store has no file for CatalogMode::Attached to sit beside".into(),
+                ));
+            }
             return Ok(Self {
                 backend: Box::new(MemoryBackend::new()),
                 metadata: MetadataStore::open_in_memory()?,
                 read_only: false,
                 file_path: None,
+                catalog,
                 txn: None,
             });
         }
         let file_path = path.ok_or_else(|| {
             TimeSeriesError::InvalidParameter("path is required when in_memory=false".into())
         })?;
-        let sqlite_path = catalog_sqlite_path(file_path);
-        let metadata = MetadataStore::open_path(&sqlite_path, false)?;
+        let metadata = match catalog {
+            CatalogMode::Attached => {
+                MetadataStore::open_path(&catalog_sqlite_path(file_path), false)?
+            }
+            CatalogMode::InMemory => MetadataStore::open_in_memory()?,
+        };
+        let mut backend = Hdf5Backend::create(file_path, compression)?;
+        // Stamp the pair at birth, so a later mismatch — one half swapped for a
+        // copy from a different save — is detectable even for a store that never
+        // goes through `persist_to`.
+        let generation = mint_generation();
+        backend.set_generation(&generation)?;
+        metadata.set_generation(&generation)?;
         Ok(Self {
-            backend: Box::new(Hdf5Backend::create(file_path, compression)?),
+            backend: Box::new(backend),
             metadata,
             read_only: false,
             file_path: Some(file_path.to_path_buf()),
+            catalog,
             txn: None,
         })
     }
 
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
+        Self::open_with_catalog(path, read_only, CatalogMode::Attached)
+    }
+
+    /// Like [`Self::open`], but places the catalog explicitly. See
+    /// [`CatalogMode`].
+    ///
+    /// With [`CatalogMode::InMemory`] the `<path>.sqlite` file is read into RAM
+    /// and then left alone; mutations never reach it, and only
+    /// [`Self::persist_to`] writes them back. Opening this way requires the
+    /// catalog file to exist — unlike [`CatalogMode::Attached`], which creates
+    /// an empty one when it is missing.
+    ///
+    /// Caution: this does **not** copy the HDF5 half, so mutations still land in
+    /// `path` itself. A caller that means to leave the original untouched until
+    /// an explicit save must open a copy.
+    pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
-        let metadata = MetadataStore::open_path(&sqlite_path, read_only)?;
+        let metadata = match catalog {
+            CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
+            CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
+        };
         // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
         // `Store::add_*` / `remove_*` guards.
         let backend = open_backend(path, read_only)?;
+        // Two stamps that disagree mean these files came from different saves —
+        // most likely a `persist_to` interrupted between its two renames. Either
+        // half being unstamped means the artifact predates the stamp, which is
+        // not an error.
+        if let (Some(h5), Some(sqlite)) = (backend.generation(), metadata.generation()?)
+            && h5 != sqlite
+        {
+            return Err(TimeSeriesError::MismatchedArtifact { h5, sqlite });
+        }
         Ok(Self {
             backend,
             metadata,
             read_only,
             file_path: Some(path.to_path_buf()),
+            catalog,
             txn: None,
         })
     }
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Where this store's catalog lives. See [`CatalogMode`].
+    pub fn catalog_mode(&self) -> CatalogMode {
+        self.catalog
     }
 
     /// The SQLite savepoint scoping transaction nesting level `depth`.
@@ -2833,8 +2981,16 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
 
+        // Carry the existing stamp into the rewrite rather than minting one.
+        // Compaction replaces only the HDF5 half and leaves the catalog
+        // untouched, so a fresh stamp here would manufacture exactly the
+        // mismatch the stamp exists to detect.
+        let generation = self.backend.generation();
         let rewritten = (|| -> Result<()> {
             let mut backend = Hdf5Backend::create(&tmp, self.compression())?;
+            if let Some(generation) = &generation {
+                backend.set_generation(generation)?;
+            }
             self.materialize_into(&mut backend)?;
             backend.flush()?;
             drop(backend);
@@ -2932,52 +3088,177 @@ impl Store {
     }
 
     /// Persist this store's data to `path` (the HDF5 arrays) and its companion
-    /// `<path>.sqlite` (the metadata). Works for both on-disk stores (copies the
-    /// two artifacts) and in-memory stores (materializes arrays + metadata to
-    /// disk). Existing target files are overwritten.
+    /// `<path>.sqlite` (the catalog). Works for every combination of backend and
+    /// [`CatalogMode`]: an on-disk store's file is copied, an in-memory one's
+    /// arrays are materialized, and the catalog is written from wherever it
+    /// lives. Existing target files are replaced.
     ///
     /// Because arrays are content-addressed, copying every array by hash plus the
     /// full metadata database reproduces all time series — static, forecast, and
     /// non-sequential — without reconstructing per-type semantics.
+    ///
+    /// Saving an [`CatalogMode::Attached`] store onto its own path is a no-op:
+    /// the destination already *is* this store, and the flush above made it
+    /// durable. The [`CatalogMode::InMemory`] counterpart is not — there the
+    /// arrays are already at `path` and the save is what writes the catalog
+    /// beside them, which is the scratch-directory workflow.
+    ///
+    /// # Atomicity, and its limit
+    ///
+    /// Both halves are written to temporary siblings, fsynced, and only then
+    /// renamed into place, so a crash before the first rename leaves the
+    /// destination untouched. The pair is stamped with a fresh generation, so a
+    /// crash *between* the two renames is caught: the halves disagree and
+    /// [`Store::open`] fails with
+    /// [`TimeSeriesError::MismatchedArtifact`](crate::TimeSeriesError::MismatchedArtifact)
+    /// rather than reading a store that quietly contradicts itself.
+    ///
+    /// What this does **not** give you is a destination that survives a failed
+    /// save. The renames replace the target, so a crash between them destroys
+    /// whatever pair was there before. That is a deliberate trade: it converts
+    /// silent corruption into loud, detectable loss. Callers must not assume the
+    /// destination is intact after a failed `persist_to` — recover by saving
+    /// again from this store, which is still live and unchanged.
     pub fn persist_to(&mut self, path: &Path) -> Result<()> {
+        // An open transaction means the catalog holds uncommitted rows that a
+        // rollback would take back. Writing them out would persist a state the
+        // caller has not committed to.
+        if self.in_transaction() {
+            return Err(TimeSeriesError::InvalidParameter(
+                "cannot persist while a transaction is open; commit or roll back first".into(),
+            ));
+        }
         self.flush()?;
-        let sqlite_path = catalog_sqlite_path(path);
 
-        if let Some(src) = self.file_path.clone() {
-            if src != path {
-                // HDF5 keeps a byte-range lock on an open file. On Windows that
-                // makes `fs::copy` (CopyFileEx) fail with ERROR_LOCK_VIOLATION
-                // ("another process has locked a portion of the file"), so drop
-                // the HDF5 handle for the duration of the copy and reopen it
-                // afterwards. The placeholder backend is never observed: nothing
-                // else runs between the swap and the reopen.
+        // Saving an attached catalog onto its own artifact is already done: the
+        // `flush` above checkpointed the catalog and flushed HDF5, so both
+        // halves are durable, paired, and exactly what a staged save would
+        // produce. Running the staged path anyway would rename a fresh catalog
+        // over the file this store's own connection still has open — which
+        // orphans that connection and leaves its `-wal` to be recovered against
+        // a database it does not belong to, corrupting the store.
+        //
+        // This is a no-op only for `Attached`. An in-memory catalog saving to
+        // its own HDF5 path is the scratch-directory workflow `CatalogMode`
+        // exists for, and has real work to do: the sidecar does not exist yet.
+        if self.catalog == CatalogMode::Attached
+            && self
+                .file_path
+                .as_deref()
+                .is_some_and(|src| same_file(src, path))
+        {
+            return Ok(());
+        }
+
+        let sqlite_path = catalog_sqlite_path(path);
+        let tmp_h5 = persist_temp_path(path);
+        let tmp_sqlite = persist_temp_path(&sqlite_path);
+        // `VACUUM INTO` refuses an existing target, and a stale temp from an
+        // earlier failed save would otherwise poison this one.
+        remove_if_exists(&tmp_h5)?;
+        remove_if_exists(&tmp_sqlite)?;
+
+        // A fresh stamp per save is what makes an interrupted save detectable.
+        // Reusing the source's would leave a re-save to the same destination
+        // (the modify-then-save-again flow) with matching stamps on mismatched
+        // content. It is written to the temporaries only: stamping the live
+        // catalog would unpair it from its own HDF5 file.
+        let generation = mint_generation();
+
+        let staged = match self.file_path.clone() {
+            // Arrays live in this process. Read them out of the live backend
+            // into a new file; the catalog is the liveness source, so this
+            // writes exactly the referenced set.
+            None => self.stage_persist_from_memory(&tmp_h5, &tmp_sqlite, &generation),
+            // Arrays are already a file — copy it rather than rewriting it, so
+            // the saved layout matches the live one.
+            //
+            // HDF5 keeps a byte-range lock on an open file, which on Windows
+            // makes both `fs::copy` (ERROR_LOCK_VIOLATION) and a rename over the
+            // source fail. So the handle goes away for the whole write-and-swap
+            // and is reopened at the end — including on the failure path, so a
+            // failed save leaves the store usable rather than stranded on the
+            // placeholder. The placeholder is never observed: nothing else runs
+            // in between.
+            Some(src) => {
                 drop(std::mem::replace(
                     &mut self.backend,
                     Box::new(MemoryBackend::new()) as Box<dyn StorageBackend>,
                 ));
-
-                let copied = std::fs::copy(&src, path)
-                    .and_then(|_| std::fs::copy(catalog_sqlite_path(&src), &sqlite_path));
-
-                // Reopen before surfacing a copy failure, so a failed persist
-                // leaves the store usable instead of stranded on the placeholder.
+                let staged = std::fs::copy(&src, &tmp_h5)
+                    .map_err(TimeSeriesError::from)
+                    .and_then(|_| self.stage_persist_catalog(&tmp_h5, &tmp_sqlite, &generation));
+                let swapped = staged
+                    .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path));
                 self.backend = open_backend(&src, self.read_only)?;
-                copied?;
+                return swapped.inspect_err(|_| Self::clear_temps(&tmp_h5, &tmp_sqlite));
             }
-            return Ok(());
-        }
+        };
 
-        // In-memory store: materialize arrays and metadata to disk. VACUUM INTO
-        // requires the target sqlite to be absent, so clear both artifacts first.
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(&sqlite_path);
+        staged
+            .and_then(|()| Self::swap_into_place(&tmp_h5, path, &tmp_sqlite, &sqlite_path))
+            .inspect_err(|_| Self::clear_temps(&tmp_h5, &tmp_sqlite))
+    }
+
+    /// Write both halves of a save for a store whose arrays live in memory.
+    fn stage_persist_from_memory(
+        &mut self,
+        tmp_h5: &Path,
+        tmp_sqlite: &Path,
+        generation: &str,
+    ) -> Result<()> {
+        let mut backend = Hdf5Backend::create(tmp_h5, self.compression())?;
+        self.materialize_into(&mut backend)?;
+        backend.flush()?;
+        drop(backend);
+        self.stage_persist_catalog(tmp_h5, tmp_sqlite, generation)
+    }
+
+    /// Stamp the staged HDF5 file, write the catalog beside it, stamp that too,
+    /// and fsync both — everything that has to be durable before the renames.
+    fn stage_persist_catalog(
+        &self,
+        tmp_h5: &Path,
+        tmp_sqlite: &Path,
+        generation: &str,
+    ) -> Result<()> {
+        crate::storage::hdf5::stamp_generation(tmp_h5, generation)?;
+        sync_file(tmp_h5)?;
+
+        // `VACUUM INTO` reads through to committed WAL content, so this captures
+        // the catalog whether it is a file or `:memory:`. The stamp goes on
+        // afterwards, into the copy, leaving the live catalog's own alone.
+        self.metadata.backup_to(tmp_sqlite)?;
         {
-            let mut backend = Hdf5Backend::create(path, self.compression())?;
-            self.materialize_into(&mut backend)?;
-            backend.flush()?;
+            let staged = MetadataStore::open_path(tmp_sqlite, false)?;
+            staged.set_generation(generation)?;
+            staged.checkpoint()?;
         }
-        self.metadata.backup_to(&sqlite_path)?;
-        Ok(())
+        sync_file(tmp_sqlite)
+    }
+
+    /// Move both staged halves into place. The window between the two renames is
+    /// what the generation stamp exists to cover — see [`Self::persist_to`].
+    fn swap_into_place(tmp_h5: &Path, h5: &Path, tmp_sqlite: &Path, sqlite: &Path) -> Result<()> {
+        sync_parent_dir(h5)?;
+        std::fs::rename(tmp_h5, h5)?;
+        // A `-wal`/`-shm` pair beside the destination belongs to the catalog
+        // being replaced — a writer that crashed there left one behind. SQLite
+        // would recover it over the database landing in its place, resurrecting
+        // the old catalog's pages, so the save silently would not take (and,
+        // with the stamp, the artifact then fails to open at all). Clearing them
+        // *before* the rename keeps the crash window harmless: what it can
+        // interrupt is the replacement of a catalog that is already outlived by
+        // the HDF5 half renamed above, and which the stamp already flags.
+        remove_if_exists(&sqlite_sidecar(sqlite, "-wal"))?;
+        remove_if_exists(&sqlite_sidecar(sqlite, "-shm"))?;
+        std::fs::rename(tmp_sqlite, sqlite)?;
+        sync_parent_dir(h5)
+    }
+
+    fn clear_temps(tmp_h5: &Path, tmp_sqlite: &Path) {
+        let _ = std::fs::remove_file(tmp_h5);
+        let _ = std::fs::remove_file(tmp_sqlite);
     }
 
     /// Write every array the catalog still references into `backend`, choosing
@@ -3614,6 +3895,82 @@ pub fn catalog_sqlite_path(data_path: &Path) -> PathBuf {
     };
     p.set_file_name(new_name);
     p
+}
+
+/// Sibling temp path a `persist_to` half is staged at. A sibling, not a temp
+/// directory, so the rename that follows stays within one filesystem and is
+/// therefore atomic.
+fn persist_temp_path(target: &Path) -> PathBuf {
+    let mut p = target.to_path_buf();
+    let new_name = match p.file_name().and_then(|n| n.to_str()) {
+        Some(name) => format!("{name}.persist"),
+        None => "store.persist".to_string(),
+    };
+    p.set_file_name(new_name);
+    p
+}
+
+/// SQLite's `-wal` / `-shm` sidecar beside a database file. The suffix is
+/// appended to the whole filename, extension included, so `set_extension` is the
+/// wrong tool here.
+fn sqlite_sidecar(sqlite: &Path, suffix: &str) -> PathBuf {
+    let mut name = sqlite.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Whether two paths name the same file. Falls back to comparing the paths as
+/// written when either cannot be canonicalized — a destination that does not
+/// exist yet is the common case, and it is by definition not the source.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+fn remove_if_exists(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// fsync a just-written file, so the rename that follows cannot publish a name
+/// pointing at data the kernel has not committed.
+///
+/// The handle is opened for writing because Windows' `FlushFileBuffers` requires
+/// write access and fails a read-only handle with `ERROR_ACCESS_DENIED`; on Unix
+/// either would do. Both callers pass a staged temporary they just wrote, so
+/// nothing else holds the file.
+fn sync_file(path: &Path) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()?;
+    Ok(())
+}
+
+/// fsync the directory holding `path`, so the renames themselves survive a
+/// crash and not just the file contents they publish.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Windows exposes no directory handle to fsync; NTFS orders the metadata
+/// operations itself, so there is nothing to force here.
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Where [`Store::compact`] builds the rewritten HDF5 file before swapping it

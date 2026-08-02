@@ -378,6 +378,31 @@ flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite ca
 
 Keep the `.h5` and `.h5.sqlite` files together.
 
+### Where the Catalog Lives
+
+By default the catalog _is_ `system.h5.sqlite`, and every commit is durable. Passing
+`catalog=:memory` keeps it in RAM instead, so it reaches disk only via [`persist!`](@ref):
+
+```julia
+# Build in a scratch directory; nothing is durable until the explicit save.
+store = Store(; in_memory=false, path=joinpath(scratch, "time_series.h5"), catalog=:memory)
+add_time_series!(store, 42, "Generator", Component, ts)
+persist!(store, destination)     # writes both halves as a matched pair
+```
+
+Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
+building a store beside volatile in-process state — a crash loses that state anyway, so journaling
+the scratch catalog buys nothing. `catalog_mode(store)` reports which mode a store is in.
+
+`open_store(path; catalog=:memory)` loads an existing catalog into RAM the same way. Note that the
+HDF5 half is still opened **in place**, so mutations land in the original file; open a copy if you
+mean to leave the source untouched until an explicit save.
+
+`persist!` stages both halves and renames them into place, and stamps the pair so that a save
+interrupted between the two renames is caught on the next open rather than read as a valid store. It
+does replace the destination, though, so a failed save may have destroyed what was there — recover
+by calling `persist!` again on the still-live store rather than assuming the target survived.
+
 ## Error Handling
 
 Errors subtype `InfraStore.TimeSeriesException`. The exception types are not exported, so reference

@@ -191,6 +191,66 @@ The HDF5 backend buffers writes. Call `flush()` (which issues `H5Fflush`) before
 for backup or archival; afterward both `system.h5` and `system.h5.sqlite` can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.
 
+## Where the Catalog Lives
+
+The catalog does not have to be the `.sqlite` file while a store is open. `CatalogMode` picks
+between two placements, independently of where the arrays live:
+
+| Mode       | Catalog                     | Durability                                  |
+| ---------- | --------------------------- | ------------------------------------------- |
+| `Attached` | is the `<path>.sqlite` file | every commit, as soon as the OS writes back |
+| `InMemory` | held in RAM, loaded on open | only at `persist_to` — a crash loses it     |
+
+`Attached` is the default and what a long-lived on-disk store wants: the CLI mutates one command per
+process and relies on each one landing.
+
+`InMemory` suits a consumer that builds a store in a scratch directory beside its own volatile state
+— a `System` under construction, say. A crash loses that state regardless, so journaling the scratch
+catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
+the HDF5 file, so this does **not** require the data to fit in memory. Nothing is durable until
+`persist_to`.
+
+Two caveats. Opening with `InMemory` reads `<path>.sqlite` into RAM but still opens the HDF5 half
+**in place**, so mutations land in the original file; a caller that means to leave the source
+untouched until an explicit save must open a copy. And a scratch store that never reached
+`persist_to`, reopened as `Attached`, reads as _empty_ rather than failing — a read-write open of a
+missing catalog creates a fresh one, so the arrays are present but nothing names them.
+
+## Saving: One Pair, Two Renames
+
+`persist_to` writes both halves to temporary siblings, fsyncs them, and only then renames them into
+place, so a crash before the first rename leaves the destination untouched.
+
+The renames cannot be made atomic together — POSIX renames one path at a time. A **generation
+stamp** covers the gap: each save mints a fresh value and writes it into both the HDF5
+`catalog_generation` root attribute and the catalog's `catalog_identity` table. A crash between the
+two renames therefore leaves halves whose stamps disagree, and the next `open` fails with
+`MismatchedArtifact` instead of reading a store that quietly contradicts itself. The same check
+catches one half being copied without the other.
+
+What the stamp does _not_ give you is a destination that survives a failed save. The renames replace
+the target, so a crash between them destroys whatever pair was there before. That is a deliberate
+trade — loud, detectable loss beats silent corruption. **Do not assume the destination is intact
+after a failed `persist_to`**; recover by saving again from the store, which is still live and
+unchanged.
+
+A store written before the stamp existed carries neither half of it. That reads as "unstamped" and
+skips the check rather than failing, so older artifacts keep opening.
+
+The swap also clears any `-wal`/`-shm` sidecar beside the destination catalog. A sidecar there
+belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite
+would recover it over the database renamed into its place, resurrecting the replaced catalog's pages
+so the save silently would not take.
+
+Saving an `Attached` store onto **its own path** is a no-op: the destination already is that store,
+and the flush at the start of `persist_to` has made it durable. The `InMemory` counterpart is real
+work rather than a no-op — the arrays are already at `path` and the save is what writes the catalog
+beside them, which is exactly the scratch-directory workflow.
+
+Compaction rewrites only the HDF5 half, so it carries the existing stamp into the rewritten file
+rather than minting a new one — a fresh stamp there would manufacture exactly the mismatch the stamp
+exists to detect.
+
 ## Compaction
 
 `compact()` reclaims space in both halves of the artifact, and the two halves behave differently.

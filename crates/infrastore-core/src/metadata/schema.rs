@@ -205,6 +205,19 @@ CREATE INDEX IF NOT EXISTS idx_interval       ON time_series_associations(interv
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
+-- Pairs this catalog with exactly one HDF5 file, whose `catalog_generation`
+-- root attribute holds the same value. `Store::open` compares the two and
+-- rejects a mismatch, which is what turns an interrupted `persist_to` — the two
+-- files are renamed into place one after the other and cannot be swapped
+-- atomically — into a loud error instead of a store that quietly disagrees with
+-- itself. Also catches one half being copied without the other.
+--
+-- Added additively (see the `DDL` doc comment): a store written before the stamp
+-- existed has no row here and no root attribute, and reads as unstamped rather
+-- than as a mismatch. Holds zero or one row; reads must tolerate the table being
+-- absent, because a read-only open cannot run this DDL.
+CREATE TABLE IF NOT EXISTS catalog_identity (generation TEXT NOT NULL);
+
 -- The two association tables below record relationships between catalog
 -- entities, independent of time series. They are deliberately separate rather
 -- than one generic endpoint table: attaching an attribute to a component and

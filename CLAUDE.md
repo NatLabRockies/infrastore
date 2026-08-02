@@ -204,6 +204,20 @@ cargo run -p infrastore-server -- --config my_server.toml
   but nothing enforces it. Identity comes from the root attribute `storage_backend = "hdf5"`, and
   `Store::open` rejects a file that lacks it — including stores written by the removed netcdf
   backend.
+- `CatalogMode` decides where the catalog lives while a store is open, independently of the backend.
+  `Attached` (default) makes it the `.sqlite` file, with WAL and durability on every commit.
+  `InMemory` holds it in RAM and writes it only at `persist_to`; arrays still stream to the HDF5
+  file, so it does not require the data to fit in memory. It exists for a consumer building a store
+  in a scratch directory beside its own volatile state (infrasys does exactly this), where a crash
+  loses that state anyway. `MemoryBackend` + `Attached` is rejected.
+- The two halves carry a matching **generation stamp** — the HDF5 root attribute
+  `catalog_generation` and the catalog's `catalog_identity` table. `persist_to` stages both halves,
+  fsyncs, and renames them into place; because two renames cannot be atomic together, a fresh stamp
+  per save makes an interrupted save fail loudly on the next open (`MismatchedArtifact`) instead of
+  reading as a valid store. A failed save may still have destroyed the destination — retry from the
+  live store rather than assuming the target survived. `compact` rewrites only the HDF5 half and
+  must therefore _preserve_ the existing stamp, never mint one. Both halves of the stamp are
+  additive, so an unstamped (older) artifact skips the check rather than failing.
 - `DATA_FORMAT_VERSION` in `crates/infrastore-core/src/version.rs` is the on-disk compatibility
   contract. Any incompatible HDF5 layout, SQLite schema, dtype encoding, or hashing change must bump
   it and update format documentation and compatibility tests.

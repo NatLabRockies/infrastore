@@ -34,7 +34,7 @@ pub use metadata::{
 pub use reader::{ForecastEntry, ForecastReader, StaticGroup, StaticReader, WindowSlot};
 pub use storage::{ArrayLocation, CompactionReport, Compression, IntegrityReport};
 pub use store::{
-    AddRequest, BulkAdd, ForecastParameters, ListFilter, StaticConsistency, Store,
+    AddRequest, BulkAdd, CatalogMode, ForecastParameters, ListFilter, StaticConsistency, Store,
     TimeSeriesCounts, TimeSeriesCountsDetailed, TransformOutcome, TransformPolicy,
     catalog_sqlite_path,
 };
@@ -78,7 +78,33 @@ pub fn create_store_with_compression(
     Store::create_with_compression(path, in_memory, compression)
 }
 
+/// Create a new store with an explicit catalog placement.
+///
+/// Behaves like [`create_store_with_compression`] but decides whether the
+/// catalog lives in `<path>.sqlite` or in RAM. See [`CatalogMode`].
+pub fn create_store_with_catalog(
+    path: Option<&std::path::Path>,
+    in_memory: bool,
+    compression: Compression,
+    catalog: CatalogMode,
+) -> Result<Store> {
+    Store::create_with_catalog(path, in_memory, compression, catalog)
+}
+
 /// Open an existing store from disk.
 pub fn open_store(path: &std::path::Path, read_only: bool) -> Result<Store> {
     Store::open(path, read_only)
+}
+
+/// Open an existing store from disk with an explicit catalog placement.
+///
+/// See [`CatalogMode`]. With [`CatalogMode::InMemory`] the catalog file is read
+/// into RAM and subsequent mutations reach disk only through
+/// [`Store::persist_to`]; the HDF5 half is still opened in place.
+pub fn open_store_with_catalog(
+    path: &std::path::Path,
+    read_only: bool,
+    catalog: CatalogMode,
+) -> Result<Store> {
+    Store::open_with_catalog(path, read_only, catalog)
 }

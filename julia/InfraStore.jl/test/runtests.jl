@@ -1898,6 +1898,54 @@ end
     @test occursin("closed", sprint(show, store))
 end
 
+@testset "catalog placement selects when the catalog reaches disk" begin
+    dir = mktempdir()
+    scratch = joinpath(dir, "scratch.h5")
+    dest = joinpath(dir, "system.h5")
+    ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load")
+
+    # Arrays stream to the HDF5 file while the catalog stays in RAM, so nothing
+    # is addressable on disk until persist!.
+    store = Store(; in_memory=false, path=scratch, catalog=:memory)
+    @test catalog_mode(store) === :memory
+    add_time_series!(store, 1, "Generator", Component, ts)
+    flush!(store)
+    @test isfile(scratch)
+    @test !isfile(scratch * ".sqlite")
+
+    persist!(store, dest)
+    @test isfile(dest * ".sqlite")
+    close!(store)
+
+    # The saved pair opens as an ordinary attached store.
+    open_store(dest; read_only=true) do saved
+        @test catalog_mode(saved) === :attached
+        @test length(list_keys(saved)) == 1
+    end
+
+    # Load back into RAM, mutate, and save over the same destination.
+    open_store(dest; catalog=:memory) do loaded
+        @test catalog_mode(loaded) === :memory
+        add_time_series!(loaded, 2, "Generator", Component, ts)
+        persist!(loaded, dest)
+    end
+    open_store(dest; read_only=true) do saved
+        @test length(list_keys(saved)) == 2
+    end
+
+    # The default still matches the backend, so existing call sites are unmoved.
+    Store(; in_memory=true) do s
+        @test catalog_mode(s) === :memory
+    end
+    Store(; in_memory=false, path=joinpath(dir, "plain.h5")) do s
+        @test catalog_mode(s) === :attached
+    end
+
+    # Rejected in Julia, before any ccall.
+    @test_throws ArgumentError Store(; in_memory=true, catalog=:bogus)
+    @test_throws ArgumentError open_store(dest; catalog=:bogus)
+end
+
 @testset "Supplemental-attribute associations" begin
     store = Store(in_memory=true)
 

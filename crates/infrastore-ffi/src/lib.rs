@@ -445,6 +445,156 @@ pub unsafe extern "C" fn infrastore_store_open(
     INFRASTORE_OK
 }
 
+/// Translate a `catalog_mode` code into a core [`CatalogMode`](core_lib::CatalogMode).
+///
+/// `0` = attached (the catalog is `<path>.sqlite`), `1` = in memory (it reaches disk only through
+/// `infrastore_store_persist`).
+fn catalog_from_code(code: u8) -> std::result::Result<core_lib::CatalogMode, i32> {
+    match code {
+        0 => Ok(core_lib::CatalogMode::Attached),
+        1 => Ok(core_lib::CatalogMode::InMemory),
+        other => {
+            set_error(format!(
+                "invalid catalog_mode {other}, expected 0 (attached) or 1 (memory)"
+            ));
+            Err(INFRASTORE_ERR_INVALID_PARAMETER)
+        }
+    }
+}
+
+/// Create a store, choosing where the SQLite catalog lives.
+///
+/// Like `infrastore_store_create_with_compression`, but `catalog_mode` selects the catalog's
+/// placement: `0` attaches it to `<path>.sqlite`, where every commit is durable; `1` holds it in
+/// memory, where nothing survives a crash and only `infrastore_store_persist` writes it out.
+/// Arrays stream to the HDF5 file either way. `in_memory=true` admits only `catalog_mode=1`.
+///
+/// # Safety
+///
+/// `path` must be null or point to a valid, null-terminated UTF-8 string, and `out` must be valid
+/// for writing one pointer. The returned handle must be released exactly once with
+/// `infrastore_store_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_create_with_catalog(
+    path: *const c_char,
+    in_memory: bool,
+    compression_kind: u8,
+    deflate_level: u8,
+    shuffle: bool,
+    catalog_mode: u8,
+    out: *mut *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let path = match unsafe { cstr_to_optional_path(path) } {
+        Ok(p) => p,
+        Err(code) => {
+            set_error("invalid path");
+            return code;
+        }
+    };
+    let compression = match compression_kind {
+        0 => core_lib::Compression::None,
+        1 => core_lib::Compression::Deflate {
+            level: deflate_level,
+            shuffle,
+        },
+        other => {
+            set_error(format!(
+                "invalid compression_kind {other}, expected 0 (none) or 1 (deflate)"
+            ));
+            return INFRASTORE_ERR_INVALID_PARAMETER;
+        }
+    };
+    let catalog = match catalog_from_code(catalog_mode) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let store =
+        match core_lib::create_store_with_catalog(path.as_deref(), in_memory, compression, catalog)
+        {
+            Ok(s) => s,
+            Err(e) => return map_core_error(e),
+        };
+    let handle = Box::new(InfraStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    INFRASTORE_OK
+}
+
+/// Open an existing store, choosing where the SQLite catalog lives.
+///
+/// Like `infrastore_store_open`, but `catalog_mode=1` reads `<path>.sqlite` into memory and leaves
+/// the file alone; later mutations reach disk only through `infrastore_store_persist`. The HDF5
+/// half is still opened in place, so a caller that means to leave the original untouched until an
+/// explicit save must open a copy.
+///
+/// # Safety
+///
+/// `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
+/// one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_open_with_catalog(
+    path: *const c_char,
+    read_only: bool,
+    catalog_mode: u8,
+    out: *mut *mut InfraStoreHandle,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let path = match unsafe { cstr_to_str(path) } {
+        Ok(s) => PathBuf::from(s),
+        Err(code) => {
+            set_error("invalid path string");
+            return code;
+        }
+    };
+    let catalog = match catalog_from_code(catalog_mode) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let store = match core_lib::open_store_with_catalog(&path, read_only, catalog) {
+        Ok(s) => s,
+        Err(e) => return map_core_error(e),
+    };
+    let handle = Box::new(InfraStoreHandle { inner: store });
+    unsafe { *out = Box::into_raw(handle) };
+    INFRASTORE_OK
+}
+
+/// Report where `handle`'s catalog lives through `out`: `0` attached, `1` in memory.
+///
+/// # Safety
+///
+/// `handle` must be a live handle returned by this library, and `out` must be valid for writing one
+/// `uint8_t`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn infrastore_store_catalog_mode(
+    handle: *const InfraStoreHandle,
+    out: *mut u8,
+) -> i32 {
+    clear_error();
+    if out.is_null() {
+        set_error("out pointer is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    }
+    let Some(store) = (unsafe { handle.as_ref() }) else {
+        set_error("store handle is null");
+        return INFRASTORE_ERR_NULL_POINTER;
+    };
+    let code = match store.inner.catalog_mode() {
+        core_lib::CatalogMode::Attached => 0,
+        core_lib::CatalogMode::InMemory => 1,
+    };
+    unsafe { *out = code };
+    INFRASTORE_OK
+}
+
 /// Release a store handle returned by `infrastore_store_create` or `infrastore_store_open`.
 ///
 /// # Safety
