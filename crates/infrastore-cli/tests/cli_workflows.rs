@@ -420,11 +420,15 @@ fn add_reads_a_descriptor_from_stdin() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("stdin.h5");
     write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    // A descriptor on stdin has no directory of its own to resolve a relative
+    // `csv` against, so this one carries an absolute path — encoded by
+    // `serde_json` rather than interpolated, because a Windows path is full of
+    // backslashes and every one of them is an escape character to a JSON parser.
+    let csv_path = serde_json::to_string(&dir.path().join("v.csv").to_string_lossy()).unwrap();
     let json = format!(
         r#"{{"owner_id": 42, "owner_type": "Generator", "name": "load",
-             "type": "SingleTimeSeries", "element_type": "f64", "csv": "{}",
-             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#,
-        dir.path().join("v.csv").display()
+             "type": "SingleTimeSeries", "element_type": "f64", "csv": {csv_path},
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#
     );
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_infrastore"))
@@ -433,6 +437,7 @@ fn add_reads_a_descriptor_from_stdin() {
         .args(["add", "--descriptor", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     use std::io::Write as _;
@@ -445,8 +450,9 @@ fn add_reads_a_descriptor_from_stdin() {
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stdout)
+        "add --descriptor - failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
     assert_eq!(data_lines(&run(&store, &["-f", "csv", "list"])).len(), 1);
 }
