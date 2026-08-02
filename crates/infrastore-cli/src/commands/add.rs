@@ -243,13 +243,15 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     let listed = total <= PER_SERIES_LIST_MAX;
     crate::output::report(
         opts.format,
-        serde_json::json!({
-            "added": total,
-            "store": store_path.display().to_string(),
-            // Same threshold as the human listing: a bulk load of 100k series
-            // should report its count, not echo every identity back.
-            "series": listed.then(|| added.clone()),
-        }),
+        || {
+            serde_json::json!({
+                "added": total,
+                "store": store_path.display().to_string(),
+                // Same threshold as the human listing: a bulk load of 100k series
+                // should report its count, not echo every identity back.
+                "series": listed.then(|| added.clone()),
+            })
+        },
         || {
             if listed {
                 for line in &added {

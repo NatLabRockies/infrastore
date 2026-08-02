@@ -262,16 +262,18 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
     if args.dry_run {
         return report(
             args.format,
-            json!({
-                "dry_run": true,
-                "would_attach": rows.len(),
-                "attachments": rows.iter().map(|r| json!({
-                    "component_id": r.component_id,
-                    "component_type": r.component_type,
-                    "attribute_id": r.attribute_id,
-                    "attribute_type": r.attribute_type,
-                })).collect::<Vec<_>>(),
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_attach": rows.len(),
+                    "attachments": rows.iter().map(|r| json!({
+                        "component_id": r.component_id,
+                        "component_type": r.component_type,
+                        "attribute_id": r.attribute_id,
+                        "attribute_type": r.attribute_type,
+                    })).collect::<Vec<_>>(),
+                })
+            },
             || {
                 println!("Would attach {} supplemental attribute(s):", rows.len());
                 for r in &rows {
@@ -288,12 +290,16 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
         .add_supplemental_attribute_associations(rows)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    report(args.format, json!({ "attached": n }), || {
-        println!(
-            "{}",
-            color::header(&format!("Attached {n} supplemental attribute(s)."))
-        );
-    })
+    report(
+        args.format,
+        || json!({ "attached": n }),
+        || {
+            println!(
+                "{}",
+                color::header(&format!("Attached {n} supplemental attribute(s)."))
+            );
+        },
+    )
 }
 
 /// `detach`: remove every attachment matching the filter.
@@ -333,14 +339,18 @@ pub fn detach(
     if dry_run {
         return report(
             format,
-            json!({ "dry_run": true, "would_detach": matched }),
+            || json!({ "dry_run": true, "would_detach": matched }),
             || println!("Would detach {matched} supplemental attribute attachment(s)."),
         );
     }
     if matched == 0 {
-        return report(format, json!({ "detached": 0 }), || {
-            println!("{}", color::dim("No attachments matched the filter."));
-        });
+        return report(
+            format,
+            || json!({ "detached": 0 }),
+            || {
+                println!("{}", color::dim("No attachments matched the filter."));
+            },
+        );
     }
     if !force && !confirm::ask(&format!("Detach {matched} attachment(s)? [y/N] "))? {
         return Ok(());
@@ -350,9 +360,13 @@ pub fn detach(
         .remove_supplemental_attribute_associations(&filter)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    report(format, json!({ "detached": n }), || {
-        println!("{}", color::header(&format!("Detached {n} attachment(s).")));
-    })
+    report(
+        format,
+        || json!({ "detached": n }),
+        || {
+            println!("{}", color::header(&format!("Detached {n} attachment(s).")));
+        },
+    )
 }
 
 /// The four fields of one directed edge, as flags.
@@ -389,16 +403,18 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
     if args.dry_run {
         return report(
             args.format,
-            json!({
-                "dry_run": true,
-                "would_link": rows.len(),
-                "links": rows.iter().map(|r| json!({
-                    "parent_id": r.parent_id,
-                    "parent_type": r.parent_type,
-                    "child_id": r.child_id,
-                    "child_type": r.child_type,
-                })).collect::<Vec<_>>(),
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_link": rows.len(),
+                    "links": rows.iter().map(|r| json!({
+                        "parent_id": r.parent_id,
+                        "parent_type": r.parent_type,
+                        "child_id": r.child_id,
+                        "child_type": r.child_type,
+                    })).collect::<Vec<_>>(),
+                })
+            },
             || {
                 println!("Would add {} link(s):", rows.len());
                 for r in &rows {
@@ -415,9 +431,13 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
         .add_parent_child_associations(rows)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    report(args.format, json!({ "linked": n }), || {
-        println!("{}", color::header(&format!("Added {n} link(s).")));
-    })
+    report(
+        args.format,
+        || json!({ "linked": n }),
+        || {
+            println!("{}", color::header(&format!("Added {n} link(s).")));
+        },
+    )
 }
 
 /// `unlink`: remove every edge matching the filter.
@@ -452,14 +472,18 @@ pub fn unlink(
     if dry_run {
         return report(
             format,
-            json!({ "dry_run": true, "would_unlink": matched }),
+            || json!({ "dry_run": true, "would_unlink": matched }),
             || println!("Would remove {matched} link(s)."),
         );
     }
     if matched == 0 {
-        return report(format, json!({ "unlinked": 0 }), || {
-            println!("{}", color::dim("No links matched the filter."));
-        });
+        return report(
+            format,
+            || json!({ "unlinked": 0 }),
+            || {
+                println!("{}", color::dim("No links matched the filter."));
+            },
+        );
     }
     if !force && !confirm::ask(&format!("Remove {matched} link(s)? [y/N] "))? {
         return Ok(());
@@ -469,9 +493,13 @@ pub fn unlink(
         .remove_parent_child_associations(&filter)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    report(format, json!({ "unlinked": n }), || {
-        println!("{}", color::header(&format!("Removed {n} link(s).")));
-    })
+    report(
+        format,
+        || json!({ "unlinked": n }),
+        || {
+            println!("{}", color::header(&format!("Removed {n} link(s).")));
+        },
+    )
 }
 
 /// `reassign`: move a component's associations from one id to another.
@@ -516,12 +544,16 @@ pub fn reassign(
                 .map_err(|e| e.to_string())?;
             counts.links = Some(as_parent + as_child);
         }
-        let mut doc = counts.to_json(old, new);
-        doc["dry_run"] = json!(true);
         let prose = counts.prose();
-        return report(format, doc, || {
-            println!("Would reassign {prose} from component {old} to {new}.");
-        });
+        return report(
+            format,
+            || {
+                let mut doc = counts.to_json(old, new);
+                doc["dry_run"] = json!(true);
+                doc
+            },
+            || println!("Would reassign {prose} from component {old} to {new}."),
+        );
     }
 
     let mut store = store_access::open_writable(store_path)?;
@@ -540,14 +572,18 @@ pub fn reassign(
     }
     store.flush().map_err(|e| e.to_string())?;
     let prose = counts.prose();
-    report(format, counts.to_json(old, new), || {
-        println!(
-            "{}",
-            color::header(&format!(
-                "Reassigned {prose} from component {old} to {new}."
-            ))
-        );
-    })
+    report(
+        format,
+        || counts.to_json(old, new),
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Reassigned {prose} from component {old} to {new}."
+                ))
+            );
+        },
+    )
 }
 
 /// What a `reassign` touched, per catalog.

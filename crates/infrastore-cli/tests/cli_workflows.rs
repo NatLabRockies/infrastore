@@ -1833,3 +1833,79 @@ fn an_error_is_json_on_stderr_under_f_json_and_prose_otherwise() {
         assert!(err.starts_with("Error: "), "-f {format}: {err}");
     }
 }
+
+/// A reader that stops early is not an error.
+///
+/// The commands whose stdout *is* the artifact — `export` with no `--dir`,
+/// `plot --out -`, `template` — used bare `print!`, which panics on `EPIPE`
+/// because Rust ignores `SIGPIPE`. `infrastore export | head` died with "failed
+/// printing to stdout" and exit 101 as soon as the document outgrew the pipe
+/// buffer, so the series has to be big enough to reach it.
+#[test]
+fn a_closed_pipe_ends_a_stdout_stream_cleanly_instead_of_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("pipe.h5");
+
+    let mut csv = String::from("value\n");
+    for i in 0..50_000 {
+        csv.push_str(&format!("{}\n", i as f64 * 1.5));
+    }
+    write(dir.path(), "big.csv", &csv);
+    let desc = write(
+        dir.path(),
+        "big.json",
+        r#"{"owner_id": 1, "owner_type": "Generator", "name": "big",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "big.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", desc.to_str().unwrap()]);
+
+    for args in [
+        vec!["-f", "csv", "export", "--owner-id", "1"],
+        vec![
+            "plot",
+            "--out",
+            "-",
+            "--owner-id",
+            "1",
+            "--name",
+            "big",
+            "--limit",
+            "50000",
+        ],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_infrastore"))
+            .arg("--store")
+            .arg(&store)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn infrastore");
+        // Close the read end while the writer is still going.
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !err.contains("panicked"),
+            "{args:?} panicked on a closed pipe: {err}"
+        );
+    }
+
+    // The same stream, read to the end, is still whole — the pipe handling must
+    // not have truncated anything.
+    let whole = run(&store, &["-f", "csv", "export", "--owner-id", "1"]);
+    assert_eq!(data_lines(&whole).len(), 50_000, "every row still written");
+
+    // `template` writes to stdout too, and has no store to read. Its descriptor
+    // fits in the pipe buffer, so this only checks it still writes cleanly
+    // through the shared helper.
+    let out = Command::new(env!("CARGO_BIN_EXE_infrastore"))
+        .args(["template", "SingleTimeSeries"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "template: {out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON descriptor");
+    assert_eq!(doc["type"], "SingleTimeSeries");
+}

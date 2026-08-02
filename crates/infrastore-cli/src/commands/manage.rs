@@ -27,13 +27,15 @@ pub fn remove(
         let ts_type = meta.time_series_type.as_str();
         return report(
             format,
-            json!({
-                "dry_run": true,
-                "would_remove": 1,
-                "name": meta.name,
-                "owner_id": meta.owner_id,
-                "time_series_type": ts_type,
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_remove": 1,
+                    "name": meta.name,
+                    "owner_id": meta.owner_id,
+                    "time_series_type": ts_type,
+                })
+            },
             || {
                 println!(
                     "Would remove {} '{}' (owner {}).",
@@ -59,7 +61,7 @@ pub fn remove(
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
-        json!({ "removed": 1, "name": meta.name, "owner_id": meta.owner_id }),
+        || json!({ "removed": 1, "name": meta.name, "owner_id": meta.owner_id }),
         || {
             println!(
                 "{}",
@@ -100,14 +102,18 @@ pub fn transform(
         .map_err(|e| e.to_string())?
         .transformed;
     store.flush().map_err(|e| e.to_string())?;
-    report(format, json!({ "transformed": n }), || {
-        println!(
-            "{}",
-            color::header(&format!(
-                "Transformed {n} SingleTimeSeries into DeterministicSingleTimeSeries."
-            ))
-        );
-    })
+    report(
+        format,
+        || json!({ "transformed": n }),
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Transformed {n} SingleTimeSeries into DeterministicSingleTimeSeries."
+                ))
+            );
+        },
+    )
 }
 
 /// `rename`: rename the single series a selector resolves to.
@@ -124,13 +130,15 @@ pub fn rename(
     if dry_run {
         return report(
             format,
-            json!({
-                "dry_run": true,
-                "would_rename": 1,
-                "name": meta.name,
-                "new_name": new_name,
-                "owner_id": meta.owner_id,
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_rename": 1,
+                    "name": meta.name,
+                    "new_name": new_name,
+                    "owner_id": meta.owner_id,
+                })
+            },
             || {
                 println!(
                     "Would rename '{}' (owner {}) to '{new_name}'.",
@@ -146,12 +154,14 @@ pub fn rename(
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
-        json!({
-            "renamed": 1,
-            "name": meta.name,
-            "new_name": new_name,
-            "owner_id": meta.owner_id,
-        }),
+        || {
+            json!({
+                "renamed": 1,
+                "name": meta.name,
+                "new_name": new_name,
+                "owner_id": meta.owner_id,
+            })
+        },
         || {
             println!(
                 "{}",
@@ -181,18 +191,24 @@ pub fn remove_all(
     if matches.is_empty() {
         // A zero count rather than nothing at all: a script that pipes this into
         // `jq .removed` should read 0, not choke on an empty document.
-        return report(format, json!({ "removed": 0 }), || {
-            println!("{}", color::dim("No time series matched the selector."));
-        });
+        return report(
+            format,
+            || json!({ "removed": 0 }),
+            || {
+                println!("{}", color::dim("No time series matched the selector."));
+            },
+        );
     }
     if dry_run {
         return report(
             format,
-            json!({
-                "dry_run": true,
-                "would_remove": matches.len(),
-                "matches": matches.iter().map(identity_json).collect::<Vec<_>>(),
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_remove": matches.len(),
+                    "matches": matches.iter().map(identity_json).collect::<Vec<_>>(),
+                })
+            },
             || {
                 println!("Would remove {} time series:", matches.len());
                 for m in &matches {
@@ -217,9 +233,13 @@ pub fn remove_all(
     let mut store = store_access::open_writable(store_path)?;
     let n = store.remove_by_filter(filter).map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    report(format, json!({ "removed": n }), || {
-        println!("{}", color::header(&format!("Removed {n} time series.")));
-    })
+    report(
+        format,
+        || json!({ "removed": n }),
+        || {
+            println!("{}", color::header(&format!("Removed {n} time series.")));
+        },
+    )
 }
 
 /// The identifying triple of one series, for the `matches` list a `--dry-run`
@@ -255,9 +275,11 @@ pub fn clear(
             filter = filter.owner_id(id).owner_category(cat);
         }
         let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
-        return report(format, json!({ "dry_run": true, "would_clear": n }), || {
-            println!("Would clear {n} time series.")
-        });
+        return report(
+            format,
+            || json!({ "dry_run": true, "would_clear": n }),
+            || println!("Would clear {n} time series."),
+        );
     }
     let scope = match owner {
         Some((id, _)) => format!("owner {id}"),
@@ -269,9 +291,13 @@ pub fn clear(
     let mut store = store_access::open_writable(store_path)?;
     let n = store.clear_time_series(owner).map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    report(format, json!({ "cleared": n }), || {
-        println!("{}", color::header(&format!("Cleared {n} time series.")));
-    })
+    report(
+        format,
+        || json!({ "cleared": n }),
+        || {
+            println!("{}", color::header(&format!("Cleared {n} time series.")));
+        },
+    )
 }
 
 /// `replace-owner`: reassign every series from one owner to another.
@@ -292,7 +318,7 @@ pub fn replace_owner(
         let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
         return report(
             format,
-            json!({ "dry_run": true, "would_reassign": n, "from": old, "to": new }),
+            || json!({ "dry_run": true, "would_reassign": n, "from": old, "to": new }),
             || println!("Would reassign {n} time series from owner {old} to {new}."),
         );
     }
@@ -303,7 +329,7 @@ pub fn replace_owner(
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
-        json!({ "reassigned": n, "from": old, "to": new }),
+        || json!({ "reassigned": n, "from": old, "to": new }),
         || {
             println!(
                 "{}",
@@ -332,15 +358,17 @@ pub fn copy(
     if dry_run {
         return report(
             format,
-            json!({
-                "dry_run": true,
-                "would_copy": 1,
-                "name": meta.name,
-                "owner_id": meta.owner_id,
-                "dst_owner_id": dst_owner_id,
-                "dst_owner_type": dst_owner_type,
-                "dst_name": dst_name,
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_copy": 1,
+                    "name": meta.name,
+                    "owner_id": meta.owner_id,
+                    "dst_owner_id": dst_owner_id,
+                    "dst_owner_type": dst_owner_type,
+                    "dst_name": dst_name,
+                })
+            },
             || {
                 println!(
                     "Would copy '{}' (owner {}) to owner {dst_owner_id} ({dst_owner_type}) as '{dst_name}'.",
@@ -356,12 +384,14 @@ pub fn copy(
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
-        json!({
-            "copied": 1,
-            "dst_owner_id": dst_owner_id,
-            "dst_owner_type": dst_owner_type,
-            "dst_name": dst_name,
-        }),
+        || {
+            json!({
+                "copied": 1,
+                "dst_owner_id": dst_owner_id,
+                "dst_owner_type": dst_owner_type,
+                "dst_name": dst_name,
+            })
+        },
         || {
             println!(
                 "{}",
@@ -399,11 +429,13 @@ pub fn persist(
         let overwriting: Vec<String> = existing.iter().map(|p| p.display().to_string()).collect();
         return report(
             format,
-            json!({
-                "dry_run": true,
-                "would_write": [dest.display().to_string(), catalog.display().to_string()],
-                "overwriting": overwriting,
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_write": [dest.display().to_string(), catalog.display().to_string()],
+                    "overwriting": overwriting,
+                })
+            },
             || {
                 println!("Would write {} and {}.", dest.display(), catalog.display());
                 if !overwriting.is_empty() {
@@ -437,11 +469,13 @@ pub fn persist(
     store.persist_to(dest).map_err(|e| e.to_string())?;
     report(
         format,
-        json!({
-            "persisted": true,
-            "dest": dest.display().to_string(),
-            "catalog": catalog.display().to_string(),
-        }),
+        || {
+            json!({
+                "persisted": true,
+                "dest": dest.display().to_string(),
+                "catalog": catalog.display().to_string(),
+            })
+        },
         || {
             println!(
                 "{}",
@@ -475,10 +509,12 @@ pub fn init(
     let in_memory = catalog == store_access::CatalogChoice::InMemory;
     report(
         format,
-        json!({
-            "created": store_path.display().to_string(),
-            "catalog": catalog.to_string(),
-        }),
+        || {
+            json!({
+                "created": store_path.display().to_string(),
+                "catalog": catalog.to_string(),
+            })
+        },
         || {
             println!(
                 "{}",
@@ -527,18 +563,24 @@ pub fn merge(
         .list_time_series(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     if metas.is_empty() {
-        return report(format, json!({ "merged": 0 }), || {
-            println!("{}", color::dim("No time series matched the selector."));
-        });
+        return report(
+            format,
+            || json!({ "merged": 0 }),
+            || {
+                println!("{}", color::dim("No time series matched the selector."));
+            },
+        );
     }
     if dry_run {
         return report(
             format,
-            json!({
-                "dry_run": true,
-                "would_merge": metas.len(),
-                "matches": metas.iter().map(identity_json).collect::<Vec<_>>(),
-            }),
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_merge": metas.len(),
+                    "matches": metas.iter().map(identity_json).collect::<Vec<_>>(),
+                })
+            },
             || {
                 println!("Would merge {} time series:", metas.len());
                 for m in &metas {
@@ -579,11 +621,13 @@ pub fn merge(
     store.flush().map_err(|e| e.to_string())?;
     report(
         format,
-        json!({
-            "merged": n,
-            "from": from.display().to_string(),
-            "into": store_path.display().to_string(),
-        }),
+        || {
+            json!({
+                "merged": n,
+                "from": from.display().to_string(),
+                "into": store_path.display().to_string(),
+            })
+        },
         || {
             println!(
                 "{}",
@@ -675,8 +719,7 @@ pub fn template(ts_type: &str) -> Result<(), String> {
             );
         }
     };
-    print!("{body}");
-    Ok(())
+    crate::output::write_raw(body)
 }
 
 // Every template spells its `type`, `owner_category`, and durations exactly the

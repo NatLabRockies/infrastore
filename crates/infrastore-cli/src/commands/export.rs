@@ -57,7 +57,7 @@ pub fn run(
             // empty case reports a zero in the same shape as a real one.
             Some(dir) => output::report(
                 format,
-                json!({ "exported": 0, "dir": dir.display().to_string(), "files": [] }),
+                || json!({ "exported": 0, "dir": dir.display().to_string(), "files": [] }),
                 || println!("{}", color::dim("No time series matched the selector.")),
             ),
         };
@@ -79,7 +79,7 @@ pub fn run(
     match dir {
         None => {
             let content = render(&metas[0], &datas[0], format)?;
-            print!("{content}");
+            output::write_raw(&content)?;
         }
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
@@ -94,11 +94,13 @@ pub fn run(
             }
             return output::report(
                 format,
-                json!({
-                    "exported": written.len(),
-                    "dir": dir.display().to_string(),
-                    "files": written,
-                }),
+                || {
+                    json!({
+                        "exported": written.len(),
+                        "dir": dir.display().to_string(),
+                        "files": written,
+                    })
+                },
                 || {
                     for path in &written {
                         println!("exported {path}");

@@ -134,13 +134,19 @@ pub fn print_items<T: Serialize>(format: Format, items: &[T]) -> Result<(), Stri
 /// one-row table: a status line has no rows to tabulate, and inventing a header
 /// for it would give scripts a shape that changes with every message we reword.
 /// JSON is the machine-readable channel here; CSV is not.
+///
+/// Both sides are closures so neither is built for a run that will not print it.
+/// The status documents are mostly a handful of scalars, but the `--dry-run`
+/// ones list every match, and a `remove --all --dry-run` over a large store
+/// should not assemble 100 000 JSON objects only to discard them and print a
+/// table.
 pub fn report(
     format: Format,
-    value: serde_json::Value,
+    value: impl FnOnce() -> serde_json::Value,
     render: impl FnOnce(),
 ) -> Result<(), String> {
     match format {
-        f if f.is_json() => print_value(f, &value),
+        f if f.is_json() => print_value(f, &value()),
         _ => {
             render();
             Ok(())
@@ -178,8 +184,31 @@ fn error_doc(message: &str) -> serde_json::Value {
 
 /// Write a line to stdout, treating a closed pipe as a clean exit.
 fn write_line(text: &str) -> Result<(), String> {
+    write_stdout(text, true)
+}
+
+/// Write a block of text to stdout verbatim, treating a closed pipe as a clean
+/// exit.
+///
+/// For the commands whose stdout *is* the artifact — `export` with no `--dir`,
+/// `plot --out -`, `template`. `print!` panics on `EPIPE` (Rust ignores
+/// `SIGPIPE`), so `infrastore plot --out - | head` used to die with "failed
+/// printing to stdout" and exit 101 once the document outgrew the pipe buffer.
+/// A reader that stops early is not an error.
+pub fn write_raw(text: &str) -> Result<(), String> {
+    write_stdout(text, false)
+}
+
+fn write_stdout(text: &str, newline: bool) -> Result<(), String> {
     let mut out = std::io::stdout();
-    match writeln!(out, "{text}") {
+    let written = if newline {
+        writeln!(out, "{text}")
+    } else {
+        write!(out, "{text}")
+    };
+    // Flushing here as well as writing: `print!` leaves a partial line in the
+    // line-buffered case, and the flush is where a closed pipe usually surfaces.
+    match written.and_then(|()| out.flush()) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(0),
         Err(e) => Err(e.to_string()),

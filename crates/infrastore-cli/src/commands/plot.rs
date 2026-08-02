@@ -90,13 +90,12 @@ fn write_out(out: &Path, title: &str, document: &str, format: Format) -> Result<
     // `-` puts the chart itself on stdout, so there is no room there for a
     // status line in any format.
     if out.as_os_str() == "-" {
-        print!("{body}");
-        return Ok(());
+        return output::write_raw(&body);
     }
     std::fs::write(out, body).map_err(|e| format!("writing {}: {e}", out.display()))?;
     output::report(
         format,
-        serde_json::json!({ "wrote": out.display().to_string() }),
+        || serde_json::json!({ "wrote": out.display().to_string() }),
         || println!("{}", color::header(&format!("Wrote {}.", out.display()))),
     )
 }
