@@ -18,12 +18,13 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 
 ## Format Version
 
-The HDF5 root carries three global attributes:
+The HDF5 root carries four global attributes:
 
 ```text
 data_format_version = "0.14.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
+catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
 ```
 
 `data_format_version` is the semver of the on-disk format (`DATA_FORMAT_VERSION`). It is bumped when
@@ -41,6 +42,15 @@ anything else and rejects a file that lacks it with `InvalidParameter` — this 
 an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
 netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
 no in-place migration.
+
+`catalog_generation` pairs this file with exactly one catalog; the same value lives in the catalog's
+[`catalog_identity`](#catalog_identity) table. `Store::open` compares the two and rejects a mismatch
+with `MismatchedArtifact`. It is written at creation and re-minted by every `persist_to`, which is
+what makes a save interrupted between its two renames detectable — see
+[Saving](../explanation/storage-model.md#saving-one-pair-two-renames). It is additive, so it carries
+no `data_format_version` change: a store written before it existed has neither the attribute nor the
+table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
+existing value rather than minting a new one, since it rewrites only the HDF5 half.
 
 Opening a store whose recorded version differs from the version this build reads fails with
 `IncompatibleFormat`, naming both versions. Every bump is backward-incompatible by definition, so
@@ -465,6 +475,23 @@ A single-column table holding the catalog schema version. Creating the catalog i
 if the table is empty; `1` is the current value. This tracks the SQLite schema alone and is distinct
 from the HDF5 `data_format_version` attribute, which governs the artifact as a whole and is the
 value `open` validates.
+
+### `catalog_identity`
+
+```sql
+CREATE TABLE catalog_identity (generation TEXT NOT NULL);
+```
+
+Holds zero or one row pairing this catalog with one HDF5 file, whose `catalog_generation` root
+attribute carries the same value. `Store::open` compares them and rejects a mismatch with
+`MismatchedArtifact`, which is what turns an interrupted `persist_to` — two renames that cannot be
+made atomic together — into a loud error instead of a store that quietly disagrees with itself. It
+also catches one half being copied without the other.
+
+Added additively, so it lands on an existing store's first writable open without a
+`data_format_version` change. A store predating it has no row here and no root attribute, and reads
+as unstamped rather than as a mismatch. Because a read-only open cannot run the DDL, every read of
+this table tolerates the table being absent.
 
 ### Indexes
 

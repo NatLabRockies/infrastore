@@ -151,6 +151,56 @@ int32_t infrastore_store_create_with_compression(const char *path,
 int32_t infrastore_store_open(const char *path, bool read_only, struct InfraStore **out);
 
 /**
+ * Create a store, choosing where the SQLite catalog lives.
+ *
+ * Like `infrastore_store_create_with_compression`, but `catalog_mode` selects the catalog's
+ * placement: `0` attaches it to `<path>.sqlite`, where every commit is durable; `1` holds it in
+ * memory, where nothing survives a crash and only `infrastore_store_persist` writes it out.
+ * Arrays stream to the HDF5 file either way. `in_memory=true` admits only `catalog_mode=1`.
+ *
+ * # Safety
+ *
+ * `path` must be null or point to a valid, null-terminated UTF-8 string, and `out` must be valid
+ * for writing one pointer. The returned handle must be released exactly once with
+ * `infrastore_store_free`.
+ */
+int32_t infrastore_store_create_with_catalog(const char *path,
+                                             bool in_memory,
+                                             uint8_t compression_kind,
+                                             uint8_t deflate_level,
+                                             bool shuffle,
+                                             uint8_t catalog_mode,
+                                             struct InfraStore **out);
+
+/**
+ * Open an existing store, choosing where the SQLite catalog lives.
+ *
+ * Like `infrastore_store_open`, but `catalog_mode=1` reads `<path>.sqlite` into memory and leaves
+ * the file alone; later mutations reach disk only through `infrastore_store_persist`. The HDF5
+ * half is still opened in place, so a caller that means to leave the original untouched until an
+ * explicit save must open a copy.
+ *
+ * # Safety
+ *
+ * `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
+ * one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+ */
+int32_t infrastore_store_open_with_catalog(const char *path,
+                                           bool read_only,
+                                           uint8_t catalog_mode,
+                                           struct InfraStore **out);
+
+/**
+ * Report where `handle`'s catalog lives through `out`: `0` attached, `1` in memory.
+ *
+ * # Safety
+ *
+ * `handle` must be a live handle returned by this library, and `out` must be valid for writing one
+ * `uint8_t`.
+ */
+int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
+
+/**
  * Release a store handle returned by `infrastore_store_create` or `infrastore_store_open`.
  *
  * # Safety

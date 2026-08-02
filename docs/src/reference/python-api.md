@@ -36,10 +36,13 @@ def create(
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
+    catalog: str | None = None,     # "attached" or "memory"; None matches the backend
 ) -> Store: ...
 
 @classmethod
-def open(cls, path: str, read_only: bool = False) -> Store: ...
+def open(
+    cls, path: str, read_only: bool = False, catalog: str = "attached"
+) -> Store: ...
 ```
 
 - `create(in_memory=True)` — in-memory store; `path` and compression arguments are ignored.
@@ -48,7 +51,15 @@ def open(cls, path: str, read_only: bool = False) -> Store: ...
   `compression_level` / `shuffle` of your choice tunes the filter. The policy persists with the
   store and is reused on later appends. An unknown `compression` or out-of-range level raises
   `InvalidParameterError`.
+- `catalog="attached"` makes the catalog the `.sqlite` file, where every commit is durable;
+  `catalog="memory"` holds it in RAM so it reaches disk only through `persist_to()`. Arrays stream
+  to the HDF5 file either way. The default (`None`) matches the backend — `"memory"` when
+  `in_memory=True`, else `"attached"` — so existing call sites are unchanged. An unknown `catalog`
+  raises `InvalidParameterError`. See
+  [Where the Catalog Lives](../explanation/storage-model.md#where-the-catalog-lives).
 - `open(path, read_only=True)` — read-only open; writes raise `ReadOnlyStoreError`.
+- `open(path, catalog="memory")` — loads the catalog into RAM; the HDF5 half is still opened in
+  place. `store.catalog` reports the mode.
 
 The store is also a context manager: `with Store.create(...) as store:` closes it on exit.
 `store.close()` drops the underlying handle and releases its files; subsequent operations raise

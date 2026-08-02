@@ -449,6 +449,21 @@ pub(crate) trait StorageBackend: Send + Sync {
     /// Flush any in-memory state to disk (no-op for in-memory backends).
     fn flush(&mut self) -> Result<()>;
 
+    /// This file's generation stamp, pairing it with exactly one catalog.
+    ///
+    /// `None` both for a backend with no file to stamp and for one written
+    /// before the stamp existed; `Store::open` treats either as "unstamped" and
+    /// skips the pairing check rather than rejecting the store.
+    fn generation(&self) -> Option<String> {
+        None
+    }
+
+    /// Stamp this file, replacing any existing value. No-op for a backend with
+    /// no file to stamp.
+    fn set_generation(&mut self, _generation: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// The compression policy applied to newly written arrays. In-memory
     /// backends report [`Compression::None`] since they never compress; the
     /// on-disk backend reports the policy it was created or reopened with.

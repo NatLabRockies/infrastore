@@ -21,34 +21,38 @@ Exported names (types first, then functions):
 `add_parent_child_association!`, `add_parent_child_associations!`,
 `add_supplemental_attribute_association!`, `add_supplemental_attribute_associations!`,
 `add_time_series!`, `add_time_series_bulk!`, `build_forecast_reader`, `build_static_reader`,
-`bulk_read`, `check_static_consistency`, `clear!`, `close!`, `compact!`, `copy_time_series!`,
-`count_array_references`, `count_components_with_attributes`, `count_parent_child_associations`,
-`count_supplemental_attribute_associations`, `count_supplemental_attributes`, `counts_by_type`,
-`flush!`, `forecast_entries`, `forecast_num_slots`, `forecast_read!`, `forecast_summary`,
-`forecast_timeline`, `forecast_values`, `get_array_by_hash`, `get_compression`, `get_counts`,
-`get_forecast_parameters`, `get_intervals`, `get_metadata`, `get_path`, `get_resolutions`,
-`get_time_series`, `get_time_series_key`, `get_time_series_keys`, `has_any_time_series`,
-`has_for_owner`, `has_parent_child_association`, `has_supplemental_attribute_association`,
-`has_time_series`, `in_transaction`, `init_logging`, `key_info`, `list_array_groups`,
-`list_children`, `list_components_with_attributes`, `list_keys`, `list_names`, `list_owner_ids`,
-`list_owner_types`, `list_parent_child_associations`, `list_parents`,
-`list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`, `list_time_series`,
-`num_distinct_arrays`, `open_store`, `persist!`, `read_only`, `rollback_transaction!`,
-`transaction`, `begin_transaction!`, `commit_transaction!`, `remove_by_filter!`,
-`remove_parent_child_associations!`, `remove_supplemental_attribute_associations!`,
-`remove_time_series!`, `rename_time_series!`, `replace_owner!`,
-`replace_parent_child_component_id!`, `replace_supplemental_attribute_component_id!`, `static_grid`,
-`static_groups`, `static_read!`, `static_summary`, `static_timestamps`, `static_values`,
-`supplemental_attribute_counts_by_type`, `supplemental_attribute_summary`, `time_series_counts`,
-`transform_single_time_series!`, `verify_integrity`.
+`bulk_read`, `catalog_mode`, `check_static_consistency`, `clear!`, `close!`, `compact!`,
+`copy_time_series!`, `count_array_references`, `count_components_with_attributes`,
+`count_parent_child_associations`, `count_supplemental_attribute_associations`,
+`count_supplemental_attributes`, `counts_by_type`, `flush!`, `forecast_entries`,
+`forecast_num_slots`, `forecast_read!`, `forecast_summary`, `forecast_timeline`, `forecast_values`,
+`get_array_by_hash`, `get_compression`, `get_counts`, `get_forecast_parameters`, `get_intervals`,
+`get_metadata`, `get_path`, `get_resolutions`, `get_time_series`, `get_time_series_key`,
+`get_time_series_keys`, `has_any_time_series`, `has_for_owner`, `has_parent_child_association`,
+`has_supplemental_attribute_association`, `has_time_series`, `in_transaction`, `init_logging`,
+`key_info`, `list_array_groups`, `list_children`, `list_components_with_attributes`, `list_keys`,
+`list_names`, `list_owner_ids`, `list_owner_types`, `list_parent_child_associations`,
+`list_parents`, `list_supplemental_attribute_associations`, `list_supplemental_attribute_ids`,
+`list_time_series`, `num_distinct_arrays`, `open_store`, `persist!`, `read_only`,
+`rollback_transaction!`, `transaction`, `begin_transaction!`, `commit_transaction!`,
+`remove_by_filter!`, `remove_parent_child_associations!`,
+`remove_supplemental_attribute_associations!`, `remove_time_series!`, `rename_time_series!`,
+`replace_owner!`, `replace_parent_child_component_id!`,
+`replace_supplemental_attribute_component_id!`, `static_grid`, `static_groups`, `static_read!`,
+`static_summary`, `static_timestamps`, `static_values`, `supplemental_attribute_counts_by_type`,
+`supplemental_attribute_summary`, `time_series_counts`, `transform_single_time_series!`,
+`verify_integrity`.
 
 ## Constructors
 
 ```julia
 Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
-        compression_level::Integer=3, shuffle::Bool=true) -> Store
-open_store(path::AbstractString; read_only::Bool=false) -> Store
+        compression_level::Integer=3, shuffle::Bool=true,
+        catalog::Union{Nothing,Symbol,AbstractString}=nothing) -> Store
+open_store(path::AbstractString; read_only::Bool=false,
+           catalog::Union{Symbol,AbstractString}=:attached) -> Store
+catalog_mode(store::Store) -> Symbol
 ```
 
 - `Store()` — in-memory store.
@@ -57,7 +61,14 @@ open_store(path::AbstractString; read_only::Bool=false) -> Store
   `compression_level` (0–9) with optional byte `shuffle`. The policy is persisted with the store and
   reused on later appends; it is ignored for in-memory stores. An unknown `compression` throws
   `ArgumentError`.
+- `catalog=:attached` makes the catalog the `.sqlite` file, where every commit is durable;
+  `catalog=:memory` holds it in RAM so it reaches disk only through `persist!`. Arrays stream to the
+  HDF5 file either way. The default (`nothing`) matches the backend — `:memory` when `in_memory` is
+  true, else `:attached` — so existing call sites are unchanged. An unknown `catalog` throws
+  `ArgumentError`. See
+  [Where the Catalog Lives](../explanation/storage-model.md#where-the-catalog-lives).
 - `open_store(path; read_only=true)` — opens an existing on-disk pair.
+- `catalog_mode(store)` returns `:attached` or `:memory`.
 
 The store registers a finalizer; close it eagerly with `close!(store)`.
 

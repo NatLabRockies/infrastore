@@ -38,6 +38,11 @@ fn value_kind(value: &rusqlite::types::Value) -> &'static str {
     }
 }
 
+/// Pages copied per step by [`MetadataStore::open_path_into_memory`]. The
+/// online-backup API requires a positive step size; this one is large enough
+/// that a realistic catalog finishes in a few iterations.
+const BACKUP_PAGES_PER_STEP: std::ffi::c_int = 1024;
+
 pub struct MetadataStore {
     conn: Connection,
     read_only: bool,
@@ -703,6 +708,46 @@ impl MetadataStore {
         })
     }
 
+    /// Copy an existing catalog file into a fresh in-memory database.
+    ///
+    /// The inverse of [`Self::backup_to`], but not its mirror image: `VACUUM
+    /// INTO` cannot target `:memory:`, so this goes through SQLite's
+    /// online-backup API instead. `path` is opened read-only and never written
+    /// — once loaded, the only route back to disk is [`Store::persist_to`].
+    ///
+    /// The DDL runs *after* the copy, which makes this strictly better than a
+    /// file open for stores predating an additive table: a read-only file open
+    /// cannot run DDL and has to degrade to empty reads (see
+    /// [`Self::has_supplemental_attribute_table`]), whereas copying into a
+    /// writable in-memory database picks the table up. `read_only` is therefore
+    /// only the software guard on mutation, not a property of the connection.
+    pub fn open_path_into_memory(path: &Path, read_only: bool) -> Result<Self> {
+        let src = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        let mut conn = Connection::open_in_memory()?;
+        {
+            // Both handles are exclusively ours, so there is no reader to yield
+            // to between steps: no pause, and a step size large enough that a
+            // realistic catalog copies in a handful of iterations.
+            let backup = rusqlite::backup::Backup::new(&src, &mut conn)?;
+            backup.run_to_completion(BACKUP_PAGES_PER_STEP, std::time::Duration::ZERO, None)?;
+        }
+        drop(src);
+        Self::init(&conn)?;
+        let has_supplemental_attribute_table =
+            table_exists(&conn, "supplemental_attribute_associations")?;
+        let has_parent_child_table = table_exists(&conn, "parent_child_associations")?;
+        Ok(Self {
+            conn,
+            read_only,
+            has_supplemental_attribute_table,
+            has_parent_child_table,
+            timestamps_cache: RefCell::default(),
+        })
+    }
+
     fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         // Wait, rather than failing immediately with SQLITE_BUSY, when another
@@ -757,6 +802,38 @@ impl MetadataStore {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// This catalog's generation stamp — see the `catalog_identity` DDL.
+    ///
+    /// `None` when the catalog predates the stamp, and also for a read-only open
+    /// of such a catalog, which cannot run the DDL that would create the table.
+    /// Both read as "unstamped", which `Store::open` treats as a skipped check
+    /// rather than a mismatch.
+    pub fn generation(&self) -> Result<Option<String>> {
+        if !table_exists(&self.conn, "catalog_identity")? {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row("SELECT generation FROM catalog_identity LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?)
+    }
+
+    /// Stamp this catalog, replacing any existing value. The table holds at most
+    /// one row, so this clears it first.
+    pub fn set_generation(&self, generation: &str) -> Result<()> {
+        if self.read_only {
+            return Err(TimeSeriesError::ReadOnlyStore);
+        }
+        self.conn.execute("DELETE FROM catalog_identity", [])?;
+        self.conn.execute(
+            "INSERT INTO catalog_identity (generation) VALUES (?1)",
+            params![generation],
+        )?;
         Ok(())
     }
 
