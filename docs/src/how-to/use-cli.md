@@ -4,11 +4,31 @@
 `.h5` + `.h5.sqlite` pair (no gRPC server required). For the full command and descriptor reference,
 see [CLI Reference](../reference/cli.md).
 
-## 1. Build the Binary
+## 1. Install the Binary
+
+Grab a prebuilt archive from the
+[Releases page](https://github.com/NatLabRockies/infrastore/releases) — the executables inside are
+statically linked against HDF5, so there is nothing else to install:
+
+```sh
+VERSION=v0.5.0    # pick a release from the Releases page
+curl -fsSLO https://github.com/NatLabRockies/infrastore/releases/download/$VERSION/infrastore-aarch64-apple-darwin.tar.gz
+tar xzf infrastore-aarch64-apple-darwin.tar.gz
+```
+
+Or install from crates.io, which builds HDF5 from source and so needs `cmake` and a C compiler:
+
+```sh
+cargo install infrastore-cli       # installs the `infrastore` binary
+```
+
+See [Installation](../getting-started/installation.md#the-infrastore-cli) for the per-platform
+archive list and checksum verification.
+
+Working in a checkout instead:
 
 ```sh
 cargo build -p infrastore-cli      # debug build at target/debug/infrastore
-# or a release build:
 cargo build -p infrastore-cli --release
 ```
 

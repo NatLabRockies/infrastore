@@ -2,18 +2,76 @@
 
 Most users install a published package and need no build tools at all:
 
-| Language | Install                        |
-| -------- | ------------------------------ |
-| Rust     | `cargo add infrastore-core`    |
-| Python   | `pip install infrastore`       |
-| Julia    | `Pkg.add("InfraStore")`        |
-| CLI      | `cargo install infrastore-cli` |
+| Language | Install                                                                     |
+| -------- | --------------------------------------------------------------------------- |
+| Rust     | `cargo add infrastore-core`                                                 |
+| Python   | `pip install infrastore`                                                    |
+| CLI      | [download a binary](#the-infrastore-cli), or `cargo install infrastore-cli` |
+| Julia    | not yet registered — see [Julia](#julia)                                    |
 
-The Python wheels and the Julia binary (`InfraStore_jll`) are prebuilt and self-contained. The Rust
-crates build HDF5 and zlib from vendored sources and link them statically, so they need `cmake` and
-a C compiler but **no system HDF5**. The same vendored, statically linked stack backs every channel,
-so the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
-environment.
+The Python wheels are prebuilt and self-contained. The Rust crates build HDF5 and zlib from vendored
+sources and link them statically, so they need `cmake` and a C compiler but **no system HDF5**. The
+same vendored, statically linked stack backs every channel, so the HDF5 version behind the on-disk
+format is pinned by infrastore rather than by the target environment.
+
+## The `infrastore` CLI
+
+### Download a prebuilt binary
+
+Each tagged release attaches archives to the
+[Releases page](https://github.com/NatLabRockies/infrastore/releases). The executables are linked
+statically against HDF5 and zlib, so there is nothing else to install.
+
+| Archive                                       | Contents                                               |
+| --------------------------------------------- | ------------------------------------------------------ |
+| `infrastore-x86_64-unknown-linux-musl.tar.gz` | Linux x86_64 — `infrastore`, `infrastore-server`       |
+| `infrastore-x86_64-unknown-linux-gnu.tar.gz`  | Linux x86_64 — `libinfrastore_ffi.so` + `infrastore.h` |
+| `infrastore-aarch64-apple-darwin.tar.gz`      | macOS Apple Silicon — executables and C library        |
+| `infrastore-x86_64-pc-windows-msvc.zip`       | Windows x86_64 — executables and C library             |
+
+Linux ships two archives because they serve different consumers. The executables are built against
+musl and linked statically, so they run on any distribution regardless of its glibc version —
+including an HPC login node much older than the build machine. The C library is built against glibc
+instead: it gets loaded into a running Julia or Python process, and a musl shared library there
+would put two C libraries in one address space.
+
+```sh
+VERSION=v0.5.0    # pick a release from the Releases page
+BASE=https://github.com/NatLabRockies/infrastore/releases/download/$VERSION
+curl -fsSLO $BASE/infrastore-aarch64-apple-darwin.tar.gz
+tar xzf infrastore-aarch64-apple-darwin.tar.gz
+./infrastore --version
+```
+
+Move `infrastore` onto your `PATH` to finish. Every archive carries a `.sha256` sidecar if you want
+to verify the download first:
+
+```sh
+curl -fsSLO $BASE/infrastore-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c infrastore-aarch64-apple-darwin.tar.gz.sha256   # sha256sum -c on Linux
+```
+
+> **macOS.** The binaries are not notarized, so Gatekeeper blocks the first run of a downloaded
+> executable. Clear the quarantine flag with `xattr -d com.apple.quarantine ./infrastore`.
+
+### Install from crates.io
+
+```sh
+cargo install infrastore-cli      # installs the `infrastore` binary
+```
+
+This compiles HDF5 from vendored sources, so it needs `cmake` and a C compiler (see
+[Build Prerequisites](#build-prerequisites)) and takes a few minutes on the first build.
+
+## Julia
+
+`InfraStore.jl` is **not yet registered in the Julia General registry**, and neither is the
+`InfraStore_jll` binary package it will eventually load, so `Pkg.add("InfraStore")` does not work
+yet. Until both are registered, install the package from a checkout and point `INFRASTORE_LIB` at a
+cdylib — either `libinfrastore_ffi` from the release archives above, or one you build with
+`cargo build -p infrastore-ffi --release`. [Integrate with Julia](../how-to/integrate-julia.md) has
+the full recipe, and [Releasing](../releasing.md#5-julia--general) tracks what registration still
+needs.
 
 The rest of this page covers building the workspace from a checkout.
 

@@ -37,5 +37,26 @@ class NonCodeLinesTest(unittest.TestCase):
         )
 
 
+class MdbookSlugTest(unittest.TestCase):
+    def test_dropped_punctuation_leaves_two_dashes(self) -> None:
+        # mdbook emits one dash per space and does not collapse runs, so
+        # punctuation it strips from between two words leaves a double dash.
+        # Each expectation here was read off the generated HTML.
+        cases = {
+            "2. Rust → crates.io": "2-rust--cratesio",
+            "5. Julia → General": "5-julia--general",
+            "gRPC Server & Client Guide": "grpc-server--client-guide",
+            "Request / Response Messages": "request--response-messages",
+            "Integrity & maintenance": "integrity--maintenance",
+        }
+        for heading, expected in cases.items():
+            with self.subTest(heading=heading):
+                self.assertEqual(check_doc_links.mdbook_slug(heading), expected)
+
+    def test_ordinary_headings_are_unaffected(self) -> None:
+        self.assertEqual(check_doc_links.mdbook_slug("Build Prerequisites"), "build-prerequisites")
+        self.assertEqual(check_doc_links.mdbook_slug("The `infrastore` CLI"), "the-infrastore-cli")
+
+
 if __name__ == "__main__":
     unittest.main()

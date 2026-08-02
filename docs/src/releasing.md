@@ -1,12 +1,14 @@
 # Releasing
 
-infrastore ships from one repository to three registries. This page is the procedure.
+infrastore ships from one repository to three registries, plus prebuilt binaries on the repository's
+own releases. This page is the procedure.
 
-| Channel | Package(s)                                                                                     | Registry      |
-| ------- | ---------------------------------------------------------------------------------------------- | ------------- |
-| Rust    | `infrastore-core`, `infrastore-proto`, `infrastore-ffi`, `infrastore-server`, `infrastore-cli` | crates.io     |
-| Python  | `infrastore`                                                                                   | PyPI          |
-| Julia   | `InfraStore_jll`, then `InfraStore`                                                            | Julia General |
+| Channel  | Package(s)                                                                                     | Registry        |
+| -------- | ---------------------------------------------------------------------------------------------- | --------------- |
+| Rust     | `infrastore-core`, `infrastore-proto`, `infrastore-ffi`, `infrastore-server`, `infrastore-cli` | crates.io       |
+| Python   | `infrastore`                                                                                   | PyPI            |
+| Julia    | `InfraStore_jll`, then `InfraStore`                                                            | Julia General   |
+| Binaries | `infrastore`, `infrastore-server`, `libinfrastore_ffi` + header                                | GitHub Releases |
 
 `infrastore-py` and `infrastore-bench` set `publish = false`: the first ships as the `infrastore`
 wheel on PyPI rather than as a crate, and the second is an internal benchmarking tool.
@@ -91,7 +93,7 @@ git tag v0.1.0
 git push origin main --tags
 ```
 
-Pushing the tag triggers both the `crates-release` and `python-wheels` workflows.
+Pushing the tag triggers three workflows: `crates-release`, `python-wheels`, and `release`.
 
 ### 2. Rust → crates.io
 
@@ -129,11 +131,48 @@ publishing (environment `pypi`).
 The abi3 floor is `abi3-py311`, set in three places that must agree: the `pyo3` feature in
 `crates/infrastore-py/Cargo.toml`, `build = "cp311-*"` in `pyproject.toml`, and `requires-python`.
 
-### 4. Julia → General
+### 4. GitHub Release binaries
+
+Handled by `.github/workflows/release.yml` on the tag. It builds the `infrastore` CLI, the
+`infrastore-server` binary, and the `libinfrastore_ffi` cdylib plus its generated header, then
+attaches one archive per platform — each with a `.sha256` sidecar — to a **draft** GitHub Release
+with generated release notes. Review the notes and publish the draft by hand.
+
+Because the workflow creates the draft itself, cut releases by pushing the tag rather than by
+authoring a release in the GitHub UI first.
+
+| Target                      | Runner           | Archive contents          |
+| --------------------------- | ---------------- | ------------------------- |
+| `aarch64-apple-darwin`      | `macos-14`       | executables and C library |
+| `x86_64-unknown-linux-musl` | `ubuntu-latest`  | executables only          |
+| `x86_64-unknown-linux-gnu`  | `ubuntu-latest`  | C library only            |
+| `x86_64-pc-windows-msvc`    | `windows-latest` | executables and C library |
+
+Linux is built twice on purpose. musl gives statically linked executables that run on any
+distribution, including HPC login nodes with an older glibc than the runner — but a musl-built
+cdylib loaded into a glibc Julia or Python process puts two C libraries in one address space, so the
+shared library comes from a separate gnu build. On macOS the packaging step rewrites the dylib's
+`LC_ID_DYLIB` to `@rpath/libinfrastore_ffi.dylib`; cargo otherwise bakes in the runner's absolute
+build path.
+
+The workflow builds selected packages rather than `--workspace`, which would drag in the PyO3 cdylib
+(it needs an interpreter to link against, and ships as a wheel instead) and `infrastore-bench`. It
+also uses `--locked`, so a release builds exactly what CI tested.
+
+The same workflow deploys **versioned documentation** to a `/infrastore/<tag>/` subdirectory of
+`gh-pages` and updates `versions.json`, which drives the docs version picker. It keeps the five most
+recent releases and prunes older ones from both the manifest and disk. It shares the `pages`
+concurrency group with `docs.yml`, which owns the `latest` build from `main`; the two must not push
+to `gh-pages` at once.
+
+To rehearse the builds without cutting a release, run the workflow manually — the `create-release`
+and docs jobs are both gated on a tag ref, so a `workflow_dispatch` run only exercises the matrix.
+
+### 5. Julia → General
 
 Two registrations, in order. The JLL must exist before `InfraStore.jl` can depend on it.
 
-**4a. `InfraStore_jll`** — the compiled `libinfrastore_ffi`, one binary per platform.
+**5a. `InfraStore_jll`** — the compiled `libinfrastore_ffi`, one binary per platform.
 
 1. Update the `GitSource` SHA in `yggdrasil/build_tarballs.jl` to the release commit
    (`git rev-parse v0.1.0^{commit}`) and `version` to match. Yggdrasil requires a full commit SHA; a
@@ -162,7 +201,7 @@ The recipe patches one thing in the source tree: it drops sha2's `asm` feature, 
 BinaryBuilder forbids forcing an arch via `-march` and the ARMv8 crypto kernels cannot be assembled
 there (x86-64 still detects SHA-NI at runtime).
 
-**4b. `InfraStore.jl`** — the `ccall` wrapper and high-level API.
+**5b. `InfraStore.jl`** — the `ccall` wrapper and high-level API.
 
 These changes are drafted below but **must not be applied until the JLL is registered** — adding a
 dependency on a package General does not yet carry makes `Pkg.instantiate()` fail, which would break
@@ -248,7 +287,7 @@ General's AutoMerge requires a public repository, an OSI-approved license file i
 directory, `[compat]` bounds for every non-stdlib dependency including `julia`, and version `0.1.0`
 for a new package. New packages also sit for a three-day waiting period before auto-merge.
 
-### 5. Downstream
+### 6. Downstream
 
 `InfrastructureSystems.jl` depends on `InfraStore.jl` for its Rust time-series backend: add
 `InfraStore` to its `[deps]` and replace the raw `ccall`s in `src/rust_time_series_store.jl` with
