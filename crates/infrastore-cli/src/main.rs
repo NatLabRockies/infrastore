@@ -785,7 +785,7 @@ fn real_main() {
     init_tracing(cli.log_level.as_deref());
     confirm::set_assume_yes(cli.yes);
     if let Err(e) = run(&cli) {
-        eprintln!("Error: {e}");
+        output::print_error(cli.format, &e);
         std::process::exit(1);
     }
 }

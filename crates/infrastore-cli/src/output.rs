@@ -148,6 +148,34 @@ pub fn report(
     }
 }
 
+/// Report a runtime failure on stderr, in the shape `format` asks for.
+///
+/// stderr in every format — stdout belongs to whatever is reading the command's
+/// output, and a failed command has no output to put there. Under
+/// `json`/`jsonl` the message is wrapped as `{"status": "error", "message": …}`
+/// so a caller that parses one stream can parse both, rather than having to
+/// switch to line-scraping the moment something goes wrong.
+///
+/// Argument-parsing failures (exit 2) are not routed through here: clap renders
+/// those itself, before there is a parsed `--format` to honor.
+pub fn print_error(format: Format, message: &str) {
+    let text = match format {
+        Format::Json => serde_json::to_string_pretty(&error_doc(message)).ok(),
+        Format::Jsonl => serde_json::to_string(&error_doc(message)).ok(),
+        _ => None,
+    };
+    match text {
+        Some(text) => eprintln!("{text}"),
+        // Both the non-JSON formats and a message that somehow refuses to
+        // serialize: the prose form always reaches the user.
+        None => eprintln!("Error: {message}"),
+    }
+}
+
+fn error_doc(message: &str) -> serde_json::Value {
+    serde_json::json!({ "status": "error", "message": message })
+}
+
 /// Write a line to stdout, treating a closed pipe as a clean exit.
 fn write_line(text: &str) -> Result<(), String> {
     let mut out = std::io::stdout();

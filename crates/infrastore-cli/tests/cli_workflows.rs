@@ -1792,3 +1792,44 @@ fn a_refused_confirmation_says_so_on_stderr_leaving_stdout_clean() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A failure reports in the same format the command was asked for.
+///
+/// Errors always went to stderr, so they never broke a `jq` reading stdout —
+/// but a caller parsing one stream had to switch to line-scraping the moment
+/// something went wrong. Under `-f json` the message is a document too.
+#[test]
+fn an_error_is_json_on_stderr_under_f_json_and_prose_otherwise() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope.h5");
+
+    let out = raw(&missing, &["-f", "json", "list"]);
+    assert!(!out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "a failure leaves stdout empty: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stderr).expect("stderr parses as one JSON document");
+    assert_eq!(doc["status"], "error");
+    assert!(
+        doc["message"].as_str().unwrap().contains("nope.h5"),
+        "{doc}"
+    );
+
+    // `jsonl` gets the same document compact, on one line.
+    let jsonl = raw(&missing, &["-f", "jsonl", "list"]);
+    let line = String::from_utf8(jsonl.stderr).unwrap();
+    assert_eq!(line.trim().lines().count(), 1, "{line}");
+    let doc: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(doc["status"], "error");
+
+    // The non-JSON formats keep the `Error:` prefix the exit-status table
+    // documents.
+    for format in ["table", "csv"] {
+        let out = raw(&missing, &["-f", format, "list"]);
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(err.starts_with("Error: "), "-f {format}: {err}");
+    }
+}

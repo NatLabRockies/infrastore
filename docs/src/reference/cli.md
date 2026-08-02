@@ -53,7 +53,13 @@ went, and `--out -` puts the chart itself on stdout with no status line at all.
 
 Diagnostics stay off stdout in every format: errors, the interactive `[y/N]` prompts, the `Aborted.`
 notice, and `add`'s progress counter all go to stderr, so `-f json` output is only ever the
-document.
+document. Errors follow the format too — `-f json` renders them as
+`{"status": "error", "message": …}` on stderr, so a caller parsing one stream can parse both:
+
+```console
+$ infrastore --store missing.h5 -f json list 2>&1 >/dev/null | jq -r .message
+store not found: missing.h5
+```
 
 `jsonl` is `json` line-delimited: one compact object per line with no enclosing `{"items": [...]}`,
 so a 100 000-row `list` streams into `jq` instead of having to be buffered whole.
@@ -727,11 +733,18 @@ reads it — so its absence never affects reads.
 
 ## Exit Status
 
-| Code | Meaning                                                                      |
-| ---- | ---------------------------------------------------------------------------- |
-| `0`  | Success.                                                                     |
-| `1`  | Runtime error. The message is printed to stderr, prefixed with `Error:`.     |
-| `2`  | Usage error from argument parsing (unknown flag, missing `--descriptor`, …). |
+| Code | Meaning                                                                          |
+| ---- | -------------------------------------------------------------------------------- |
+| `0`  | Success.                                                                         |
+| `1`  | Runtime error. The message goes to stderr, in the `--format` that was asked for. |
+| `2`  | Usage error from argument parsing (unknown flag, missing `--descriptor`, …).     |
+
+A runtime error is `Error: <message>` under `table` and `csv`, and
+`{"status": "error", "message": "<message>"}` under `json` and `jsonl` — pretty for `json`, one
+compact line for `jsonl`. stdout is left empty either way.
+
+Exit `2` is the exception: clap renders those itself, before there is a parsed `--format` to honor,
+so an argument error is always prose no matter what `-f` says.
 
 Three commands also use `1` as an _answer_ rather than a failure, so they drop into a shell
 conditional or a CI gate: `verify` when the integrity report lists any error, `diff` when the two
