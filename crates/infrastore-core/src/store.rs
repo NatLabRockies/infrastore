@@ -3939,8 +3939,16 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 
 /// fsync a just-written file, so the rename that follows cannot publish a name
 /// pointing at data the kernel has not committed.
+///
+/// The handle is opened for writing because Windows' `FlushFileBuffers` requires
+/// write access and fails a read-only handle with `ERROR_ACCESS_DENIED`; on Unix
+/// either would do. Both callers pass a staged temporary they just wrote, so
+/// nothing else holds the file.
 fn sync_file(path: &Path) -> Result<()> {
-    std::fs::File::open(path)?.sync_all()?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()?;
     Ok(())
 }
 
