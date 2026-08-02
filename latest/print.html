@@ -3153,21 +3153,20 @@ cargo build -p infrastore-cli --release
 <p>Numeric values live in a CSV; everything that does not fit a flat grid (owner, name, type,
 element_type, resolution, initial timestamp, units, features) lives in a <strong>descriptor JSON</strong>. Print
 a starting point for any type with <code>template</code>:</p>
-<pre><code class="language-sh">infrastore template single &gt; load.json       # print an example descriptor to edit
+<pre><code class="language-sh">infrastore template SingleTimeSeries &gt; load.json   # print an example descriptor to edit
 </code></pre>
 <p>Edit it to point at your data and metadata:</p>
 <pre><code class="language-json">{
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load",
-  "type": "single",
+  "type": "SingleTimeSeries",
   "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
+  "resolution": "PT1H",
   "features": {
     "model_year": 2030
   }
@@ -3182,35 +3181,96 @@ value
 102.8
 101.0
 </code></pre>
+<p><strong>Every data CSV needs a header row.</strong> It is not decoration: <code>add</code> reads it to tell a hand-written
+value-only file from one <code>export</code> wrote (see
+<a href="how-to/../reference/cli.html#reading-back-and-re-adding">Reading back, and re-adding</a>). A file whose first
+row is data is rejected rather than quietly losing that row to the header.</p>
 <p>The descriptor rejects unknown keys, so a typo (<code>resolutionn</code>) is a hard error rather than a
 silently ignored setting.</p>
 <h2 id="3-add-it-to-a-store"><a class="header" href="#3-add-it-to-a-store">3. Add It to a Store</a></h2>
-<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json
+<pre><code class="language-sh">infrastore --store demo.h5 add --descriptor load.json --dry-run   # check first
+infrastore --store demo.h5 add --descriptor load.json
 </code></pre>
-<p>The store (<code>demo.h5</code> and its <code>demo.h5.sqlite</code> catalog) is created on first <code>add</code>. A descriptor may
-also be a JSON array of objects to add many series in one transaction. <code>--csv</code> overrides the
+<p>The store (<code>demo.h5</code> and its <code>demo.h5.sqlite</code> catalog) is created on first <code>add</code>, or explicitly with
+<code>infrastore --store demo.h5 init</code> when you want to pin a compression policy up front. A descriptor
+may also be a JSON array of objects to add many series in one transaction. <code>--csv</code> overrides the
 descriptor's <code>csv</code> path, but only for a single-series descriptor: with an array of two or more
 objects it errors (<code>--csv cannot be used with an array descriptor</code>).</p>
+<p><code>--dry-run</code> is worth running first on anything large. It resolves every descriptor and reads every
+CSV in full, then prints the resolved <code>(owner, type, name, element type, shape)</code> table without
+opening the store — which catches the "I got the shape wrong" class of mistake before a multi-GB
+load starts. <code>--replace</code> makes a re-run after fixing the data idempotent, and <code>--descriptor -</code> reads
+the JSON from stdin so a generator script can pipe descriptors straight in.</p>
+<p>For a one-off, the descriptor fields are also <code>add</code> flags:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
+  --name load --type SingleTimeSeries --element-type f64 --units MW \
+  --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+</code></pre>
+<h3 id="one-file-many-components"><a class="header" href="#one-file-many-components">One file, many components</a></h3>
+<p>The canonical power-systems CSV is one column per component, which is the opposite shape from the
+descriptor's one-object-one-series default:</p>
+<pre><code class="language-text"># gen_profiles.csv
+timestamp,gen_001,gen_002,gen_003
+2024-01-01T00:00:00Z,101.5,88.2,44.0
+2024-01-01T01:00:00Z,102.1,87.4,44.6
+</code></pre>
+<p><code>"layout": "wide"</code> loads that as one scalar series per column. The store keys on an integer
+<code>owner_id</code> while the headers are component <em>names</em>, so the mapping is an input — a
+<code>column,owner_id[,owner_type]</code> sidecar CSV, an inline object, or <code>"owner_id_from": "header"</code> when
+the headers already are ids:</p>
+<pre><code class="language-json">{
+  "csv": "gen_profiles.csv",
+  "layout": "wide",
+  "type": "SingleTimeSeries",
+  "name": "max_active_power",
+  "owner_type": "ThermalStandard",
+  "element_type": "f64",
+  "units": "MW",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "owner_map": "components.csv"
+}
+</code></pre>
+<p><code>infrastore grid</code> writes that same shape back out, so the two are an inverse pair — see below.</p>
 <h2 id="4-read-it-back"><a class="header" href="#4-read-it-back">4. Read It Back</a></h2>
 <p><code>infrastore</code> follows an output convention: a global <code>-f/--format</code> with <code>table</code> (default), <code>json</code>,
-and <code>csv</code>. Only the read commands (<code>list</code>, <code>get</code>, <code>info</code>) honor it; <code>add</code>, <code>remove</code>, <code>transform</code>,
-and <code>template</code> accept the flag but ignore it and print plain text.</p>
+<code>jsonl</code>, and <code>csv</code>. Only the read commands honor it; <code>add</code>, <code>remove</code>, <code>transform</code>, and <code>template</code>
+accept the flag but ignore it and print plain text. <code>jsonl</code> is <code>json</code> line-delimited — one compact
+object per line, which streams into <code>jq</code> where a single pretty array cannot.</p>
+<p>Before you can write a selector you need to know what values exist, which is what the discovery
+commands are for:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 names                                      # distinct series names
+infrastore --store demo.h5 owner-types                                # distinct owner types
+infrastore --store demo.h5 owners --type SingleTimeSeries             # distinct owner ids
+infrastore --store demo.h5 exists --name load                         # exit 0 = yes, 1 = no
+</code></pre>
 <pre><code class="language-sh">infrastore --store demo.h5 list                                       # what's in the store
 infrastore --store demo.h5 list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
 infrastore --store demo.h5 list --limit 20 --wide                     # bounded, all columns
 infrastore --store demo.h5 get  --owner-id 42 --name load             # pretty table
+infrastore --store demo.h5 get  --name load --tail --limit 24         # the last day
+infrastore --store demo.h5 get  --name load --plot                    # a terminal sparkline
 infrastore --store demo.h5 -f csv  get  --owner-id 42 --name load     # timestamped CSV
+infrastore --store demo.h5 -f jsonl list                              # one JSON object per line
 infrastore --store demo.h5 -f json info --owner-id 42 --name load     # metadata + hash + stats
 infrastore --store demo.h5 -f csv  export --dir out/                  # one file per series
 </code></pre>
+<p>To see many series side by side against one time axis — the read-direction inverse of the wide
+ingest above — use <code>grid</code>:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 -f csv grid --name max_active_power --resolution PT1H
+</code></pre>
+<p>Every column in a grid shares one timeline, which is what makes the rows line up without a presence
+mask; that is why <code>SingleTimeSeries</code> needs <code>--resolution</code>. When every column shares one series name
+the headers are bare owner ids, which is exactly the wide form <code>add</code> reads back.</p>
 <p><code>export</code> is the bulk read-direction inverse of <code>add</code>: every series the selector matches is written
-to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches). Setting
-<code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, and destructive commands (<code>remove</code>,
-<code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>) accept <code>--dry-run</code> to preview their effect.</p>
+to its own CSV or JSON file under <code>--dir</code> (or to stdout when exactly one matches), optionally sliced
+with <code>--time-range</code>. Setting <code>INFRASTORE_STORE</code> in the environment stands in for <code>--store</code>, every
+destructive command accepts <code>--dry-run</code> to preview its effect, and the global <code>-y</code>/<code>--yes</code> answers
+every confirmation prompt so a script does not have to know which commands ask.</p>
 <p><code>info</code> reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
-over the values: <code>min</code>/<code>max</code>/<code>mean</code> for numeric dtypes, or <code>true_count</code>/<code>false_count</code> when the dtype
-is <code>bool</code>, and always <code>num_elements</code>. The stats are the only part that reads the array —
-<code>--no-stats</code> skips it for a purely catalog-side query.</p>
+over the values: <code>min</code>/<code>max</code>/<code>mean</code>/<code>stddev</code>, the <code>p5</code>–<code>p95</code> percentiles, <code>first</code>/<code>last</code>, and a
+separate <code>non_finite</code> count — or <code>true_count</code>/<code>false_count</code> when the dtype is <code>bool</code>. The stats are
+the only part that reads the array — <code>--no-stats</code> skips it for a purely catalog-side query.</p>
 <p><code>list</code> shows every field that is part of a series' identity, features included, so two series that
 differ only by a feature never render as the same row. Its <code>Hash</code> column is the first 12 characters
 of the array's content hash: rows with equal hashes share one array on disk.</p>
@@ -3218,9 +3278,23 @@ of the array's content hash: rows with equal hashes share one array on disk.</p>
 <code>--type</code>, <code>--resolution</code>, and repeated <code>--feature key=value</code> (<code>--feature</code> is the only repeatable
 one); if more than one series matches, <code>infrastore</code> lists the candidates so you can narrow the
 query. The owner is the <code>(owner_id, owner_category)</code> pair, so a component and a supplemental
-attribute may share a numeric id — add <code>--owner-category</code> (<code>component</code> / <code>supplemental_attribute</code>)
-to disambiguate. Large series truncate in <code>table</code> output — pass <code>--limit N</code> or <code>--full</code>.</p>
-<h2 id="5-find-the-bytes-on-disk"><a class="header" href="#5-find-the-bytes-on-disk">5. Find the Bytes on Disk</a></h2>
+attribute may share a numeric id — add <code>--owner-category</code> (<code>Component</code> / <code>SupplementalAttribute</code>) to
+disambiguate. Large series truncate in <code>table</code> output — pass <code>--limit N</code>, <code>--full</code>, or <code>--tail</code> to
+read from the end. <code>--stride N</code> keeps every Nth row and, unlike the display bounds, applies to a
+<code>-f csv</code> pipe too: it selects data rather than shortening a view, and a silently short pipe is a bug
+in whatever consumes it.</p>
+<h2 id="5-look-at-it"><a class="header" href="#5-look-at-it">5. Look at It</a></h2>
+<pre><code class="language-sh">infrastore --store demo.h5 get --name load --plot                        # sparkline, no file
+infrastore --store demo.h5 plot --name load --out load.svg               # the profile
+infrastore --store demo.h5 plot --name load --kind duration --out ldc.svg
+infrastore --store demo.h5 plot --name load --kind heatmap --out heat.html
+</code></pre>
+<p><code>plot</code> writes one self-contained file — no external fonts, scripts, or images, and both light and
+dark themes inside it — so it opens in a browser and drops into a report. The five <code>--kind</code> values
+are <code>line</code>, <code>duration</code> (the load duration curve), <code>heatmap</code> (time-of-day against day, which is how
+you catch a timezone or DST shift), <code>fan</code> (percentile bands or scenario traces for one forecast
+window), and <code>overlay</code> (a <code>Deterministic</code>'s windows over the actuals it came from).</p>
+<h2 id="6-find-the-bytes-on-disk"><a class="header" href="#6-find-the-bytes-on-disk">6. Find the Bytes on Disk</a></h2>
 <p>Arrays are content-addressed, so identical values are stored once and shared. <code>arrays</code> shows what
 collapsed onto what, and where each array actually lives:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 store-info    # both file paths, format version, compression
@@ -3236,52 +3310,74 @@ metadata alone.</p>
 hashes as garbage bytes, and in <code>.mode box</code> it mangles the table borders:</p>
 <pre><code class="language-sh">sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 </code></pre>
-<h2 id="6-associations"><a class="header" href="#6-associations">6. Associations</a></h2>
-<p>Two association catalogs live alongside the time series and are readable here:</p>
+<h2 id="7-associations"><a class="header" href="#7-associations">7. Associations</a></h2>
+<p>Two association catalogs live alongside the time series, readable and writable here:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 attributes                 # component &lt;-&gt; supplemental attribute
 infrastore --store demo.h5 attributes --summary       # counts by (component type, attribute type)
 infrastore --store demo.h5 links --parent-id 42       # directed parent -&gt; child edges
+infrastore --store demo.h5 attach --from attachments.csv
+infrastore --store demo.h5 link --parent-id 42 --parent-type Generator \
+  --child-id 7 --child-type Bus
+infrastore --store demo.h5 reassign --old 42 --new 43 # both catalogs follow a renumbered component
 </code></pre>
-<p>Both are read-only from the CLI: writing an association means writing the consumer's object graph
-alongside it, so that direction stays with the Rust, Python, and Julia APIs.</p>
+<p>The store holds only the <em>relationship</em> — the components and attributes themselves live in the
+consumer's object graph — so the flags are bare ids and type names. <code>attach --from</code> and <code>link --from</code>
+import a whole table in one all-or-nothing transaction; their header is checked, because the four
+columns are two interchangeable-looking <code>(id, type)</code> pairs and a swapped file would silently invert
+every relationship.</p>
 <p><code>--time-range START..END</code> on <code>get</code> takes two <em>timestamps</em> (RFC3339 or epoch-ms), not a duration:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load \
   --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
 </code></pre>
-<p>Beware that inputs and outputs are spelled differently. You type the short, lowercase forms
-(<code>--type single</code>, <code>--owner-category component</code>), but <code>list</code>/<code>get</code>/<code>info</code> print the canonical
-CamelCase names (<code>SingleTimeSeries</code>, <code>Component</code>). Both spellings are accepted as input, so
-<code>-f json list</code> output can be fed back into a selector unchanged; just don't expect the rendered
-value to string-match what you typed.</p>
-<h2 id="7-forecasts"><a class="header" href="#7-forecasts">7. Forecasts</a></h2>
-<p>All five writable types work (<code>single</code>, <code>non_sequential</code>, <code>deterministic</code>, <code>probabilistic</code>,
-<code>scenarios</code>). <code>infrastore template deterministic</code> prints a descriptor to edit, but it is plain JSON
-and says nothing about the data layout, so here is the rule:</p>
+<p>Selectors accept either spelling: <code>--type single</code> and <code>--type SingleTimeSeries</code> mean the same thing,
+as do <code>--owner-category component</code> and <code>--owner-category Component</code>. What the CLI <em>prints</em> — in
+<code>list</code>/<code>get</code>/<code>info</code> output and in what <code>template</code> writes — is always the canonical CamelCase name,
+so descriptors, rendered rows, and <code>-f json</code> output all string-match each other. The lowercase forms
+are a typing shortcut on the command line, not a second vocabulary.</p>
+<h2 id="8-forecasts"><a class="header" href="#8-forecasts">8. Forecasts</a></h2>
+<p>All five writable types work (<code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code>, <code>Deterministic</code>,
+<code>Probabilistic</code>, <code>Scenarios</code>). <code>infrastore template Deterministic</code> prints a descriptor to edit, but
+it is plain JSON and says nothing about the data layout, so here is the rule:</p>
 <p>Forecast CSVs are a flat, <strong>row-major</strong> stream of values with no structure of their own. The count
 must equal the product of the type's shape:</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th></tr></thead><tbody>
-<tr><td><code>deterministic</code></td><td><code>[H, count, *element_shape]</code></td></tr>
-<tr><td><code>probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td></tr>
-<tr><td><code>scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td></tr>
+<tr><td><code>Deterministic</code></td><td><code>[H, count, *element_shape]</code></td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td></tr>
+<tr><td><code>Scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td></tr>
 </tbody></table>
 </div>
-<p><code>H = horizon / resolution</code> — with the template's <code>"horizon": "24h"</code>, <code>"resolution": "1h"</code>, and
-<code>"count": 7</code>, a scalar <code>deterministic</code> needs exactly <code>24 * 7 = 168</code> values (plus the header row that
-<code>has_header: true</code> skips). Use <code>-f json</code> to read the flat values back at full fidelity. <code>get -f csv</code>
-on a forecast emits <strong>timestamped analysis rows</strong> instead — one row per <code>(window, step)</code> with
-<code>issue_time</code>/<code>target_time</code> columns and one value column per percentile or scenario — so it is not
-re-ingestible by <code>add</code> (static series' <code>get -f csv</code> still round-trips).</p>
+<p><code>H = horizon / resolution</code> — with the template's <code>"horizon": "PT24H"</code>, <code>"resolution": "PT1H"</code>, and
+<code>"count": 7</code>, a scalar <code>Deterministic</code> needs exactly <code>24 * 7 = 168</code> values, plus the header row. Use
+<code>-f json</code> to read the flat values back at full fidelity. <code>get -f csv</code> on a forecast emits
+<strong>timestamped analysis rows</strong> instead — one row per <code>(window, step)</code> with <code>issue_time</code>/<code>target_time</code>
+columns and one value column per percentile or scenario — so it is not re-ingestible by <code>add</code>
+(static series' <code>get -f csv</code> still round-trips).</p>
 <p><code>DeterministicSingleTimeSeries</code> is not added from CSV — store a <code>SingleTimeSeries</code>, then derive it.
 <code>transform</code> takes <strong>no selector</strong>: it rewrites <em>every</em> <code>SingleTimeSeries</code> in the store. <code>--horizon</code>
 must fit inside each one (<code>horizon / resolution</code> steps must not exceed its <code>length</code>), so with the
 6-row hourly <code>load</code> above, a 24-hour horizon fails and a 3-hour one works:</p>
-<pre><code class="language-sh">infrastore --store demo.h5 transform --horizon 3h --interval 1h
+<pre><code class="language-sh">infrastore --store demo.h5 transform --horizon PT3H --interval PT1H
 </code></pre>
 <p>The derived series keeps the source's owner, name, and resolution, so <code>load</code> now matches two entries
 and a bare selector becomes ambiguous. Disambiguate with <code>--type</code>:</p>
 <pre><code class="language-sh">infrastore --store demo.h5 get --owner-id 42 --name load --type single
 infrastore --store demo.h5 get --owner-id 42 --name load --type deterministic_single
 </code></pre>
+<p>A forecast's table view is the same structured one <code>-f csv</code> writes — <code>issue_time</code>, <code>target_time</code>,
+and one column per percentile or scenario — and <code>--window N</code> (or <code>--issue-time &lt;TS&gt;</code>) narrows it to
+a single window instead of dumping all of them:</p>
+<pre><code class="language-sh">infrastore --store demo.h5 get --name load --type deterministic_single --window 0
+</code></pre>
+<h2 id="9-compare-and-move-stores"><a class="header" href="#9-compare-and-move-stores">9. Compare and Move Stores</a></h2>
+<pre><code class="language-sh">infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
+infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
+infrastore --store demo.h5 persist --dest backup.h5 --force
+</code></pre>
+<p><code>diff</code> compares catalog identities and content hashes without reading either store's arrays, which
+makes it cheap enough for a CI gate: two series hold the same numbers exactly when they carry the
+same hash. <code>merge</code> moves arrays as bytes, so nothing is lost to a CSV round trip. <code>persist</code> is the
+one write that refuses an existing destination without <code>--force</code>: a save that fails partway may
+already have destroyed what was there.</p>
 <h2 id="notes-1"><a class="header" href="#notes-1">Notes</a></h2>
 <ul>
 <li>The CLI writes locally; there is no remote/gRPC mode yet (store access is isolated so one can be
@@ -7845,41 +7941,79 @@ compare, treating length as non-secret.</p>
 <p><code>infrastore-cli</code> builds the <code>infrastore</code> binary, which reads and writes a store directly on disk
 (HDF5 + SQLite). For a task-oriented walkthrough, see
 <a href="reference/../how-to/use-cli.html">Use the <code>infrastore</code> CLI</a>.</p>
-<p>The CLI covers time series, plus read-only views of the
-<a href="reference/../explanation/data-model.html#associations-between-entities">association catalogs</a> (<code>attributes</code>,
-<code>links</code>). Writing an association means writing the consumer's object graph alongside it, so that
-direction stays with the Rust, Python, and Julia APIs.</p>
+<p>The CLI covers time series and both
+<a href="reference/../explanation/data-model.html#associations-between-entities">association catalogs</a>, read and write.
+The store holds only the <em>relationship</em> — the components and supplemental attributes themselves live
+in the consumer's object graph — which is why the association flags are bare ids and type names.</p>
 <h2 id="synopsis"><a class="header" href="#synopsis">Synopsis</a></h2>
 <pre><code class="language-text">infrastore [--store &lt;PATH.h5&gt;] [-f &lt;FORMAT&gt;] [--log-level &lt;FILTER&gt;] &lt;COMMAND&gt;
 </code></pre>
 <h3 id="global-options"><a class="header" href="#global-options">Global options</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Option</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>--store &lt;PATH&gt;</code></td><td>Path to the HDF5 store file. The <code>&lt;PATH&gt;.sqlite</code> catalog is implicit. Falls back to the <code>INFRASTORE_STORE</code> environment variable.</td></tr>
-<tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, or <code>csv</code>.</td></tr>
+<tr><td><code>-f</code>, <code>--format</code></td><td>Output format: <code>table</code> (default), <code>json</code>, <code>jsonl</code>, or <code>csv</code>.</td></tr>
 <tr><td><code>--log-level</code></td><td>Tracing filter; also read from <code>RUST_LOG</code>. Defaults to <code>warn</code>.</td></tr>
+<tr><td><code>-y</code>, <code>--yes</code></td><td>Answer every confirmation prompt with yes.</td></tr>
 </tbody></table>
 </div>
 <p><code>--store</code> (or <code>INFRASTORE_STORE</code>) is required by every command except <code>template</code> and <code>completions</code>.</p>
-<p><code>-f</code>/<code>--format</code> affects the read/inspection commands (<code>list</code>, <code>get</code>, <code>info</code>, <code>export</code>, <code>stats</code>,
-<code>summary</code>, <code>verify</code>, <code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>). It is accepted
-anywhere because it is global, but the write commands (<code>add</code>, <code>remove</code>, <code>rename</code>, <code>copy</code>,
-<code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>) ignore it and print plain text; <code>template</code> always
-prints a JSON descriptor. <code>export</code> requires <code>-f csv</code> or <code>-f json</code> (there is no table export).</p>
+<p><code>-f</code>/<code>--format</code> affects the read/inspection commands (<code>list</code>, <code>get</code>, <code>grid</code>, <code>info</code>, <code>export</code>,
+<code>names</code>, <code>owner-types</code>, <code>owners</code>, <code>exists</code>, <code>stats</code>, <code>summary</code>, <code>diff</code>, <code>verify</code>,
+<code>check-consistency</code>, <code>resolutions</code>, <code>params</code>, <code>compact</code>, and <code>add --dry-run</code>). It is accepted
+anywhere because it is global, but the write commands (<code>init</code>, <code>add</code>, <code>merge</code>, <code>remove</code>, <code>rename</code>,
+<code>copy</code>, <code>replace-owner</code>, <code>clear</code>, <code>transform</code>, <code>persist</code>, <code>attach</code>, <code>detach</code>, <code>link</code>, <code>unlink</code>,
+<code>reassign</code>) ignore it and print plain text; <code>template</code> always prints a JSON descriptor and <code>plot</code>
+always writes a chart file.</p>
+<p><code>jsonl</code> is <code>json</code> line-delimited: one compact object per line with no enclosing <code>{"items": [...]}</code>,
+so a 100 000-row <code>list</code> streams into <code>jq</code> instead of having to be buffered whole.</p>
+<p><code>export</code> has no table form; with <code>-f table</code> (the global default) it writes CSV, which is both what
+<code>--dir</code> is for and what <code>add</code> reads back. Its <code>--dir</code> files are named for the format they hold —
+<code>.csv</code>, <code>.json</code>, or <code>.jsonl</code> — and under <code>-f jsonl</code> each series is one compact line rather than a
+pretty document.</p>
+<p><code>-y</code>/<code>--yes</code> answers every prompt, so a script no longer has to know which commands prompt or which
+flag each spells it with. The per-command <code>--force</code> flags still work and are what a one-off reaches
+for.</p>
 <h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
 <p><code>infrastore --help</code> lists these under the same six headings used below. The grouping is a display
 aid only — every command is invoked flat, as <code>infrastore &lt;command&gt;</code>; there are no subcommand
 namespaces to type.</p>
+<p>Each group's examples are below its table, and every command carries the same ones in its own help:
+<code>infrastore &lt;command&gt; --help</code> ends with a worked invocation. A test parses all of them, so an
+example can never name a flag the command does not have.</p>
 <h3 id="read-data"><a class="header" href="#read-data">Read data</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>list</code></td><td>List stored series matching the selector filters.</td></tr>
 <tr><td><code>get</code></td><td>Read and display a single series' values.</td></tr>
+<tr><td><code>grid</code></td><td>Render N series as N columns against one shared time axis.</td></tr>
 <tr><td><code>info</code></td><td>Metadata, content hash, HDF5 location, and stats for one series.</td></tr>
 <tr><td><code>export</code></td><td>Write series values to CSV/JSON files (<code>--dir</code>), or stdout for one match.</td></tr>
 </tbody></table>
 </div>
+<pre><code class="language-sh">infrastore --store demo.h5 list                                   # everything in the store
+infrastore --store demo.h5 list --name-glob 'load_*' --limit 20   # filtered, bounded
+infrastore --store demo.h5 get --owner-id 42 --name load --full   # every row, not just 50
+infrastore --store demo.h5 get --name load --plot                 # a terminal sparkline
+infrastore --store demo.h5 get --name load --tail --limit 24      # the last day
+infrastore --store demo.h5 -f csv grid --name-glob 'load_*' --resolution PT1H
+infrastore --store demo.h5 info --name load --no-stats            # catalog only, no array read
+infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
+</code></pre>
+<h4 id="bounding-the-rows"><a class="header" href="#bounding-the-rows">Bounding the rows</a></h4>
+<p><code>get</code> and <code>grid</code> separate the flags that <em>select data</em> from the flags that <em>bound a display</em>, and
+the two reach different formats:</p>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Applies to</th><th>Why</th></tr></thead><tbody>
+<tr><td><code>--time-range START..END</code></td><td>every format</td><td>A time slice is a different span of the series, so a pipe should carry exactly the rows asked for.</td></tr>
+<tr><td><code>--stride N</code> (<code>get</code>)</td><td>every format</td><td>Every <code>N</code>th row is a different series, not a shorter view of one. <code>-f json</code> reports the strided <code>shape</code> and echoes <code>stride</code>.</td></tr>
+<tr><td><code>--limit N</code>, <code>--full</code>, <code>--tail</code> (<code>get</code>); <code>--limit N</code>, <code>--full</code> (<code>grid</code>)</td><td>the table only</td><td>A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table.</td></tr>
+</tbody></table>
+</div>
+<p>So <code>-f csv get --limit 3</code> still writes every row; thin a pipe with <code>--stride</code>, or slice it with
+<code>--time-range</code>. The table's own default cap is 50 rows, lifted by <code>--full</code>.</p>
 <h3 id="write-data"><a class="header" href="#write-data">Write data</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
-<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV.</td></tr>
+<tr><td><code>init</code></td><td>Create an empty store with an explicit compression and catalog policy.</td></tr>
+<tr><td><code>add</code></td><td>Add one or more series from a descriptor JSON + CSV, or from flags.</td></tr>
+<tr><td><code>merge</code></td><td>Copy matching series from another store into this one.</td></tr>
 <tr><td><code>transform</code></td><td>Derive <code>DeterministicSingleTimeSeries</code> from stored <code>SingleTimeSeries</code>.</td></tr>
 <tr><td><code>remove</code></td><td>Delete a single series, or every match with <code>--all</code> (prompts unless <code>--force</code>).</td></tr>
 <tr><td><code>rename</code></td><td>Rename the single series a selector resolves to (<code>--new-name</code>).</td></tr>
@@ -7888,6 +8022,53 @@ namespaces to type.</p>
 <tr><td><code>clear</code></td><td>Remove all series, or all for one owner (prompts unless <code>--force</code>).</td></tr>
 </tbody></table>
 </div>
+<pre><code class="language-sh">infrastore --store demo.h5 init --compression deflate:6
+infrastore --store demo.h5 add --descriptor load.json
+infrastore --store demo.h5 add --descriptor batch.json --dry-run
+infrastore --store demo.h5 add --descriptor batch.json --replace --batch-size 500
+infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
+    --name load --type SingleTimeSeries --element-type f64 \
+    --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
+infrastore --store demo.h5 transform --horizon PT24H --interval PT1H
+infrastore --store demo.h5 remove --owner-id 42 --name load --type SingleTimeSeries
+infrastore --store demo.h5 remove --all --name-glob 'scratch_*' --dry-run
+infrastore --store demo.h5 rename --owner-id 42 --name load --new-name demand
+infrastore --store demo.h5 copy --name load --dst-owner-id 43 --dst-owner-type Generator
+infrastore --store demo.h5 replace-owner --old 42 --new 43 --owner-category Component
+infrastore --store demo.h5 clear --owner-id 42 --owner-category Component
+</code></pre>
+<h3 id="discover"><a class="header" href="#discover">Discover</a></h3>
+<p>The step before writing a selector. <code>stats</code> says a store holds 5000 series and <code>list</code> shows the ones
+matching a filter, but writing that filter means already knowing which names, owner types, and owner
+ids exist. Each takes the same selector every read command does, so narrowing composes.</p>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>names</code></td><td>Distinct series names matching the selector.</td></tr>
+<tr><td><code>owner-types</code></td><td>Distinct owner types matching the selector.</td></tr>
+<tr><td><code>owners</code></td><td>Distinct owner ids that have a time series.</td></tr>
+<tr><td><code>exists</code></td><td>Whether anything matches; exit <code>0</code> for yes, <code>1</code> for no.</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-sh">infrastore --store demo.h5 names
+infrastore --store demo.h5 names --owner-id 42
+infrastore --store demo.h5 owner-types
+infrastore --store demo.h5 owners --type SingleTimeSeries --resolution PT1H
+infrastore --store demo.h5 exists --name load
+</code></pre>
+<p><code>owners</code> projects to owner ids, so it takes only <code>--owner-category</code> (default <code>Component</code>), <code>--type</code>,
+and <code>--resolution</code>; any other selector flag is refused rather than silently ignored. Use <code>list</code> when
+you need the full filter.</p>
+<h3 id="visualize"><a class="header" href="#visualize">Visualize</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>plot</code></td><td>Draw a chart to a self-contained SVG or HTML file.</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-sh">infrastore --store demo.h5 plot --name load --out load.svg
+infrastore --store demo.h5 plot --name load --kind duration --out ldc.html
+infrastore --store demo.h5 plot --name load --kind heatmap --out heat.svg
+</code></pre>
+<p>See <a href="reference/cli.html#charts">Charts</a> below for the five <code>--kind</code> values and what each is for. For a quick
+in-terminal check, <code>get --plot</code> draws a sparkline with no file involved.</p>
 <h3 id="inspect-the-store"><a class="header" href="#inspect-the-store">Inspect the store</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>stats</code></td><td>Association, owner, and distinct-array counts.</td></tr>
@@ -7898,51 +8079,118 @@ namespaces to type.</p>
 <tr><td><code>params</code></td><td>Show the store's forecast parameters (<code>--resolution</code>/<code>--interval</code>).</td></tr>
 </tbody></table>
 </div>
+<pre><code class="language-sh">infrastore --store demo.h5 stats
+infrastore --store demo.h5 store-info
+infrastore --store demo.h5 arrays --data-hash 2018057b
+infrastore --store demo.h5 summary --static-only
+infrastore --store demo.h5 resolutions
+infrastore --store demo.h5 params --resolution PT1H --interval PT1H
+</code></pre>
 <h3 id="associations-7"><a class="header" href="#associations-7">Associations</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>attributes</code></td><td>Component &lt;-&gt; supplemental-attribute associations (<code>--summary</code> for counts).</td></tr>
 <tr><td><code>links</code></td><td>Directed parent -&gt; child component associations.</td></tr>
+<tr><td><code>attach</code></td><td>Attach supplemental attributes to components.</td></tr>
+<tr><td><code>detach</code></td><td>Remove attachments matching the filter.</td></tr>
+<tr><td><code>link</code></td><td>Add directed parent -&gt; child component links.</td></tr>
+<tr><td><code>unlink</code></td><td>Remove links matching the filter.</td></tr>
+<tr><td><code>reassign</code></td><td>Move a component's associations from one id to another.</td></tr>
 </tbody></table>
 </div>
+<pre><code class="language-sh">infrastore --store demo.h5 attributes --component-id 42
+infrastore --store demo.h5 attributes --summary
+infrastore --store demo.h5 links --parent-type Bus --child-type Generator
+infrastore --store demo.h5 attach --component-id 42 --component-type Generator \
+    --attribute-id 7 --attribute-type GeographicInfo
+infrastore --store demo.h5 attach --from attachments.csv
+infrastore --store demo.h5 link --parent-id 42 --parent-type Generator \
+    --child-id 7 --child-type Bus
+infrastore --store demo.h5 detach --component-id 42 --dry-run
+infrastore --store demo.h5 unlink --child-type Bus --force
+infrastore --store demo.h5 reassign --old 42 --new 43
+</code></pre>
+<p><code>attach --from</code> and <code>link --from</code> import a whole table in one all-or-nothing transaction, from a
+<code>component_id,component_type,attribute_id,attribute_type</code> or
+<code>parent_id,parent_type,child_id,child_type</code> CSV. The header is mandatory and its names are checked:
+the four columns are two interchangeable-looking <code>(id, type)</code> pairs, so a file with the pairs
+swapped would import cleanly and silently invert every relationship.</p>
+<p><code>detach</code> and <code>unlink</code> with no filter would empty the whole catalog, so they require <code>--all</code> to say
+you meant it. <code>reassign</code> is the association counterpart of <code>replace-owner</code>, which moves time series;
+with neither <code>--attributes</code> nor <code>--links</code> it moves both catalogs, which is what a renumbered
+component needs.</p>
 <h3 id="integrity--maintenance"><a class="header" href="#integrity--maintenance">Integrity &amp; maintenance</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>verify</code></td><td>Verify store integrity; nonzero exit if errors are present.</td></tr>
 <tr><td><code>check-consistency</code></td><td>Verify the per-resolution static grid (<code>--resolution</code>).</td></tr>
 <tr><td><code>compact</code></td><td>Rewrite the <code>.h5</code> to reclaim space (prompts unless <code>--force</code>); print the report.</td></tr>
 <tr><td><code>persist</code></td><td>Write the store to a new HDF5 + SQLite artifact (<code>--dest</code>).</td></tr>
+<tr><td><code>diff</code></td><td>Compare this store against another at the catalog level (<code>--against</code>).</td></tr>
 </tbody></table>
 </div>
+<pre><code class="language-sh">infrastore --store demo.h5 verify
+infrastore --store demo.h5 check-consistency --resolution PT1H
+infrastore --store demo.h5 compact --force
+infrastore --store demo.h5 persist --dest backup.h5 --dry-run
+infrastore --store demo.h5 persist --dest backup.h5 --force
+infrastore --store demo.h5 diff --against baseline.h5
+</code></pre>
+<p><code>persist</code> is the one write guarded even when the destination is explicit: a save that fails partway
+may already have destroyed what was there, so replacing an existing artifact needs <code>--force</code> (or the
+global <code>--yes</code>), and a non-interactive run without one stops rather than proceeding.</p>
+<p><code>diff</code> is the regression check for "did this model run change what I expected". Content addressing
+makes it cheap — two series hold the same numbers exactly when they carry the same <code>data_hash</code> — so
+the comparison is a set operation over the two catalogs and neither store's arrays are read. It
+exits <code>1</code> when the stores differ, so it drops straight into a CI gate; <code>--all</code> also lists the
+identical series.</p>
 <h3 id="scaffolding"><a class="header" href="#scaffolding">Scaffolding</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>template</code></td><td>Print an example descriptor for a given type to stdout.</td></tr>
 <tr><td><code>completions</code></td><td>Generate shell completions to stdout (bash/zsh/fish/…).</td></tr>
 </tbody></table>
 </div>
-<pre><code class="language-text">infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json&gt; [--csv &lt;FILE.csv&gt;] [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle]
+<pre><code class="language-sh">infrastore template SingleTimeSeries &gt; load.json
+infrastore completions zsh &gt; ~/.zfunc/_infrastore
+</code></pre>
+<pre><code class="language-text">infrastore --store &lt;PATH&gt; init [--compression &lt;none|deflate[:LEVEL]&gt;] [--no-shuffle] [--catalog &lt;attached|in-memory&gt;]
+infrastore --store &lt;PATH&gt; add --descriptor &lt;FILE.json|-&gt; [--csv &lt;FILE.csv&gt;] [--dry-run] [--replace] [--batch-size N] [--quiet] [--compression &lt;SPEC&gt;] [--no-shuffle] [--catalog &lt;MODE&gt;]
+infrastore --store &lt;PATH&gt; add --csv &lt;FILE.csv&gt; --owner-id &lt;I&gt; --owner-type &lt;T&gt; --name &lt;N&gt; --type &lt;T&gt; --element-type &lt;E&gt; [DESCRIPTOR FIELDS...]
+infrastore --store &lt;PATH&gt; merge --from &lt;PATH.h5&gt; [SELECTOR...] [--replace] [--dry-run]
 infrastore --store &lt;PATH&gt; list    [SELECTOR...] [--limit N] [--wide]
-infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full]
+infrastore --store &lt;PATH&gt; get     [SELECTOR...] [--time-range START..END] [--limit N | --full] [--tail] [--stride N] [--plot [--plot-width COLS]] [--window N | --issue-time &lt;TS&gt;]
+infrastore --store &lt;PATH&gt; grid    [SELECTOR...] [--time-range START..END] [--limit N | --full] [--label &lt;auto|owner|full&gt;]
+infrastore --store &lt;PATH&gt; plot    [SELECTOR...] --out &lt;FILE.svg|FILE.html|-&gt; [--kind &lt;line|duration|heatmap|fan|overlay&gt;] [--time-range START..END] [--title &lt;T&gt;] [--width W] [--height H] [--window N] [--limit N]
 infrastore --store &lt;PATH&gt; info    [SELECTOR...] [--no-stats]
-infrastore --store &lt;PATH&gt; -f csv|json export [SELECTOR...] [--dir &lt;DIR&gt;]
+infrastore --store &lt;PATH&gt; export  [SELECTOR...] [--dir &lt;DIR&gt;] [--time-range START..END]
+infrastore --store &lt;PATH&gt; names       [SELECTOR...]
+infrastore --store &lt;PATH&gt; owner-types [SELECTOR...]
+infrastore --store &lt;PATH&gt; owners      [--owner-category &lt;C&gt;] [--type &lt;T&gt;] [--resolution &lt;DUR&gt;]
+infrastore --store &lt;PATH&gt; exists      [SELECTOR...]
+infrastore --store &lt;PATH&gt; diff --against &lt;PATH.h5&gt; [SELECTOR...] [--all]
 infrastore --store &lt;PATH&gt; remove  [SELECTOR...] [--all] [--force] [--dry-run]
 infrastore --store &lt;PATH&gt; rename  [SELECTOR...] --new-name &lt;NAME&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; copy    [SELECTOR...] --dst-owner-id &lt;I&gt; --dst-owner-type &lt;T&gt; [--new-name &lt;NAME&gt;] [--dry-run]
 infrastore --store &lt;PATH&gt; replace-owner --old &lt;I&gt; --new &lt;I&gt; --owner-category &lt;C&gt; [--dry-run]
 infrastore --store &lt;PATH&gt; clear   [--owner-id &lt;I&gt; --owner-category &lt;C&gt;] [--force] [--dry-run]
 infrastore --store &lt;PATH&gt; transform --horizon &lt;DUR&gt; --interval &lt;DUR&gt; [--owner-category &lt;C&gt;] [--resolution &lt;DUR&gt;]
-infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt;
+infrastore --store &lt;PATH&gt; persist --dest &lt;PATH.h5&gt; [--force] [--dry-run]
 infrastore --store &lt;PATH&gt; compact [--force]
 infrastore --store &lt;PATH&gt; stats
 infrastore --store &lt;PATH&gt; store-info
 infrastore --store &lt;PATH&gt; arrays [SELECTOR...] [--data-hash &lt;HEX&gt;]
 infrastore --store &lt;PATH&gt; attributes [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--summary]
 infrastore --store &lt;PATH&gt; links [--parent-id &lt;I&gt;] [--child-id &lt;I&gt;] [--parent-type &lt;T&gt;] [--child-type &lt;T&gt;]
+infrastore --store &lt;PATH&gt; attach [--component-id &lt;I&gt; --component-type &lt;T&gt; --attribute-id &lt;I&gt; --attribute-type &lt;T&gt; | --from &lt;FILE.csv&gt;] [--dry-run]
+infrastore --store &lt;PATH&gt; detach [--component-id &lt;I&gt;] [--attribute-id &lt;I&gt;] [--component-type &lt;T&gt;] [--attribute-type &lt;T&gt;] [--all] [--force] [--dry-run]
+infrastore --store &lt;PATH&gt; link   [--parent-id &lt;I&gt; --parent-type &lt;T&gt; --child-id &lt;I&gt; --child-type &lt;T&gt; | --from &lt;FILE.csv&gt;] [--dry-run]
+infrastore --store &lt;PATH&gt; unlink [--parent-id &lt;I&gt;] [--child-id &lt;I&gt;] [--parent-type &lt;T&gt;] [--child-type &lt;T&gt;] [--all] [--force] [--dry-run]
+infrastore --store &lt;PATH&gt; reassign --old &lt;I&gt; --new &lt;I&gt; [--attributes] [--links] [--dry-run]
 infrastore completions &lt;SHELL&gt;
 infrastore --store &lt;PATH&gt; summary [--static-only | --forecast-only]
 infrastore --store &lt;PATH&gt; verify
 infrastore --store &lt;PATH&gt; check-consistency [--resolution &lt;DUR&gt;]
 infrastore --store &lt;PATH&gt; resolutions
 infrastore --store &lt;PATH&gt; params [--resolution &lt;DUR&gt;] [--interval &lt;DUR&gt;]
-infrastore template &lt;single|non_sequential|deterministic|probabilistic|scenarios&gt;
+infrastore template &lt;SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios&gt;
 </code></pre>
 <p><code>--csv</code> overrides the <code>csv</code> path inside the descriptor, and only works for a descriptor that
 describes a single series. Passing it alongside a descriptor array holding more than one object
@@ -7965,22 +8213,41 @@ identity. When two matched series would share one filename, each gains a suffix 
 that distinguish them (<code>..._PT1H_model_year-2030.csv</code>), so an export never silently overwrites part
 of its own output. Filenames are compared case-insensitively, so an export produces the same set of
 files on Linux, macOS, and Windows.</p>
-<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, and <code>copy</code> prints what would change and
-exits without opening the store for writing. <code>add --compression</code> sets the HDF5 compression policy
-for a store this command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to
-disable byte-shuffle); passing it for an existing store is an error, since the persisted policy
-governs.</p>
+<p><code>--dry-run</code> on <code>remove</code>, <code>clear</code>, <code>replace-owner</code>, <code>rename</code>, <code>copy</code>, <code>merge</code>, <code>persist</code>, <code>attach</code>,
+<code>detach</code>, <code>link</code>, <code>unlink</code>, and <code>reassign</code> prints what would change and exits without opening the
+store for writing.</p>
+<p><code>add --dry-run</code> is a validate mode: it resolves every descriptor, reads every CSV in full, and
+prints the resolved <code>(owner, type, name, element type, shape)</code> table without opening the store at
+all. That catches the whole class of "I got the shape wrong" errors before a multi-GB load starts.
+Because the store is opened lazily, on the first batch that actually has something to write, a load
+that fails validation never leaves an empty store behind.</p>
+<p><code>add --replace</code> removes any series that already carries one of the identities being added, inside
+the same transaction, which is what makes re-running a load after fixing the data idempotent.
+<code>add --batch-size N</code> commits every N series instead of the whole load in one transaction, bounding
+memory for a very large load at the cost of the load's atomicity; <code>--quiet</code> silences everything but
+errors, and above 20 series the per-series lines are replaced by a progress counter on stderr.</p>
+<p><code>add --descriptor -</code> reads the JSON from stdin, so a generator script can pipe descriptors straight
+in. Relative <code>csv</code> paths in a piped descriptor resolve against the working directory, since there is
+no descriptor file for them to sit beside.</p>
+<p><code>init --compression</code> (or <code>add --compression</code>) sets the HDF5 compression policy for a store the
+command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle);
+passing it for an existing store is an error, since the persisted policy governs.</p>
+<p><code>--catalog</code> decides where the SQLite catalog lives while the store is open. <code>attached</code> (the default)
+commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already written.
+<code>in-memory</code> holds the catalog in RAM and writes it only at <code>persist</code> — much faster for a bulk load,
+and it loses <em>everything</em> if the process dies first: arrays still stream to the <code>.h5</code> file, but
+without a catalog they are unreachable.</p>
 <h3 id="selectors"><a class="header" href="#selectors">Selectors</a></h3>
 <p><code>get</code>, <code>info</code>, and <code>remove</code> identify exactly one series with these flags; <code>list</code> accepts the same
 flags as filters. Every flag is optional. Only <code>--feature</code> may be repeated; the rest take a single
 value:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Meaning</th></tr></thead><tbody>
 <tr><td><code>--owner-id &lt;I&gt;</code></td><td>Owner identifier (<code>i64</code> integer).</td></tr>
-<tr><td><code>--owner-category &lt;C&gt;</code></td><td>Restrict to <code>component</code> or <code>supplemental_attribute</code>; omit to match either.</td></tr>
+<tr><td><code>--owner-category &lt;C&gt;</code></td><td>Restrict to <code>Component</code> or <code>SupplementalAttribute</code>; omit to match either.</td></tr>
 <tr><td><code>--name &lt;N&gt;</code></td><td>Series name (exact match).</td></tr>
 <tr><td><code>--name-glob &lt;P&gt;</code></td><td>Name pattern (SQLite <code>GLOB</code>: case-sensitive <code>*</code>/<code>?</code>). ANDed with <code>--name</code>.</td></tr>
 <tr><td><code>--type &lt;T&gt;</code></td><td>See the type spellings below.</td></tr>
-<tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution, e.g. <code>1h</code>, <code>15min</code>, or ISO-8601 like <code>PT1H</code>, <code>P1M</code>.</td></tr>
+<tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution as an ISO-8601 duration, e.g. <code>PT1H</code>, <code>PT15M</code>, <code>P1M</code>.</td></tr>
 <tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
 </tbody></table>
 </div>
@@ -8011,46 +8278,57 @@ and it is often required: <code>transform</code> derives a series that shares <c
 with its source <code>SingleTimeSeries</code>, so after a transform a query like
 <code>infrastore get --owner-id 42 --name load</code> matches two series and errors. <code>--type single</code> or
 <code>--type deterministic_single</code> is the only way to pick one.</p>
-<p>Note that inputs and outputs use different spellings. You <em>pass</em> the short, lowercase forms
-(<code>--type single</code>, <code>--owner-category component</code>), but <code>list</code>, <code>get</code>, and <code>info</code> <em>render</em> the
-canonical CamelCase names (<code>SingleTimeSeries</code>, <code>Component</code>). Piping <code>-f json list</code> output straight
-back into a filter therefore needs no translation — the CamelCase form is accepted as input too —
-but string-comparing rendered output against the short form will not match.</p>
+<p>Both spellings are accepted as input: <code>--type single</code> and <code>--type SingleTimeSeries</code> are equivalent,
+as are <code>--owner-category component</code> and <code>--owner-category Component</code> (matching is case-insensitive
+and ignores underscores). Everything the CLI <em>emits</em> uses the canonical CamelCase name — rendered
+rows, <code>-f json</code> output, and the descriptors <code>template</code> prints — so those all string-match one
+another. The lowercase forms are a command-line shorthand, not a second vocabulary.</p>
 <h2 id="durations-and-timestamps"><a class="header" href="#durations-and-timestamps">Durations and Timestamps</a></h2>
 <ul>
-<li><strong>Durations</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>): an integer plus a unit — <code>ms</code>, <code>s</code>, <code>min</code>,
-<code>h</code>, <code>d</code> (e.g. <code>500ms</code>, <code>15min</code>, <code>24h</code>, <code>7d</code>). A bare integer is milliseconds. These three also
-accept ISO-8601 duration strings (e.g. <code>PT1H</code>, <code>P1M</code>, <code>P1Y</code>); a calendar grid
-(monthly/quarterly/annual) can only be expressed this way, since the human-unit form is always a
-fixed span.</li>
-<li><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column): RFC3339 (e.g.
-<code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds.</li>
-<li><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open), where each
+<li>
+<p><strong>Durations</strong> (<code>resolution</code>, <code>horizon</code>, <code>interval</code>): an <strong>ISO-8601 duration</strong>, and nothing else —
+<code>PT1H</code>, <code>PT15M</code>, <code>PT30S</code>, <code>PT0.5S</code>, <code>P1D</code>, <code>P7D</code> for fixed spans, <code>P1M</code> / <code>P3M</code> / <code>P1Y</code> for
+calendar ones. This is also the spelling every command <em>prints</em>, so a duration copied out of
+<code>list</code>, <code>info</code>, or <code>export -f json</code> can be pasted straight back into a descriptor.</p>
+<p>The human form the CLI used to accept (<code>1h</code>, <code>15min</code>, <code>7d</code>, and a bare integer meaning
+<em>milliseconds</em>) is rejected, with the ISO-8601 translation attached:
+<code>invalid duration '1h': durations are ISO-8601 — did you mean 'PT1H'?</code></p>
+</li>
+<li>
+<p><strong>Timestamps</strong> (<code>initial_timestamp</code>, non-sequential timestamp column): RFC3339 (e.g.
+<code>2024-01-01T00:00:00Z</code>) or a bare integer of epoch milliseconds.</p>
+</li>
+<li>
+<p><strong><code>--time-range</code></strong> is a pair of <em>timestamps</em>, not a duration: <code>START..END</code> (half-open), where each
 side is parsed as a timestamp. For example
 <code>--time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z</code>. A duration such as <code>--time-range 1h</code> is
-rejected with <code>invalid --time-range '1h' (expected START..END)</code>.</li>
+rejected with <code>invalid --time-range '1h' (expected START..END)</code>.</p>
+</li>
 </ul>
 <h2 id="descriptor-schema"><a class="header" href="#descriptor-schema">Descriptor Schema</a></h2>
 <p>A descriptor JSON file is either a single object (one series) or an array of objects (batch add).
-The CSV holds only numbers (plus a leading timestamp column for <code>non_sequential</code>).</p>
+The CSV holds only numbers, preceded by a mandatory header row (plus a leading timestamp column for
+<code>NonSequentialTimeSeries</code>).</p>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Required for</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>owner_id</code></td><td>all</td><td>Integer component identifier (<code>i64</code>).</td></tr>
-<tr><td><code>owner_type</code></td><td>all</td><td></td></tr>
-<tr><td><code>owner_category</code></td><td>optional</td><td><code>component</code> (default) or <code>supplemental_attribute</code>.</td></tr>
+<tr><td><code>owner_id</code></td><td>long layout</td><td>Integer component identifier (<code>i64</code>). Rejected when wide.</td></tr>
+<tr><td><code>owner_type</code></td><td>all</td><td>In the wide layout, the default for unmapped columns.</td></tr>
+<tr><td><code>owner_category</code></td><td>optional</td><td><code>Component</code> (default) or <code>SupplementalAttribute</code>.</td></tr>
 <tr><td><code>name</code></td><td>all</td><td></td></tr>
-<tr><td><code>type</code></td><td>all</td><td>One of the five writable types.</td></tr>
+<tr><td><code>type</code></td><td>all</td><td>One of the five writable types, canonically spelled.</td></tr>
 <tr><td><code>element_type</code></td><td>all</td><td><code>f64</code>/<code>f32</code>/<code>i64</code>/…, <code>tuple(N,f64)</code>, or a function-data kind.</td></tr>
 <tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
-<tr><td><code>has_header</code></td><td>optional</td><td>Skip the first CSV row. Default <code>true</code>.</td></tr>
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>
 <tr><td><code>units</code></td><td>optional</td><td>Free-form label.</td></tr>
 <tr><td><code>ext</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
 <tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
-<tr><td><code>initial_timestamp</code></td><td>all except <code>non_sequential</code></td><td></td></tr>
-<tr><td><code>resolution</code></td><td>all except <code>non_sequential</code></td><td></td></tr>
-<tr><td><code>horizon</code>, <code>interval</code>, <code>count</code></td><td>forecasts</td><td></td></tr>
-<tr><td><code>percentiles</code></td><td><code>probabilistic</code></td><td>Strictly increasing list of floats.</td></tr>
-<tr><td><code>scenario_count</code></td><td><code>scenarios</code> (optional)</td><td>Inferred from the data length if omitted.</td></tr>
+<tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td></td></tr>
+<tr><td><code>resolution</code></td><td>all but non-sequential</td><td>ISO-8601 duration, e.g. <code>PT1H</code>.</td></tr>
+<tr><td><code>horizon</code>, <code>interval</code>, <code>count</code></td><td>forecasts</td><td>The two durations are ISO-8601, e.g. <code>PT24H</code>.</td></tr>
+<tr><td><code>percentiles</code></td><td><code>Probabilistic</code></td><td>Strictly increasing list of floats.</td></tr>
+<tr><td><code>scenario_count</code></td><td><code>Scenarios</code> (optional)</td><td>Inferred from the data length if omitted.</td></tr>
+<tr><td><code>layout</code></td><td>optional</td><td><code>long</code> (default) or <code>wide</code>. See below.</td></tr>
+<tr><td><code>owner_map</code></td><td>wide layout</td><td>Sidecar CSV path, or an inline <code>{"column": owner_id}</code> object.</td></tr>
+<tr><td><code>owner_id_from</code></td><td>wide layout</td><td><code>"header"</code> when the headers already are owner ids.</td></tr>
 </tbody></table>
 </div>
 <p>Unknown keys are rejected. Any key not in the table above — including a typo like <code>resolutionn</code> — is
@@ -8059,28 +8337,84 @@ silently dropping a setting.</p>
 <p>Inside <code>features</code>, a name that shadows a time-series or key field (<code>name</code>, <code>resolution</code>, <code>owner_id</code>,
 …) is rejected when the series is added — see
 <a href="reference/../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</p>
+<p>Every field above also exists as an <code>add</code> flag, for a one-off that does not deserve a file:
+<code>--owner-id</code>, <code>--owner-type</code>, <code>--owner-category</code>, <code>--name</code>, <code>--type</code>, <code>--element-type</code>, <code>--units</code>,
+<code>--ext</code>, <code>--element-shape</code> (repeatable), <code>--feature</code> (repeatable), <code>--initial-timestamp</code>,
+<code>--resolution</code>, <code>--horizon</code>, <code>--interval</code>, <code>--count</code>, <code>--percentile</code> (repeatable),
+<code>--scenario-count</code>, <code>--layout</code>, <code>--owner-map</code>, <code>--owner-id-from</code>. The inline form is a shortcut for
+authoring one descriptor, not a second schema — both go down the same code path — so <code>--descriptor</code>
+and the inline flags cannot be combined. Keep the descriptor as the repeatable and batch form.</p>
+<h3 id="wide-layout"><a class="header" href="#wide-layout">Wide layout</a></h3>
+<p>The canonical power-systems file is one column per component:</p>
+<pre><code class="language-text">timestamp,gen_001,gen_002,...,gen_500
+2024-01-01T00:00:00Z,101.5,88.2,...,44.0
+</code></pre>
+<p>In the default <code>long</code> layout every value column is part of <em>one</em> series' per-timestep element, so
+loading that file would need 500 descriptors and 500 single-column CSVs. <code>"layout": "wide"</code> reads it
+as 500 separate scalar series instead, sharing this descriptor's <code>name</code>, <code>type</code>, <code>resolution</code>,
+<code>units</code>, <code>ext</code>, and <code>features</code>, and differing only by owner:</p>
+<pre><code class="language-json">{
+  "csv": "gen_profiles.csv",
+  "layout": "wide",
+  "type": "SingleTimeSeries",
+  "name": "max_active_power",
+  "owner_type": "ThermalStandard",
+  "element_type": "f64",
+  "units": "MW",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "owner_map": "components.csv"
+}
+</code></pre>
+<p>The store keys on an <code>i64</code> <code>owner_id</code> but wide headers are component <em>names</em>, so the mapping has to
+be an input. There are three ways to supply it:</p>
+<div class="table-wrapper"><table><thead><tr><th>Form</th><th>When</th></tr></thead><tbody>
+<tr><td><code>"owner_map": "components.csv"</code></td><td>The batch case: a <code>column,owner_id[,owner_type]</code></td></tr>
+<tr><td><code>"owner_map": {"gen_001": 42, ...}</code></td><td>A handful of columns, written inline</td></tr>
+<tr><td><code>"owner_id_from": "header"</code></td><td>The headers already are integer owner ids</td></tr>
+</tbody></table>
+</div>
+<p>The sidecar CSV's header is mandatory and checked (<code>column,owner_id</code> or
+<code>column,owner_id,owner_type</code>). Where a row names an <code>owner_type</code> it wins; otherwise the descriptor's
+<code>owner_type</code> is the default. A column with no mapping is an error that names the unmapped columns —
+a 500-column load that stopped at "some column is unmapped" would leave you diffing two files by
+hand.</p>
+<p>A leading <code>timestamp</code> column is stripped if present, and is <strong>required</strong> for a wide
+<code>NonSequentialTimeSeries</code> (whose timestamps are explicit rather than a grid). The wide layout covers
+the two static types and scalar elements only: a forecast's value block is already three axes deep
+before any per-column split, and a multidimensional element would need a second header row to say
+which column belongs to which <code>(owner, element)</code> pair. Both are rejected rather than guessed at.</p>
+<p><code>infrastore grid</code> writes this same shape back out — see below.</p>
 <h2 id="csv-layout"><a class="header" href="#csv-layout">CSV Layout</a></h2>
 <p><code>infrastore</code> computes the full array shape from the descriptor and reads the CSV's value cells in
 <strong>row-major</strong> order to fill it. The total cell count must equal the product of the shape.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th>Shape</th><th>CSV</th></tr></thead><tbody>
-<tr><td><code>single</code></td><td><code>[length, *element_shape]</code></td><td>One value column (or <code>prod(element_shape)</code> columns), one row per step.</td></tr>
-<tr><td><code>non_sequential</code></td><td><code>[length, *element_shape]</code></td><td>First column is the timestamp, then value columns.</td></tr>
-<tr><td><code>deterministic</code></td><td><code>[H, count, *E]</code></td><td>Flat row-major values; <code>H = horizon / resolution</code>.</td></tr>
-<tr><td><code>probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
-<tr><td><code>scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
+<tr><td><code>SingleTimeSeries</code></td><td><code>[length, *element_shape]</code></td><td>One value column (or <code>prod(element_shape)</code> columns), one row per step.</td></tr>
+<tr><td><code>NonSequentialTimeSeries</code></td><td><code>[length, *element_shape]</code></td><td>First column is the timestamp, then value columns.</td></tr>
+<tr><td><code>Deterministic</code></td><td><code>[H, count, *E]</code></td><td>Flat row-major values; <code>H = horizon / resolution</code>.</td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>[num_percentiles, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
+<tr><td><code>Scenarios</code></td><td><code>[scenario_count, H, count, *E]</code></td><td>Flat row-major values.</td></tr>
 </tbody></table>
 </div>
 <p><code>bool</code> cells accept <code>true</code>/<code>false</code>/<code>1</code>/<code>0</code>. The table above is the <strong>write</strong> layout: the rawest
 form, which is what <code>template</code> prints and what a hand-authored CSV should look like.</p>
+<p><strong>The header row is mandatory.</strong> It carries no data, but it is the only input to the layout
+detection below, and guessing wrong on a forecast transposes its axes without failing. A file whose
+first row parses as values of the declared <code>element_type</code> is rejected — otherwise the CSV reader
+would consume that row as column names and store the series one element short, silently:</p>
+<pre><code class="language-text">$ infrastore --store demo.h5 add --descriptor load.json
+Error: the first row of load.csv (1.5) is f64 data, not a header. Every data CSV must start with a
+header row — add one (e.g. `value`, or `timestamp,value`), or delete the row if it is a stray value.
+</code></pre>
 <h3 id="reading-back-and-re-adding"><a class="header" href="#reading-back-and-re-adding">Reading back, and re-adding</a></h3>
 <p>Every CSV <code>infrastore</code> writes carries timestamps, because they are the useful part of the output and
 because a piped file otherwise loses the time axis entirely — <code>initial_timestamp</code> and <code>resolution</code>
 live in the catalog, not in the file.</p>
 <div class="table-wrapper"><table><thead><tr><th>Type</th><th><code>get -f csv</code> / <code>export -f csv</code> header</th></tr></thead><tbody>
-<tr><td><code>single</code>, <code>non_sequential</code></td><td><code>timestamp,value...</code></td></tr>
-<tr><td><code>deterministic</code></td><td><code>issue_time,target_time,value...</code></td></tr>
-<tr><td><code>probabilistic</code></td><td><code>issue_time,target_time,value[p10],...</code> (one column per percentile)</td></tr>
-<tr><td><code>scenarios</code></td><td><code>issue_time,target_time,value[s0],...</code> (one column per scenario)</td></tr>
+<tr><td><code>SingleTimeSeries</code>, <code>NonSequentialTimeSeries</code></td><td><code>timestamp,value...</code></td></tr>
+<tr><td><code>Deterministic</code></td><td><code>issue_time,target_time,value...</code></td></tr>
+<tr><td><code>Probabilistic</code></td><td><code>issue_time,target_time,value[p10],...</code> (one column per percentile)</td></tr>
+<tr><td><code>Scenarios</code></td><td><code>issue_time,target_time,value[s0],...</code> (one column per scenario)</td></tr>
 </tbody></table>
 </div>
 <p><code>add</code> reads both layouts. It picks between them from the header row, so a file written by <code>export</code>
@@ -8092,11 +8426,66 @@ window-major with the percentiles/scenarios spread across columns — <code>add<
 into the stored <code>[series, horizon, count, element]</code> order;</li>
 <li>anything else is the flat write layout above.</li>
 </ul>
-<p>Detection needs <code>has_header: true</code> (the default). With <code>has_header: false</code> there is no header to
-read, so the flat write layout is assumed.</p>
 <p>The round trip is exact for every type, including forecasts: values come back in the order they went
 in. What a CSV cannot carry is the descriptor metadata — owner, name, features, units — so re-adding
 still needs a descriptor supplying those. <code>export -f json</code> carries all of it, plus <code>data_hash</code>.</p>
+<h2 id="grid-many-series-one-time-axis"><a class="header" href="#grid-many-series-one-time-axis">Grid: many series, one time axis</a></h2>
+<p><code>grid</code> is the read-direction inverse of the wide ingest above, and the CLI surface for the core's
+columnar reader. It emits one row per timestamp and one column per series:</p>
+<pre><code class="language-text">$ infrastore --store demo.h5 -f csv grid --name max_active_power --resolution PT1H
+timestamp,1,2,3
+2024-01-01T00:00:00+00:00,101.5,88.2,44.0
+2024-01-01T01:00:00+00:00,102.1,87.4,44.6
+</code></pre>
+<p>A reader spans exactly <strong>one timeline</strong>, which is what makes the columns line up row by row without
+a presence mask. For <code>SingleTimeSeries</code> that means one resolution, so <code>--resolution</code> is required;
+for <code>NonSequentialTimeSeries</code> it means one shared timestamp vector, and a selection spanning two is
+an error naming how many were found rather than a padded result.</p>
+<p>Columns are named by <code>--label</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Value</th><th>Header</th></tr></thead><tbody>
+<tr><td><code>auto</code> (default)</td><td>The bare owner id when every column shares one series name, else</td></tr>
+<tr><td></td><td><code>name@owner</code>.</td></tr>
+<tr><td><code>owner</code></td><td>Always the bare owner id.</td></tr>
+<tr><td><code>full</code></td><td>Always <code>name@owner</code>.</td></tr>
+</tbody></table>
+</div>
+<p>The bare form is what closes the loop: a <code>grid</code> CSV is re-readable by
+<code>add --layout wide --owner-id-from header</code>, and <code>grid → add → grid</code> is a fixed point. Column order
+is the reader's own — groups by <code>(dtype, element_shape)</code>, keys in build order — so it is stable
+across runs and two grid exports can be diffed.</p>
+<h2 id="charts"><a class="header" href="#charts">Charts</a></h2>
+<p><code>plot</code> writes one <strong>self-contained</strong> file: no external fonts, scripts, stylesheets, or images, so it
+opens in a browser, drops into a report, and survives being emailed. Both light and dark themes are
+written into the document, keyed on <code>prefers-color-scheme</code>. An <code>.html</code> destination wraps the same
+SVG in a minimal page; <code>--out -</code> writes to stdout.</p>
+<div class="table-wrapper"><table><thead><tr><th><code>--kind</code></th><th>What it shows</th></tr></thead><tbody>
+<tr><td><code>line</code></td><td>The profile itself, one or more series against time.</td></tr>
+<tr><td><code>duration</code></td><td>The load duration curve: values sorted descending against the percent of time at</td></tr>
+<tr><td></td><td>or above them. Standard in this field, and the fastest read on how peaky a</td></tr>
+<tr><td></td><td>profile is.</td></tr>
+<tr><td><code>heatmap</code></td><td>Time-of-day against day. The fastest way to spot a timezone or DST error — the</td></tr>
+<tr><td></td><td>bug class this data is most prone to. A correct profile shows vertical banding; a</td></tr>
+<tr><td></td><td>shifted one shows a diagonal seam.</td></tr>
+<tr><td><code>fan</code></td><td>Percentile bands for a <code>Probabilistic</code>, overlaid traces for <code>Scenarios</code>, for one</td></tr>
+<tr><td></td><td>window (<code>--window N</code>). These types have no other readable rendering.</td></tr>
+<tr><td><code>overlay</code></td><td>A <code>Deterministic</code>'s windows drawn over the <code>SingleTimeSeries</code> it was transformed</td></tr>
+<tr><td></td><td>from: forecast against actual.</td></tr>
+</tbody></table>
+</div>
+<pre><code class="language-sh">infrastore --store demo.h5 plot --name load --kind line --out load.svg
+infrastore --store demo.h5 plot --name load --kind duration --out ldc.svg
+infrastore --store demo.h5 plot --name load --kind heatmap --out heat.html
+infrastore --store demo.h5 plot --name load_prob --type Probabilistic --kind fan --out fan.svg
+infrastore --store demo.h5 plot --name load --type Deterministic --kind overlay --out fc.svg
+</code></pre>
+<p>The categorical palette has eight distinguishable colors, so a <code>line</code> or <code>duration</code> chart refuses a
+selector matching more than eight series and points at <code>grid</code> instead — cycling colors would produce
+a chart whose legend lies. <code>heatmap</code> draws one series. <code>Scenarios</code> past eight traces are drawn in
+one color with the count in the legend, which is the honest reading of a spaghetti plot.</p>
+<p><code>get --plot</code> is the no-file version: a Unicode sparkline per element, with the series range printed
+beside it. Each column shows its bucket's most extreme sample rather than its average, so a one-hour
+spike in a year of hourly data still shows — the thing a sanity-check plot must not hide. The cost
+is that a column is not a summary of its bucket; <code>plot</code> draws the real curve.</p>
 <h2 id="content-addressing-1"><a class="header" href="#content-addressing-1">Content Addressing</a></h2>
 <p>Arrays are stored by the SHA-256 of their contents, so two series holding identical values share one
 array on disk. Three commands surface that, which is what makes an HDF5 file with fewer columns than
@@ -8120,8 +8509,11 @@ same-shaped arrays, and the column index is only recoverable by scanning that da
 <code>_h</code> hash dataset; a packed pool that fills up also spills into <code>{name}__1</code>, <code>{name}__2</code>, so even
 the dataset name is not derivable from metadata. A standalone array (irregular series, dense
 forecast) reports its own dataset and no column.</p>
-<p><code>info</code> reads the array to compute its min/max/mean. <code>--no-stats</code> skips that, leaving a purely
-catalog-side query that never touches the HDF5 file.</p>
+<p><code>info</code> reads the array to compute its statistics: <code>min</code>, <code>max</code>, <code>mean</code>, <code>stddev</code>, the <code>p5</code>/<code>p25</code>/
+<code>p50</code>/<code>p75</code>/<code>p95</code> percentiles, <code>first</code>, <code>last</code>, <code>num_elements</code>, and a separate <code>non_finite</code> count (a
+NaN in a load profile is a data bug, and a mean that quietly ignored it would hide the bug rather
+than surface it). <code>--no-stats</code> skips all of that, leaving a purely catalog-side query that never
+touches the HDF5 file.</p>
 <h3 id="reading-the-sqlite-catalog-by-hand"><a class="header" href="#reading-the-sqlite-catalog-by-hand">Reading the SQLite catalog by hand</a></h3>
 <p>The catalog stores both hashes as <code>BLOB</code>, which <code>sqlite3</code> renders as raw bytes in its default <code>list</code>
 mode and in <code>.mode box</code> / <code>.mode json</code> — mangling the terminal, and in box mode the table borders
@@ -8142,7 +8534,12 @@ reads it — so its absence never affects reads.</p>
 <tr><td><code>1</code></td><td>Runtime error. The message is printed to stderr, prefixed with <code>Error:</code>.</td></tr>
 <tr><td><code>2</code></td><td>Usage error from argument parsing (unknown flag, missing <code>--descriptor</code>, …).</td></tr>
 </tbody></table>
-</div><div style="break-before: page; page-break-before: always;"></div><h1 id="contributing"><a class="header" href="#contributing">Contributing</a></h1>
+</div>
+<p>Three commands also use <code>1</code> as an <em>answer</em> rather than a failure, so they drop into a shell
+conditional or a CI gate: <code>verify</code> when the integrity report lists any error, <code>diff</code> when the two
+stores differ, and <code>exists</code> when nothing matches. All three still print their result to stdout, and
+a genuine failure is distinguishable by the <code>Error:</code> line on stderr.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="contributing"><a class="header" href="#contributing">Contributing</a></h1>
 <p>This page covers the conventions for contributing code and documentation to infrastore.</p>
 <h2 id="code-quality"><a class="header" href="#code-quality">Code Quality</a></h2>
 <p>All changes should pass the standard workspace checks before being committed:</p>
