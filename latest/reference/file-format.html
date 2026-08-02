@@ -197,10 +197,11 @@ Earlier releases wrote it through netcdf-c; the layout below is unchanged, but t
 carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</code> accepts only files it wrote itself
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
-<p>The HDF5 root carries three global attributes:</p>
+<p>The HDF5 root carries four global attributes:</p>
 <pre><code class="language-text">data_format_version = "0.14.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
+catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
 </code></pre>
 <p><code>data_format_version</code> is the semver of the on-disk format (<code>DATA_FORMAT_VERSION</code>). It is bumped when
 the HDF5 layout, the SQLite schema, or the <a href="../explanation/content-addressing.html">hashing domain</a>
@@ -215,6 +216,14 @@ anything else and rejects a file that lacks it with <code>InvalidParameter</code
 an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
 netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
 no in-place migration.</p>
+<p><code>catalog_generation</code> pairs this file with exactly one catalog; the same value lives in the catalog's
+<a href="#catalog_identity"><code>catalog_identity</code></a> table. <code>Store::open</code> compares the two and rejects a mismatch
+with <code>MismatchedArtifact</code>. It is written at creation and re-minted by every <code>persist_to</code>, which is
+what makes a save interrupted between its two renames detectable — see
+<a href="../explanation/storage-model.html#saving-one-pair-two-renames">Saving</a>. It is additive, so it carries
+no <code>data_format_version</code> change: a store written before it existed has neither the attribute nor the
+table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
+existing value rather than minting a new one, since it rewrites only the HDF5 half.</p>
 <p>Opening a store whose recorded version differs from the version this build reads fails with
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
@@ -580,6 +589,18 @@ have made every existing store unreadable in exchange for nothing.</p>
 if the table is empty; <code>1</code> is the current value. This tracks the SQLite schema alone and is distinct
 from the HDF5 <code>data_format_version</code> attribute, which governs the artifact as a whole and is the
 value <code>open</code> validates.</p>
+<h3 id="catalog_identity"><a class="header" href="#catalog_identity"><code>catalog_identity</code></a></h3>
+<pre><code class="language-sql">CREATE TABLE catalog_identity (generation TEXT NOT NULL);
+</code></pre>
+<p>Holds zero or one row pairing this catalog with one HDF5 file, whose <code>catalog_generation</code> root
+attribute carries the same value. <code>Store::open</code> compares them and rejects a mismatch with
+<code>MismatchedArtifact</code>, which is what turns an interrupted <code>persist_to</code> — two renames that cannot be
+made atomic together — into a loud error instead of a store that quietly disagrees with itself. It
+also catches one half being copied without the other.</p>
+<p>Added additively, so it lands on an existing store's first writable open without a
+<code>data_format_version</code> change. A store predating it has no row here and no root attribute, and reads
+as unstamped rather than as a mismatch. Because a read-only open cannot run the DDL, every read of
+this table tolerates the table being absent.</p>
 <h3 id="indexes"><a class="header" href="#indexes">Indexes</a></h3>
 <pre><code class="language-sql">CREATE UNIQUE INDEX uq_ts_assoc ON time_series_associations
     (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);

@@ -246,6 +246,14 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 int32_t infrastore_store_create_with_compression(const char *path, bool in_memory, uint8_t compression_kind,
                                          uint8_t deflate_level, bool shuffle, struct InfraStore **out);
 int32_t infrastore_store_open(const char *path, bool read_only, struct InfraStore **out);
+/* catalog_mode: 0 = attached (&lt;path&gt;.sqlite), 1 = in memory (written only by
+   infrastore_store_persist). in_memory=true admits only catalog_mode=1. */
+int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
 void    infrastore_store_free(struct InfraStore *handle);
 void    infrastore_key_free(struct InfraStoreKey *key);
 /* Frees any owned `char *` this library returns (resolutions, horizons, intervals, …). */

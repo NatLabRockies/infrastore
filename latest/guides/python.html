@@ -408,6 +408,24 @@ assert store.list_parents(child_id=7) == [43, 99]
 <pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
 <p>Keep the two files together — the <code>.h5</code> and <code>.h5.sqlite</code> pair is a single logical store.</p>
+<h3 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h3>
+<p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
+<code>catalog="memory"</code> keeps it in RAM instead, so it reaches disk only when you call <code>persist_to()</code>:</p>
+<pre><code class="language-python"># Build in a scratch directory; nothing is durable until the explicit save.
+store = Store.create(scratch / "time_series.h5", catalog="memory")
+store.add_time_series(...)
+store.persist_to(destination)     # writes both halves as a matched pair
+</code></pre>
+<p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
+building a store beside volatile in-process state — a crash loses that state anyway, so journaling
+the scratch catalog buys nothing. Read <code>store.catalog</code> to see which mode a store is in.</p>
+<p><code>Store.open(path, catalog="memory")</code> loads an existing catalog into RAM the same way. Note that the
+HDF5 half is still opened <strong>in place</strong>, so mutations land in the original file; open a copy if you
+mean to leave the source untouched until an explicit save.</p>
+<p><code>persist_to()</code> stages both halves and renames them into place, and stamps the pair so that a save
+interrupted between the two renames is caught on the next open rather than read as a valid store. It
+does replace the destination, though, so a failed save may have destroyed what was there — recover
+by calling <code>persist_to()</code> again on the still-live store rather than assuming the target survived.</p>
 <h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
 <p>The store's own exceptions inherit from <code>TimeSeriesError</code>, so you can catch broadly or narrowly:</p>
 <pre><code class="language-python">from infrastore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError

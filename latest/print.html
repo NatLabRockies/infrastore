@@ -1193,6 +1193,53 @@ feature set; the set is left unreachable for a later <code>compact()</code> to s
 <p>The HDF5 backend buffers writes. Call <code>flush()</code> (which issues <code>H5Fflush</code>) before copying the files
 for backup or archival; afterward both <code>system.h5</code> and <code>system.h5.sqlite</code> can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.</p>
+<h2 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h2>
+<p>The catalog does not have to be the <code>.sqlite</code> file while a store is open. <code>CatalogMode</code> picks
+between two placements, independently of where the arrays live:</p>
+<div class="table-wrapper"><table><thead><tr><th>Mode</th><th>Catalog</th><th>Durability</th></tr></thead><tbody>
+<tr><td><code>Attached</code></td><td>is the <code>&lt;path&gt;.sqlite</code> file</td><td>every commit, as soon as the OS writes back</td></tr>
+<tr><td><code>InMemory</code></td><td>held in RAM, loaded on open</td><td>only at <code>persist_to</code> — a crash loses it</td></tr>
+</tbody></table>
+</div>
+<p><code>Attached</code> is the default and what a long-lived on-disk store wants: the CLI mutates one command per
+process and relies on each one landing.</p>
+<p><code>InMemory</code> suits a consumer that builds a store in a scratch directory beside its own volatile state
+— a <code>System</code> under construction, say. A crash loses that state regardless, so journaling the scratch
+catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
+the HDF5 file, so this does <strong>not</strong> require the data to fit in memory. Nothing is durable until
+<code>persist_to</code>.</p>
+<p>Two caveats. Opening with <code>InMemory</code> reads <code>&lt;path&gt;.sqlite</code> into RAM but still opens the HDF5 half
+<strong>in place</strong>, so mutations land in the original file; a caller that means to leave the source
+untouched until an explicit save must open a copy. And a scratch store that never reached
+<code>persist_to</code>, reopened as <code>Attached</code>, reads as <em>empty</em> rather than failing — a read-write open of a
+missing catalog creates a fresh one, so the arrays are present but nothing names them.</p>
+<h2 id="saving-one-pair-two-renames"><a class="header" href="#saving-one-pair-two-renames">Saving: One Pair, Two Renames</a></h2>
+<p><code>persist_to</code> writes both halves to temporary siblings, fsyncs them, and only then renames them into
+place, so a crash before the first rename leaves the destination untouched.</p>
+<p>The renames cannot be made atomic together — POSIX renames one path at a time. A <strong>generation
+stamp</strong> covers the gap: each save mints a fresh value and writes it into both the HDF5
+<code>catalog_generation</code> root attribute and the catalog's <code>catalog_identity</code> table. A crash between the
+two renames therefore leaves halves whose stamps disagree, and the next <code>open</code> fails with
+<code>MismatchedArtifact</code> instead of reading a store that quietly contradicts itself. The same check
+catches one half being copied without the other.</p>
+<p>What the stamp does <em>not</em> give you is a destination that survives a failed save. The renames replace
+the target, so a crash between them destroys whatever pair was there before. That is a deliberate
+trade — loud, detectable loss beats silent corruption. <strong>Do not assume the destination is intact
+after a failed <code>persist_to</code></strong>; recover by saving again from the store, which is still live and
+unchanged.</p>
+<p>A store written before the stamp existed carries neither half of it. That reads as "unstamped" and
+skips the check rather than failing, so older artifacts keep opening.</p>
+<p>The swap also clears any <code>-wal</code>/<code>-shm</code> sidecar beside the destination catalog. A sidecar there
+belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite
+would recover it over the database renamed into its place, resurrecting the replaced catalog's pages
+so the save silently would not take.</p>
+<p>Saving an <code>Attached</code> store onto <strong>its own path</strong> is a no-op: the destination already is that store,
+and the flush at the start of <code>persist_to</code> has made it durable. The <code>InMemory</code> counterpart is real
+work rather than a no-op — the arrays are already at <code>path</code> and the save is what writes the catalog
+beside them, which is exactly the scratch-directory workflow.</p>
+<p>Compaction rewrites only the HDF5 half, so it carries the existing stamp into the rewritten file
+rather than minting a new one — a fresh stamp there would manufacture exactly the mismatch the stamp
+exists to detect.</p>
 <h2 id="compaction"><a class="header" href="#compaction">Compaction</a></h2>
 <p><code>compact()</code> reclaims space in both halves of the artifact, and the two halves behave differently.</p>
 <p><strong>On the array side, compaction rewrites the file.</strong> Deleting a series frees its column slot (reused
@@ -2183,6 +2230,24 @@ assert store.list_parents(child_id=7) == [43, 99]
 <pre><code class="language-python">store.flush()   # sync buffered writes; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
 <p>Keep the two files together — the <code>.h5</code> and <code>.h5.sqlite</code> pair is a single logical store.</p>
+<h3 id="where-the-catalog-lives-1"><a class="header" href="#where-the-catalog-lives-1">Where the Catalog Lives</a></h3>
+<p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
+<code>catalog="memory"</code> keeps it in RAM instead, so it reaches disk only when you call <code>persist_to()</code>:</p>
+<pre><code class="language-python"># Build in a scratch directory; nothing is durable until the explicit save.
+store = Store.create(scratch / "time_series.h5", catalog="memory")
+store.add_time_series(...)
+store.persist_to(destination)     # writes both halves as a matched pair
+</code></pre>
+<p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
+building a store beside volatile in-process state — a crash loses that state anyway, so journaling
+the scratch catalog buys nothing. Read <code>store.catalog</code> to see which mode a store is in.</p>
+<p><code>Store.open(path, catalog="memory")</code> loads an existing catalog into RAM the same way. Note that the
+HDF5 half is still opened <strong>in place</strong>, so mutations land in the original file; open a copy if you
+mean to leave the source untouched until an explicit save.</p>
+<p><code>persist_to()</code> stages both halves and renames them into place, and stamps the pair so that a save
+interrupted between the two renames is caught on the next open rather than read as a valid store. It
+does replace the destination, though, so a failed save may have destroyed what was there — recover
+by calling <code>persist_to()</code> again on the still-live store rather than assuming the target survived.</p>
 <h2 id="error-handling-1"><a class="header" href="#error-handling-1">Error Handling</a></h2>
 <p>The store's own exceptions inherit from <code>TimeSeriesError</code>, so you can catch broadly or narrowly:</p>
 <pre><code class="language-python">from infrastore import NotFoundError, DuplicateTimeSeriesError, TimeSeriesError
@@ -2535,6 +2600,24 @@ list_parents(store; child_id=7)                     # [43, 99]
 <pre><code class="language-julia">flush!(store)   # sync HDF5 + SQLite; afterwards system.h5 + system.h5.sqlite can be copied
 </code></pre>
 <p>Keep the <code>.h5</code> and <code>.h5.sqlite</code> files together.</p>
+<h3 id="where-the-catalog-lives-2"><a class="header" href="#where-the-catalog-lives-2">Where the Catalog Lives</a></h3>
+<p>By default the catalog <em>is</em> <code>system.h5.sqlite</code>, and every commit is durable. Passing
+<code>catalog=:memory</code> keeps it in RAM instead, so it reaches disk only via <a href="guides/@ref"><code>persist!</code></a>:</p>
+<pre><code class="language-julia"># Build in a scratch directory; nothing is durable until the explicit save.
+store = Store(; in_memory=false, path=joinpath(scratch, "time_series.h5"), catalog=:memory)
+add_time_series!(store, 42, "Generator", Component, ts)
+persist!(store, destination)     # writes both halves as a matched pair
+</code></pre>
+<p>Arrays still stream to the HDF5 file, so this does not require the data to fit in memory. It suits
+building a store beside volatile in-process state — a crash loses that state anyway, so journaling
+the scratch catalog buys nothing. <code>catalog_mode(store)</code> reports which mode a store is in.</p>
+<p><code>open_store(path; catalog=:memory)</code> loads an existing catalog into RAM the same way. Note that the
+HDF5 half is still opened <strong>in place</strong>, so mutations land in the original file; open a copy if you
+mean to leave the source untouched until an explicit save.</p>
+<p><code>persist!</code> stages both halves and renames them into place, and stamps the pair so that a save
+interrupted between the two renames is caught on the next open rather than read as a valid store. It
+does replace the destination, though, so a failed save may have destroyed what was there — recover
+by calling <code>persist!</code> again on the still-live store rather than assuming the target survived.</p>
 <h2 id="error-handling-2"><a class="header" href="#error-handling-2">Error Handling</a></h2>
 <p>Errors subtype <code>InfraStore.TimeSeriesException</code>. The exception types are not exported, so reference
 them module-qualified. Catch broadly or narrowly:</p>
@@ -3237,10 +3320,11 @@ Earlier releases wrote it through netcdf-c; the layout below is unchanged, but t
 carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</code> accepts only files it wrote itself
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
-<p>The HDF5 root carries three global attributes:</p>
+<p>The HDF5 root carries four global attributes:</p>
 <pre><code class="language-text">data_format_version = "0.14.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
+catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
 </code></pre>
 <p><code>data_format_version</code> is the semver of the on-disk format (<code>DATA_FORMAT_VERSION</code>). It is bumped when
 the HDF5 layout, the SQLite schema, or the <a href="reference/../explanation/content-addressing.html">hashing domain</a>
@@ -3255,6 +3339,14 @@ anything else and rejects a file that lacks it with <code>InvalidParameter</code
 an infrastore store from an arbitrary HDF5 file, and it is why stores written by the older
 netcdf-backed releases are refused rather than misread. Such a store has to be regenerated; there is
 no in-place migration.</p>
+<p><code>catalog_generation</code> pairs this file with exactly one catalog; the same value lives in the catalog's
+<a href="reference/file-format.html#catalog_identity"><code>catalog_identity</code></a> table. <code>Store::open</code> compares the two and rejects a mismatch
+with <code>MismatchedArtifact</code>. It is written at creation and re-minted by every <code>persist_to</code>, which is
+what makes a save interrupted between its two renames detectable — see
+<a href="reference/../explanation/storage-model.html#saving-one-pair-two-renames">Saving</a>. It is additive, so it carries
+no <code>data_format_version</code> change: a store written before it existed has neither the attribute nor the
+table, which reads as "unstamped" and skips the check rather than failing. Compaction preserves the
+existing value rather than minting a new one, since it rewrites only the HDF5 half.</p>
 <p>Opening a store whose recorded version differs from the version this build reads fails with
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
@@ -3620,6 +3712,18 @@ have made every existing store unreadable in exchange for nothing.</p>
 if the table is empty; <code>1</code> is the current value. This tracks the SQLite schema alone and is distinct
 from the HDF5 <code>data_format_version</code> attribute, which governs the artifact as a whole and is the
 value <code>open</code> validates.</p>
+<h3 id="catalog_identity"><a class="header" href="#catalog_identity"><code>catalog_identity</code></a></h3>
+<pre><code class="language-sql">CREATE TABLE catalog_identity (generation TEXT NOT NULL);
+</code></pre>
+<p>Holds zero or one row pairing this catalog with one HDF5 file, whose <code>catalog_generation</code> root
+attribute carries the same value. <code>Store::open</code> compares them and rejects a mismatch with
+<code>MismatchedArtifact</code>, which is what turns an interrupted <code>persist_to</code> — two renames that cannot be
+made atomic together — into a loud error instead of a store that quietly disagrees with itself. It
+also catches one half being copied without the other.</p>
+<p>Added additively, so it lands on an existing store's first writable open without a
+<code>data_format_version</code> change. A store predating it has no row here and no root attribute, and reads
+as unstamped rather than as a mismatch. Because a read-only open cannot run the DDL, every read of
+this table tolerates the table being absent.</p>
 <h3 id="indexes"><a class="header" href="#indexes">Indexes</a></h3>
 <pre><code class="language-sql">CREATE UNIQUE INDEX uq_ts_assoc ON time_series_associations
     (owner_id, owner_category, time_series_type, name, resolution, interval, features_hash);
@@ -5148,10 +5252,13 @@ def create(
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
+    catalog: str | None = None,     # "attached" or "memory"; None matches the backend
 ) -&gt; Store: ...
 
 @classmethod
-def open(cls, path: str, read_only: bool = False) -&gt; Store: ...
+def open(
+    cls, path: str, read_only: bool = False, catalog: str = "attached"
+) -&gt; Store: ...
 </code></pre>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
@@ -5160,7 +5267,15 @@ def open(cls, path: str, read_only: bool = False) -&gt; Store: ...
 <code>compression_level</code> / <code>shuffle</code> of your choice tunes the filter. The policy persists with the
 store and is reused on later appends. An unknown <code>compression</code> or out-of-range level raises
 <code>InvalidParameterError</code>.</li>
+<li><code>catalog="attached"</code> makes the catalog the <code>.sqlite</code> file, where every commit is durable;
+<code>catalog="memory"</code> holds it in RAM so it reaches disk only through <code>persist_to()</code>. Arrays stream
+to the HDF5 file either way. The default (<code>None</code>) matches the backend — <code>"memory"</code> when
+<code>in_memory=True</code>, else <code>"attached"</code> — so existing call sites are unchanged. An unknown <code>catalog</code>
+raises <code>InvalidParameterError</code>. See
+<a href="reference/../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
 <li><code>open(path, read_only=True)</code> — read-only open; writes raise <code>ReadOnlyStoreError</code>.</li>
+<li><code>open(path, catalog="memory")</code> — loads the catalog into RAM; the HDF5 half is still opened in
+place. <code>store.catalog</code> reports the mode.</li>
 </ul>
 <p>The store is also a context manager: <code>with Store.create(...) as store:</code> closes it on exit.
 <code>store.close()</code> drops the underlying handle and releases its files; subsequent operations raise
@@ -5780,31 +5895,35 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>add_parent_child_association!</code>, <code>add_parent_child_associations!</code>,
 <code>add_supplemental_attribute_association!</code>, <code>add_supplemental_attribute_associations!</code>,
 <code>add_time_series!</code>, <code>add_time_series_bulk!</code>, <code>build_forecast_reader</code>, <code>build_static_reader</code>,
-<code>bulk_read</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>, <code>copy_time_series!</code>,
-<code>count_array_references</code>, <code>count_components_with_attributes</code>, <code>count_parent_child_associations</code>,
-<code>count_supplemental_attribute_associations</code>, <code>count_supplemental_attributes</code>, <code>counts_by_type</code>,
-<code>flush!</code>, <code>forecast_entries</code>, <code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>,
-<code>forecast_timeline</code>, <code>forecast_values</code>, <code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>,
-<code>get_forecast_parameters</code>, <code>get_intervals</code>, <code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>,
-<code>get_time_series</code>, <code>get_time_series_key</code>, <code>get_time_series_keys</code>, <code>has_any_time_series</code>,
-<code>has_for_owner</code>, <code>has_parent_child_association</code>, <code>has_supplemental_attribute_association</code>,
-<code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>, <code>key_info</code>, <code>list_array_groups</code>,
-<code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>, <code>list_names</code>, <code>list_owner_ids</code>,
-<code>list_owner_types</code>, <code>list_parent_child_associations</code>, <code>list_parents</code>,
-<code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>, <code>list_time_series</code>,
-<code>num_distinct_arrays</code>, <code>open_store</code>, <code>persist!</code>, <code>read_only</code>, <code>rollback_transaction!</code>,
-<code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>, <code>remove_by_filter!</code>,
-<code>remove_parent_child_associations!</code>, <code>remove_supplemental_attribute_associations!</code>,
-<code>remove_time_series!</code>, <code>rename_time_series!</code>, <code>replace_owner!</code>,
-<code>replace_parent_child_component_id!</code>, <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>,
-<code>static_groups</code>, <code>static_read!</code>, <code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>,
-<code>supplemental_attribute_counts_by_type</code>, <code>supplemental_attribute_summary</code>, <code>time_series_counts</code>,
-<code>transform_single_time_series!</code>, <code>verify_integrity</code>.</p>
+<code>bulk_read</code>, <code>catalog_mode</code>, <code>check_static_consistency</code>, <code>clear!</code>, <code>close!</code>, <code>compact!</code>,
+<code>copy_time_series!</code>, <code>count_array_references</code>, <code>count_components_with_attributes</code>,
+<code>count_parent_child_associations</code>, <code>count_supplemental_attribute_associations</code>,
+<code>count_supplemental_attributes</code>, <code>counts_by_type</code>, <code>flush!</code>, <code>forecast_entries</code>,
+<code>forecast_num_slots</code>, <code>forecast_read!</code>, <code>forecast_summary</code>, <code>forecast_timeline</code>, <code>forecast_values</code>,
+<code>get_array_by_hash</code>, <code>get_compression</code>, <code>get_counts</code>, <code>get_forecast_parameters</code>, <code>get_intervals</code>,
+<code>get_metadata</code>, <code>get_path</code>, <code>get_resolutions</code>, <code>get_time_series</code>, <code>get_time_series_key</code>,
+<code>get_time_series_keys</code>, <code>has_any_time_series</code>, <code>has_for_owner</code>, <code>has_parent_child_association</code>,
+<code>has_supplemental_attribute_association</code>, <code>has_time_series</code>, <code>in_transaction</code>, <code>init_logging</code>,
+<code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>,
+<code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
+<code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
+<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_store</code>, <code>persist!</code>, <code>read_only</code>,
+<code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>,
+<code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
+<code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
+<code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
+<code>static_summary</code>, <code>static_timestamps</code>, <code>static_values</code>, <code>supplemental_attribute_counts_by_type</code>,
+<code>supplemental_attribute_summary</code>, <code>time_series_counts</code>, <code>transform_single_time_series!</code>,
+<code>verify_integrity</code>.</p>
 <h2 id="constructors-2"><a class="header" href="#constructors-2">Constructors</a></h2>
 <pre><code class="language-julia">Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
-        compression_level::Integer=3, shuffle::Bool=true) -&gt; Store
-open_store(path::AbstractString; read_only::Bool=false) -&gt; Store
+        compression_level::Integer=3, shuffle::Bool=true,
+        catalog::Union{Nothing,Symbol,AbstractString}=nothing) -&gt; Store
+open_store(path::AbstractString; read_only::Bool=false,
+           catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
+catalog_mode(store::Store) -&gt; Symbol
 </code></pre>
 <ul>
 <li><code>Store()</code> — in-memory store.</li>
@@ -5813,7 +5932,14 @@ open_store(path::AbstractString; read_only::Bool=false) -&gt; Store
 <code>compression_level</code> (0–9) with optional byte <code>shuffle</code>. The policy is persisted with the store and
 reused on later appends; it is ignored for in-memory stores. An unknown <code>compression</code> throws
 <code>ArgumentError</code>.</li>
+<li><code>catalog=:attached</code> makes the catalog the <code>.sqlite</code> file, where every commit is durable;
+<code>catalog=:memory</code> holds it in RAM so it reaches disk only through <code>persist!</code>. Arrays stream to the
+HDF5 file either way. The default (<code>nothing</code>) matches the backend — <code>:memory</code> when <code>in_memory</code> is
+true, else <code>:attached</code> — so existing call sites are unchanged. An unknown <code>catalog</code> throws
+<code>ArgumentError</code>. See
+<a href="reference/../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
 <li><code>open_store(path; read_only=true)</code> — opens an existing on-disk pair.</li>
+<li><code>catalog_mode(store)</code> returns <code>:attached</code> or <code>:memory</code>.</li>
 </ul>
 <p>The store registers a finalizer; close it eagerly with <code>close!(store)</code>.</p>
 <h2 id="types-1"><a class="header" href="#types-1">Types</a></h2>
@@ -6624,6 +6750,14 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 int32_t infrastore_store_create_with_compression(const char *path, bool in_memory, uint8_t compression_kind,
                                          uint8_t deflate_level, bool shuffle, struct InfraStore **out);
 int32_t infrastore_store_open(const char *path, bool read_only, struct InfraStore **out);
+/* catalog_mode: 0 = attached (&lt;path&gt;.sqlite), 1 = in memory (written only by
+   infrastore_store_persist). in_memory=true admits only catalog_mode=1. */
+int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
 void    infrastore_store_free(struct InfraStore *handle);
 void    infrastore_key_free(struct InfraStoreKey *key);
 /* Frees any owned `char *` this library returns (resolutions, horizons, intervals, …). */

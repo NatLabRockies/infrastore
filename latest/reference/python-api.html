@@ -215,10 +215,13 @@ def create(
     compression: str = "deflate",   # "deflate" or "none"
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
+    catalog: str | None = None,     # "attached" or "memory"; None matches the backend
 ) -&gt; Store: ...
 
 @classmethod
-def open(cls, path: str, read_only: bool = False) -&gt; Store: ...
+def open(
+    cls, path: str, read_only: bool = False, catalog: str = "attached"
+) -&gt; Store: ...
 </code></pre>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
@@ -227,7 +230,15 @@ def open(cls, path: str, read_only: bool = False) -&gt; Store: ...
 <code>compression_level</code> / <code>shuffle</code> of your choice tunes the filter. The policy persists with the
 store and is reused on later appends. An unknown <code>compression</code> or out-of-range level raises
 <code>InvalidParameterError</code>.</li>
+<li><code>catalog="attached"</code> makes the catalog the <code>.sqlite</code> file, where every commit is durable;
+<code>catalog="memory"</code> holds it in RAM so it reaches disk only through <code>persist_to()</code>. Arrays stream
+to the HDF5 file either way. The default (<code>None</code>) matches the backend — <code>"memory"</code> when
+<code>in_memory=True</code>, else <code>"attached"</code> — so existing call sites are unchanged. An unknown <code>catalog</code>
+raises <code>InvalidParameterError</code>. See
+<a href="../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
 <li><code>open(path, read_only=True)</code> — read-only open; writes raise <code>ReadOnlyStoreError</code>.</li>
+<li><code>open(path, catalog="memory")</code> — loads the catalog into RAM; the HDF5 half is still opened in
+place. <code>store.catalog</code> reports the mode.</li>
 </ul>
 <p>The store is also a context manager: <code>with Store.create(...) as store:</code> closes it on exit.
 <code>store.close()</code> drops the underlying handle and releases its files; subsequent operations raise

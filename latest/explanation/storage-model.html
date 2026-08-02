@@ -352,6 +352,53 @@ feature set; the set is left unreachable for a later <code>compact()</code> to s
 <p>The HDF5 backend buffers writes. Call <code>flush()</code> (which issues <code>H5Fflush</code>) before copying the files
 for backup or archival; afterward both <code>system.h5</code> and <code>system.h5.sqlite</code> can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.</p>
+<h2 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h2>
+<p>The catalog does not have to be the <code>.sqlite</code> file while a store is open. <code>CatalogMode</code> picks
+between two placements, independently of where the arrays live:</p>
+<div class="table-wrapper"><table><thead><tr><th>Mode</th><th>Catalog</th><th>Durability</th></tr></thead><tbody>
+<tr><td><code>Attached</code></td><td>is the <code>&lt;path&gt;.sqlite</code> file</td><td>every commit, as soon as the OS writes back</td></tr>
+<tr><td><code>InMemory</code></td><td>held in RAM, loaded on open</td><td>only at <code>persist_to</code> — a crash loses it</td></tr>
+</tbody></table>
+</div>
+<p><code>Attached</code> is the default and what a long-lived on-disk store wants: the CLI mutates one command per
+process and relies on each one landing.</p>
+<p><code>InMemory</code> suits a consumer that builds a store in a scratch directory beside its own volatile state
+— a <code>System</code> under construction, say. A crash loses that state regardless, so journaling the scratch
+catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
+the HDF5 file, so this does <strong>not</strong> require the data to fit in memory. Nothing is durable until
+<code>persist_to</code>.</p>
+<p>Two caveats. Opening with <code>InMemory</code> reads <code>&lt;path&gt;.sqlite</code> into RAM but still opens the HDF5 half
+<strong>in place</strong>, so mutations land in the original file; a caller that means to leave the source
+untouched until an explicit save must open a copy. And a scratch store that never reached
+<code>persist_to</code>, reopened as <code>Attached</code>, reads as <em>empty</em> rather than failing — a read-write open of a
+missing catalog creates a fresh one, so the arrays are present but nothing names them.</p>
+<h2 id="saving-one-pair-two-renames"><a class="header" href="#saving-one-pair-two-renames">Saving: One Pair, Two Renames</a></h2>
+<p><code>persist_to</code> writes both halves to temporary siblings, fsyncs them, and only then renames them into
+place, so a crash before the first rename leaves the destination untouched.</p>
+<p>The renames cannot be made atomic together — POSIX renames one path at a time. A <strong>generation
+stamp</strong> covers the gap: each save mints a fresh value and writes it into both the HDF5
+<code>catalog_generation</code> root attribute and the catalog's <code>catalog_identity</code> table. A crash between the
+two renames therefore leaves halves whose stamps disagree, and the next <code>open</code> fails with
+<code>MismatchedArtifact</code> instead of reading a store that quietly contradicts itself. The same check
+catches one half being copied without the other.</p>
+<p>What the stamp does <em>not</em> give you is a destination that survives a failed save. The renames replace
+the target, so a crash between them destroys whatever pair was there before. That is a deliberate
+trade — loud, detectable loss beats silent corruption. <strong>Do not assume the destination is intact
+after a failed <code>persist_to</code></strong>; recover by saving again from the store, which is still live and
+unchanged.</p>
+<p>A store written before the stamp existed carries neither half of it. That reads as "unstamped" and
+skips the check rather than failing, so older artifacts keep opening.</p>
+<p>The swap also clears any <code>-wal</code>/<code>-shm</code> sidecar beside the destination catalog. A sidecar there
+belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite
+would recover it over the database renamed into its place, resurrecting the replaced catalog's pages
+so the save silently would not take.</p>
+<p>Saving an <code>Attached</code> store onto <strong>its own path</strong> is a no-op: the destination already is that store,
+and the flush at the start of <code>persist_to</code> has made it durable. The <code>InMemory</code> counterpart is real
+work rather than a no-op — the arrays are already at <code>path</code> and the save is what writes the catalog
+beside them, which is exactly the scratch-directory workflow.</p>
+<p>Compaction rewrites only the HDF5 half, so it carries the existing stamp into the rewritten file
+rather than minting a new one — a fresh stamp there would manufacture exactly the mismatch the stamp
+exists to detect.</p>
 <h2 id="compaction"><a class="header" href="#compaction">Compaction</a></h2>
 <p><code>compact()</code> reclaims space in both halves of the artifact, and the two halves behave differently.</p>
 <p><strong>On the array side, compaction rewrites the file.</strong> Deleting a series frees its column slot (reused
