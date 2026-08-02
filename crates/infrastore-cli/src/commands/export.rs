@@ -35,6 +35,7 @@ pub fn run(
     };
     let ext = match format {
         Format::Csv => "csv",
+        Format::Jsonl => "jsonl",
         _ => "json",
     };
 
@@ -194,7 +195,7 @@ fn render(
 ) -> Result<String, String> {
     match format {
         Format::Csv => render_csv(meta, data),
-        _ => render_json(meta, data),
+        other => render_json(meta, data, other),
     }
 }
 
@@ -251,7 +252,18 @@ fn sequential_rows(
     (headers, rows)
 }
 
-fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String, String> {
+/// One series as a JSON document: pretty for `-f json`, one compact line for
+/// `-f jsonl`.
+///
+/// `jsonl` is advertised globally as line-delimited output, and an exported file
+/// full of pretty-printed documents is not something a line-oriented consumer
+/// can read. One series is one document either way — the two formats differ only
+/// in whether it is allowed to wrap.
+fn render_json(
+    meta: &TimeSeriesMetadata,
+    data: &TimeSeriesData,
+    format: Format,
+) -> Result<String, String> {
     let mut obj = Map::new();
     obj.insert("owner_id".into(), json!(meta.owner_id));
     obj.insert("owner_type".into(), json!(meta.owner_type));
@@ -320,7 +332,10 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
             obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
         }
     }
-    serde_json::to_string_pretty(&Value::Object(obj))
-        .map(|s| s + "\n")
-        .map_err(|e| e.to_string())
+    let value = Value::Object(obj);
+    let text = match format {
+        Format::Jsonl => serde_json::to_string(&value),
+        _ => serde_json::to_string_pretty(&value),
+    };
+    text.map(|s| s + "\n").map_err(|e| e.to_string())
 }

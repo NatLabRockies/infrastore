@@ -749,7 +749,32 @@ enum Commands {
     },
 }
 
+/// The stack `real_main` is given, which is more than the 1 MiB Windows hands
+/// the main thread by default.
+///
+/// [`build_command`] assembles every subcommand and every one of their arguments
+/// in a single clap-derive-generated call tree, and an unoptimized build gives
+/// each of those temporaries its own stack slot instead of reusing one. Measured
+/// against a `--help` run of the debug binary, that alone needs between 1 and
+/// 2 MiB — so on Windows the CLI overflowed before it could parse anything, on
+/// every invocation, while Linux and macOS (8 MiB) were fine. A spawned thread
+/// takes its stack size from this constant rather than from the executable
+/// header, which is why the work happens on one.
+const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 fn main() {
+    let worker = std::thread::Builder::new()
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(real_main)
+        .expect("spawning the worker thread");
+    if worker.join().is_err() {
+        // The panic hook has already printed the message; match the exit code a
+        // panicking main would have produced.
+        std::process::exit(101);
+    }
+}
+
+fn real_main() {
     // Parsed through `build_command` rather than `Cli::parse` so the grouped
     // help template is the one a user actually sees.
     let matches = build_command().get_matches();

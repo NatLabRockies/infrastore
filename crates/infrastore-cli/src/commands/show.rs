@@ -189,30 +189,62 @@ pub struct RowWindow {
 }
 
 impl RowWindow {
-    /// Apply the window to `rows`, returning the kept rows and the number that
-    /// were dropped.
-    fn apply<T: Clone>(&self, rows: &[T], format: Format) -> Result<(Vec<T>, usize), String> {
-        let strided: Vec<T> = match self.stride {
+    /// Which of `len` rows this window keeps, and how many the display bound
+    /// dropped.
+    ///
+    /// Returns the selection rather than the rows: a caller that only needs
+    /// fifty rows of a million-row series has no reason to build the other
+    /// 999,950 first, and [`Selection`] is the arithmetic that lets it build
+    /// only what it prints.
+    fn select(&self, len: usize, format: Format) -> Result<(Selection, usize), String> {
+        let step = match self.stride {
             Some(0) => return Err("--stride must be at least 1".to_string()),
-            Some(n) => rows.iter().step_by(n).cloned().collect(),
-            None => rows.to_vec(),
+            Some(n) => n,
+            None => 1,
         };
+        let strided = len.div_ceil(step);
         if format != Format::Table {
-            return Ok((strided, 0));
+            return Ok((Selection::new(0, step, strided), 0));
         }
         let max = match (self.full, self.limit) {
-            (true, _) => strided.len(),
+            (true, _) => strided,
             (_, Some(n)) => n,
             (_, None) => DEFAULT_LIMIT,
         };
-        let shown = strided.len().min(max);
-        let dropped = strided.len() - shown;
-        let kept = if self.tail {
-            strided[strided.len() - shown..].to_vec()
-        } else {
-            strided[..shown].to_vec()
-        };
-        Ok((kept, dropped))
+        let shown = strided.min(max);
+        let dropped = strided - shown;
+        let first = if self.tail { strided - shown } else { 0 };
+        Ok((Selection::new(first * step, step, shown), dropped))
+    }
+
+    /// Apply the window to rows that are already built, returning the kept rows
+    /// and the number that were dropped.
+    fn apply<T: Clone>(&self, rows: &[T], format: Format) -> Result<(Vec<T>, usize), String> {
+        let (sel, dropped) = self.select(rows.len(), format)?;
+        Ok((sel.iter().map(|i| rows[i].clone()).collect(), dropped))
+    }
+}
+
+/// An arithmetic run of row indices: `count` rows starting at `start`, `step`
+/// apart. The output of [`RowWindow::select`].
+#[derive(Debug, Clone, Copy)]
+struct Selection {
+    start: usize,
+    step: usize,
+    count: usize,
+}
+
+impl Selection {
+    fn new(start: usize, step: usize, count: usize) -> Self {
+        Self { start, step, count }
+    }
+
+    fn iter(self) -> impl Iterator<Item = usize> {
+        (0..self.count).map(move |k| self.start + k * self.step)
+    }
+
+    fn len(self) -> usize {
+        self.count
     }
 }
 
@@ -484,29 +516,43 @@ fn render_sequential(
     window: RowWindow,
 ) -> Result<(), String> {
     let per_step = arr.element_shape().iter().product::<usize>().max(1);
-    let decoded = csv_io::array_to_strings(arr);
     let length = arr.length();
-
-    let mut header = vec!["timestamp".to_string()];
-    header.extend(value_headers(per_step));
-    let all: Vec<Vec<String>> = (0..length)
-        .map(|i| {
-            let mut row = Vec::with_capacity(1 + per_step);
-            row.push(timestamps.get(i).cloned().unwrap_or_default());
-            for j in 0..per_step {
-                row.push(decoded[i * per_step + j].clone());
-            }
-            row
-        })
-        .collect();
-    let (rows, dropped) = window.apply(&all, format)?;
+    // Select the rows before decoding any of them: a table showing fifty rows of
+    // a year of five-minute data would otherwise stringify all 105,120 first.
+    let (sel, dropped) = window.select(length, format)?;
+    let elem = arr.dtype.size();
+    let row_bytes = |i: usize| {
+        arr.bytes
+            .get(i * per_step * elem..(i + 1) * per_step * elem)
+            .unwrap_or(&[])
+    };
+    let timestamp_at = |i: usize| timestamps.get(i).cloned().unwrap_or_default();
 
     match format {
         f if f.is_json() => {
             let mut obj = Map::new();
             meta_fields(meta, arr, &mut obj);
-            obj.insert("timestamps".into(), json!(timestamps));
-            obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
+            // `--stride` selects data rather than bounding a display, so the
+            // emitted grid really is shorter than the stored one — and the shape
+            // printed beside it has to say so instead of describing an array
+            // this document does not contain.
+            if sel.len() != length {
+                let mut shape = arr.shape.clone();
+                if let Some(rows) = shape.first_mut() {
+                    *rows = sel.len();
+                }
+                obj.insert("shape".into(), json!(shape));
+            }
+            if sel.step > 1 {
+                obj.insert("stride".into(), json!(sel.step));
+            }
+            let ts: Vec<String> = sel.iter().map(timestamp_at).collect();
+            let values: Vec<Value> = sel
+                .iter()
+                .flat_map(|i| csv_io::bytes_to_json_values(arr.dtype, row_bytes(i)))
+                .collect();
+            obj.insert("timestamps".into(), json!(ts));
+            obj.insert("values".into(), json!(values));
             output::print_value(f, &Value::Object(obj))?;
         }
         // Every sequential CSV carries its timestamp column. A SingleTimeSeries
@@ -514,10 +560,24 @@ fn render_sequential(
         // reconstructible from initial_timestamp + resolution — but those live
         // in the metadata, not in the file being piped, so `get -f csv >
         // out.csv` silently dropped the time axis.
-        Format::Csv => output::display_csv_rows(&header, &rows)?,
         _ => {
-            output::display_table_dyn(&header, &rows);
-            report_dropped(dropped);
+            let mut header = vec!["timestamp".to_string()];
+            header.extend(value_headers(per_step));
+            let rows: Vec<Vec<String>> = sel
+                .iter()
+                .map(|i| {
+                    let mut row = Vec::with_capacity(1 + per_step);
+                    row.push(timestamp_at(i));
+                    row.extend(csv_io::bytes_to_strings(arr.dtype, row_bytes(i)));
+                    row
+                })
+                .collect();
+            if format == Format::Csv {
+                output::display_csv_rows(&header, &rows)?;
+            } else {
+                output::display_table_dyn(&header, &rows);
+                report_dropped(dropped);
+            }
         }
     }
     Ok(())
@@ -560,18 +620,25 @@ fn render_forecast(
             if let TimeSeriesData::Scenarios(s) = data {
                 obj.insert("scenario_count".into(), json!(s.scenario_count));
             }
-            match window {
-                // A window slice keeps the readable shape rather than the
-                // stored one: the flat array's index arithmetic is exactly what
-                // a caller asking for one window does not want to redo.
-                Some(c) => {
+            let stride = rows_window.stride.filter(|&n| n > 1);
+            // A window slice keeps the readable shape rather than the stored
+            // one: the flat array's index arithmetic is exactly what a caller
+            // asking for one window does not want to redo. A stride is the same
+            // argument — the rows kept are no longer the stored array, so
+            // emitting that array's flat values would answer a different
+            // question than the one asked.
+            if window.is_some() || stride.is_some() {
+                let (shown, _) = rows_window.apply(&rows, format)?;
+                if let Some(c) = window {
                     obj.insert("window".into(), json!(c));
-                    obj.insert("columns".into(), json!(headers));
-                    obj.insert("rows".into(), json!(rows));
                 }
-                None => {
-                    obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
+                if let Some(n) = stride {
+                    obj.insert("stride".into(), json!(n));
                 }
+                obj.insert("columns".into(), json!(headers));
+                obj.insert("rows".into(), json!(shown));
+            } else {
+                obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
             }
             output::print_value(f, &Value::Object(obj))?;
         }

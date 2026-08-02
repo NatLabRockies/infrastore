@@ -2565,8 +2565,9 @@ fn the_association_catalogs_are_readable_from_the_cli() {
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
 
-    // The CLI has no write path for associations (that belongs with the
-    // consumer's object graph), so seed the catalog directly.
+    // Seeded through SQLite rather than through `attach`/`link` so this test
+    // covers the read path on its own: the write commands have their own tests
+    // in cli_workflows.rs, and a failure there should not also fail this one.
     let mut sqlite = store.clone().into_os_string();
     sqlite.push(".sqlite");
     let conn = rusqlite::Connection::open(PathBuf::from(sqlite)).unwrap();

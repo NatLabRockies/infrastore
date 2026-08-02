@@ -317,6 +317,58 @@ fn grid_labels_columns_by_name_when_the_selection_spans_several() {
     assert_eq!(bare.lines().next().unwrap(), "timestamp,1,2", "{bare}");
 }
 
+/// `grid` slices and truncates like `get` does: `--time-range` selects the rows
+/// read, `--limit`/`--full` bound the table only. A CSV pipe of a grid is fed
+/// straight back into `add`, so a silent truncation there would drop data on the
+/// floor.
+#[test]
+fn grid_time_range_selects_rows_and_the_table_bound_never_reaches_the_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("g.h5");
+    let mut body = String::from("timestamp,gen_001,gen_002\n");
+    for h in 0..8 {
+        body.push_str(&format!("2024-01-01T{h:02}:00:00Z,{h},{}\n", 10 + h));
+    }
+    write(dir.path(), "wide.csv", &body);
+    let desc = write(
+        dir.path(),
+        "wide.json",
+        &wide_descriptor(",\n  \"owner_map\": {\"gen_001\": 1, \"gen_002\": 2}"),
+    );
+    run(&store, &["add", "--descriptor", desc.to_str().unwrap()]);
+
+    let sliced = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "grid",
+            "--resolution",
+            "PT1H",
+            "--time-range",
+            "2024-01-01T02:00:00Z..2024-01-01T05:00:00Z",
+        ],
+    );
+    let rows = data_lines(&sliced);
+    assert_eq!(rows.len(), 3, "half-open, so 02, 03, 04: {sliced}");
+    assert!(rows[0].starts_with("2024-01-01T02:00:00"), "{sliced}");
+    assert!(
+        rows[0].ends_with(",2,12"),
+        "both columns come along: {sliced}"
+    );
+
+    // The table bound applies to the table.
+    let table = run(&store, &["grid", "--resolution", "PT1H", "--limit", "2"]);
+    assert!(table.contains("more rows"), "{table}");
+
+    // But not to a pipe, which is read by a program that cannot tell.
+    let piped = run(
+        &store,
+        &["-f", "csv", "grid", "--resolution", "PT1H", "--limit", "2"],
+    );
+    assert_eq!(data_lines(&piped).len(), 8, "{piped}");
+}
+
 // --- A2/A3/A4/A8: the other ways to run `add` ------------------------------
 
 fn seed_one(dir: &Path, store: &Path) {
@@ -623,6 +675,68 @@ fn jsonl_emits_one_object_per_line_with_no_enclosing_array() {
     assert!(!out.contains("\"items\""), "jsonl has no wrapper: {out}");
 }
 
+/// `export -f jsonl` used to be handled as a synonym for `-f json`, writing
+/// pretty-printed documents into files named `.json` — which is precisely what a
+/// line-oriented consumer of an export cannot read.
+#[test]
+fn export_jsonl_writes_one_series_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("e.h5");
+    seed_one(dir.path(), &store);
+    write(dir.path(), "v2.csv", "value\n4\n5\n6\n");
+    let second = write(
+        dir.path(),
+        "two.json",
+        r#"{"owner_id": 43, "owner_type": "Generator", "name": "spill",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v2.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", second.to_str().unwrap()]);
+
+    // A single match goes to stdout, on one line.
+    let out = run(&store, &["-f", "jsonl", "export", "--name", "load"]);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(parsed["name"], "load");
+    assert_eq!(parsed["values"], serde_json::json!([1.0, 2.0, 3.0]));
+
+    // And a directory export names the files for the format it wrote.
+    let out_dir = dir.path().join("jsonl-out");
+    run(
+        &store,
+        &["-f", "jsonl", "export", "--dir", out_dir.to_str().unwrap()],
+    );
+    let mut written: Vec<String> = fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    written.sort();
+    assert_eq!(written.len(), 2, "{written:?}");
+    for name in &written {
+        assert!(name.ends_with(".jsonl"), "{written:?}");
+        let body = fs::read_to_string(out_dir.join(name)).unwrap();
+        assert_eq!(body.lines().count(), 1, "{name}: {body}");
+        serde_json::from_str::<serde_json::Value>(body.trim()).expect("each file is one JSON line");
+    }
+
+    // `-f json` keeps its pretty documents and its `.json` names.
+    let json_dir = dir.path().join("json-out");
+    run(
+        &store,
+        &["-f", "json", "export", "--dir", json_dir.to_str().unwrap()],
+    );
+    let first = fs::read_dir(&json_dir).unwrap().next().unwrap().unwrap();
+    assert!(
+        first.file_name().to_string_lossy().ends_with(".json"),
+        "{:?}",
+        first.file_name()
+    );
+    assert!(
+        fs::read_to_string(first.path()).unwrap().lines().count() > 1,
+        "-f json is still pretty-printed"
+    );
+}
+
 // --- B1/B2: the forecast views --------------------------------------------
 
 fn seed_forecast(dir: &Path, store: &Path) {
@@ -752,6 +866,159 @@ fn tail_and_stride_narrow_the_rows_a_table_shows() {
         &["-f", "csv", "get", "--name", "load", "--limit", "3"],
     );
     assert_eq!(data_lines(&piped).len(), 24, "{piped}");
+}
+
+/// `--stride` selects data, so it has to reach the formats a program reads.
+///
+/// It used to be applied only on the way to the table: `-f json` emitted the
+/// whole stored array and the whole timestamp vector regardless, which is worse
+/// than ignoring the flag — the document said `shape: [24]` while the caller had
+/// asked for four rows, so a consumer could not even tell it had been ignored.
+#[test]
+fn stride_reaches_json_and_jsonl_not_only_the_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("stride.h5");
+    let mut body = String::from("value\n");
+    for v in 0..24 {
+        body.push_str(&format!("{v}\n"));
+    }
+    write(dir.path(), "v.csv", &body);
+    let d = write(
+        dir.path(),
+        "s.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "load",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let strided: serde_json::Value = serde_json::from_str(&run(
+        &store,
+        &["-f", "json", "get", "--name", "load", "--stride", "6"],
+    ))
+    .unwrap();
+    assert_eq!(
+        strided["values"].as_array().unwrap(),
+        &vec![
+            serde_json::json!(0.0),
+            serde_json::json!(6.0),
+            serde_json::json!(12.0),
+            serde_json::json!(18.0)
+        ],
+        "every sixth value, not all 24: {strided}"
+    );
+    assert_eq!(strided["timestamps"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        strided["timestamps"][1], "2024-01-01T06:00:00+00:00",
+        "the timestamps must follow the values they label: {strided}"
+    );
+    // The metadata has to describe the document, not the array it came from.
+    assert_eq!(strided["shape"], serde_json::json!([4]));
+    assert_eq!(strided["stride"], 6);
+
+    // jsonl is the same document on one line.
+    let line = run(
+        &store,
+        &["-f", "jsonl", "get", "--name", "load", "--stride", "6"],
+    );
+    assert_eq!(line.lines().count(), 1, "{line}");
+    let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(parsed, strided);
+
+    // An unstrided read is untouched: full length, and no `stride` key claiming
+    // a thinning that did not happen.
+    let full: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "get", "--name", "load"])).unwrap();
+    assert_eq!(full["values"].as_array().unwrap().len(), 24);
+    assert_eq!(full["shape"], serde_json::json!([24]));
+    assert!(full.get("stride").is_none(), "{full}");
+
+    // And the three formats agree on which rows survived.
+    let csv = run(
+        &store,
+        &["-f", "csv", "get", "--name", "load", "--stride", "6"],
+    );
+    let kept: Vec<String> = data_lines(&csv)
+        .iter()
+        .map(|l| l.split(',').next_back().unwrap().to_string())
+        .collect();
+    assert_eq!(kept, ["0", "6", "12", "18"], "{csv}");
+}
+
+/// A stride keeps whole timesteps: the row it drops is every value of that
+/// timestep, not every sixth number in the flattened array.
+#[test]
+fn stride_slices_a_multidimensional_series_by_whole_timesteps() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("md.h5");
+    let mut body = String::from("a,b\n");
+    for step in 0..6 {
+        body.push_str(&format!("{},{}\n", step * 10, step * 10 + 1));
+    }
+    write(dir.path(), "md.csv", &body);
+    let d = write(
+        dir.path(),
+        "md.json",
+        r#"{"owner_id": 1, "owner_type": "G", "name": "curve",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "md.csv",
+            "element_shape": [2],
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    let out: serde_json::Value = serde_json::from_str(&run(
+        &store,
+        &["-f", "json", "get", "--name", "curve", "--stride", "2"],
+    ))
+    .unwrap();
+    assert_eq!(
+        out["values"],
+        serde_json::json!([0.0, 1.0, 20.0, 21.0, 40.0, 41.0]),
+        "both columns of steps 0, 2 and 4: {out}"
+    );
+    // Only the time axis shrinks; the per-step width is unchanged.
+    assert_eq!(out["shape"], serde_json::json!([3, 2]));
+    assert_eq!(out["element_shape"], serde_json::json!([2]));
+
+    let csv = run(
+        &store,
+        &["-f", "csv", "get", "--name", "curve", "--stride", "2"],
+    );
+    assert_eq!(data_lines(&csv).len(), 3, "{csv}");
+    assert!(csv.contains("value[0],value[1]"), "{csv}");
+}
+
+/// A strided forecast is not the stored array either, so its JSON switches to
+/// the readable `columns`/`rows` view the `--window` slice already used rather
+/// than emitting a flat array the rows contradict.
+#[test]
+fn stride_reshapes_the_forecast_json_into_the_rows_it_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("f.h5");
+    seed_forecast(dir.path(), &store);
+
+    let out: serde_json::Value = serde_json::from_str(&run(
+        &store,
+        &["-f", "json", "get", "--name", "load_prob", "--stride", "2"],
+    ))
+    .unwrap();
+    assert_eq!(out["stride"], 2);
+    // 3 windows x 2 horizon steps, every second row.
+    assert_eq!(out["rows"].as_array().unwrap().len(), 3, "{out}");
+    assert!(
+        out.get("values").is_none(),
+        "a flat array would describe rows this document does not carry: {out}"
+    );
+    assert_eq!(
+        out["columns"],
+        serde_json::json!(["issue_time", "target_time", "value[p10]", "value[p90]"])
+    );
+
+    // Unstrided, the stored array is still what a caller gets.
+    let plain: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "get", "--name", "load_prob"])).unwrap();
+    assert_eq!(plain["values"].as_array().unwrap().len(), 12);
+    assert!(plain.get("rows").is_none(), "{plain}");
 }
 
 #[test]
@@ -917,6 +1184,56 @@ fn diff_reports_added_removed_and_changed_and_exits_nonzero() {
     );
 }
 
+/// `diff` reports the differences by default and exits nonzero on them; `--all`
+/// adds the identical rows, and two stores that agree still exit zero.
+#[test]
+fn diff_all_lists_the_identical_series_and_agreement_exits_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("left.h5");
+    let right = dir.path().join("right.h5");
+    seed_one(dir.path(), &left);
+    seed_one(dir.path(), &right);
+
+    let output = raw(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "identical stores must exit zero: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let quiet: serde_json::Value = serde_json::from_str(&run(
+        &left,
+        &["-f", "json", "diff", "--against", right.to_str().unwrap()],
+    ))
+    .unwrap();
+    assert_eq!(quiet["same"], 1);
+    assert_eq!(
+        quiet["items"].as_array().unwrap().len(),
+        0,
+        "the identical series is counted, not listed: {quiet}"
+    );
+
+    let all: serde_json::Value = serde_json::from_str(&run(
+        &left,
+        &[
+            "-f",
+            "json",
+            "diff",
+            "--against",
+            right.to_str().unwrap(),
+            "--all",
+        ],
+    ))
+    .unwrap();
+    let items = all["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{all}");
+    assert_eq!(items[0]["status"], "same");
+    assert_eq!(
+        items[0]["left_data_hash"], items[0]["right_data_hash"],
+        "same values, same content hash: {all}"
+    );
+}
+
 #[test]
 fn merge_copies_series_between_stores() {
     let dir = tempfile::tempdir().unwrap();
@@ -1024,6 +1341,187 @@ fn attachments_and_links_can_be_written_from_the_cli() {
     );
     run(&store, &["unlink", "--all", "--force"]);
     assert_eq!(data_lines(&run(&store, &["-f", "csv", "links"])).len(), 0);
+}
+
+/// Every association write carries `--dry-run`, and each has to leave the
+/// catalog exactly as it found it — including the removals, where getting this
+/// wrong is unrecoverable.
+#[test]
+fn the_association_writes_all_have_a_dry_run_that_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("dry.h5");
+    run(&store, &["init"]);
+    run(
+        &store,
+        &[
+            "attach",
+            "--component-id",
+            "42",
+            "--component-type",
+            "Generator",
+            "--attribute-id",
+            "7",
+            "--attribute-type",
+            "GeographicInfo",
+        ],
+    );
+    run(
+        &store,
+        &[
+            "link",
+            "--parent-id",
+            "42",
+            "--parent-type",
+            "Generator",
+            "--child-id",
+            "1",
+            "--child-type",
+            "Bus",
+        ],
+    );
+
+    let attrs = || data_lines(&run(&store, &["-f", "csv", "attributes"])).len();
+    let links = || data_lines(&run(&store, &["-f", "csv", "links"])).len();
+
+    let added = run(
+        &store,
+        &[
+            "attach",
+            "--component-id",
+            "50",
+            "--component-type",
+            "Bus",
+            "--attribute-id",
+            "8",
+            "--attribute-type",
+            "GeographicInfo",
+            "--dry-run",
+        ],
+    );
+    assert!(added.contains("50"), "{added}");
+    assert_eq!(attrs(), 1, "--dry-run must not attach");
+
+    run(
+        &store,
+        &[
+            "link",
+            "--parent-id",
+            "50",
+            "--parent-type",
+            "Bus",
+            "--child-id",
+            "2",
+            "--child-type",
+            "Load",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(links(), 1, "--dry-run must not link");
+
+    // The removals report a count, and `--dry-run` stands in for the
+    // confirmation `--force` would otherwise have to answer.
+    let detached = run(&store, &["detach", "--all", "--dry-run"]);
+    assert!(detached.contains('1'), "{detached}");
+    assert_eq!(attrs(), 1, "--dry-run must not detach");
+    run(&store, &["unlink", "--all", "--dry-run"]);
+    assert_eq!(links(), 1, "--dry-run must not unlink");
+
+    run(
+        &store,
+        &["reassign", "--old", "42", "--new", "142", "--dry-run"],
+    );
+    assert!(
+        run(&store, &["-f", "csv", "attributes"]).contains("42"),
+        "--dry-run must not reassign"
+    );
+}
+
+/// `reassign` moves both catalogs by default; `--attributes` and `--links`
+/// narrow it to one. A consumer renumbering only its attribute graph would
+/// otherwise have to move the links too and put them back.
+#[test]
+fn reassign_can_move_one_association_catalog_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("r.h5");
+    run(&store, &["init"]);
+    run(
+        &store,
+        &[
+            "attach",
+            "--component-id",
+            "42",
+            "--component-type",
+            "Generator",
+            "--attribute-id",
+            "7",
+            "--attribute-type",
+            "GeographicInfo",
+        ],
+    );
+    run(
+        &store,
+        &[
+            "link",
+            "--parent-id",
+            "42",
+            "--parent-type",
+            "Generator",
+            "--child-id",
+            "1",
+            "--child-type",
+            "Bus",
+        ],
+    );
+
+    run(
+        &store,
+        &["reassign", "--old", "42", "--new", "142", "--attributes"],
+    );
+    assert!(
+        run(&store, &["-f", "csv", "attributes"]).contains("142"),
+        "the attachment moves"
+    );
+    let links = run(&store, &["-f", "csv", "links"]);
+    assert!(
+        links.contains("42") && !links.contains("142"),
+        "the link must be left alone: {links}"
+    );
+
+    run(
+        &store,
+        &["reassign", "--old", "42", "--new", "142", "--links"],
+    );
+    assert!(run(&store, &["-f", "csv", "links"]).contains("142"));
+}
+
+/// `attributes --summary` groups the catalog by (component type, attribute
+/// type) instead of listing rows, which is the only view that stays readable on
+/// a real system's attachment count.
+#[test]
+fn attributes_summary_counts_by_type_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("s.h5");
+    run(&store, &["init"]);
+    let batch = write(
+        dir.path(),
+        "batch.csv",
+        "component_id,component_type,attribute_id,attribute_type\n\
+         1,Generator,10,GeographicInfo\n\
+         2,Generator,11,GeographicInfo\n\
+         3,Bus,12,GeographicInfo\n",
+    );
+    run(&store, &["attach", "--from", batch.to_str().unwrap()]);
+
+    let summary: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "attributes", "--summary"])).unwrap();
+    let items = summary["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "one row per type pair: {summary}");
+    let generators = items
+        .iter()
+        .find(|r| r["component_type"] == "Generator")
+        .unwrap_or_else(|| panic!("no Generator row: {summary}"));
+    assert_eq!(generators["count"], 2);
+    assert_eq!(generators["attribute_type"], "GeographicInfo");
 }
 
 // --- G1/G2: the safety guards ---------------------------------------------

@@ -218,11 +218,18 @@ pub fn bytes_to_strings(dtype: Dtype, bytes: &[u8]) -> Vec<String> {
 /// accepts. `u64` values above 2^53 stay exact — `serde_json` carries them as
 /// integers, not floats.
 pub fn array_to_json_values(arr: &TypedArray) -> Vec<serde_json::Value> {
+    bytes_to_json_values(arr.dtype, &arr.bytes)
+}
+
+/// The array-free form of [`array_to_json_values`], for a caller decoding one
+/// slice of a buffer — a row of a series it is about to print — rather than the
+/// whole of it.
+pub fn bytes_to_json_values(dtype: Dtype, bytes: &[u8]) -> Vec<serde_json::Value> {
     use serde_json::{Value, json};
-    let size = arr.dtype.size();
-    arr.bytes
+    let size = dtype.size();
+    bytes
         .chunks_exact(size)
-        .map(|c| match arr.dtype {
+        .map(|c| match dtype {
             Dtype::F64 => finite_json(f64::from_le_bytes(c.try_into().unwrap())),
             Dtype::F32 => finite_json(f32::from_le_bytes(c.try_into().unwrap()) as f64),
             Dtype::I64 => json!(i64::from_le_bytes(c.try_into().unwrap())),

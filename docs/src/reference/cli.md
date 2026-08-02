@@ -38,7 +38,9 @@ always writes a chart file.
 so a 100 000-row `list` streams into `jq` instead of having to be buffered whole.
 
 `export` has no table form; with `-f table` (the global default) it writes CSV, which is both what
-`--dir` is for and what `add` reads back.
+`--dir` is for and what `add` reads back. Its `--dir` files are named for the format they hold —
+`.csv`, `.json`, or `.jsonl` — and under `-f jsonl` each series is one compact line rather than a
+pretty document.
 
 `-y`/`--yes` answers every prompt, so a script no longer has to know which commands prompt or which
 flag each spells it with. The per-command `--force` flags still work and are what a one-off reaches
@@ -74,6 +76,20 @@ infrastore --store demo.h5 -f csv grid --name-glob 'load_*' --resolution PT1H
 infrastore --store demo.h5 info --name load --no-stats            # catalog only, no array read
 infrastore --store demo.h5 -f csv export --name-glob 'load_*' --dir out/
 ```
+
+#### Bounding the rows
+
+`get` and `grid` separate the flags that _select data_ from the flags that _bound a display_, and
+the two reach different formats:
+
+| Flag                                                                    | Applies to     | Why                                                                                                                                 |
+| ----------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--time-range START..END`                                               | every format   | A time slice is a different span of the series, so a pipe should carry exactly the rows asked for.                                  |
+| `--stride N` (`get`)                                                    | every format   | Every `N`th row is a different series, not a shorter view of one. `-f json` reports the strided `shape` and echoes `stride`.        |
+| `--limit N`, `--full`, `--tail` (`get`); `--limit N`, `--full` (`grid`) | the table only | A CSV or JSON stream is read by another program, and a silently short one is a data bug in whatever reads it — not a shorter table. |
+
+So `-f csv get --limit 3` still writes every row; thin a pipe with `--stride`, or slice it with
+`--time-range`. The table's own default cap is 50 rows, lifted by `--full`.
 
 ### Write data
 
