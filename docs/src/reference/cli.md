@@ -26,13 +26,34 @@ infrastore [--store <PATH.h5>] [-f <FORMAT>] [--log-level <FILTER>] <COMMAND>
 
 `--store` (or `INFRASTORE_STORE`) is required by every command except `template` and `completions`.
 
-`-f`/`--format` affects the read/inspection commands (`list`, `get`, `grid`, `info`, `export`,
-`names`, `owner-types`, `owners`, `exists`, `stats`, `summary`, `diff`, `verify`,
-`check-consistency`, `resolutions`, `params`, `compact`, and `add --dry-run`). It is accepted
-anywhere because it is global, but the write commands (`init`, `add`, `merge`, `remove`, `rename`,
-`copy`, `replace-owner`, `clear`, `transform`, `persist`, `attach`, `detach`, `link`, `unlink`,
-`reassign`) ignore it and print plain text; `template` always prints a JSON descriptor and `plot`
-always writes a chart file.
+`-f`/`--format` applies to every command, read and write alike. The read/inspection commands
+(`list`, `get`, `grid`, `info`, `export`, `names`, `owner-types`, `owners`, `exists`, `stats`,
+`summary`, `diff`, `verify`, `check-consistency`, `resolutions`, `params`, `compact`, and
+`add --dry-run`) render their results in it. The write commands (`init`, `add`, `merge`, `remove`,
+`rename`, `copy`, `replace-owner`, `clear`, `transform`, `persist`, `plot`, `attach`, `detach`,
+`link`, `unlink`, `reassign`) report their outcome in it: prose under `table`, and a one-object
+status document under `json`/`jsonl`, so a scripted mutation pipes into `jq` the way a scripted
+query does.
+
+```console
+$ infrastore --store s.h5 -f json --yes remove --all --owner-id 42 | jq .removed
+3
+```
+
+Each command's document names what it did — `{"removed": N}`, `{"added": N, "store": …}`,
+`{"merged": N, …}` — and a `--dry-run` reports `{"dry_run": true, "would_remove": N, …}` instead. A
+filter that matches nothing still reports its zero rather than printing nothing, so `jq .removed`
+reads `0` instead of failing on an empty document.
+
+`csv` renders these status lines as prose alongside `table`: a status line has no rows to tabulate,
+and a one-row CSV of it would give scripts a shape that changes every time the message is reworded.
+JSON is the machine-readable channel for mutations. `template` always prints a JSON descriptor, and
+`plot` writes the chart to its `--out` file — `-f json` shapes only the line reporting where it
+went, and `--out -` puts the chart itself on stdout with no status line at all.
+
+Diagnostics stay off stdout in every format: errors, the interactive `[y/N]` prompts, the `Aborted.`
+notice, and `add`'s progress counter all go to stderr, so `-f json` output is only ever the
+document.
 
 `jsonl` is `json` line-delimited: one compact object per line with no enclosing `{"items": [...]}`,
 so a 100 000-row `list` streams into `jq` instead of having to be buffered whole.

@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::color;
 use crate::csv_io;
 use crate::fields;
-use crate::output::Format;
+use crate::output::{self, Format};
 use crate::select::{self, SelectorArgs};
 use crate::store_access;
 
@@ -45,8 +45,22 @@ pub fn run(
         .list_time_series(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     if metas.is_empty() {
-        println!("{}", color::dim("No time series matched the selector."));
-        return Ok(());
+        return match dir {
+            // Without --dir, stdout *is* the exported series, so a notice
+            // written there would be indistinguishable from content. It goes to
+            // stderr and stdout stays empty.
+            None => {
+                eprintln!("{}", color::dim_err("No time series matched the selector."));
+                Ok(())
+            }
+            // With --dir, stdout carries the status report either way, so the
+            // empty case reports a zero in the same shape as a real one.
+            Some(dir) => output::report(
+                format,
+                json!({ "exported": 0, "dir": dir.display().to_string(), "files": [] }),
+                || println!("{}", color::dim("No time series matched the selector.")),
+            ),
+        };
     }
     if dir.is_none() && metas.len() > 1 {
         return Err(format!(
@@ -70,20 +84,34 @@ pub fn run(
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
             let stems = unique_file_stems(&metas);
+            let mut written = Vec::with_capacity(metas.len());
             for ((meta, data), stem) in metas.iter().zip(&datas).zip(&stems) {
                 let path = dir.join(format!("{stem}.{ext}"));
                 let content = render(meta, data, format)?;
                 std::fs::write(&path, content)
                     .map_err(|e| format!("writing {}: {e}", path.display()))?;
-                println!("exported {}", path.display());
+                written.push(path.display().to_string());
             }
-            println!(
-                "{}",
-                color::header(&format!(
-                    "Exported {} time series to {}.",
-                    metas.len(),
-                    dir.display()
-                ))
+            return output::report(
+                format,
+                json!({
+                    "exported": written.len(),
+                    "dir": dir.display().to_string(),
+                    "files": written,
+                }),
+                || {
+                    for path in &written {
+                        println!("exported {path}");
+                    }
+                    println!(
+                        "{}",
+                        color::header(&format!(
+                            "Exported {} time series to {}.",
+                            written.len(),
+                            dir.display()
+                        ))
+                    );
+                },
             );
         }
     }

@@ -833,14 +833,21 @@ fn run(cli: &Cli) -> Result<(), String> {
                 .as_deref()
                 .map(|spec| parse::parse_compression(spec, !no_shuffle))
                 .transpose()?;
-            commands::manage::init(&require_store(cli)?, compression, *catalog)
+            commands::manage::init(&require_store(cli)?, compression, *catalog, cli.format)
         }
         Commands::Merge {
             from,
             selector,
             replace,
             dry_run,
-        } => commands::manage::merge(&require_store(cli)?, from, selector, *replace, *dry_run),
+        } => commands::manage::merge(
+            &require_store(cli)?,
+            from,
+            selector,
+            *replace,
+            *dry_run,
+            cli.format,
+        ),
         Commands::List {
             selector,
             limit,
@@ -912,6 +919,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 height: *height,
                 window: *window,
                 limit: *limit,
+                format: cli.format,
             },
         ),
         Commands::Info { selector, no_stats } => {
@@ -925,9 +933,9 @@ fn run(cli: &Cli) -> Result<(), String> {
         } => {
             let store = require_store(cli)?;
             if *all {
-                commands::manage::remove_all(&store, selector, *force, *dry_run)
+                commands::manage::remove_all(&store, selector, *force, *dry_run, cli.format)
             } else {
-                commands::manage::remove(&store, selector, *force, *dry_run)
+                commands::manage::remove(&store, selector, *force, *dry_run, cli.format)
             }
         }
         Commands::Transform {
@@ -941,12 +949,19 @@ fn run(cli: &Cli) -> Result<(), String> {
             interval,
             owner_category.as_deref(),
             resolution.as_deref(),
+            cli.format,
         ),
         Commands::Rename {
             selector,
             new_name,
             dry_run,
-        } => commands::manage::rename(&require_store(cli)?, selector, new_name, *dry_run),
+        } => commands::manage::rename(
+            &require_store(cli)?,
+            selector,
+            new_name,
+            *dry_run,
+            cli.format,
+        ),
         Commands::Copy {
             selector,
             dst_owner_id,
@@ -960,6 +975,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             dst_owner_type,
             new_name.as_deref(),
             *dry_run,
+            cli.format,
         ),
         Commands::ReplaceOwner {
             old,
@@ -972,6 +988,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             *new,
             owner_category,
             *dry_run,
+            cli.format,
         ),
         Commands::Clear {
             owner_id,
@@ -984,12 +1001,13 @@ fn run(cli: &Cli) -> Result<(), String> {
             owner_category.as_deref(),
             *force,
             *dry_run,
+            cli.format,
         ),
         Commands::Persist {
             dest,
             force,
             dry_run,
-        } => commands::manage::persist(&require_store(cli)?, dest, *force, *dry_run),
+        } => commands::manage::persist(&require_store(cli)?, dest, *force, *dry_run, cli.format),
         Commands::Compact { force } => {
             commands::manage::compact(&require_store(cli)?, *force, cli.format)
         }
@@ -1112,6 +1130,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 attribute_type: attribute_type.as_deref(),
                 from: from.as_deref(),
                 dry_run: *dry_run,
+                format: cli.format,
             },
         ),
         Commands::Detach {
@@ -1131,6 +1150,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             *all,
             *force,
             *dry_run,
+            cli.format,
         ),
         Commands::Link {
             parent_id,
@@ -1148,6 +1168,7 @@ fn run(cli: &Cli) -> Result<(), String> {
                 child_type: child_type.as_deref(),
                 from: from.as_deref(),
                 dry_run: *dry_run,
+                format: cli.format,
             },
         ),
         Commands::Unlink {
@@ -1167,6 +1188,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             *all,
             *force,
             *dry_run,
+            cli.format,
         ),
         Commands::Reassign {
             old,
@@ -1181,6 +1203,7 @@ fn run(cli: &Cli) -> Result<(), String> {
             *attributes,
             *links,
             *dry_run,
+            cli.format,
         ),
         Commands::Template { ts_type } => commands::manage::template(ts_type),
     }

@@ -1,9 +1,11 @@
 //! Tiny ANSI color helpers (green bold for
 //! headers/success, cyan for literals, dim for secondary notes).
 //!
-//! Color is emitted only when stdout is a terminal and `NO_COLOR` is unset, so
-//! piped/redirected output (and `-f json`/`-f csv`, which is consumed by other
-//! tools) stays plain.
+//! Color is emitted only when the destination stream is a terminal and
+//! `NO_COLOR` is unset, so piped/redirected output (and `-f json`/`-f csv`,
+//! which is consumed by other tools) stays plain. The two streams are tracked
+//! separately: `infrastore ... | jq` leaves stderr a terminal even though stdout
+//! is not, and the prompts and notices that go there should still be colored.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -21,8 +23,19 @@ pub fn enabled() -> bool {
         .get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal())
 }
 
+/// Whether color should be emitted to stderr (cached for the process).
+fn enabled_err() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal())
+}
+
 fn paint(code: &str, s: &str) -> String {
-    if enabled() {
+    paint_if(enabled(), code, s)
+}
+
+fn paint_if(on: bool, code: &str, s: &str) -> String {
+    if on {
         format!("{code}{s}{RESET}")
     } else {
         s.to_string()
@@ -42,6 +55,11 @@ pub fn label(s: &str) -> String {
 /// Secondary text: dim (truncation notes, "no results").
 pub fn dim(s: &str) -> String {
     paint(DIM, s)
+}
+
+/// [`dim`], for text bound for stderr rather than stdout.
+pub fn dim_err(s: &str) -> String {
+    paint_if(enabled_err(), DIM, s)
 }
 
 /// Command names in the grouped `--help` listing: cyan + bold, matching the

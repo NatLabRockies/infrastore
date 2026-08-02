@@ -1563,3 +1563,232 @@ fn persist_refuses_to_overwrite_without_being_told_to() {
         &["--yes", "persist", "--dest", dest.to_str().unwrap()],
     );
 }
+
+// --- A9: stdout under -f json stays machine-readable -----------------------
+
+/// Run a command under `-f json` and parse its stdout, asserting nothing but
+/// JSON reached the pipe.
+fn json_stdout(store: &Path, args: &[&str]) -> serde_json::Value {
+    let mut full = vec!["-f", "json"];
+    full.extend_from_slice(args);
+    let out = run(store, &full);
+    serde_json::from_str(out.trim()).unwrap_or_else(|e| {
+        panic!("`infrastore -f json {args:?}` put non-JSON on stdout ({e}):\n{out}")
+    })
+}
+
+/// Every command that changes the store reports through `-f json` too.
+///
+/// The read commands always did; the write commands used to print prose to
+/// stdout no matter what `--format` said, which meant `infrastore -f json
+/// remove ... | jq` died on "Removed 1 time series." A scripted mutation has to
+/// be as pipeable as a scripted query, so this walks the whole write surface.
+#[test]
+fn every_mutating_command_emits_json_on_stdout_under_f_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("m.h5");
+
+    // init / add
+    let fresh = dir.path().join("fresh.h5");
+    assert_eq!(json_stdout(&fresh, &["init"])["catalog"], "attached");
+
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    let desc = write(
+        dir.path(),
+        "one.json",
+        r#"{"owner_id": 42, "owner_type": "Generator", "name": "load",
+            "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+            "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#,
+    );
+    let d = desc.to_str().unwrap();
+    assert_eq!(json_stdout(&store, &["add", "--descriptor", d])["added"], 1);
+    // `add --dry-run` reports the *plan*, so it keeps the `{"items": [...]}`
+    // shape every listing uses rather than the `{"dry_run": true}` status the
+    // other write commands report — its output is rows, not a status line.
+    let plan = json_stdout(&store, &["add", "--descriptor", d, "--dry-run"]);
+    assert_eq!(plan["items"].as_array().unwrap().len(), 1, "{plan}");
+
+    // rename / copy / replace-owner, each with its dry run
+    let sel = ["--owner-id", "42", "--name", "load"];
+    let mut args = vec!["rename", "--new-name", "load2"];
+    args.extend_from_slice(&sel);
+    args.push("--dry-run");
+    assert_eq!(json_stdout(&store, &args)["would_rename"], 1);
+    args.pop();
+    assert_eq!(json_stdout(&store, &args)["renamed"], 1);
+
+    let mut args = vec![
+        "copy",
+        "--dst-owner-id",
+        "43",
+        "--dst-owner-type",
+        "Generator",
+    ];
+    args.extend_from_slice(&["--owner-id", "42", "--name", "load2"]);
+    assert_eq!(json_stdout(&store, &args)["copied"], 1);
+
+    assert_eq!(
+        json_stdout(
+            &store,
+            &[
+                "replace-owner",
+                "--old",
+                "43",
+                "--new",
+                "44",
+                "--owner-category",
+                "Component"
+            ],
+        )["reassigned"],
+        1
+    );
+
+    // transform / compact / persist / export / plot
+    assert_eq!(
+        json_stdout(
+            &store,
+            &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+        )["transformed"],
+        2
+    );
+    assert!(json_stdout(&store, &["compact", "--force"]).is_object());
+
+    let backup = dir.path().join("backup.h5");
+    assert_eq!(
+        json_stdout(&store, &["persist", "--dest", backup.to_str().unwrap()])["persisted"],
+        true
+    );
+
+    let outdir = dir.path().join("exported");
+    let exported = json_stdout(
+        &store,
+        &[
+            "export",
+            "--dir",
+            outdir.to_str().unwrap(),
+            "--owner-id",
+            "42",
+        ],
+    );
+    // Owner 42 holds `load2` plus the forecast `transform` derived from it.
+    assert_eq!(exported["exported"], 2);
+    assert_eq!(exported["files"].as_array().unwrap().len(), 2);
+
+    let svg = dir.path().join("c.svg");
+    let mut args = vec!["plot", "--out", svg.to_str().unwrap()];
+    args.extend_from_slice(&["--owner-id", "42", "--name", "load2"]);
+    assert!(json_stdout(&store, &args)["wrote"].is_string());
+
+    // The association catalogs.
+    let attach = [
+        "attach",
+        "--component-id",
+        "1",
+        "--component-type",
+        "Bus",
+        "--attribute-id",
+        "9",
+        "--attribute-type",
+        "GeoLocation",
+    ];
+    assert_eq!(json_stdout(&store, &attach)["attached"], 1);
+    let link = [
+        "link",
+        "--parent-id",
+        "1",
+        "--parent-type",
+        "Bus",
+        "--child-id",
+        "2",
+        "--child-type",
+        "Generator",
+    ];
+    assert_eq!(json_stdout(&store, &link)["linked"], 1);
+    // Scoped to one catalog, the other key is absent rather than a misleading 0.
+    let moved = json_stdout(&store, &["reassign", "--old", "1", "--new", "7", "--links"]);
+    assert_eq!(moved["links"], 1);
+    assert!(moved.get("attachments").is_none(), "{moved}");
+    assert_eq!(
+        json_stdout(&store, &["unlink", "--parent-id", "7", "--force"])["unlinked"],
+        1
+    );
+    assert_eq!(
+        json_stdout(&store, &["detach", "--component-id", "1", "--force"])["detached"],
+        1
+    );
+    // A filter that matches nothing still reports a count, not an empty pipe.
+    assert_eq!(
+        json_stdout(&store, &["detach", "--component-id", "999", "--force"])["detached"],
+        0
+    );
+
+    // merge / remove / clear
+    let other = dir.path().join("other.h5");
+    run(&other, &["add", "--descriptor", d]);
+    assert_eq!(
+        json_stdout(
+            &other,
+            &[
+                "merge",
+                "--from",
+                store.to_str().unwrap(),
+                "--owner-id",
+                "42"
+            ]
+        )["merged"],
+        2
+    );
+    // `--type` because `transform` left a forecast sharing the name.
+    assert_eq!(
+        json_stdout(
+            &store,
+            &[
+                "remove",
+                "--owner-id",
+                "42",
+                "--name",
+                "load2",
+                "--type",
+                "SingleTimeSeries",
+                "--force"
+            ]
+        )["removed"],
+        1
+    );
+    assert_eq!(
+        json_stdout(&store, &["remove", "--all", "--owner-id", "999", "--force"])["removed"],
+        0
+    );
+    assert!(json_stdout(&store, &["clear", "--force"])["cleared"].is_number());
+}
+
+/// The interactive prompt and its abort notice belong on stderr.
+///
+/// A prompt written to stdout lands in the middle of the document `-f json |
+/// jq` is reading. These tests never see a terminal, so `ask` auto-confirms;
+/// what is asserted here is the strict form, which refuses instead — and must
+/// refuse without putting its explanation on stdout.
+#[test]
+fn a_refused_confirmation_says_so_on_stderr_leaving_stdout_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("q.h5");
+    let dest = dir.path().join("dest.h5");
+    seed_one(dir.path(), &store);
+    run(&store, &["persist", "--dest", dest.to_str().unwrap()]);
+
+    let out = raw(
+        &store,
+        &["-f", "json", "persist", "--dest", dest.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "a refusal must leave stdout empty for the reader: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--force"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
