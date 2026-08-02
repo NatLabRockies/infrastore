@@ -53,17 +53,24 @@ authoritative.
 
 ## Installation
 
-| Language | Install                        |
-| -------- | ------------------------------ |
-| Rust     | `cargo add infrastore-core`    |
-| Python   | `pip install infrastore`       |
-| Julia    | `Pkg.add("InfraStore")`        |
-| CLI      | `cargo install infrastore-cli` |
+| Language | Install                                                                                                      |
+| -------- | ------------------------------------------------------------------------------------------------------------ |
+| Rust     | `cargo add infrastore-core`                                                                                  |
+| Python   | `pip install infrastore`                                                                                     |
+| CLI      | [download a binary](https://github.com/NatLabRockies/infrastore/releases), or `cargo install infrastore-cli` |
+| Julia    | not yet registered — build from a checkout                                                                   |
 
 Every channel statically links HDF5 and zlib, so there are no system libraries to install. Building
-the crates from source needs `cmake` and a C compiler; the Python wheels and the Julia binary
-(`InfraStore_jll`) are prebuilt — see [Releasing](docs/src/releasing.md) for why the Julia package
-vendors its own HDF5 rather than linking `HDF5_jll`.
+the crates from source needs `cmake` and a C compiler; the Python wheels and the release binaries
+are prebuilt.
+
+Each tagged release attaches per-platform archives holding the `infrastore` CLI, the
+`infrastore-server` binary, and the `libinfrastore_ffi` C library with its header. `InfraStore.jl`
+is not in the Julia General registry yet, so Julia users install it from a checkout and point
+`INFRASTORE_LIB` at a cdylib — from a release archive or built locally. See
+[Installation](docs/src/getting-started/installation.md) for the per-platform list, and
+[Releasing](docs/src/releasing.md) for why the Julia package will vendor its own HDF5 rather than
+linking `HDF5_jll`.
 
 To work against a checkout instead:
 

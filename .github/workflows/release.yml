@@ -1,0 +1,360 @@
+# Build the release executables and the C ABI shared library, attach them to a
+# draft GitHub Release, and publish versioned documentation.
+#
+# This is the third workflow that fires on a `v*` tag. The other two publish to
+# package registries and are deliberately not duplicated here:
+#   crates-release.yml -> crates.io (trusted publishing, tag/version check,
+#                         already-published guard)
+#   python-wheels.yml  -> PyPI (cibuildwheel, trusted publishing)
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Granted per job rather than workflow-wide: only create-release (draft +
+# assets) and deploy-docs (push to gh-pages) need write access, and the build
+# matrix has no reason to hold it.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `payload` selects what gets built and packaged:
+        #   bins -> the `infrastore` CLI and the `infrastore-server` binary
+        #   lib  -> libinfrastore_ffi + the generated C header, which is what
+        #           InfraStore.jl dlopens via INFRASTORE_LIB
+        #
+        # Linux is built twice on purpose. musl gives statically linked
+        # executables that run on any distro, including the older glibc on HPC
+        # login nodes -- but a musl-built cdylib loaded into a glibc Julia
+        # process puts two libcs in one address space, so the shared library
+        # comes from a separate gnu build instead.
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            payload: bins+lib
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            payload: bins
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            payload: lib
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            payload: bins+lib
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # infrastore-proto's build script shells out to protoc, so the server
+      # build needs it. Harmless on the ffi-only target.
+      - name: Setup protobuf compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The vendored HDF5 + zlib build compiles C, so the musl target needs a
+      # musl C toolchain; the `cc` crate then hands musl-gcc to cmake. Host and
+      # target are both x86_64 Linux, so cmake still treats this as a native
+      # build and HDF5's configure-time try_run probes work.
+      - name: Install musl toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      # No HDF5 provisioning on any platform, and never set HDF5_DIR here: the
+      # default `vendored` feature builds HDF5 + zlib from source and links them
+      # statically. See the long comment in test.yml for what setting those
+      # variables breaks.
+
+      # Swatinem/rust-cache rather than torc's hand-rolled actions/cache over
+      # `target/`: it keys on the target triple and drops the workspace's own
+      # build artifacts from the cache, so a release build cannot pick up a
+      # stale `infrastore` binary from an earlier run.
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Selected packages rather than `--workspace`: the workspace also holds
+      # infrastore-py, whose PyO3 cdylib needs an interpreter to link against
+      # and has no business in these archives, and infrastore-bench, which is an
+      # internal tool. `--locked` pins the committed Cargo.lock -- a release
+      # should build exactly what CI tested.
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=()
+          case "${{ matrix.payload }}" in
+            *bins*) packages+=(-p infrastore-cli -p infrastore-server) ;;
+          esac
+          case "${{ matrix.payload }}" in
+            *lib*) packages+=(-p infrastore-ffi) ;;
+          esac
+          cargo build --release --locked --all-features \
+            --target ${{ matrix.target }} "${packages[@]}"
+
+      - name: Create release archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          rm -rf staging release
+          mkdir -p staging release
+
+          case "$RUNNER_OS" in
+            Windows) exe=".exe" ;;
+            *)       exe="" ;;
+          esac
+
+          case "${{ matrix.payload }}" in
+            *bins*)
+              cp "$out/infrastore$exe" "$out/infrastore-server$exe" staging/
+              ;;
+          esac
+
+          case "${{ matrix.payload }}" in
+            *lib*)
+              case "$RUNNER_OS" in
+                Linux) cp "$out/libinfrastore_ffi.so" staging/ ;;
+                macOS)
+                  cp "$out/libinfrastore_ffi.dylib" staging/
+                  # Cargo bakes the absolute build path into LC_ID_DYLIB, so a
+                  # shipped dylib would otherwise advertise itself as living
+                  # under the runner's work directory. Julia does not care --
+                  # it dlopens the absolute INFRASTORE_LIB path -- but anything
+                  # that links against the library at build time would inherit
+                  # that path. install_name_tool re-signs ad hoc on its own, so
+                  # the library still loads afterwards.
+                  install_name_tool -id @rpath/libinfrastore_ffi.dylib \
+                    staging/libinfrastore_ffi.dylib
+                  ;;
+                # The import library ships too, for C consumers linking at
+                # build time; Julia only needs the DLL.
+                Windows) cp "$out/infrastore_ffi.dll" "$out/infrastore_ffi.dll.lib" staging/ ;;
+              esac
+              # The header is committed, and infrastore-ffi's build script has
+              # just rewritten it in place from this exact source tree.
+              cp crates/infrastore-ffi/include/infrastore.h staging/
+              ;;
+          esac
+
+          cp README.md LICENSE staging/
+
+          if [ "$RUNNER_OS" = Windows ]; then
+            name="infrastore-${{ matrix.target }}.zip"
+            (cd staging && 7z a "../release/$name" .)
+          else
+            name="infrastore-${{ matrix.target }}.tar.gz"
+            tar czf "release/$name" -C staging .
+          fi
+
+          # Checksums travel with the archive so a download can be verified
+          # without a second round trip to the release page. macOS ships
+          # `shasum` but not `sha256sum`.
+          cd release
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name" > "$name.sha256"
+          else
+            shasum -a 256 "$name" > "$name.sha256"
+          fi
+          cd ..
+
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          ls -lh release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: infrastore-${{ matrix.target }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      # A glob over the download directory rather than one line per matrix
+      # entry, so adding a target does not silently ship nothing.
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy-docs:
+    name: Deploy Versioned Docs
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    # Shares the group with docs.yml's `latest` deploy: both push to gh-pages,
+    # and two concurrent pushes would conflict.
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.4.52'
+
+      - name: Install mdbook-mermaid
+        run: cargo install mdbook-mermaid@0.16.0
+
+      - name: Build documentation
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd docs
+          # Point this build at its own versioned subdirectory, and send "edit
+          # this page" at the tag rather than at main.
+          sed -i "s|site-url = \"/infrastore/\"|site-url = \"/infrastore/${VERSION}/\"|" book.toml
+          sed -i "s|edit-url-template = \"https://github.com/NatLabRockies/infrastore/edit/main/docs/{path}\"|edit-url-template = \"https://github.com/NatLabRockies/infrastore/tree/${VERSION}/docs/{path}\"|" book.toml
+          mdbook build
+
+      - name: Check documentation links
+        run: python3 .github/scripts/check-doc-links.py --internal --external
+
+      - name: Setup gh-pages branch
+        run: .github/scripts/gh-pages-setup.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Deploy versioned docs
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd gh-pages-deploy
+
+          # Copy the build into its versioned subdirectory
+          rm -rf "${VERSION}"
+          cp -r ../docs/book "${VERSION}"
+
+          # Root redirect (only if missing -- docs.yml owns it otherwise)
+          if [ ! -f index.html ]; then
+            cp ../docs/redirect.html index.html
+          fi
+
+          # Update versions.json, which version-selector.js reads to populate
+          # the picker.
+          python3 << 'PYEOF'
+          import json, os, re, shutil
+
+          version = os.environ["VERSION"]
+          versions_file = "versions.json"
+
+          if os.path.exists(versions_file):
+              with open(versions_file) as f:
+                  data = json.load(f)
+          else:
+              data = {"latest_release": None, "versions": []}
+
+          # Rewrite the "latest (main)" entry rather than only inserting it when
+          # absent: the deployed versions.json predates the repo rename and
+          # still points at /time-series-store/latest/, and docs.yml seeds the
+          # file only when it is missing, so nothing else ever repairs it.
+          data["versions"] = [v for v in data["versions"] if v["version"] != "latest"]
+          data["versions"].insert(0, {
+              "version": "latest",
+              "label": "latest (main)",
+              "path": "/infrastore/latest/",
+          })
+
+          # Replace any existing entry for this version (re-running a release
+          # should be idempotent)
+          data["versions"] = [v for v in data["versions"] if v["version"] != version]
+          data["versions"].insert(1, {
+              "version": version,
+              "label": version,
+              "path": f"/infrastore/{version}/",
+          })
+
+          def semver_key(v):
+              if v["version"] == "latest":
+                  return (999, 999, 999)
+              # major.minor.patch only; pre-release suffixes are ignored here
+              m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", v["version"])
+              return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else (0, 0, 0)
+
+          data["versions"].sort(key=semver_key, reverse=True)
+          data["latest_release"] = version
+
+          # Keep at most MAX_VERSIONS releases (plus "latest"); prune the rest
+          # from versions.json and from disk.
+          MAX_VERSIONS = 5
+          releases = [v for v in data["versions"] if v["version"] != "latest"]
+          if len(releases) > MAX_VERSIONS:
+              pruned = releases[MAX_VERSIONS:]
+              data["versions"] = [v for v in data["versions"] if v not in pruned]
+              for p in pruned:
+                  if os.path.isdir(p["version"]):
+                      shutil.rmtree(p["version"])
+                      print(f"Pruned old version: {p['version']}")
+
+          with open(versions_file, "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+
+          print(f"Updated versions.json: {json.dumps(data, indent=2)}")
+          PYEOF
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd gh-pages-deploy
+          ../.github/scripts/gh-pages-commit.sh "Deploy docs ${VERSION} from ${GITHUB_SHA::8}"

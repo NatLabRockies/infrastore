@@ -3,6 +3,15 @@
 This recipe builds the components other languages depend on. For the full prerequisites and
 workspace build, see [Installation](../getting-started/installation.md).
 
+> **You may not need to build it.** Each tagged release attaches `libinfrastore_ffi` and the
+> generated `infrastore.h` to the
+> [Releases page](https://github.com/NatLabRockies/infrastore/releases), linked statically against
+> HDF5 and zlib. Downloading that archive and pointing `INFRASTORE_LIB` at the library (step 3
+> below) skips this whole page. It is the shortest path for Julia today, since `InfraStore.jl` is
+> not yet registered — see [Installation § Julia](../getting-started/installation.md#julia). Build
+> from source when you need a platform the release matrix does not cover, or a library matching a
+> working tree.
+
 ## 1. Install System Libraries
 
 ```sh
