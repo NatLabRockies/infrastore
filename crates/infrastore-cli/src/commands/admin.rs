@@ -18,9 +18,9 @@ use crate::store_access;
 /// is a single object mapping label -> value.
 fn render_kv(title: &str, pairs: Vec<(String, Value)>, format: Format) -> Result<(), String> {
     match format {
-        Format::Json => {
+        f if f.is_json() => {
             let obj: serde_json::Map<String, Value> = pairs.into_iter().collect();
-            output::print_json(&Value::Object(obj))
+            output::print_value(f, &Value::Object(obj))
         }
         Format::Csv => {
             let headers = vec!["Metric".to_string(), "Value".to_string()];
@@ -30,7 +30,7 @@ fn render_kv(title: &str, pairs: Vec<(String, Value)>, format: Format) -> Result
                 .collect();
             output::display_csv_rows(&headers, &rows)
         }
-        Format::Table => {
+        _ => {
             println!("{}", color::header(title));
             let headers = vec!["Metric".to_string(), "Value".to_string()];
             let rows: Vec<Vec<String>> = pairs
@@ -186,9 +186,9 @@ pub fn arrays(
         .collect();
 
     match format {
-        Format::Json => output::print_json_wrapped(&items)?,
+        f if f.is_json() => output::print_items(f, &items)?,
         Format::Csv => output::display_csv_rows(&headers, &table_rows)?,
-        Format::Table => output::display_table_dyn(&headers, &table_rows),
+        _ => output::display_table_dyn(&headers, &table_rows),
     }
     Ok(())
 }
@@ -261,9 +261,9 @@ pub fn verify(store_path: &Path, format: Format) -> Result<(), String> {
     let headers = vec!["Error".to_string()];
     let rows: Vec<Vec<String>> = report.errors.iter().map(|e| vec![e.clone()]).collect();
     match format {
-        Format::Json => output::print_json(&json!({ "errors": report.errors }))?,
+        f if f.is_json() => output::print_value(f, &json!({ "errors": report.errors }))?,
         Format::Csv => output::display_csv_rows(&headers, &rows)?,
-        Format::Table => {
+        _ => {
             if report.errors.is_empty() {
                 // Scoped deliberately: this command checks stored arrays against
                 // their recorded hashes and does not inspect the SQLite catalog.
@@ -307,7 +307,7 @@ pub fn check_consistency(
         })
         .collect();
     match format {
-        Format::Json => {
+        f if f.is_json() => {
             let items: Vec<Value> = rows
                 .iter()
                 .map(|c| {
@@ -318,10 +318,10 @@ pub fn check_consistency(
                     })
                 })
                 .collect();
-            output::print_json_wrapped(&items)?;
+            output::print_items(f, &items)?;
         }
         Format::Csv => output::display_csv_rows(&headers, &table_rows)?,
-        Format::Table => output::display_table_dyn(&headers, &table_rows),
+        _ => output::display_table_dyn(&headers, &table_rows),
     }
     Ok(())
 }
@@ -333,10 +333,13 @@ pub fn resolutions(store_path: &Path, format: Format) -> Result<(), String> {
     let intervals = store.get_intervals(None).map_err(|e| e.to_string())?;
     let iso = |v: &[Period]| v.iter().map(|p| p.to_iso8601()).collect::<Vec<_>>();
     match format {
-        Format::Json => output::print_json(&json!({
-            "resolutions": iso(&res),
-            "intervals": iso(&intervals),
-        }))?,
+        f if f.is_json() => output::print_value(
+            f,
+            &json!({
+                "resolutions": iso(&res),
+                "intervals": iso(&intervals),
+            }),
+        )?,
         _ => {
             let headers = vec!["Kind".to_string(), "Value".to_string()];
             let mut rows: Vec<Vec<String>> = res
@@ -431,10 +434,13 @@ pub fn summary(
     }
 
     match format {
-        Format::Json => output::print_json(&json!({
-            "static": static_items,
-            "forecast": forecast_items,
-        }))?,
+        f if f.is_json() => output::print_value(
+            f,
+            &json!({
+                "static": static_items,
+                "forecast": forecast_items,
+            }),
+        )?,
         _ => {
             // `Series` (not `Count`): this column is how many series fall in the
             // group. The forecast table also has a real forecast `count` — the

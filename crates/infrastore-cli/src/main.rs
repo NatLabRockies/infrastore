@@ -1,8 +1,10 @@
 //! `infrastore` — a command-line tool for loading and inspecting a infrastore store
 //! directly on disk (HDF5 + SQLite).
 
+mod chart;
 mod color;
 mod commands;
+mod confirm;
 mod csv_io;
 mod descriptor;
 mod fields;
@@ -44,11 +46,13 @@ const HELP_STYLES: Styles = Styles::styled()
 /// table lists exactly the commands clap knows about, which is what stops a
 /// newly added command from silently vanishing out of the help.
 const COMMAND_GROUPS: &[(&str, &[&str])] = &[
-    ("Read data", &["list", "get", "info", "export"]),
+    ("Read data", &["list", "get", "grid", "info", "export"]),
     (
         "Write data",
         &[
+            "init",
             "add",
+            "merge",
             "transform",
             "remove",
             "rename",
@@ -57,6 +61,8 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "clear",
         ],
     ),
+    ("Discover", &["names", "owner-types", "owners", "exists"]),
+    ("Visualize", &["plot"]),
     (
         "Inspect the store",
         &[
@@ -68,10 +74,21 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "params",
         ],
     ),
-    ("Associations", &["attributes", "links"]),
+    (
+        "Associations",
+        &[
+            "attributes",
+            "links",
+            "attach",
+            "detach",
+            "link",
+            "unlink",
+            "reassign",
+        ],
+    ),
     (
         "Integrity & maintenance",
-        &["verify", "check-consistency", "compact", "persist"],
+        &["verify", "check-consistency", "compact", "persist", "diff"],
     ),
     ("Scaffolding", &["template", "completions", "help"]),
 ];
@@ -174,21 +191,51 @@ struct Cli {
     #[arg(long, env = "RUST_LOG", global = true)]
     log_level: Option<String>,
 
+    /// Answer every confirmation prompt with yes.
+    ///
+    /// The scriptable counterpart to the per-command --force flags: a script
+    /// no longer has to know which commands prompt, or which flag each spells
+    /// it with.
+    #[arg(short = 'y', long, global = true)]
+    yes: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
+// The variants differ a lot in size (an inline `add` carries twenty-odd fields;
+// `stats` carries none). This is a parsed command line, constructed once per
+// process and matched immediately, so boxing the large variants would trade
+// clarity for an allocation nobody measures.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Add time series from a descriptor JSON + CSV data.
+    /// Add time series from a descriptor JSON + CSV data, or from flags.
     #[command(after_help = help::ADD)]
     Add {
-        /// Descriptor JSON describing the series (single object or array of objects).
+        /// Descriptor JSON describing the series (single object or array of
+        /// objects). `-` reads it from stdin.
         #[arg(long)]
-        descriptor: PathBuf,
-        /// Override the CSV path from the descriptor (single-series descriptors only).
+        descriptor: Option<PathBuf>,
+        /// CSV data path. With --descriptor it overrides the descriptor's own
+        /// (single-series descriptors only); without one it starts an inline add.
         #[arg(long)]
         csv: Option<PathBuf>,
+        #[command(flatten)]
+        inline: commands::add::InlineArgs,
+        /// Resolve every descriptor and print what would be written, without
+        /// opening the store.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove any series that already has one of these identities first.
+        #[arg(long)]
+        replace: bool,
+        /// Commit every N series instead of the whole load in one transaction.
+        #[arg(long, value_name = "N")]
+        batch_size: Option<usize>,
+        /// Print nothing but errors.
+        #[arg(long, short = 'q')]
+        quiet: bool,
         /// Compression for a store created by this command: none, deflate, or
         /// deflate:LEVEL (0-9). Errors if the store already exists.
         #[arg(long)]
@@ -196,6 +243,37 @@ enum Commands {
         /// Disable byte-shuffle for deflate compression (only with --compression).
         #[arg(long)]
         no_shuffle: bool,
+        /// Where the SQLite catalog lives while the store is open.
+        #[arg(long, value_name = "MODE", default_value_t = store_access::CatalogChoice::Attached)]
+        catalog: store_access::CatalogChoice,
+    },
+    /// Create an empty store with an explicit compression and catalog policy.
+    #[command(after_help = help::INIT)]
+    Init {
+        /// Compression: none, deflate, or deflate:LEVEL (0-9).
+        #[arg(long)]
+        compression: Option<String>,
+        /// Disable byte-shuffle for deflate compression (only with --compression).
+        #[arg(long)]
+        no_shuffle: bool,
+        /// Where the SQLite catalog lives while the store is open.
+        #[arg(long, value_name = "MODE", default_value_t = store_access::CatalogChoice::Attached)]
+        catalog: store_access::CatalogChoice,
+    },
+    /// Copy matching series from another store into this one.
+    #[command(after_help = help::MERGE)]
+    Merge {
+        /// Source store (`.h5`) to read from.
+        #[arg(long)]
+        from: PathBuf,
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Replace a destination series that already has the same identity.
+        #[arg(long)]
+        replace: bool,
+        /// Show what would be merged without changing either store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List stored time series matching the given filters.
     #[command(after_help = help::LIST)]
@@ -224,6 +302,70 @@ enum Commands {
         /// Show all rows in table output.
         #[arg(long)]
         full: bool,
+        /// Take the table's rows from the end of the series, not the start.
+        #[arg(long)]
+        tail: bool,
+        /// Keep only every Nth row, in every format (applied before --limit).
+        #[arg(long, value_name = "N")]
+        stride: Option<usize>,
+        /// Draw a terminal sparkline instead of the values.
+        #[arg(long)]
+        plot: bool,
+        /// Sparkline width in characters (defaults to the terminal width).
+        #[arg(long, value_name = "COLS")]
+        plot_width: Option<usize>,
+        /// Show only forecast window N.
+        #[arg(long, value_name = "N")]
+        window: Option<usize>,
+        /// Show only the forecast window issued at this timestamp.
+        #[arg(long, value_name = "TIMESTAMP")]
+        issue_time: Option<String>,
+    },
+    /// Render N series as N columns against one shared time axis.
+    #[command(after_help = help::GRID)]
+    Grid {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        #[arg(long)]
+        time_range: Option<String>,
+        /// Max rows to show in table output (default 50).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Show all rows in table output.
+        #[arg(long)]
+        full: bool,
+        /// How to name the columns.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        label: commands::grid::ColumnLabel,
+    },
+    /// Draw a chart to a self-contained SVG or HTML file.
+    #[command(after_help = help::PLOT)]
+    Plot {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Which view to draw.
+        #[arg(long, default_value = "line")]
+        kind: commands::plot::Kind,
+        /// Destination file (.svg or .html); `-` writes to stdout.
+        #[arg(long, default_value = "chart.svg")]
+        out: PathBuf,
+        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        #[arg(long)]
+        time_range: Option<String>,
+        /// Chart title (defaults to the series name).
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value_t = 960.0)]
+        width: f64,
+        #[arg(long, default_value_t = 440.0)]
+        height: f64,
+        /// First forecast window to draw (fan, overlay).
+        #[arg(long, default_value_t = 0)]
+        window: usize,
+        /// How many forecast windows to overlay (overlay; default 8).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
     /// Metadata, content hash, HDF5 location, and stats for one series.
     #[command(after_help = help::INFO)]
@@ -331,6 +473,12 @@ enum Commands {
         /// Destination `.h5` path.
         #[arg(long)]
         dest: PathBuf,
+        /// Overwrite an existing destination without confirming.
+        #[arg(long)]
+        force: bool,
+        /// Show what would be written without writing it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Reclaim space; print the compaction report.
     ///
@@ -355,6 +503,9 @@ enum Commands {
         /// Directory to write one file per matched series.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        #[arg(long)]
+        time_range: Option<String>,
     },
     /// Generate shell completions to stdout.
     ///
@@ -451,6 +602,140 @@ enum Commands {
         #[arg(long)]
         interval: Option<String>,
     },
+    /// Distinct series names matching the selector.
+    #[command(after_help = help::NAMES)]
+    Names {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Distinct owner types matching the selector.
+    #[command(after_help = help::OWNER_TYPES)]
+    OwnerTypes {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Distinct owner ids that have a time series.
+    #[command(after_help = help::OWNERS)]
+    Owners {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Whether anything matches the selector (exit 0 = yes, 1 = no).
+    #[command(after_help = help::EXISTS)]
+    Exists {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Compare this store against another at the catalog level.
+    #[command(after_help = help::DIFF)]
+    Diff {
+        /// The other store (`.h5`) to compare against.
+        #[arg(long)]
+        against: PathBuf,
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// List the identical series too, not just the differences.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Attach supplemental attributes to components.
+    #[command(after_help = help::ATTACH)]
+    Attach {
+        #[arg(long)]
+        component_id: Option<i64>,
+        #[arg(long)]
+        component_type: Option<String>,
+        #[arg(long)]
+        attribute_id: Option<i64>,
+        #[arg(long)]
+        attribute_type: Option<String>,
+        /// Bulk import from a
+        /// `component_id,component_type,attribute_id,attribute_type` CSV.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Show what would be attached without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove supplemental-attribute attachments matching the filter.
+    #[command(after_help = help::DETACH)]
+    Detach {
+        #[arg(long)]
+        component_id: Option<i64>,
+        #[arg(long)]
+        component_type: Option<String>,
+        #[arg(long)]
+        attribute_id: Option<i64>,
+        #[arg(long)]
+        attribute_type: Option<String>,
+        /// Remove every attachment (required when no filter is given).
+        #[arg(long)]
+        all: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        force: bool,
+        /// Show how many would be detached without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Add directed parent -> child component links.
+    #[command(after_help = help::LINK)]
+    Link {
+        #[arg(long)]
+        parent_id: Option<i64>,
+        #[arg(long)]
+        parent_type: Option<String>,
+        #[arg(long)]
+        child_id: Option<i64>,
+        #[arg(long)]
+        child_type: Option<String>,
+        /// Bulk import from a `parent_id,parent_type,child_id,child_type` CSV.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Show what would be linked without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove parent -> child links matching the filter.
+    #[command(after_help = help::UNLINK)]
+    Unlink {
+        #[arg(long)]
+        parent_id: Option<i64>,
+        #[arg(long)]
+        parent_type: Option<String>,
+        #[arg(long)]
+        child_id: Option<i64>,
+        #[arg(long)]
+        child_type: Option<String>,
+        /// Remove every link (required when no filter is given).
+        #[arg(long)]
+        all: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        force: bool,
+        /// Show how many would be removed without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Move a component's associations from one id to another.
+    ///
+    /// The association counterpart of `replace-owner`, which moves time series.
+    #[command(after_help = help::REASSIGN)]
+    Reassign {
+        #[arg(long)]
+        old: i64,
+        #[arg(long)]
+        new: i64,
+        /// Move only the supplemental-attribute attachments.
+        #[arg(long)]
+        attributes: bool,
+        /// Move only the parent/child links.
+        #[arg(long)]
+        links: bool,
+        /// Show how many would move without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print an example descriptor JSON for a time-series type.
     ///
     /// Durations, `type`, and `owner_category` are printed in the same spelling
@@ -473,6 +758,7 @@ fn main() {
         Err(e) => e.exit(),
     };
     init_tracing(cli.log_level.as_deref());
+    confirm::set_assume_yes(cli.yes);
     if let Err(e) = run(&cli) {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -484,8 +770,14 @@ fn run(cli: &Cli) -> Result<(), String> {
         Commands::Add {
             descriptor,
             csv,
+            inline,
+            dry_run,
+            replace,
+            batch_size,
+            quiet,
             compression,
             no_shuffle,
+            catalog,
         } => {
             let compression = compression
                 .as_deref()
@@ -493,11 +785,37 @@ fn run(cli: &Cli) -> Result<(), String> {
                 .transpose()?;
             commands::add::run(
                 &require_store(cli)?,
-                descriptor,
-                csv.as_deref(),
-                compression,
+                &commands::add::Options {
+                    descriptor: descriptor.as_deref(),
+                    csv: csv.as_deref(),
+                    inline,
+                    compression,
+                    catalog: *catalog,
+                    batch_size: *batch_size,
+                    replace: *replace,
+                    dry_run: *dry_run,
+                    quiet: *quiet,
+                    format: cli.format,
+                },
             )
         }
+        Commands::Init {
+            compression,
+            no_shuffle,
+            catalog,
+        } => {
+            let compression = compression
+                .as_deref()
+                .map(|spec| parse::parse_compression(spec, !no_shuffle))
+                .transpose()?;
+            commands::manage::init(&require_store(cli)?, compression, *catalog)
+        }
+        Commands::Merge {
+            from,
+            selector,
+            replace,
+            dry_run,
+        } => commands::manage::merge(&require_store(cli)?, from, selector, *replace, *dry_run),
         Commands::List {
             selector,
             limit,
@@ -508,13 +826,68 @@ fn run(cli: &Cli) -> Result<(), String> {
             time_range,
             limit,
             full,
+            tail,
+            stride,
+            plot,
+            plot_width,
+            window,
+            issue_time,
         } => commands::show::get(
+            &require_store(cli)?,
+            selector,
+            &commands::show::GetOptions {
+                time_range: time_range.as_deref(),
+                rows: commands::show::RowWindow {
+                    limit: *limit,
+                    full: *full,
+                    tail: *tail,
+                    stride: *stride,
+                },
+                plot: *plot,
+                plot_width: *plot_width,
+                window: *window,
+                issue_time: issue_time.as_deref(),
+            },
+            cli.format,
+        ),
+        Commands::Grid {
+            selector,
+            time_range,
+            limit,
+            full,
+            label,
+        } => commands::grid::run(
             &require_store(cli)?,
             selector,
             time_range.as_deref(),
             *limit,
             *full,
+            *label,
             cli.format,
+        ),
+        Commands::Plot {
+            selector,
+            kind,
+            out,
+            time_range,
+            title,
+            width,
+            height,
+            window,
+            limit,
+        } => commands::plot::run(
+            &require_store(cli)?,
+            selector,
+            &commands::plot::Options {
+                kind: *kind,
+                out,
+                time_range: time_range.as_deref(),
+                title: title.as_deref(),
+                width: *width,
+                height: *height,
+                window: *window,
+                limit: *limit,
+            },
         ),
         Commands::Info { selector, no_stats } => {
             commands::show::info(&require_store(cli)?, selector, *no_stats, cli.format)
@@ -587,13 +960,25 @@ fn run(cli: &Cli) -> Result<(), String> {
             *force,
             *dry_run,
         ),
-        Commands::Persist { dest } => commands::manage::persist(&require_store(cli)?, dest),
+        Commands::Persist {
+            dest,
+            force,
+            dry_run,
+        } => commands::manage::persist(&require_store(cli)?, dest, *force, *dry_run),
         Commands::Compact { force } => {
             commands::manage::compact(&require_store(cli)?, *force, cli.format)
         }
-        Commands::Export { selector, dir } => {
-            commands::export::run(&require_store(cli)?, selector, dir.as_deref(), cli.format)
-        }
+        Commands::Export {
+            selector,
+            dir,
+            time_range,
+        } => commands::export::run(
+            &require_store(cli)?,
+            selector,
+            dir.as_deref(),
+            time_range.as_deref(),
+            cli.format,
+        ),
         Commands::Completions { shell } => {
             // The same command the binary parses with, so completions can never
             // describe a different set of subcommands than `--help` does.
@@ -668,6 +1053,109 @@ fn run(cli: &Cli) -> Result<(), String> {
             resolution.as_deref(),
             interval.as_deref(),
             cli.format,
+        ),
+        Commands::Names { selector } => {
+            commands::discover::names(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::OwnerTypes { selector } => {
+            commands::discover::owner_types(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::Owners { selector } => {
+            commands::discover::owners(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::Exists { selector } => {
+            commands::discover::exists(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::Diff {
+            against,
+            selector,
+            all,
+        } => commands::diff::run(&require_store(cli)?, against, selector, *all, cli.format),
+        Commands::Attach {
+            component_id,
+            component_type,
+            attribute_id,
+            attribute_type,
+            from,
+            dry_run,
+        } => commands::assoc::attach(
+            &require_store(cli)?,
+            &commands::assoc::AttachArgs {
+                component_id: *component_id,
+                component_type: component_type.as_deref(),
+                attribute_id: *attribute_id,
+                attribute_type: attribute_type.as_deref(),
+                from: from.as_deref(),
+                dry_run: *dry_run,
+            },
+        ),
+        Commands::Detach {
+            component_id,
+            component_type,
+            attribute_id,
+            attribute_type,
+            all,
+            force,
+            dry_run,
+        } => commands::assoc::detach(
+            &require_store(cli)?,
+            *component_id,
+            *attribute_id,
+            component_type.as_deref(),
+            attribute_type.as_deref(),
+            *all,
+            *force,
+            *dry_run,
+        ),
+        Commands::Link {
+            parent_id,
+            parent_type,
+            child_id,
+            child_type,
+            from,
+            dry_run,
+        } => commands::assoc::link(
+            &require_store(cli)?,
+            &commands::assoc::LinkArgs {
+                parent_id: *parent_id,
+                parent_type: parent_type.as_deref(),
+                child_id: *child_id,
+                child_type: child_type.as_deref(),
+                from: from.as_deref(),
+                dry_run: *dry_run,
+            },
+        ),
+        Commands::Unlink {
+            parent_id,
+            parent_type,
+            child_id,
+            child_type,
+            all,
+            force,
+            dry_run,
+        } => commands::assoc::unlink(
+            &require_store(cli)?,
+            *parent_id,
+            *child_id,
+            parent_type.as_deref(),
+            child_type.as_deref(),
+            *all,
+            *force,
+            *dry_run,
+        ),
+        Commands::Reassign {
+            old,
+            new,
+            attributes,
+            links,
+            dry_run,
+        } => commands::assoc::reassign(
+            &require_store(cli)?,
+            *old,
+            *new,
+            *attributes,
+            *links,
+            *dry_run,
         ),
         Commands::Template { ts_type } => commands::manage::template(ts_type),
     }

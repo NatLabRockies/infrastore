@@ -15,8 +15,6 @@ use crate::store_access;
 
 const DEFAULT_LIMIT: usize = 50;
 
-type TimeRange = (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>);
-
 /// `list`: enumerate stored series matching the selector filters.
 ///
 /// The table's default columns cover every field that is part of a series'
@@ -41,7 +39,16 @@ pub fn list(
     };
 
     match format {
-        Format::Table => {
+        f if f.is_json() => {
+            let items: Vec<Value> = metas.iter().map(list_json).collect();
+            output::print_items(f, &items)?;
+        }
+        Format::Csv => {
+            let headers = list_headers(wide);
+            let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
+            output::display_csv_rows(&headers, &rows)?;
+        }
+        _ => {
             let headers = list_headers(wide);
             let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
             output::display_table_dyn(&headers, &rows);
@@ -54,15 +61,6 @@ pub fn list(
                     ))
                 );
             }
-        }
-        Format::Csv => {
-            let headers = list_headers(wide);
-            let rows: Vec<Vec<String>> = metas.iter().map(|m| list_row(m, wide)).collect();
-            output::display_csv_rows(&headers, &rows)?;
-        }
-        Format::Json => {
-            let items: Vec<Value> = metas.iter().map(list_json).collect();
-            output::print_json_wrapped(&items)?;
         }
     }
     Ok(())
@@ -165,21 +163,88 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     Value::Object(obj)
 }
 
+/// How many rows a view shows, and from which end.
+///
+/// The three flags do two different jobs, and the split is deliberate.
+///
+/// `--stride` *selects data*: "every 24th row" is a different series, not a
+/// shorter view of the same one, so it applies in every format — a `-f csv`
+/// pipe of daily samples is exactly what someone asks for with it.
+///
+/// `--limit` / `--full` / `--tail` *bound a display*, and apply to the table
+/// only. A CSV or JSON stream is consumed by another program, and a silently
+/// short one is a data bug in whatever reads it; that is why the table's
+/// default 50-row cap has never applied there, and why an explicit bound does
+/// not either. Thin a pipe with `--stride`, or slice it with `--time-range`.
+///
+/// Order matters within the display half: striding first and then taking from
+/// an end means `--stride 24 --tail 7` reads as "the last seven daily samples",
+/// which is what someone typing it means.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RowWindow {
+    pub limit: Option<usize>,
+    pub full: bool,
+    pub tail: bool,
+    pub stride: Option<usize>,
+}
+
+impl RowWindow {
+    /// Apply the window to `rows`, returning the kept rows and the number that
+    /// were dropped.
+    fn apply<T: Clone>(&self, rows: &[T], format: Format) -> Result<(Vec<T>, usize), String> {
+        let strided: Vec<T> = match self.stride {
+            Some(0) => return Err("--stride must be at least 1".to_string()),
+            Some(n) => rows.iter().step_by(n).cloned().collect(),
+            None => rows.to_vec(),
+        };
+        if format != Format::Table {
+            return Ok((strided, 0));
+        }
+        let max = match (self.full, self.limit) {
+            (true, _) => strided.len(),
+            (_, Some(n)) => n,
+            (_, None) => DEFAULT_LIMIT,
+        };
+        let shown = strided.len().min(max);
+        let dropped = strided.len() - shown;
+        let kept = if self.tail {
+            strided[strided.len() - shown..].to_vec()
+        } else {
+            strided[..shown].to_vec()
+        };
+        Ok((kept, dropped))
+    }
+}
+
+/// Everything `get` was asked for beyond the selector.
+pub struct GetOptions<'a> {
+    pub time_range: Option<&'a str>,
+    pub rows: RowWindow,
+    /// Draw a terminal sparkline instead of the value rows.
+    pub plot: bool,
+    pub plot_width: Option<usize>,
+    /// Restrict a forecast to one window, by index or by issue time.
+    pub window: Option<usize>,
+    pub issue_time: Option<&'a str>,
+}
+
 /// `get`: read a single series and render its values.
 pub fn get(
     store_path: &Path,
     selector: &SelectorArgs,
-    time_range: Option<&str>,
-    limit: Option<usize>,
-    full: bool,
+    opts: &GetOptions<'_>,
     format: Format,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
-    let range = parse_time_range(time_range)?;
+    let range = parse::parse_time_range(opts.time_range)?;
     let data = store
         .get_time_series(&key, range)
         .map_err(|e| e.to_string())?;
+
+    if opts.plot {
+        return render_plot(&meta, &data, opts.plot_width);
+    }
 
     match &data {
         TimeSeriesData::SingleTimeSeries(s) => {
@@ -197,13 +262,69 @@ pub fn get(
                         })
                 })
                 .collect::<Result<_, String>>()?;
-            render_sequential(&meta, &ts, &s.data, format, limit, full)
+            reject_forecast_flags(opts, &meta)?;
+            render_sequential(&meta, &ts, &s.data, format, opts.rows)
         }
         TimeSeriesData::NonSequentialTimeSeries(ns) => {
             let ts: Vec<String> = ns.timestamps.iter().map(|t| t.to_rfc3339()).collect();
-            render_sequential(&meta, &ts, &ns.data, format, limit, full)
+            reject_forecast_flags(opts, &meta)?;
+            render_sequential(&meta, &ts, &ns.data, format, opts.rows)
         }
-        _ => render_forecast(&meta, &data, format, limit, full),
+        _ => {
+            let window = resolve_window(&meta, opts)?;
+            render_forecast(&meta, &data, format, opts.rows, window)
+        }
+    }
+}
+
+fn reject_forecast_flags(opts: &GetOptions<'_>, meta: &TimeSeriesMetadata) -> Result<(), String> {
+    if opts.window.is_some() || opts.issue_time.is_some() {
+        return Err(format!(
+            "--window/--issue-time select one window of a forecast; '{}' is a {}",
+            meta.name,
+            meta.time_series_type.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// The forecast window index `--window` / `--issue-time` names, if either was
+/// given.
+///
+/// `--issue-time` is resolved against the stored `initial_timestamp` and
+/// `interval` rather than searched for: a timestamp that is not exactly a window
+/// boundary is a mistake worth reporting, not one to round away.
+fn resolve_window(
+    meta: &TimeSeriesMetadata,
+    opts: &GetOptions<'_>,
+) -> Result<Option<usize>, String> {
+    match (opts.window, opts.issue_time) {
+        (Some(_), Some(_)) => Err("--window and --issue-time both name a window; use one".into()),
+        (Some(w), None) => Ok(Some(w)),
+        (None, Some(spec)) => {
+            let wanted = parse::parse_timestamp(spec)?;
+            let initial = meta
+                .initial_timestamp
+                .ok_or("forecast metadata is missing initial_timestamp")?;
+            let interval = meta
+                .interval
+                .ok_or("forecast metadata is missing interval")?;
+            let count = meta.count.unwrap_or(0);
+            for c in 0..count {
+                match interval.add_to(initial, c as i64) {
+                    Some(t) if t == wanted => return Ok(Some(c)),
+                    _ => continue,
+                }
+            }
+            Err(format!(
+                "no window is issued at {}; this forecast has {count} windows starting at {} \
+                 every {}",
+                wanted.to_rfc3339(),
+                initial.to_rfc3339(),
+                interval.to_iso8601()
+            ))
+        }
+        (None, None) => Ok(None),
     }
 }
 
@@ -295,17 +416,17 @@ pub fn info(
     }
 
     match format {
-        Format::Table => {
-            let table = flat_rows(&rows, true);
-            output::display_table_dyn(&field_value_header(), &table);
+        f if f.is_json() => {
+            let obj: Map<String, Value> = rows.into_iter().collect();
+            output::print_value(f, &Value::Object(obj))?;
         }
         Format::Csv => {
             let table = flat_rows(&rows, false);
             output::display_csv_rows(&field_value_header(), &table)?;
         }
-        Format::Json => {
-            let obj: Map<String, Value> = rows.into_iter().collect();
-            output::print_json(&Value::Object(obj))?;
+        _ => {
+            let table = flat_rows(&rows, true);
+            output::display_table_dyn(&field_value_header(), &table);
         }
     }
     Ok(())
@@ -360,126 +481,186 @@ fn render_sequential(
     timestamps: &[String],
     arr: &TypedArray,
     format: Format,
-    limit: Option<usize>,
-    full: bool,
+    window: RowWindow,
 ) -> Result<(), String> {
     let per_step = arr.element_shape().iter().product::<usize>().max(1);
     let decoded = csv_io::array_to_strings(arr);
     let length = arr.length();
-    let vheaders = value_headers(per_step);
+
+    let mut header = vec!["timestamp".to_string()];
+    header.extend(value_headers(per_step));
+    let all: Vec<Vec<String>> = (0..length)
+        .map(|i| {
+            let mut row = Vec::with_capacity(1 + per_step);
+            row.push(timestamps.get(i).cloned().unwrap_or_default());
+            for j in 0..per_step {
+                row.push(decoded[i * per_step + j].clone());
+            }
+            row
+        })
+        .collect();
+    let (rows, dropped) = window.apply(&all, format)?;
 
     match format {
-        Format::Table => {
-            let mut header = vec!["timestamp".to_string()];
-            header.extend(vheaders);
-            let max = if full {
-                length
-            } else {
-                limit.unwrap_or(DEFAULT_LIMIT)
-            };
-            let shown = length.min(max);
-            let mut rows = Vec::with_capacity(shown);
-            for i in 0..shown {
-                let mut row = Vec::with_capacity(1 + per_step);
-                row.push(timestamps.get(i).cloned().unwrap_or_default());
-                for j in 0..per_step {
-                    row.push(decoded[i * per_step + j].clone());
-                }
-                rows.push(row);
-            }
-            output::display_table_dyn(&header, &rows);
-            if length > shown {
-                println!(
-                    "{}",
-                    color::dim(&format!("... {} more rows (use --full)", length - shown))
-                );
-            }
-        }
-        Format::Csv => {
-            // Every sequential CSV carries its timestamp column. A
-            // SingleTimeSeries used to emit values only, on the grounds that its
-            // grid is reconstructible from initial_timestamp + resolution — but
-            // those live in the metadata, not in the file being piped, so
-            // `get -f csv > out.csv` silently dropped the time axis.
-            let mut header = vec!["timestamp".to_string()];
-            header.extend(value_headers(per_step));
-            let mut rows = Vec::with_capacity(length);
-            for i in 0..length {
-                let mut row = Vec::with_capacity(1 + per_step);
-                row.push(timestamps.get(i).cloned().unwrap_or_default());
-                for j in 0..per_step {
-                    row.push(decoded[i * per_step + j].clone());
-                }
-                rows.push(row);
-            }
-            output::display_csv_rows(&header, &rows)?;
-        }
-        Format::Json => {
+        f if f.is_json() => {
             let mut obj = Map::new();
             meta_fields(meta, arr, &mut obj);
             obj.insert("timestamps".into(), json!(timestamps));
             obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
-            output::print_json(&Value::Object(obj))?;
+            output::print_value(f, &Value::Object(obj))?;
+        }
+        // Every sequential CSV carries its timestamp column. A SingleTimeSeries
+        // used to emit values only, on the grounds that its grid is
+        // reconstructible from initial_timestamp + resolution — but those live
+        // in the metadata, not in the file being piped, so `get -f csv >
+        // out.csv` silently dropped the time axis.
+        Format::Csv => output::display_csv_rows(&header, &rows)?,
+        _ => {
+            output::display_table_dyn(&header, &rows);
+            report_dropped(dropped);
         }
     }
     Ok(())
 }
 
+/// A dense forecast, rendered as the structured view in every format.
+///
+/// The table used to print `index,value` over the row-major flattening and
+/// point at `-f csv` for anything readable — but [`forecast_csv_rows`] was
+/// already computing the good view for that flag, so the table now uses it too:
+/// `issue_time`, `target_time`, and one column per percentile / scenario.
 fn render_forecast(
     meta: &TimeSeriesMetadata,
     data: &TimeSeriesData,
     format: Format,
-    limit: Option<usize>,
-    full: bool,
+    rows_window: RowWindow,
+    window: Option<usize>,
 ) -> Result<(), String> {
     let arr = data_array(data);
-    let decoded = csv_io::array_to_strings(arr);
+    let (headers, mut rows) = forecast_csv_rows(meta, data)?;
+
+    // One window is a contiguous run of `horizon` rows, because
+    // `forecast_csv_rows` emits window-major.
+    if let Some(c) = window {
+        let count = meta.count.unwrap_or(0);
+        if c >= count {
+            return Err(format!(
+                "--window {c} is out of range: this forecast has {count} windows (0..{})",
+                count.saturating_sub(1)
+            ));
+        }
+        let horizon = rows.len() / count.max(1);
+        rows = rows[c * horizon..(c + 1) * horizon].to_vec();
+    }
 
     match format {
-        Format::Table => {
-            println!(
-                "{}",
-                color::dim(&format!(
-                    "{} '{}' shape {:?} dtype {} (row-major flat values; use -f csv or -f json for structured output)",
-                    meta.time_series_type.as_str(),
-                    meta.name,
-                    arr.shape,
-                    arr.dtype.as_str(),
-                ))
-            );
-            let max = if full {
-                decoded.len()
-            } else {
-                limit.unwrap_or(DEFAULT_LIMIT)
-            };
-            let shown = decoded.len().min(max);
-            let rows: Vec<Vec<String>> = (0..shown)
-                .map(|i| vec![i.to_string(), decoded[i].clone()])
-                .collect();
-            output::display_table_dyn(&["index".to_string(), "value".to_string()], &rows);
-            if decoded.len() > shown {
-                println!(
-                    "{}",
-                    color::dim(&format!(
-                        "... {} more values (use --full)",
-                        decoded.len() - shown
-                    ))
-                );
-            }
-        }
-        Format::Csv => {
-            let (headers, rows) = forecast_csv_rows(meta, data)?;
-            output::display_csv_rows(&headers, &rows)?;
-        }
-        Format::Json => {
+        f if f.is_json() => {
             let mut obj = Map::new();
             meta_fields(meta, arr, &mut obj);
             if let TimeSeriesData::Scenarios(s) = data {
                 obj.insert("scenario_count".into(), json!(s.scenario_count));
             }
-            obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
-            output::print_json(&Value::Object(obj))?;
+            match window {
+                // A window slice keeps the readable shape rather than the
+                // stored one: the flat array's index arithmetic is exactly what
+                // a caller asking for one window does not want to redo.
+                Some(c) => {
+                    obj.insert("window".into(), json!(c));
+                    obj.insert("columns".into(), json!(headers));
+                    obj.insert("rows".into(), json!(rows));
+                }
+                None => {
+                    obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
+                }
+            }
+            output::print_value(f, &Value::Object(obj))?;
         }
+        Format::Csv => {
+            let (shown, _) = rows_window.apply(&rows, format)?;
+            output::display_csv_rows(&headers, &shown)?;
+        }
+        _ => {
+            let (shown, dropped) = rows_window.apply(&rows, format)?;
+            output::display_table_dyn(&headers, &shown);
+            report_dropped(dropped);
+        }
+    }
+    Ok(())
+}
+
+fn report_dropped(dropped: usize) {
+    if dropped > 0 {
+        println!(
+            "{}",
+            color::dim(&format!(
+                "... {dropped} more rows (use --full, --limit, or --tail)"
+            ))
+        );
+    }
+}
+
+/// `get --plot`: one sparkline per element of the series.
+fn render_plot(
+    meta: &TimeSeriesMetadata,
+    data: &TimeSeriesData,
+    width: Option<usize>,
+) -> Result<(), String> {
+    let arr = data_array(data);
+    let decoded = csv_io::array_to_f64_lossy(arr);
+    let per_step = arr.element_shape().iter().product::<usize>().max(1);
+    // A forecast has no single time axis, so its whole flattened array is drawn
+    // as one trace — enough to see whether the numbers are plausible, which is
+    // all a sparkline claims. `infrastore plot --kind fan` draws the structure.
+    let steps = if meta.time_series_type.is_forecast() {
+        decoded.len()
+    } else {
+        arr.length()
+    };
+    let elements = if meta.time_series_type.is_forecast() {
+        1
+    } else {
+        per_step
+    };
+    let width = width.unwrap_or_else(crate::chart::spark::terminal_width);
+
+    println!(
+        "{}",
+        color::header(&format!(
+            "{} '{}' (owner {}) — {} values{}",
+            meta.time_series_type.as_str(),
+            meta.name,
+            meta.owner_id,
+            decoded.len(),
+            meta.units
+                .as_ref()
+                .map(|u| format!(", {u}"))
+                .unwrap_or_default(),
+        ))
+    );
+    for e in 0..elements {
+        let values: Vec<f64> = (0..steps)
+            .map(|i| decoded.get(i * elements + e).copied().unwrap_or(f64::NAN))
+            .collect();
+        let s = crate::chart::spark::render(&values, width);
+        let label = if elements > 1 {
+            format!("[{e}] ")
+        } else {
+            String::new()
+        };
+        println!(
+            "{label}{} {}",
+            s.line,
+            color::dim(&format!(
+                "min {} max {}{}",
+                crate::chart::fmt_num(s.min),
+                crate::chart::fmt_num(s.max),
+                if s.non_finite > 0 {
+                    format!(" ({} non-finite)", s.non_finite)
+                } else {
+                    String::new()
+                }
+            ))
+        );
     }
     Ok(())
 }
@@ -622,6 +803,14 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     obj.insert("data_hash".into(), json!(fields::hash_hex(&meta.data_hash)));
 }
 
+/// Numeric stats over the decoded array.
+///
+/// The array is already in memory as `f64` by the time this runs, so the
+/// distribution shape — spread, quartiles, tails — costs one sort on top of the
+/// pass that computed min/max/mean, and it is what tells a plausible profile
+/// from a broken one. `non_finite` is reported separately rather than folded in:
+/// a NaN in a load profile is a data bug, and a mean that quietly ignored it
+/// would hide the bug rather than surface it.
 fn append_stats(arr: &TypedArray, rows: &mut Vec<(String, Value)>) {
     let vals = csv_io::array_to_f64_lossy(arr);
     if vals.is_empty() {
@@ -631,30 +820,63 @@ fn append_stats(arr: &TypedArray, rows: &mut Vec<(String, Value)>) {
         let t = vals.iter().filter(|x| **x != 0.0).count();
         rows.push(("true_count".into(), json!(t)));
         rows.push(("false_count".into(), json!(vals.len() - t)));
-    } else {
-        let min = vals.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-        rows.push(("min".into(), json!(min)));
-        rows.push(("max".into(), json!(max)));
-        rows.push(("mean".into(), json!(mean)));
+        rows.push(("num_elements".into(), json!(vals.len())));
+        return;
     }
+
+    let finite: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+    let non_finite = vals.len() - finite.len();
     rows.push(("num_elements".into(), json!(vals.len())));
+    rows.push(("non_finite".into(), json!(non_finite)));
+    rows.push(("first".into(), json!(finite_json(vals.first().copied()))));
+    rows.push(("last".into(), json!(finite_json(vals.last().copied()))));
+    if finite.is_empty() {
+        return;
+    }
+
+    let n = finite.len() as f64;
+    let mean = finite.iter().sum::<f64>() / n;
+    // Sample standard deviation (n-1). A single value has no spread to report.
+    let stddev = if finite.len() > 1 {
+        (finite.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt()
+    } else {
+        0.0
+    };
+    let mut sorted = finite;
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    rows.push(("min".into(), json!(sorted[0])));
+    rows.push(("max".into(), json!(sorted[sorted.len() - 1])));
+    rows.push(("mean".into(), json!(mean)));
+    rows.push(("stddev".into(), json!(stddev)));
+    for p in [5u32, 25, 50, 75, 95] {
+        rows.push((format!("p{p}"), json!(percentile(&sorted, f64::from(p)))));
+    }
+}
+
+/// The `p`-th percentile of an ascending slice, by linear interpolation between
+/// neighbours (the "inclusive" definition NumPy and Excel both default to).
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let rank = (p / 100.0) * (sorted.len() - 1) as f64;
+    let lo = rank.floor() as usize;
+    let hi = rank.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
+    }
+}
+
+/// A value JSON can carry, or `null` for the non-finite ones it cannot spell.
+fn finite_json(v: Option<f64>) -> Value {
+    match v {
+        Some(v) if v.is_finite() => json!(v),
+        _ => Value::Null,
+    }
 }
 
 fn field_value_header() -> Vec<String> {
     vec!["field".to_string(), "value".to_string()]
-}
-
-fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String> {
-    let Some(spec) = spec else {
-        return Ok(None);
-    };
-    let (start, end) = spec
-        .split_once("..")
-        .ok_or_else(|| format!("invalid --time-range '{spec}' (expected START..END)"))?;
-    Ok(Some((
-        parse::parse_timestamp(start)?,
-        parse::parse_timestamp(end)?,
-    )))
 }

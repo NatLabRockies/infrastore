@@ -66,39 +66,115 @@ silently ignored setting.
 ## 3. Add It to a Store
 
 ```sh
+infrastore --store demo.h5 add --descriptor load.json --dry-run   # check first
 infrastore --store demo.h5 add --descriptor load.json
 ```
 
-The store (`demo.h5` and its `demo.h5.sqlite` catalog) is created on first `add`. A descriptor may
-also be a JSON array of objects to add many series in one transaction. `--csv` overrides the
+The store (`demo.h5` and its `demo.h5.sqlite` catalog) is created on first `add`, or explicitly with
+`infrastore --store demo.h5 init` when you want to pin a compression policy up front. A descriptor
+may also be a JSON array of objects to add many series in one transaction. `--csv` overrides the
 descriptor's `csv` path, but only for a single-series descriptor: with an array of two or more
 objects it errors (`--csv cannot be used with an array descriptor`).
+
+`--dry-run` is worth running first on anything large. It resolves every descriptor and reads every
+CSV in full, then prints the resolved `(owner, type, name, element type, shape)` table without
+opening the store — which catches the "I got the shape wrong" class of mistake before a multi-GB
+load starts. `--replace` makes a re-run after fixing the data idempotent, and `--descriptor -` reads
+the JSON from stdin so a generator script can pipe descriptors straight in.
+
+For a one-off, the descriptor fields are also `add` flags:
+
+```sh
+infrastore --store demo.h5 add --csv load.csv --owner-id 42 --owner-type Generator \
+  --name load --type SingleTimeSeries --element-type f64 --units MW \
+  --resolution PT1H --initial-timestamp 2024-01-01T00:00:00Z
+```
+
+### One file, many components
+
+The canonical power-systems CSV is one column per component, which is the opposite shape from the
+descriptor's one-object-one-series default:
+
+```text
+# gen_profiles.csv
+timestamp,gen_001,gen_002,gen_003
+2024-01-01T00:00:00Z,101.5,88.2,44.0
+2024-01-01T01:00:00Z,102.1,87.4,44.6
+```
+
+`"layout": "wide"` loads that as one scalar series per column. The store keys on an integer
+`owner_id` while the headers are component _names_, so the mapping is an input — a
+`column,owner_id[,owner_type]` sidecar CSV, an inline object, or `"owner_id_from": "header"` when
+the headers already are ids:
+
+```json
+{
+  "csv": "gen_profiles.csv",
+  "layout": "wide",
+  "type": "SingleTimeSeries",
+  "name": "max_active_power",
+  "owner_type": "ThermalStandard",
+  "element_type": "f64",
+  "units": "MW",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H",
+  "owner_map": "components.csv"
+}
+```
+
+`infrastore grid` writes that same shape back out, so the two are an inverse pair — see below.
 
 ## 4. Read It Back
 
 `infrastore` follows an output convention: a global `-f/--format` with `table` (default), `json`,
-and `csv`. Only the read commands (`list`, `get`, `info`) honor it; `add`, `remove`, `transform`,
-and `template` accept the flag but ignore it and print plain text.
+`jsonl`, and `csv`. Only the read commands honor it; `add`, `remove`, `transform`, and `template`
+accept the flag but ignore it and print plain text. `jsonl` is `json` line-delimited — one compact
+object per line, which streams into `jq` where a single pretty array cannot.
+
+Before you can write a selector you need to know what values exist, which is what the discovery
+commands are for:
+
+```sh
+infrastore --store demo.h5 names                                      # distinct series names
+infrastore --store demo.h5 owner-types                                # distinct owner types
+infrastore --store demo.h5 owners --type SingleTimeSeries             # distinct owner ids
+infrastore --store demo.h5 exists --name load                         # exit 0 = yes, 1 = no
+```
 
 ```sh
 infrastore --store demo.h5 list                                       # what's in the store
 infrastore --store demo.h5 list --name-glob 'load_*'                  # name pattern (SQLite GLOB)
 infrastore --store demo.h5 list --limit 20 --wide                     # bounded, all columns
 infrastore --store demo.h5 get  --owner-id 42 --name load             # pretty table
+infrastore --store demo.h5 get  --name load --tail --limit 24         # the last day
+infrastore --store demo.h5 get  --name load --plot                    # a terminal sparkline
 infrastore --store demo.h5 -f csv  get  --owner-id 42 --name load     # timestamped CSV
+infrastore --store demo.h5 -f jsonl list                              # one JSON object per line
 infrastore --store demo.h5 -f json info --owner-id 42 --name load     # metadata + hash + stats
 infrastore --store demo.h5 -f csv  export --dir out/                  # one file per series
 ```
 
+To see many series side by side against one time axis — the read-direction inverse of the wide
+ingest above — use `grid`:
+
+```sh
+infrastore --store demo.h5 -f csv grid --name max_active_power --resolution PT1H
+```
+
+Every column in a grid shares one timeline, which is what makes the rows line up without a presence
+mask; that is why `SingleTimeSeries` needs `--resolution`. When every column shares one series name
+the headers are bare owner ids, which is exactly the wide form `add` reads back.
+
 `export` is the bulk read-direction inverse of `add`: every series the selector matches is written
-to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches). Setting
-`INFRASTORE_STORE` in the environment stands in for `--store`, and destructive commands (`remove`,
-`clear`, `replace-owner`, `rename`, `copy`) accept `--dry-run` to preview their effect.
+to its own CSV or JSON file under `--dir` (or to stdout when exactly one matches), optionally sliced
+with `--time-range`. Setting `INFRASTORE_STORE` in the environment stands in for `--store`, every
+destructive command accepts `--dry-run` to preview its effect, and the global `-y`/`--yes` answers
+every confirmation prompt so a script does not have to know which commands ask.
 
 `info` reports metadata, the array's content hash and where it lives in the HDF5 file, and stats
-over the values: `min`/`max`/`mean` for numeric dtypes, or `true_count`/`false_count` when the dtype
-is `bool`, and always `num_elements`. The stats are the only part that reads the array —
-`--no-stats` skips it for a purely catalog-side query.
+over the values: `min`/`max`/`mean`/`stddev`, the `p5`–`p95` percentiles, `first`/`last`, and a
+separate `non_finite` count — or `true_count`/`false_count` when the dtype is `bool`. The stats are
+the only part that reads the array — `--no-stats` skips it for a purely catalog-side query.
 
 `list` shows every field that is part of a series' identity, features included, so two series that
 differ only by a feature never render as the same row. Its `Hash` column is the first 12 characters
@@ -109,9 +185,27 @@ of the array's content hash: rows with equal hashes share one array on disk.
 one); if more than one series matches, `infrastore` lists the candidates so you can narrow the
 query. The owner is the `(owner_id, owner_category)` pair, so a component and a supplemental
 attribute may share a numeric id — add `--owner-category` (`Component` / `SupplementalAttribute`) to
-disambiguate. Large series truncate in `table` output — pass `--limit N` or `--full`.
+disambiguate. Large series truncate in `table` output — pass `--limit N`, `--full`, or `--tail` to
+read from the end. `--stride N` keeps every Nth row and, unlike the display bounds, applies to a
+`-f csv` pipe too: it selects data rather than shortening a view, and a silently short pipe is a bug
+in whatever consumes it.
 
-## 5. Find the Bytes on Disk
+## 5. Look at It
+
+```sh
+infrastore --store demo.h5 get --name load --plot                        # sparkline, no file
+infrastore --store demo.h5 plot --name load --out load.svg               # the profile
+infrastore --store demo.h5 plot --name load --kind duration --out ldc.svg
+infrastore --store demo.h5 plot --name load --kind heatmap --out heat.html
+```
+
+`plot` writes one self-contained file — no external fonts, scripts, or images, and both light and
+dark themes inside it — so it opens in a browser and drops into a report. The five `--kind` values
+are `line`, `duration` (the load duration curve), `heatmap` (time-of-day against day, which is how
+you catch a timezone or DST shift), `fan` (percentile bands or scenario traces for one forecast
+window), and `overlay` (a `Deterministic`'s windows over the actuals it came from).
+
+## 6. Find the Bytes on Disk
 
 Arrays are content-addressed, so identical values are stored once and shared. `arrays` shows what
 collapsed onto what, and where each array actually lives:
@@ -135,18 +229,26 @@ hashes as garbage bytes, and in `.mode box` it mangles the table borders:
 sqlite3 demo.h5.sqlite 'SELECT name, data_hash FROM time_series_readable;'
 ```
 
-## 6. Associations
+## 7. Associations
 
-Two association catalogs live alongside the time series and are readable here:
+Two association catalogs live alongside the time series, readable and writable here:
 
 ```sh
 infrastore --store demo.h5 attributes                 # component <-> supplemental attribute
 infrastore --store demo.h5 attributes --summary       # counts by (component type, attribute type)
 infrastore --store demo.h5 links --parent-id 42       # directed parent -> child edges
+infrastore --store demo.h5 attach --from attachments.csv
+infrastore --store demo.h5 link --parent-id 42 --parent-type Generator \
+  --child-id 7 --child-type Bus
+infrastore --store demo.h5 reassign --old 42 --new 43 # both catalogs follow a renumbered component
 ```
 
-Both are read-only from the CLI: writing an association means writing the consumer's object graph
-alongside it, so that direction stays with the Rust, Python, and Julia APIs.
+The store holds only the _relationship_ — the components and attributes themselves live in the
+consumer's object graph — so the flags are bare ids and type names. `attach --from` and `link
+--from`
+import a whole table in one all-or-nothing transaction; their header is checked, because the four
+columns are two interchangeable-looking `(id, type)` pairs and a swapped file would silently invert
+every relationship.
 
 `--time-range START..END` on `get` takes two _timestamps_ (RFC3339 or epoch-ms), not a duration:
 
@@ -161,7 +263,7 @@ as do `--owner-category component` and `--owner-category Component`. What the CL
 so descriptors, rendered rows, and `-f json` output all string-match each other. The lowercase forms
 are a typing shortcut on the command line, not a second vocabulary.
 
-## 7. Forecasts
+## 8. Forecasts
 
 All five writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
 `Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a descriptor to edit, but
@@ -199,6 +301,28 @@ and a bare selector becomes ambiguous. Disambiguate with `--type`:
 infrastore --store demo.h5 get --owner-id 42 --name load --type single
 infrastore --store demo.h5 get --owner-id 42 --name load --type deterministic_single
 ```
+
+A forecast's table view is the same structured one `-f csv` writes — `issue_time`, `target_time`,
+and one column per percentile or scenario — and `--window N` (or `--issue-time <TS>`) narrows it to
+a single window instead of dumping all of them:
+
+```sh
+infrastore --store demo.h5 get --name load --type deterministic_single --window 0
+```
+
+## 9. Compare and Move Stores
+
+```sh
+infrastore --store run.h5 diff --against baseline.h5      # exits 1 when they differ
+infrastore --store demo.h5 merge --from other.h5 --name-glob 'load_*'
+infrastore --store demo.h5 persist --dest backup.h5 --force
+```
+
+`diff` compares catalog identities and content hashes without reading either store's arrays, which
+makes it cheap enough for a CI gate: two series hold the same numbers exactly when they carry the
+same hash. `merge` moves arrays as bytes, so nothing is lost to a CSV round trip. `persist` is the
+one write that refuses an existing destination without `--force`: a save that fails partway may
+already have destroyed what was there.
 
 ## Notes
 

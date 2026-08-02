@@ -1,9 +1,9 @@
 //! Write-side maintenance commands: `remove`, `transform`, and `template`.
 
-use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 use crate::color;
+use crate::confirm;
 use crate::parse;
 use crate::select::SelectorArgs;
 use crate::store_access;
@@ -29,23 +29,15 @@ pub fn remove(
         return Ok(());
     }
 
-    if !force && std::io::stdin().is_terminal() {
-        print!(
+    if !force
+        && !confirm::ask(&format!(
             "Remove {} '{}' (owner {})? [y/N] ",
             meta.time_series_type.as_str(),
             meta.name,
             meta.owner_id
-        );
-        std::io::stdout().flush().ok();
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|e| e.to_string())?;
-        let answer = answer.trim().to_ascii_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("{}", color::dim("Aborted."));
-            return Ok(());
-        }
+        ))?
+    {
+        return Ok(());
     }
 
     let mut store = store_access::open_writable(store_path)?;
@@ -158,21 +150,13 @@ pub fn remove_all(
         }
         return Ok(());
     }
-    if !force && std::io::stdin().is_terminal() {
-        print!(
+    if !force
+        && !confirm::ask(&format!(
             "Remove {} time series matching the selector? [y/N] ",
             matches.len()
-        );
-        std::io::stdout().flush().ok();
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|e| e.to_string())?;
-        let answer = answer.trim().to_ascii_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("{}", color::dim("Aborted."));
-            return Ok(());
-        }
+        ))?
+    {
+        return Ok(());
     }
     let mut store = store_access::open_writable(store_path)?;
     let n = store.remove_by_filter(filter).map_err(|e| e.to_string())?;
@@ -206,22 +190,12 @@ pub fn clear(
         println!("Would clear {n} time series.");
         return Ok(());
     }
-    if !force && std::io::stdin().is_terminal() {
-        let scope = match owner {
-            Some((id, _)) => format!("owner {id}"),
-            None => "the entire store".to_string(),
-        };
-        print!("Clear all time series for {scope}? [y/N] ");
-        std::io::stdout().flush().ok();
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|e| e.to_string())?;
-        let answer = answer.trim().to_ascii_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("{}", color::dim("Aborted."));
-            return Ok(());
-        }
+    let scope = match owner {
+        Some((id, _)) => format!("owner {id}"),
+        None => "the entire store".to_string(),
+    };
+    if !force && !confirm::ask(&format!("Clear all time series for {scope}? [y/N] "))? {
+        return Ok(());
     }
     let mut store = store_access::open_writable(store_path)?;
     let n = store.clear_time_series(owner).map_err(|e| e.to_string())?;
@@ -298,12 +272,177 @@ pub fn copy(
 }
 
 /// `persist`: write the store to a new HDF5 + SQLite artifact.
-pub fn persist(store_path: &Path, dest: &Path) -> Result<(), String> {
+///
+/// Guarded, unlike every other write, for a specific reason: a `persist_to`
+/// that fails partway may already have destroyed the destination, so
+/// overwriting an existing artifact is the one operation here whose failure
+/// mode loses data that was not otherwise at risk. An existing destination
+/// therefore needs `--force` or an interactive `y`.
+pub fn persist(store_path: &Path, dest: &Path, force: bool, dry_run: bool) -> Result<(), String> {
+    let catalog = store_access::catalog_path(dest);
+    // Both halves are one artifact, so either one existing counts as "there is
+    // something here to lose".
+    let existing: Vec<&Path> = [dest, catalog.as_path()]
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+
+    if dry_run {
+        println!("Would write {} and {}.", dest.display(), catalog.display());
+        if !existing.is_empty() {
+            println!(
+                "{}",
+                color::dim(&format!(
+                    "Overwriting: {}",
+                    existing
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            );
+        }
+        return Ok(());
+    }
+
+    if !existing.is_empty() && !force {
+        let listed = existing
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !confirm::ask_strict(
+            &format!(
+                "{listed} already exist(s) and will be replaced. A failed save may leave \
+                 neither the old nor the new artifact. Continue? [y/N] "
+            ),
+            "pass --force (or the global --yes) to overwrite it",
+        )? {
+            return Ok(());
+        }
+    }
+
     let mut store = store_access::open_writable(store_path)?;
     store.persist_to(dest).map_err(|e| e.to_string())?;
     println!(
         "{}",
         color::header(&format!("Persisted store to {}.", dest.display()))
+    );
+    Ok(())
+}
+
+/// `init`: create an empty store with an explicit policy.
+///
+/// A store already springs into existence on the first `add`, so this exists for
+/// what that cannot express: choosing a compression policy is only possible at
+/// creation, and hanging that choice off `add` made it a flag that errors
+/// whenever the store happens to exist already. Separating "create with a
+/// policy" from "load data" also gives a load script somewhere to fail early.
+pub fn init(
+    store_path: &Path,
+    compression: Option<infrastore_core::Compression>,
+    catalog: store_access::CatalogChoice,
+) -> Result<(), String> {
+    if store_path.exists() {
+        return Err(format!(
+            "{} already exists; init creates a new store",
+            store_path.display()
+        ));
+    }
+    let mut store = store_access::open_writable_with(store_path, compression, catalog)?;
+    store.flush().map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        color::header(&format!(
+            "Created {} (catalog: {catalog}).",
+            store_path.display()
+        ))
+    );
+    if catalog == store_access::CatalogChoice::InMemory {
+        println!(
+            "{}",
+            color::dim(
+                "The catalog stays in RAM: run `infrastore persist --dest <path.h5>` when \
+                 the load is done, or the arrays will be unreachable."
+            )
+        );
+    }
+    Ok(())
+}
+
+/// `merge`: copy matching series from another store into this one.
+///
+/// The in-store form of `export` to a directory followed by `add` back, without
+/// the round trip through CSV — and without the precision and metadata loss that
+/// round trip implies, since the arrays move as bytes.
+///
+/// One asymmetry is worth knowing: a stored `DeterministicSingleTimeSeries`
+/// reads back as a `Deterministic` (a storage-level view, by design), so it
+/// lands in the destination as a real `Deterministic` rather than as a
+/// transform of a source series. Merging the underlying `SingleTimeSeries` and
+/// re-running `infrastore transform` reproduces the original arrangement.
+pub fn merge(
+    store_path: &Path,
+    from: &Path,
+    selector: &SelectorArgs,
+    replace: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    if from == store_path {
+        return Err("merge --from is the destination store itself".to_string());
+    }
+    let source = store_access::open_readonly(from)?;
+    let metas = source
+        .list_time_series(selector.to_filter()?)
+        .map_err(|e| e.to_string())?;
+    if metas.is_empty() {
+        println!("{}", color::dim("No time series matched the selector."));
+        return Ok(());
+    }
+    if dry_run {
+        println!("Would merge {} time series:", metas.len());
+        for m in &metas {
+            println!("  - {}", crate::fields::identity_line(m));
+        }
+        return Ok(());
+    }
+
+    let identities: Vec<_> = metas.iter().map(crate::select::key_of).collect();
+    let refs: Vec<&_> = identities.iter().collect();
+    let datas = source.bulk_read(&refs).map_err(|e| e.to_string())?;
+    drop(source);
+
+    let requests: Vec<infrastore_core::AddRequest> = metas
+        .iter()
+        .zip(datas)
+        .map(|(m, data)| infrastore_core::AddRequest {
+            owner_id: m.owner_id,
+            owner_type: m.owner_type.clone(),
+            owner_category: m.owner_category,
+            data,
+            features: m.features.clone(),
+        })
+        .collect();
+
+    let mut store = store_access::open_writable(store_path)?;
+    if replace {
+        let keys: Vec<&infrastore_core::KeyIdentity> = identities.iter().collect();
+        store
+            .remove_time_series_bulk(&keys)
+            .map_err(|e| e.to_string())?;
+    }
+    let n = store
+        .add_time_series_bulk(requests)
+        .map_err(|e| e.to_string())?
+        .len();
+    store.flush().map_err(|e| e.to_string())?;
+    println!(
+        "{}",
+        color::header(&format!(
+            "Merged {n} time series from {} into {}.",
+            from.display(),
+            store_path.display()
+        ))
     );
     Ok(())
 }
@@ -316,30 +455,25 @@ pub fn compact(
     force: bool,
     format: crate::output::Format,
 ) -> Result<(), String> {
-    if !force && std::io::stdin().is_terminal() {
-        print!("Compact the store? This rewrites the .h5 file and replaces it. [y/N] ");
-        std::io::stdout().flush().ok();
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|e| e.to_string())?;
-        let answer = answer.trim().to_ascii_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("{}", color::dim("Aborted."));
-            return Ok(());
-        }
+    if !force
+        && !confirm::ask("Compact the store? This rewrites the .h5 file and replaces it. [y/N] ")?
+    {
+        return Ok(());
     }
     let mut store = store_access::open_writable(store_path)?;
     let report = store.compact().map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
     match format {
-        crate::output::Format::Json => crate::output::print_json(&serde_json::json!({
+        f if f.is_json() => crate::output::print_value(
+            f,
+            &serde_json::json!({
             "slots_reclaimed": report.slots_reclaimed,
             "datasets_dropped": report.datasets_dropped,
             "feature_sets_reclaimed": report.feature_sets_reclaimed,
             "timestamp_sets_reclaimed": report.timestamp_sets_reclaimed,
-            "bytes_reclaimed": report.bytes_reclaimed,
-        }))?,
+                "bytes_reclaimed": report.bytes_reclaimed,
+            }),
+        )?,
         _ => {
             let headers = vec!["Metric".to_string(), "Value".to_string()];
             let rows = vec![

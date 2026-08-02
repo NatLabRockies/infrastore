@@ -16,7 +16,7 @@ SQLite. It exposes multiple bindings over a shared core:
 - **Julia** — `infrastore-ffi` C ABI cdylib, wrapped by `julia/InfraStore.jl`
 - **CLI** — `infrastore-cli` (`infrastore` binary): loads time series from CSV + a descriptor JSON
   and inspects a store, talking directly to the on-disk HDF5 + SQLite artifact (read+write; no
-  gRPC). Output uses a global `-f/--format table|json|csv`.
+  gRPC). Output uses a global `-f/--format table|json|jsonl|csv`.
 
 **Current feature coverage:** `SingleTimeSeries` and `NonSequentialTimeSeries` are implemented
 end-to-end (read+write in the Rust core, C ABI, Python, and Julia; read-only over gRPC).
@@ -37,15 +37,16 @@ name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_f
 `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
 preserving `ext`, and serde on the core types) is available in the Rust core and threaded through
 the C ABI/Julia and Python bindings. Two **association catalogs** are available in the Rust core, C
-ABI, Julia, and Python, and read-only in the CLI (`attributes` / `links`), but not over gRPC:
-`supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
-counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
-component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
-more). Both are independent of time series in both directions, and of each other. Metadata getters
-surface `element_shape` and `features` in every binding. Python ships type stubs (`infrastore.pyi` +
-a pytest drift guard), a full exception hierarchy, and keyword-only optional arguments; Julia
-returns its catalog/metadata/summary query results as structs (`TimeSeriesMetadata`, `KeyRow`,
-`StaticGrid`, … — see `docs/src/reference/julia-api.md#result-types`), overloads `Base`
+ABI, Julia, Python, and the CLI (read via `attributes` / `links`, write via `attach` / `detach` /
+`link` / `unlink` / `reassign`), but not over gRPC: `supplemental_attribute_associations` (component
+↔ supplemental attribute, the wider surface — counts, counts-by-type, grouped summary) and
+`parent_child_associations` (directed component ↔ component edges, e.g. a generator connected to a
+bus, deliberately narrower until a consumer needs more). Both are independent of time series in both
+directions, and of each other. Metadata getters surface `element_shape` and `features` in every
+binding. Python ships type stubs (`infrastore.pyi` + a pytest drift guard), a full exception
+hierarchy, and keyword-only optional arguments; Julia returns its catalog/metadata/summary query
+results as structs (`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
+`docs/src/reference/julia-api.md#result-types`), overloads `Base`
 (`==`/`hash`/`show`/`length`/`iterate`), and offers do-block `Store`/`open_store` forms. A stored
 `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by
 design); the DST tag remains visible in catalog surfaces (keys, metadata, counts). The CLI
@@ -53,9 +54,19 @@ additionally has `export` (bulk read-direction inverse of `add`; its timestamped
 by `add`, which detects the layout from the header), `arrays` / `store-info` and the `data_hash` +
 resolved HDF5 dataset/column on `list`/`info`, `--name-glob` selectors, `--dry-run` on destructive
 commands, store-creation `--compression` flags, shell `completions`, and a `INFRASTORE_STORE` env
-fallback. The SQLite catalog carries a `time_series_readable` view that hex-encodes both hashes for
-hand inspection. The read-only gRPC server carries the full read surface too: full `TimeSeriesKey`s
-over the wire plus `ListKeys`, `GetMetadata`, `BulkRead`, detailed/per-type counts, `ListOwnerIds`,
+fallback. It also carries a **wide-CSV ingest** (`"layout": "wide"` plus an
+`owner_map`/`owner_id_from` column→owner mapping) and its inverse `grid`, which drives the core's
+`StaticReader`; discovery commands (`names`, `owner-types`, `owners`, `exists`); charting
+(`get
+--plot` sparklines and `plot --kind line|duration|heatmap|fan|overlay`, rendered by the
+hand-written `src/chart/` SVG backend — deliberately no charting dependency, because `deny.toml`
+makes one a policy decision); `diff` and `merge` between two stores; `init` and
+`--catalog attached|in-memory`; and an inline flag form of `add` alongside `--descriptor -` (stdin),
+`--dry-run`, `--replace`, and `--batch-size`. A `--endpoint` mode pointing the read commands at the
+gRPC server is still the one documented gap; `src/store_access.rs` is the seam reserved for it. The
+SQLite catalog carries a `time_series_readable` view that hex-encodes both hashes for hand
+inspection. The read-only gRPC server carries the full read surface too: full `TimeSeriesKey`s over
+the wire plus `ListKeys`, `GetMetadata`, `BulkRead`, detailed/per-type counts, `ListOwnerIds`,
 `GetIntervals`, static/forecast summaries, `CheckStaticConsistency`, and `ResolveForecastKey`. Auth
 is `none` (default) or `api_key` via the `x-api-key` header. See `README.md` and
 `docs/src/explanation/data-model.md` for the authoritative feature matrix.
@@ -108,6 +119,8 @@ crates/
   infrastore-py/      # PyO3 bindings
   infrastore-ffi/     # C ABI cdylib (used by the Julia binding)
   infrastore-cli/     # `infrastore` CLI: CSV add/read against an on-disk store (clap, csv, tabled)
+    src/chart/               #   hand-written sparkline + SVG renderer (no charting dependency)
+    src/commands/            #   one module per command group
   infrastore-bench/   # `infrastore-bench` binary: bulk-ingest + simulation-read benchmarks
 julia/InfraStore.jl/    # Julia package wrapping the C ABI
 python/tests/                # pytest suite

@@ -9,7 +9,22 @@ use tabled::settings::Style;
 pub enum Format {
     Table,
     Json,
+    /// Line-delimited JSON: one compact object per line, no enclosing array.
+    ///
+    /// `json` emits one pretty document, which a 100k-row `list` cannot be
+    /// streamed out of — `jq` has to buffer the whole array before it sees the
+    /// first element. `jsonl` is the same data in the shape every streaming
+    /// consumer expects.
+    Jsonl,
     Csv,
+}
+
+impl Format {
+    /// Whether this format is rendered by the JSON writers rather than the
+    /// table/CSV ones.
+    pub fn is_json(self) -> bool {
+        matches!(self, Format::Json | Format::Jsonl)
+    }
 }
 
 impl std::fmt::Display for Format {
@@ -17,6 +32,7 @@ impl std::fmt::Display for Format {
         f.write_str(match self {
             Format::Table => "table",
             Format::Json => "json",
+            Format::Jsonl => "jsonl",
             Format::Csv => "csv",
         })
     }
@@ -76,6 +92,36 @@ pub fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
 pub fn print_json_wrapped<T: Serialize>(items: &[T]) -> Result<(), String> {
     let wrapped = serde_json::json!({ "items": items });
     print_json(&wrapped)
+}
+
+/// Print one value in whichever JSON shape `format` asks for.
+///
+/// A single document has no "elements" to stream, so `jsonl` renders it as one
+/// compact line rather than as a one-element stream — which is what a
+/// line-oriented consumer of a single record wants anyway.
+pub fn print_value<T: Serialize>(format: Format, value: &T) -> Result<(), String> {
+    match format {
+        Format::Jsonl => {
+            let text = serde_json::to_string(value).map_err(|e| e.to_string())?;
+            write_line(&text)
+        }
+        _ => print_json(value),
+    }
+}
+
+/// Print a list of values: one `{"items": [...]}` document, or one compact
+/// object per line.
+pub fn print_items<T: Serialize>(format: Format, items: &[T]) -> Result<(), String> {
+    match format {
+        Format::Jsonl => {
+            for item in items {
+                let text = serde_json::to_string(item).map_err(|e| e.to_string())?;
+                write_line(&text)?;
+            }
+            Ok(())
+        }
+        _ => print_json_wrapped(items),
+    }
 }
 
 /// Write a line to stdout, treating a closed pipe as a clean exit.

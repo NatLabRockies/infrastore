@@ -79,6 +79,20 @@ pub fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     ))
 }
 
+/// A half-open `START..END` time range, as `get`, `grid`, and `export` spell it.
+pub type TimeRange = (DateTime<Utc>, DateTime<Utc>);
+
+/// Parse a `START..END` time range, each end an RFC3339 timestamp or epoch-ms.
+pub fn parse_time_range(spec: Option<&str>) -> Result<Option<TimeRange>, String> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let (start, end) = spec
+        .split_once("..")
+        .ok_or_else(|| format!("invalid --time-range '{spec}' (expected START..END)"))?;
+    Ok(Some((parse_timestamp(start)?, parse_timestamp(end)?)))
+}
+
 /// Parse an owner category. `Component` / `SupplementalAttribute` are the
 /// canonical spellings — what the CLI prints, and what `template` now writes —
 /// but matching is case-insensitive and ignores underscores, so the

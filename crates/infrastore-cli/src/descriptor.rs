@@ -16,12 +16,51 @@ use serde::Deserialize;
 use crate::csv_io::{self, CsvData};
 use crate::parse;
 
+/// Which shape the companion CSV's *columns* are in.
+///
+/// Orthogonal to [`CsvLayout`], which is about the leading timestamp columns:
+/// this decides whether the value block describes one series or many.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnLayout {
+    /// Every value column belongs to the one series the descriptor names, and
+    /// together they are its per-timestep element. The hand-authored form, and
+    /// what `template` prints.
+    #[default]
+    Long,
+    /// Every value column is a *separate* scalar series, sharing this
+    /// descriptor's name, type, resolution, and units, and differing only by
+    /// owner. This is the canonical power-systems file
+    /// (`timestamp,gen_001,gen_002,...`) and the shape `infrastore grid`
+    /// writes back out.
+    Wide,
+}
+
+/// How a wide CSV's column headers map to the `i64` owner ids the store keys on.
+///
+/// Wide headers are component *names*; the store has no name→id table, so the
+/// mapping has to be an input. A sidecar CSV is the batch form, the inline
+/// object the one-off, and `owner_id_from: "header"` the case where the headers
+/// already are ids.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OwnerMap {
+    /// Path to a `column,owner_id[,owner_type]` CSV, relative to the descriptor.
+    Path(String),
+    /// `{"gen_001": 42, ...}` written straight into the descriptor.
+    Inline(BTreeMap<String, i64>),
+}
+
 /// One time-series description. Field presence is validated per `type`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Descriptor {
-    pub owner_id: i64,
-    pub owner_type: String,
+    /// Required in the `long` layout; rejected in `wide`, where each column
+    /// carries its own owner.
+    pub owner_id: Option<i64>,
+    /// Required in `long`. In `wide` it is the default for columns whose
+    /// `owner_map` row does not name one.
+    pub owner_type: Option<String>,
     #[serde(default = "default_owner_category")]
     pub owner_category: String,
     pub name: String,
@@ -49,6 +88,14 @@ pub struct Descriptor {
     pub count: Option<usize>,
     pub percentiles: Option<Vec<f64>>,
     pub scenario_count: Option<usize>,
+
+    // Wide layout.
+    #[serde(default)]
+    pub layout: ColumnLayout,
+    /// Column header -> owner id, as a sidecar CSV path or an inline object.
+    pub owner_map: Option<OwnerMap>,
+    /// `"header"` when the column headers already are integer owner ids.
+    pub owner_id_from: Option<String>,
 }
 
 fn default_owner_category() -> String {
@@ -218,38 +265,46 @@ fn forecast_values_from_rows(
 pub fn load(path: &Path) -> Result<Vec<Descriptor>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("reading descriptor {}: {e}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("parsing descriptor {}: {e}", path.display()))?;
+    parse_descriptors(&text, &path.display().to_string())
+}
+
+/// [`load`] from an already-open reader, for `--descriptor -`.
+///
+/// `label` stands in for the path in error messages, so a piped descriptor
+/// reports `<stdin>` rather than a path that does not exist.
+pub fn load_reader(mut reader: impl std::io::Read, label: &str) -> Result<Vec<Descriptor>, String> {
+    let mut text = String::new();
+    reader
+        .read_to_string(&mut text)
+        .map_err(|e| format!("reading descriptor {label}: {e}"))?;
+    parse_descriptors(&text, label)
+}
+
+fn parse_descriptors(text: &str, path: &str) -> Result<Vec<Descriptor>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("parsing descriptor {path}: {e}"))?;
 
     match &value {
         serde_json::Value::Array(arr) => {
             if arr.is_empty() {
-                return Err(format!("descriptor {} is an empty array", path.display()));
+                return Err(format!("descriptor {path} is an empty array"));
             }
             let series: Vec<Descriptor> = arr
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    serde_json::from_value(v.clone()).map_err(|e| {
-                        format!(
-                            "parsing descriptor[{i}] in {}: {}",
-                            path.display(),
-                            explain(e)
-                        )
-                    })
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("parsing descriptor[{i}] in {path}: {}", explain(e)))
                 })
                 .collect::<Result<_, _>>()?;
             Ok(series)
         }
         serde_json::Value::Object(_) => {
             let one: Descriptor = serde_json::from_value(value)
-                .map_err(|e| format!("parsing descriptor {}: {}", path.display(), explain(e)))?;
+                .map_err(|e| format!("parsing descriptor {path}: {}", explain(e)))?;
             Ok(vec![one])
         }
-        _ => Err(format!(
-            "descriptor {} must be a JSON object or array",
-            path.display()
-        )),
+        _ => Err(format!("descriptor {path} must be a JSON object or array")),
     }
 }
 
@@ -301,13 +356,47 @@ impl Descriptor {
         Ok(out)
     }
 
-    /// Build a core [`AddRequest`] by reading the companion CSV and assembling
-    /// the matching [`TimeSeriesData`] variant.
-    pub fn to_add_request(
+    /// Build the core [`AddRequest`]s this descriptor describes by reading the
+    /// companion CSV and assembling the matching [`TimeSeriesData`] variants.
+    ///
+    /// A `long` descriptor yields exactly one request; a `wide` one yields one
+    /// per value column. Callers therefore cannot assume a 1:1 descriptor →
+    /// series relationship — which is the whole point of the wide layout.
+    pub fn to_add_requests(
+        &self,
+        base_dir: Option<&Path>,
+        override_csv: Option<&Path>,
+    ) -> Result<Vec<AddRequest>, String> {
+        match self.layout {
+            ColumnLayout::Long => Ok(vec![self.long_request(base_dir, override_csv)?]),
+            ColumnLayout::Wide => self.wide_requests(base_dir, override_csv),
+        }
+    }
+
+    fn long_request(
         &self,
         base_dir: Option<&Path>,
         override_csv: Option<&Path>,
     ) -> Result<AddRequest, String> {
+        for (field, present) in [
+            ("owner_map", self.owner_map.is_some()),
+            ("owner_id_from", self.owner_id_from.is_some()),
+        ] {
+            if present {
+                return Err(format!(
+                    "series '{}' sets `{field}`, which only applies to \"layout\": \"wide\"",
+                    self.name
+                ));
+            }
+        }
+        let owner_id = self
+            .owner_id
+            .ok_or_else(|| format!("series '{}' requires `owner_id`", self.name))?;
+        let owner_type = self
+            .owner_type
+            .clone()
+            .ok_or_else(|| format!("series '{}' requires `owner_type`", self.name))?;
+
         let element_type = parse::parse_element_type(&self.element_type)?;
         let dtype = element_type.physical_dtype();
         let ts_type = parse::parse_ts_type(&self.ts_type)?;
@@ -325,12 +414,255 @@ impl Descriptor {
         data.set_descriptors(element_type, self.units.clone(), self.ext.clone());
 
         Ok(AddRequest {
-            owner_id: self.owner_id,
-            owner_type: self.owner_type.clone(),
+            owner_id,
+            owner_type,
             owner_category,
             data,
             features: self.features()?,
         })
+    }
+
+    /// One request per value column of a wide CSV.
+    ///
+    /// Restricted to the two static types and to scalar elements. A forecast's
+    /// value block is already three axes deep before any per-column split, and
+    /// a multidimensional element would need a second header row to say which
+    /// column belongs to which `(owner, element)` pair — neither is expressible
+    /// in `timestamp,gen_001,...`, so both are rejected rather than guessed at.
+    fn wide_requests(
+        &self,
+        base_dir: Option<&Path>,
+        override_csv: Option<&Path>,
+    ) -> Result<Vec<AddRequest>, String> {
+        let ts_type = parse::parse_ts_type(&self.ts_type)?;
+        if !matches!(
+            ts_type,
+            TimeSeriesType::SingleTimeSeries | TimeSeriesType::NonSequentialTimeSeries
+        ) {
+            return Err(format!(
+                "\"layout\": \"wide\" holds one scalar series per column, so it covers \
+                 SingleTimeSeries and NonSequentialTimeSeries only; '{}' is {}",
+                self.name,
+                ts_type.as_str()
+            ));
+        }
+        if !self.element_shape.is_empty() {
+            return Err(format!(
+                "series '{}': \"layout\": \"wide\" gives each column one scalar per \
+                 timestep, so `element_shape` must be omitted (got {:?})",
+                self.name, self.element_shape
+            ));
+        }
+        if self.owner_id.is_some() {
+            return Err(format!(
+                "series '{}': a wide descriptor takes its owner ids from `owner_map` / \
+                 `owner_id_from`, so `owner_id` must be omitted",
+                self.name
+            ));
+        }
+        let element_type = parse::parse_element_type(&self.element_type)?;
+        let dtype = element_type.physical_dtype();
+        let owner_category = parse::parse_owner_category(&self.owner_category)?;
+        let features = self.features()?;
+
+        let csv_path = self.csv_path(base_dir, override_csv)?;
+        let header = csv_io::read_header(&csv_path)?;
+        // The header is the column→owner mapping's left-hand side, so unlike the
+        // long layout there is nothing to detect: a leading `timestamp` column
+        // is stripped, everything after it is a series. `reject_headerless` is
+        // deliberately not run — with `owner_id_from: "header"` the headers are
+        // integers, which parse as every numeric dtype and would trip it.
+        let has_timestamps = header
+            .first()
+            .is_some_and(|c| c.trim().eq_ignore_ascii_case("timestamp"));
+        if ts_type == TimeSeriesType::NonSequentialTimeSeries && !has_timestamps {
+            return Err(format!(
+                "{}: a wide NonSequentialTimeSeries CSV must start with a `timestamp` \
+                 column (its timestamps are explicit, not a grid)",
+                csv_path.display()
+            ));
+        }
+        let leading = usize::from(has_timestamps);
+        let columns: Vec<String> = header[leading.min(header.len())..].to_vec();
+        if columns.is_empty() {
+            return Err(format!(
+                "{} has no value columns; a wide CSV is `timestamp,<col>,<col>,...`",
+                csv_path.display()
+            ));
+        }
+        if let Some(dup) = first_duplicate(&columns) {
+            return Err(format!(
+                "{} has two columns named '{dup}'; wide column headers identify owners \
+                 and must be distinct",
+                csv_path.display()
+            ));
+        }
+        let owners = self.resolve_owners(&columns, base_dir, &csv_path)?;
+
+        let csv = csv_io::read_csv(&csv_path, leading)?;
+        if csv.rows > 0 && csv.row_width != columns.len() {
+            return Err(format!(
+                "{} has {} value columns in its header but {} in its rows",
+                csv_path.display(),
+                columns.len(),
+                csv.row_width
+            ));
+        }
+        let timestamps = if has_timestamps && ts_type == TimeSeriesType::NonSequentialTimeSeries {
+            Some(
+                csv.timestamps()
+                    .iter()
+                    .map(|s| parse::parse_timestamp(s))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
+
+        let mut out = Vec::with_capacity(columns.len());
+        for (j, (owner_id, owner_type)) in owners.into_iter().enumerate() {
+            let cells: Vec<String> = (0..csv.rows)
+                .map(|r| csv.values[r * csv.row_width + j].clone())
+                .collect();
+            let arr = csv_io::build_typed_array(dtype, vec![csv.rows], &cells)
+                .map_err(|e| format!("column '{}': {e}", columns[j]))?;
+            let mut data = match &timestamps {
+                Some(ts) => TimeSeriesData::NonSequentialTimeSeries(
+                    NonSequentialTimeSeries::new(ts.clone(), arr, &self.name)
+                        .map_err(|e| format!("column '{}': {e}", columns[j]))?,
+                ),
+                None => {
+                    let (initial, resolution) = self.regular_params()?;
+                    TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                        initial, resolution, arr, &self.name,
+                    ))
+                }
+            };
+            data.set_descriptors(element_type, self.units.clone(), self.ext.clone());
+            out.push(AddRequest {
+                owner_id,
+                owner_type,
+                owner_category,
+                data,
+                features: features.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// `(owner_id, owner_type)` for each wide column, in column order.
+    fn resolve_owners(
+        &self,
+        columns: &[String],
+        base_dir: Option<&Path>,
+        csv_path: &Path,
+    ) -> Result<Vec<(i64, String)>, String> {
+        let default_type = || {
+            self.owner_type.clone().ok_or_else(|| {
+                format!(
+                    "series '{}' requires `owner_type` (the type every wide column gets \
+                     unless its owner_map row names one)",
+                    self.name
+                )
+            })
+        };
+        match (&self.owner_id_from, &self.owner_map) {
+            (Some(_), Some(_)) => Err(format!(
+                "series '{}' sets both `owner_id_from` and `owner_map`; use one",
+                self.name
+            )),
+            (Some(from), None) => {
+                if from != "header" {
+                    return Err(format!(
+                        "series '{}': invalid `owner_id_from` '{from}' (the only value is \
+                         \"header\", for a CSV whose column headers already are owner ids)",
+                        self.name
+                    ));
+                }
+                let owner_type = default_type()?;
+                columns
+                    .iter()
+                    .map(|c| {
+                        c.trim()
+                            .parse::<i64>()
+                            .map(|id| (id, owner_type.clone()))
+                            .map_err(|_| {
+                                format!(
+                                    "{}: column header '{c}' is not an integer owner id. \
+                                     Drop \"owner_id_from\": \"header\" and supply an \
+                                     `owner_map` instead.",
+                                    csv_path.display()
+                                )
+                            })
+                    })
+                    .collect()
+            }
+            (None, Some(map)) => {
+                let table = self.load_owner_map(map, base_dir)?;
+                let mut out = Vec::with_capacity(columns.len());
+                let mut missing = Vec::new();
+                for c in columns {
+                    match table.get(c.trim()) {
+                        Some((id, ty)) => out.push((
+                            *id,
+                            match ty {
+                                Some(t) => t.clone(),
+                                None => default_type()?,
+                            },
+                        )),
+                        None => missing.push(c.clone()),
+                    }
+                }
+                if !missing.is_empty() {
+                    // Naming the columns is the whole value here: a 500-column
+                    // load that stops at "some column is unmapped" leaves the
+                    // caller diffing two files by hand.
+                    const MAX: usize = 10;
+                    let shown: Vec<&str> = missing.iter().take(MAX).map(String::as_str).collect();
+                    let more = missing.len().saturating_sub(MAX);
+                    return Err(format!(
+                        "{} of {}'s columns are not in the owner_map: {}{}",
+                        missing.len(),
+                        csv_path.display(),
+                        shown.join(", "),
+                        if more > 0 {
+                            format!(", ... and {more} more")
+                        } else {
+                            String::new()
+                        }
+                    ));
+                }
+                Ok(out)
+            }
+            (None, None) => Err(format!(
+                "series '{}': \"layout\": \"wide\" needs a column->owner mapping. Add \
+                 \"owner_map\": \"components.csv\" (a `column,owner_id[,owner_type]` file), \
+                 an inline \"owner_map\": {{\"gen_001\": 42}}, or \"owner_id_from\": \
+                 \"header\" if the headers already are owner ids.",
+                self.name
+            )),
+        }
+    }
+
+    /// The owner map as `column -> (owner_id, owner_type?)`.
+    fn load_owner_map(
+        &self,
+        map: &OwnerMap,
+        base_dir: Option<&Path>,
+    ) -> Result<BTreeMap<String, (i64, Option<String>)>, String> {
+        match map {
+            OwnerMap::Inline(entries) => Ok(entries
+                .iter()
+                .map(|(k, v)| (k.trim().to_string(), (*v, None)))
+                .collect()),
+            OwnerMap::Path(rel) => {
+                let path = match base_dir {
+                    Some(dir) => dir.join(rel),
+                    None => std::path::PathBuf::from(rel),
+                };
+                read_owner_map_csv(&path)
+            }
+        }
     }
 
     fn build_data(
@@ -491,4 +823,74 @@ impl Descriptor {
 fn with_elem(mut leading: Vec<usize>, elem: &[usize]) -> Vec<usize> {
     leading.extend_from_slice(elem);
     leading
+}
+
+/// The first value that appears twice, trimmed. `None` when all are distinct.
+fn first_duplicate(values: &[String]) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .map(|v| v.trim())
+        .find(|v| !seen.insert(*v))
+        .map(str::to_string)
+}
+
+/// Read a `column,owner_id[,owner_type]` sidecar into `column -> (id, type?)`.
+///
+/// The header row is mandatory and its names are checked, because the file is
+/// two or three same-shaped columns of text: a header-less file would silently
+/// map the literal column named `column` to the id `owner_id` and then report
+/// every real column as unmapped.
+fn read_owner_map_csv(path: &Path) -> Result<BTreeMap<String, (i64, Option<String>)>, String> {
+    let header = csv_io::read_header(path)?;
+    let normalized: Vec<String> = header
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    let has_type = match normalized.as_slice() {
+        [c, o] if c == "column" && o == "owner_id" => false,
+        [c, o, t] if c == "column" && o == "owner_id" && t == "owner_type" => true,
+        _ => {
+            return Err(format!(
+                "{}: an owner map must start with the header `column,owner_id` or \
+                 `column,owner_id,owner_type` (found `{}`)",
+                path.display(),
+                header.join(",")
+            ));
+        }
+    };
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(false)
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let mut out: BTreeMap<String, (i64, Option<String>)> = BTreeMap::new();
+    for (row, record) in reader.records().enumerate() {
+        let record =
+            record.map_err(|e| format!("reading {} row {}: {e}", path.display(), row + 1))?;
+        let column = record.get(0).unwrap_or_default().trim().to_string();
+        let raw_id = record.get(1).unwrap_or_default().trim();
+        let owner_id = raw_id.parse::<i64>().map_err(|_| {
+            format!(
+                "{} row {}: owner_id '{raw_id}' is not an integer",
+                path.display(),
+                row + 1
+            )
+        })?;
+        let owner_type = if has_type {
+            record
+                .get(2)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        if out.insert(column.clone(), (owner_id, owner_type)).is_some() {
+            return Err(format!("{} maps column '{column}' twice", path.display()));
+        }
+    }
+    Ok(out)
 }

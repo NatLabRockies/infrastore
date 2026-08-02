@@ -22,16 +22,23 @@ pub fn run(
     store_path: &Path,
     selector: &SelectorArgs,
     dir: Option<&Path>,
+    time_range: Option<&str>,
     format: Format,
 ) -> Result<(), String> {
+    // `table` is the global default, so the first `export` anyone ran used to
+    // fail on a flag they never passed. There is no table export to fall back
+    // to, and CSV is both the format `add` reads back and the one `--dir` is
+    // for, so it is what an unspecified format means here.
+    let format = match format {
+        Format::Table => Format::Csv,
+        other => other,
+    };
     let ext = match format {
         Format::Csv => "csv",
-        Format::Json => "json",
-        Format::Table => {
-            return Err("export writes files; use -f csv or -f json".to_string());
-        }
+        _ => "json",
     };
 
+    let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
     let metas = store
         .list_time_series(selector.to_filter()?)
@@ -50,7 +57,9 @@ pub fn run(
     // One batched read instead of N catalog round-trips.
     let identities: Vec<_> = metas.iter().map(select::key_of).collect();
     let refs: Vec<&_> = identities.iter().collect();
-    let datas = store.bulk_read(&refs).map_err(|e| e.to_string())?;
+    let datas = store
+        .bulk_read_range(&refs, range)
+        .map_err(|e| e.to_string())?;
 
     match dir {
         None => {
@@ -185,8 +194,7 @@ fn render(
 ) -> Result<String, String> {
     match format {
         Format::Csv => render_csv(meta, data),
-        Format::Json => render_json(meta, data),
-        Format::Table => unreachable!("rejected in run"),
+        _ => render_json(meta, data),
     }
 }
 

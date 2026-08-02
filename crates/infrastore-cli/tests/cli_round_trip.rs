@@ -674,9 +674,14 @@ fn export_to_dir_and_stdout() {
     let body = fs::read_to_string(out_dir.join(&files[0])).unwrap();
     assert!(body.contains("\"values\""), "export json: {body}");
 
-    // Table format is refused.
-    let err = run_err(&store, &["export", "--name", "a_series"]);
-    assert!(err.contains("csv or -f json"), "table refused: {err}");
+    // There is no table export, and `table` is the *global default* — so an
+    // `export` with no -f used to fail on a flag the caller never passed. It
+    // now means CSV, which is both what --dir is for and what `add` reads back.
+    let defaulted = run(&store, &["export", "--name", "a_series"]);
+    assert!(
+        defaulted.starts_with("timestamp,"),
+        "an unqualified export should write CSV: {defaulted}"
+    );
 }
 
 #[test]

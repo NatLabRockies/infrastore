@@ -178,10 +178,20 @@ fn parse_bool(s: &str) -> Result<bool, String> {
 
 /// Decode every element of an array to a display string, per dtype.
 pub fn array_to_strings(arr: &TypedArray) -> Vec<String> {
-    let size = arr.dtype.size();
-    arr.bytes
+    bytes_to_strings(arr.dtype, &arr.bytes)
+}
+
+/// Decode a raw little-endian buffer to one display string per element.
+///
+/// The array-free form of [`array_to_strings`], for the columnar reader: a
+/// [`crate::commands::grid`] read hands back a `StaticGroup`'s buffer rather
+/// than a [`TypedArray`], and wrapping it in one per timestep would copy the
+/// whole buffer on every step of the loop the reader exists to make cheap.
+pub fn bytes_to_strings(dtype: Dtype, bytes: &[u8]) -> Vec<String> {
+    let size = dtype.size();
+    bytes
         .chunks_exact(size)
-        .map(|c| match arr.dtype {
+        .map(|c| match dtype {
             Dtype::F64 => f64::from_le_bytes(c.try_into().unwrap()).to_string(),
             Dtype::F32 => f32::from_le_bytes(c.try_into().unwrap()).to_string(),
             Dtype::I64 => i64::from_le_bytes(c.try_into().unwrap()).to_string(),
