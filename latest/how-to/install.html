@@ -187,6 +187,16 @@
                         <h1 id="install-the-native-library"><a class="header" href="#install-the-native-library">Install the Native Library</a></h1>
 <p>This recipe builds the components other languages depend on. For the full prerequisites and
 workspace build, see <a href="../getting-started/installation.html">Installation</a>.</p>
+<blockquote>
+<p><strong>You may not need to build it.</strong> Each tagged release attaches <code>libinfrastore_ffi</code> and the
+generated <code>infrastore.h</code> to the
+<a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a>, linked statically against
+HDF5 and zlib. Downloading that archive and pointing <code>INFRASTORE_LIB</code> at the library (step 3
+below) skips this whole page. It is the shortest path for Julia today, since <code>InfraStore.jl</code> is
+not yet registered — see <a href="../getting-started/installation.html#julia">Installation § Julia</a>. Build
+from source when you need a platform the release matrix does not cover, or a library matching a
+working tree.</p>
+</blockquote>
 <h2 id="1-install-system-libraries"><a class="header" href="#1-install-system-libraries">1. Install System Libraries</a></h2>
 <pre><code class="language-sh"># macOS
 brew install hdf5 protobuf

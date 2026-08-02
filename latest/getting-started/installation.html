@@ -189,15 +189,59 @@
 <div class="table-wrapper"><table><thead><tr><th>Language</th><th>Install</th></tr></thead><tbody>
 <tr><td>Rust</td><td><code>cargo add infrastore-core</code></td></tr>
 <tr><td>Python</td><td><code>pip install infrastore</code></td></tr>
-<tr><td>Julia</td><td><code>Pkg.add("InfraStore")</code></td></tr>
-<tr><td>CLI</td><td><code>cargo install infrastore-cli</code></td></tr>
+<tr><td>CLI</td><td><a href="#the-infrastore-cli">download a binary</a>, or <code>cargo install infrastore-cli</code></td></tr>
+<tr><td>Julia</td><td>not yet registered — see <a href="#julia">Julia</a></td></tr>
 </tbody></table>
 </div>
-<p>The Python wheels and the Julia binary (<code>InfraStore_jll</code>) are prebuilt and self-contained. The Rust
-crates build HDF5 and zlib from vendored sources and link them statically, so they need <code>cmake</code> and
-a C compiler but <strong>no system HDF5</strong>. The same vendored, statically linked stack backs every channel,
-so the HDF5 version behind the on-disk format is pinned by infrastore rather than by the target
-environment.</p>
+<p>The Python wheels are prebuilt and self-contained. The Rust crates build HDF5 and zlib from vendored
+sources and link them statically, so they need <code>cmake</code> and a C compiler but <strong>no system HDF5</strong>. The
+same vendored, statically linked stack backs every channel, so the HDF5 version behind the on-disk
+format is pinned by infrastore rather than by the target environment.</p>
+<h2 id="the-infrastore-cli"><a class="header" href="#the-infrastore-cli">The <code>infrastore</code> CLI</a></h2>
+<h3 id="download-a-prebuilt-binary"><a class="header" href="#download-a-prebuilt-binary">Download a prebuilt binary</a></h3>
+<p>Each tagged release attaches archives to the
+<a href="https://github.com/NatLabRockies/infrastore/releases">Releases page</a>. The executables are linked
+statically against HDF5 and zlib, so there is nothing else to install.</p>
+<div class="table-wrapper"><table><thead><tr><th>Archive</th><th>Contents</th></tr></thead><tbody>
+<tr><td><code>infrastore-x86_64-unknown-linux-musl.tar.gz</code></td><td>Linux x86_64 — <code>infrastore</code>, <code>infrastore-server</code></td></tr>
+<tr><td><code>infrastore-x86_64-unknown-linux-gnu.tar.gz</code></td><td>Linux x86_64 — <code>libinfrastore_ffi.so</code> + <code>infrastore.h</code></td></tr>
+<tr><td><code>infrastore-aarch64-apple-darwin.tar.gz</code></td><td>macOS Apple Silicon — executables and C library</td></tr>
+<tr><td><code>infrastore-x86_64-pc-windows-msvc.zip</code></td><td>Windows x86_64 — executables and C library</td></tr>
+</tbody></table>
+</div>
+<p>Linux ships two archives because they serve different consumers. The executables are built against
+musl and linked statically, so they run on any distribution regardless of its glibc version —
+including an HPC login node much older than the build machine. The C library is built against glibc
+instead: it gets loaded into a running Julia or Python process, and a musl shared library there
+would put two C libraries in one address space.</p>
+<pre><code class="language-sh">VERSION=v0.5.0    # pick a release from the Releases page
+BASE=https://github.com/NatLabRockies/infrastore/releases/download/$VERSION
+curl -fsSLO $BASE/infrastore-aarch64-apple-darwin.tar.gz
+tar xzf infrastore-aarch64-apple-darwin.tar.gz
+./infrastore --version
+</code></pre>
+<p>Move <code>infrastore</code> onto your <code>PATH</code> to finish. Every archive carries a <code>.sha256</code> sidecar if you want
+to verify the download first:</p>
+<pre><code class="language-sh">curl -fsSLO $BASE/infrastore-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c infrastore-aarch64-apple-darwin.tar.gz.sha256   # sha256sum -c on Linux
+</code></pre>
+<blockquote>
+<p><strong>macOS.</strong> The binaries are not notarized, so Gatekeeper blocks the first run of a downloaded
+executable. Clear the quarantine flag with <code>xattr -d com.apple.quarantine ./infrastore</code>.</p>
+</blockquote>
+<h3 id="install-from-cratesio"><a class="header" href="#install-from-cratesio">Install from crates.io</a></h3>
+<pre><code class="language-sh">cargo install infrastore-cli      # installs the `infrastore` binary
+</code></pre>
+<p>This compiles HDF5 from vendored sources, so it needs <code>cmake</code> and a C compiler (see
+<a href="#build-prerequisites">Build Prerequisites</a>) and takes a few minutes on the first build.</p>
+<h2 id="julia"><a class="header" href="#julia">Julia</a></h2>
+<p><code>InfraStore.jl</code> is <strong>not yet registered in the Julia General registry</strong>, and neither is the
+<code>InfraStore_jll</code> binary package it will eventually load, so <code>Pkg.add("InfraStore")</code> does not work
+yet. Until both are registered, install the package from a checkout and point <code>INFRASTORE_LIB</code> at a
+cdylib — either <code>libinfrastore_ffi</code> from the release archives above, or one you build with
+<code>cargo build -p infrastore-ffi --release</code>. <a href="../how-to/integrate-julia.html">Integrate with Julia</a> has
+the full recipe, and <a href="../releasing.html#5-julia--general">Releasing</a> tracks what registration still
+needs.</p>
 <p>The rest of this page covers building the workspace from a checkout.</p>
 <h2 id="build-prerequisites"><a class="header" href="#build-prerequisites">Build Prerequisites</a></h2>
 <p>A Rust toolchain, <code>cmake</code>, a C compiler, and <code>protobuf</code> for the gRPC codegen. The Python and Julia
