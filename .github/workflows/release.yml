@@ -124,6 +124,23 @@ jobs:
           cargo build --release --locked --all-features \
             --target ${{ matrix.target }} "${packages[@]}"
 
+      # An executable that links but does not start is still a broken release,
+      # and nothing downstream would notice -- the archive step only copies
+      # files. The musl binaries are static, so the glibc runner runs them
+      # directly. `infrastore-server` has no `--version`, hence `--help`.
+      - name: Smoke-test the executables
+        if: contains(matrix.payload, 'bins')
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          case "$RUNNER_OS" in
+            Windows) exe=".exe" ;;
+            *)       exe="" ;;
+          esac
+          "$out/infrastore$exe" --version
+          "$out/infrastore-server$exe" --help > /dev/null
+
       - name: Create release archive
         id: archive
         shell: bash
