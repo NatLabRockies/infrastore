@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::color;
 use crate::confirm;
-use crate::output::{self, Format};
+use crate::output::{self, Format, report};
 use crate::store_access;
 
 /// `attributes`: component <-> supplemental-attribute attachments.
@@ -233,6 +233,7 @@ pub struct AttachArgs<'a> {
     /// A `component_id,component_type,attribute_id,attribute_type` CSV.
     pub from: Option<&'a Path>,
     pub dry_run: bool,
+    pub format: Format,
 }
 
 /// `attach`: attach supplemental attributes to components.
@@ -259,25 +260,46 @@ pub fn attach(store_path: &Path, args: &AttachArgs<'_>) -> Result<(), String> {
         }],
     };
     if args.dry_run {
-        println!("Would attach {} supplemental attribute(s):", rows.len());
-        for r in &rows {
-            println!(
-                "  - component {} ({}) <- attribute {} ({})",
-                r.component_id, r.component_type, r.attribute_id, r.attribute_type
-            );
-        }
-        return Ok(());
+        return report(
+            args.format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_attach": rows.len(),
+                    "attachments": rows.iter().map(|r| json!({
+                        "component_id": r.component_id,
+                        "component_type": r.component_type,
+                        "attribute_id": r.attribute_id,
+                        "attribute_type": r.attribute_type,
+                    })).collect::<Vec<_>>(),
+                })
+            },
+            || {
+                println!("Would attach {} supplemental attribute(s):", rows.len());
+                for r in &rows {
+                    println!(
+                        "  - component {} ({}) <- attribute {} ({})",
+                        r.component_id, r.component_type, r.attribute_id, r.attribute_type
+                    );
+                }
+            },
+        );
     }
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .add_supplemental_attribute_associations(rows)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!("Attached {n} supplemental attribute(s)."))
-    );
-    Ok(())
+    report(
+        args.format,
+        || json!({ "attached": n }),
+        || {
+            println!(
+                "{}",
+                color::header(&format!("Attached {n} supplemental attribute(s)."))
+            );
+        },
+    )
 }
 
 /// `detach`: remove every attachment matching the filter.
@@ -294,6 +316,7 @@ pub fn detach(
     all: bool,
     force: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let filter = attribute_filter(component_id, attribute_id, component_type, attribute_type);
     let narrowed = component_id.is_some()
@@ -314,12 +337,20 @@ pub fn detach(
         .map_err(|e| e.to_string())?;
     drop(store);
     if dry_run {
-        println!("Would detach {matched} supplemental attribute attachment(s).");
-        return Ok(());
+        return report(
+            format,
+            || json!({ "dry_run": true, "would_detach": matched }),
+            || println!("Would detach {matched} supplemental attribute attachment(s)."),
+        );
     }
     if matched == 0 {
-        println!("{}", color::dim("No attachments matched the filter."));
-        return Ok(());
+        return report(
+            format,
+            || json!({ "detached": 0 }),
+            || {
+                println!("{}", color::dim("No attachments matched the filter."));
+            },
+        );
     }
     if !force && !confirm::ask(&format!("Detach {matched} attachment(s)? [y/N] "))? {
         return Ok(());
@@ -329,8 +360,13 @@ pub fn detach(
         .remove_supplemental_attribute_associations(&filter)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!("{}", color::header(&format!("Detached {n} attachment(s).")));
-    Ok(())
+    report(
+        format,
+        || json!({ "detached": n }),
+        || {
+            println!("{}", color::header(&format!("Detached {n} attachment(s).")));
+        },
+    )
 }
 
 /// The four fields of one directed edge, as flags.
@@ -342,6 +378,7 @@ pub struct LinkArgs<'a> {
     /// A `parent_id,parent_type,child_id,child_type` CSV.
     pub from: Option<&'a Path>,
     pub dry_run: bool,
+    pub format: Format,
 }
 
 /// `link`: add directed parent -> child component edges.
@@ -364,22 +401,43 @@ pub fn link(store_path: &Path, args: &LinkArgs<'_>) -> Result<(), String> {
         }],
     };
     if args.dry_run {
-        println!("Would add {} link(s):", rows.len());
-        for r in &rows {
-            println!(
-                "  - {} ({}) -> {} ({})",
-                r.parent_id, r.parent_type, r.child_id, r.child_type
-            );
-        }
-        return Ok(());
+        return report(
+            args.format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_link": rows.len(),
+                    "links": rows.iter().map(|r| json!({
+                        "parent_id": r.parent_id,
+                        "parent_type": r.parent_type,
+                        "child_id": r.child_id,
+                        "child_type": r.child_type,
+                    })).collect::<Vec<_>>(),
+                })
+            },
+            || {
+                println!("Would add {} link(s):", rows.len());
+                for r in &rows {
+                    println!(
+                        "  - {} ({}) -> {} ({})",
+                        r.parent_id, r.parent_type, r.child_id, r.child_type
+                    );
+                }
+            },
+        );
     }
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .add_parent_child_associations(rows)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!("{}", color::header(&format!("Added {n} link(s).")));
-    Ok(())
+    report(
+        args.format,
+        || json!({ "linked": n }),
+        || {
+            println!("{}", color::header(&format!("Added {n} link(s).")));
+        },
+    )
 }
 
 /// `unlink`: remove every edge matching the filter.
@@ -393,6 +451,7 @@ pub fn unlink(
     all: bool,
     force: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let filter = link_filter(parent_id, child_id, parent_type, child_type);
     let narrowed =
@@ -411,12 +470,20 @@ pub fn unlink(
         .map_err(|e| e.to_string())?;
     drop(store);
     if dry_run {
-        println!("Would remove {matched} link(s).");
-        return Ok(());
+        return report(
+            format,
+            || json!({ "dry_run": true, "would_unlink": matched }),
+            || println!("Would remove {matched} link(s)."),
+        );
     }
     if matched == 0 {
-        println!("{}", color::dim("No links matched the filter."));
-        return Ok(());
+        return report(
+            format,
+            || json!({ "unlinked": 0 }),
+            || {
+                println!("{}", color::dim("No links matched the filter."));
+            },
+        );
     }
     if !force && !confirm::ask(&format!("Remove {matched} link(s)? [y/N] "))? {
         return Ok(());
@@ -426,8 +493,13 @@ pub fn unlink(
         .remove_parent_child_associations(&filter)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!("{}", color::header(&format!("Removed {n} link(s).")));
-    Ok(())
+    report(
+        format,
+        || json!({ "unlinked": n }),
+        || {
+            println!("{}", color::header(&format!("Removed {n} link(s).")));
+        },
+    )
 }
 
 /// `reassign`: move a component's associations from one id to another.
@@ -443,6 +515,7 @@ pub fn reassign(
     attributes: bool,
     links: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     // Neither flag means both — the usual reason to reassign is that a
     // component was renumbered, and that moves everything about it.
@@ -452,14 +525,15 @@ pub fn reassign(
     };
     if dry_run {
         let store = store_access::open_readonly(store_path)?;
-        let mut lines = Vec::new();
+        let mut counts = ReassignCounts::default();
         if do_attributes {
-            let n = store
-                .count_supplemental_attribute_associations(
-                    &SupplementalAttributeFilter::new().component_id(old),
-                )
-                .map_err(|e| e.to_string())?;
-            lines.push(format!("{n} supplemental attribute attachment(s)"));
+            counts.attachments = Some(
+                store
+                    .count_supplemental_attribute_associations(
+                        &SupplementalAttributeFilter::new().component_id(old),
+                    )
+                    .map_err(|e| e.to_string())?,
+            );
         }
         if do_links {
             let as_parent = store
@@ -468,38 +542,88 @@ pub fn reassign(
             let as_child = store
                 .count_parent_child_associations(&ParentChildFilter::new().child_id(old))
                 .map_err(|e| e.to_string())?;
-            lines.push(format!("{} link(s)", as_parent + as_child));
+            counts.links = Some(as_parent + as_child);
         }
-        println!(
-            "Would reassign {} from component {old} to {new}.",
-            lines.join(" and ")
+        let prose = counts.prose();
+        return report(
+            format,
+            || {
+                let mut doc = counts.to_json(old, new);
+                doc["dry_run"] = json!(true);
+                doc
+            },
+            || println!("Would reassign {prose} from component {old} to {new}."),
         );
-        return Ok(());
     }
 
     let mut store = store_access::open_writable(store_path)?;
-    let mut moved = Vec::new();
+    let mut counts = ReassignCounts::default();
     if do_attributes {
         let n = store
             .replace_supplemental_attribute_component_id(old, new)
             .map_err(|e| e.to_string())?;
-        moved.push(format!("{n} attachment(s)"));
+        counts.attachments = Some(n as i64);
     }
     if do_links {
         let n = store
             .replace_parent_child_component_id(old, new)
             .map_err(|e| e.to_string())?;
-        moved.push(format!("{n} link(s)"));
+        counts.links = Some(n as i64);
     }
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Reassigned {} from component {old} to {new}.",
-            moved.join(" and ")
-        ))
-    );
-    Ok(())
+    let prose = counts.prose();
+    report(
+        format,
+        || counts.to_json(old, new),
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Reassigned {prose} from component {old} to {new}."
+                ))
+            );
+        },
+    )
+}
+
+/// What a `reassign` touched, per catalog.
+///
+/// `None` means the run was scoped away from that catalog by `--attributes` /
+/// `--links`, which is not the same as having found nothing there — so the JSON
+/// omits the key entirely rather than reporting a zero the caller would read as
+/// "checked, empty".
+///
+/// Counts are `i64` because that is what the catalog's `count_*` calls return;
+/// the `replace_*` calls hand back a `usize` row count that is converted on the
+/// way in.
+#[derive(Default)]
+struct ReassignCounts {
+    attachments: Option<i64>,
+    links: Option<i64>,
+}
+
+impl ReassignCounts {
+    fn to_json(&self, old: i64, new: i64) -> Value {
+        let mut doc = json!({ "from": old, "to": new });
+        if let Some(n) = self.attachments {
+            doc["attachments"] = json!(n);
+        }
+        if let Some(n) = self.links {
+            doc["links"] = json!(n);
+        }
+        doc
+    }
+
+    fn prose(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(n) = self.attachments {
+            parts.push(format!("{n} attachment(s)"));
+        }
+        if let Some(n) = self.links {
+            parts.push(format!("{n} link(s)"));
+        }
+        parts.join(" and ")
+    }
 }
 
 // --- bulk import -----------------------------------------------------------

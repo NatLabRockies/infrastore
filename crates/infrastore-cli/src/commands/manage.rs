@@ -2,8 +2,11 @@
 
 use std::path::Path;
 
+use serde_json::json;
+
 use crate::color;
 use crate::confirm;
+use crate::output::{Format, report};
 use crate::parse;
 use crate::select::SelectorArgs;
 use crate::store_access;
@@ -14,19 +17,32 @@ pub fn remove(
     selector: &SelectorArgs,
     force: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
     drop(store);
 
     if dry_run {
-        println!(
-            "Would remove {} '{}' (owner {}).",
-            meta.time_series_type.as_str(),
-            meta.name,
-            meta.owner_id
+        let ts_type = meta.time_series_type.as_str();
+        return report(
+            format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_remove": 1,
+                    "name": meta.name,
+                    "owner_id": meta.owner_id,
+                    "time_series_type": ts_type,
+                })
+            },
+            || {
+                println!(
+                    "Would remove {} '{}' (owner {}).",
+                    ts_type, meta.name, meta.owner_id
+                );
+            },
         );
-        return Ok(());
     }
 
     if !force
@@ -43,14 +59,19 @@ pub fn remove(
     let mut store = store_access::open_writable(store_path)?;
     store.remove_time_series(&key).map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Removed '{}' (owner {}).",
-            meta.name, meta.owner_id
-        ))
-    );
-    Ok(())
+    report(
+        format,
+        || json!({ "removed": 1, "name": meta.name, "owner_id": meta.owner_id }),
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Removed '{}' (owner {}).",
+                    meta.name, meta.owner_id
+                ))
+            );
+        },
+    )
 }
 
 /// `transform`: derive DeterministicSingleTimeSeries from stored SingleTimeSeries,
@@ -61,6 +82,7 @@ pub fn transform(
     interval: &str,
     owner_category: Option<&str>,
     resolution: Option<&str>,
+    format: Format,
 ) -> Result<(), String> {
     let horizon = parse::parse_period(horizon)?;
     let interval = parse::parse_period(interval)?;
@@ -80,13 +102,18 @@ pub fn transform(
         .map_err(|e| e.to_string())?
         .transformed;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Transformed {n} SingleTimeSeries into DeterministicSingleTimeSeries."
-        ))
-    );
-    Ok(())
+    report(
+        format,
+        || json!({ "transformed": n }),
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Transformed {n} SingleTimeSeries into DeterministicSingleTimeSeries."
+                ))
+            );
+        },
+    )
 }
 
 /// `rename`: rename the single series a selector resolves to.
@@ -95,30 +122,56 @@ pub fn rename(
     selector: &SelectorArgs,
     new_name: &str,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
     drop(store);
     if dry_run {
-        println!(
-            "Would rename '{}' (owner {}) to '{new_name}'.",
-            meta.name, meta.owner_id
+        return report(
+            format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_rename": 1,
+                    "name": meta.name,
+                    "new_name": new_name,
+                    "owner_id": meta.owner_id,
+                })
+            },
+            || {
+                println!(
+                    "Would rename '{}' (owner {}) to '{new_name}'.",
+                    meta.name, meta.owner_id
+                );
+            },
         );
-        return Ok(());
     }
     let mut store = store_access::open_writable(store_path)?;
     store
         .rename_time_series(&key, new_name)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Renamed '{}' (owner {}) to '{new_name}'.",
-            meta.name, meta.owner_id
-        ))
-    );
-    Ok(())
+    report(
+        format,
+        || {
+            json!({
+                "renamed": 1,
+                "name": meta.name,
+                "new_name": new_name,
+                "owner_id": meta.owner_id,
+            })
+        },
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Renamed '{}' (owner {}) to '{new_name}'.",
+                    meta.name, meta.owner_id
+                ))
+            );
+        },
+    )
 }
 
 /// `remove --all`: remove every series matching the selector (may be several).
@@ -127,6 +180,7 @@ pub fn remove_all(
     selector: &SelectorArgs,
     force: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let filter = selector.to_filter()?;
@@ -135,20 +189,38 @@ pub fn remove_all(
         .map_err(|e| e.to_string())?;
     drop(store);
     if matches.is_empty() {
-        println!("{}", color::dim("No time series matched the selector."));
-        return Ok(());
+        // A zero count rather than nothing at all: a script that pipes this into
+        // `jq .removed` should read 0, not choke on an empty document.
+        return report(
+            format,
+            || json!({ "removed": 0 }),
+            || {
+                println!("{}", color::dim("No time series matched the selector."));
+            },
+        );
     }
     if dry_run {
-        println!("Would remove {} time series:", matches.len());
-        for m in &matches {
-            println!(
-                "  - owner={} type={} name={}",
-                m.owner_id,
-                m.time_series_type.as_str(),
-                m.name
-            );
-        }
-        return Ok(());
+        return report(
+            format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_remove": matches.len(),
+                    "matches": matches.iter().map(identity_json).collect::<Vec<_>>(),
+                })
+            },
+            || {
+                println!("Would remove {} time series:", matches.len());
+                for m in &matches {
+                    println!(
+                        "  - owner={} type={} name={}",
+                        m.owner_id,
+                        m.time_series_type.as_str(),
+                        m.name
+                    );
+                }
+            },
+        );
     }
     if !force
         && !confirm::ask(&format!(
@@ -161,8 +233,23 @@ pub fn remove_all(
     let mut store = store_access::open_writable(store_path)?;
     let n = store.remove_by_filter(filter).map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!("{}", color::header(&format!("Removed {n} time series.")));
-    Ok(())
+    report(
+        format,
+        || json!({ "removed": n }),
+        || {
+            println!("{}", color::header(&format!("Removed {n} time series.")));
+        },
+    )
+}
+
+/// The identifying triple of one series, for the `matches` list a `--dry-run`
+/// reports under `-f json`.
+fn identity_json(m: &infrastore_core::TimeSeriesMetadata) -> serde_json::Value {
+    json!({
+        "owner_id": m.owner_id,
+        "time_series_type": m.time_series_type.as_str(),
+        "name": m.name,
+    })
 }
 
 /// `clear`: remove all series, or all for one owner, confirming when interactive.
@@ -172,6 +259,7 @@ pub fn clear(
     owner_category: Option<&str>,
     force: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let owner = match (owner_id, owner_category) {
         (Some(id), Some(cat)) => Some((id, parse::parse_owner_category(cat)?)),
@@ -187,8 +275,11 @@ pub fn clear(
             filter = filter.owner_id(id).owner_category(cat);
         }
         let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
-        println!("Would clear {n} time series.");
-        return Ok(());
+        return report(
+            format,
+            || json!({ "dry_run": true, "would_clear": n }),
+            || println!("Would clear {n} time series."),
+        );
     }
     let scope = match owner {
         Some((id, _)) => format!("owner {id}"),
@@ -200,8 +291,13 @@ pub fn clear(
     let mut store = store_access::open_writable(store_path)?;
     let n = store.clear_time_series(owner).map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!("{}", color::header(&format!("Cleared {n} time series.")));
-    Ok(())
+    report(
+        format,
+        || json!({ "cleared": n }),
+        || {
+            println!("{}", color::header(&format!("Cleared {n} time series.")));
+        },
+    )
 }
 
 /// `replace-owner`: reassign every series from one owner to another.
@@ -211,6 +307,7 @@ pub fn replace_owner(
     new: i64,
     owner_category: &str,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let category = parse::parse_owner_category(owner_category)?;
     if dry_run {
@@ -219,21 +316,29 @@ pub fn replace_owner(
             .owner_id(old)
             .owner_category(category);
         let n = store.list_keys(filter).map_err(|e| e.to_string())?.len();
-        println!("Would reassign {n} time series from owner {old} to {new}.");
-        return Ok(());
+        return report(
+            format,
+            || json!({ "dry_run": true, "would_reassign": n, "from": old, "to": new }),
+            || println!("Would reassign {n} time series from owner {old} to {new}."),
+        );
     }
     let mut store = store_access::open_writable(store_path)?;
     let n = store
         .replace_owner(old, new, category)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Reassigned {n} time series from owner {old} to {new}."
-        ))
-    );
-    Ok(())
+    report(
+        format,
+        || json!({ "reassigned": n, "from": old, "to": new }),
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Reassigned {n} time series from owner {old} to {new}."
+                ))
+            );
+        },
+    )
 }
 
 /// `copy`: copy the single series a selector resolves to onto another owner.
@@ -244,31 +349,58 @@ pub fn copy(
     dst_owner_type: &str,
     new_name: Option<&str>,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     let store = store_access::open_readonly(store_path)?;
     let (meta, key) = selector.resolve(&store)?;
     drop(store);
+    let dst_name = new_name.unwrap_or(&meta.name);
     if dry_run {
-        println!(
-            "Would copy '{}' (owner {}) to owner {dst_owner_id} ({dst_owner_type}) as '{}'.",
-            meta.name,
-            meta.owner_id,
-            new_name.unwrap_or(&meta.name)
+        return report(
+            format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_copy": 1,
+                    "name": meta.name,
+                    "owner_id": meta.owner_id,
+                    "dst_owner_id": dst_owner_id,
+                    "dst_owner_type": dst_owner_type,
+                    "dst_name": dst_name,
+                })
+            },
+            || {
+                println!(
+                    "Would copy '{}' (owner {}) to owner {dst_owner_id} ({dst_owner_type}) as '{dst_name}'.",
+                    meta.name, meta.owner_id
+                );
+            },
         );
-        return Ok(());
     }
     let mut store = store_access::open_writable(store_path)?;
     store
         .copy_time_series(&key, dst_owner_id, dst_owner_type, new_name)
         .map_err(|e| e.to_string())?;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Copied to owner {dst_owner_id} ({dst_owner_type})."
-        ))
-    );
-    Ok(())
+    report(
+        format,
+        || {
+            json!({
+                "copied": 1,
+                "dst_owner_id": dst_owner_id,
+                "dst_owner_type": dst_owner_type,
+                "dst_name": dst_name,
+            })
+        },
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Copied to owner {dst_owner_id} ({dst_owner_type})."
+                ))
+            );
+        },
+    )
 }
 
 /// `persist`: write the store to a new HDF5 + SQLite artifact.
@@ -278,7 +410,13 @@ pub fn copy(
 /// overwriting an existing artifact is the one operation here whose failure
 /// mode loses data that was not otherwise at risk. An existing destination
 /// therefore needs `--force` or an interactive `y`.
-pub fn persist(store_path: &Path, dest: &Path, force: bool, dry_run: bool) -> Result<(), String> {
+pub fn persist(
+    store_path: &Path,
+    dest: &Path,
+    force: bool,
+    dry_run: bool,
+    format: Format,
+) -> Result<(), String> {
     let catalog = store_access::catalog_path(dest);
     // Both halves are one artifact, so either one existing counts as "there is
     // something here to lose".
@@ -288,21 +426,26 @@ pub fn persist(store_path: &Path, dest: &Path, force: bool, dry_run: bool) -> Re
         .collect();
 
     if dry_run {
-        println!("Would write {} and {}.", dest.display(), catalog.display());
-        if !existing.is_empty() {
-            println!(
-                "{}",
-                color::dim(&format!(
-                    "Overwriting: {}",
-                    existing
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            );
-        }
-        return Ok(());
+        let overwriting: Vec<String> = existing.iter().map(|p| p.display().to_string()).collect();
+        return report(
+            format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_write": [dest.display().to_string(), catalog.display().to_string()],
+                    "overwriting": overwriting,
+                })
+            },
+            || {
+                println!("Would write {} and {}.", dest.display(), catalog.display());
+                if !overwriting.is_empty() {
+                    println!(
+                        "{}",
+                        color::dim(&format!("Overwriting: {}", overwriting.join(", ")))
+                    );
+                }
+            },
+        );
     }
 
     if !existing.is_empty() && !force {
@@ -324,11 +467,22 @@ pub fn persist(store_path: &Path, dest: &Path, force: bool, dry_run: bool) -> Re
 
     let mut store = store_access::open_writable(store_path)?;
     store.persist_to(dest).map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!("Persisted store to {}.", dest.display()))
-    );
-    Ok(())
+    report(
+        format,
+        || {
+            json!({
+                "persisted": true,
+                "dest": dest.display().to_string(),
+                "catalog": catalog.display().to_string(),
+            })
+        },
+        || {
+            println!(
+                "{}",
+                color::header(&format!("Persisted store to {}.", dest.display()))
+            );
+        },
+    )
 }
 
 /// `init`: create an empty store with an explicit policy.
@@ -342,6 +496,7 @@ pub fn init(
     store_path: &Path,
     compression: Option<infrastore_core::Compression>,
     catalog: store_access::CatalogChoice,
+    format: Format,
 ) -> Result<(), String> {
     if store_path.exists() {
         return Err(format!(
@@ -351,23 +506,34 @@ pub fn init(
     }
     let mut store = store_access::open_writable_with(store_path, compression, catalog)?;
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Created {} (catalog: {catalog}).",
-            store_path.display()
-        ))
-    );
-    if catalog == store_access::CatalogChoice::InMemory {
-        println!(
-            "{}",
-            color::dim(
-                "The catalog stays in RAM: run `infrastore persist --dest <path.h5>` when \
-                 the load is done, or the arrays will be unreachable."
-            )
-        );
-    }
-    Ok(())
+    let in_memory = catalog == store_access::CatalogChoice::InMemory;
+    report(
+        format,
+        || {
+            json!({
+                "created": store_path.display().to_string(),
+                "catalog": catalog.to_string(),
+            })
+        },
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Created {} (catalog: {catalog}).",
+                    store_path.display()
+                ))
+            );
+            if in_memory {
+                println!(
+                    "{}",
+                    color::dim(
+                        "The catalog stays in RAM: run `infrastore persist --dest <path.h5>` when \
+                         the load is done, or the arrays will be unreachable."
+                    )
+                );
+            }
+        },
+    )
 }
 
 /// `merge`: copy matching series from another store into this one.
@@ -387,6 +553,7 @@ pub fn merge(
     selector: &SelectorArgs,
     replace: bool,
     dry_run: bool,
+    format: Format,
 ) -> Result<(), String> {
     if from == store_path {
         return Err("merge --from is the destination store itself".to_string());
@@ -396,15 +563,31 @@ pub fn merge(
         .list_time_series(selector.to_filter()?)
         .map_err(|e| e.to_string())?;
     if metas.is_empty() {
-        println!("{}", color::dim("No time series matched the selector."));
-        return Ok(());
+        return report(
+            format,
+            || json!({ "merged": 0 }),
+            || {
+                println!("{}", color::dim("No time series matched the selector."));
+            },
+        );
     }
     if dry_run {
-        println!("Would merge {} time series:", metas.len());
-        for m in &metas {
-            println!("  - {}", crate::fields::identity_line(m));
-        }
-        return Ok(());
+        return report(
+            format,
+            || {
+                json!({
+                    "dry_run": true,
+                    "would_merge": metas.len(),
+                    "matches": metas.iter().map(identity_json).collect::<Vec<_>>(),
+                })
+            },
+            || {
+                println!("Would merge {} time series:", metas.len());
+                for m in &metas {
+                    println!("  - {}", crate::fields::identity_line(m));
+                }
+            },
+        );
     }
 
     let identities: Vec<_> = metas.iter().map(crate::select::key_of).collect();
@@ -436,15 +619,26 @@ pub fn merge(
         .map_err(|e| e.to_string())?
         .len();
     store.flush().map_err(|e| e.to_string())?;
-    println!(
-        "{}",
-        color::header(&format!(
-            "Merged {n} time series from {} into {}.",
-            from.display(),
-            store_path.display()
-        ))
-    );
-    Ok(())
+    report(
+        format,
+        || {
+            json!({
+                "merged": n,
+                "from": from.display().to_string(),
+                "into": store_path.display().to_string(),
+            })
+        },
+        || {
+            println!(
+                "{}",
+                color::header(&format!(
+                    "Merged {n} time series from {} into {}.",
+                    from.display(),
+                    store_path.display()
+                ))
+            );
+        },
+    )
 }
 
 /// `compact`: reclaim space; print the compaction report. Confirms first when
@@ -525,8 +719,7 @@ pub fn template(ts_type: &str) -> Result<(), String> {
             );
         }
     };
-    print!("{body}");
-    Ok(())
+    crate::output::write_raw(body)
 }
 
 // Every template spells its `type`, `owner_category`, and durations exactly the
