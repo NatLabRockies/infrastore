@@ -82,9 +82,11 @@ def mdbook_slug(heading: str) -> str:
     heading = re.sub(r"[^\w\s-]", "", heading, flags=re.UNICODE)
     # One dash per whitespace character, not per run. mdbook does not collapse
     # them, so punctuation dropped by the line above leaves the spaces that
-    # surrounded it behind as separate dashes: "Rust -> crates.io" (with an
-    # arrow) anchors as `2-rust--crates-io`, not `2-rust-crates-io`. Collapsing
-    # here makes the checker reject links that actually resolve on the site.
+    # surrounded it behind as separate dashes, while punctuation with no space
+    # around it just vanishes. The heading "2. Rust -> crates.io" (with an
+    # arrow) therefore anchors as `2-rust--cratesio`: two dashes where the arrow
+    # was, none where the dot was. Collapsing here makes the checker reject
+    # links that actually resolve on the site.
     return re.sub(r"\s", "-", heading)
 
 

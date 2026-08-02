@@ -185,6 +185,14 @@ jobs:
           echo "name=$name" >> "$GITHUB_OUTPUT"
           ls -lh release
 
+      # upload@v7 pairs with download@v8 in create-release. That is a newer
+      # pairing than the artifact@v4 the rest of this repo uses, and the two
+      # must be upgraded together -- an upload major and a download major are
+      # only guaranteed to interoperate as the pair the Actions team ships.
+      # v4 is not deprecated (only v1-v3 are) so it would also work; this
+      # follows torc's release.yml, where the same pairing has green runs.
+      # Nothing between v4 and v7 changed the inputs used here: v5 and v6 are
+      # Node runtime bumps and v7 adds an optional `archive` input.
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
