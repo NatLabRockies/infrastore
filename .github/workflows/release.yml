@@ -11,6 +11,15 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Smoke-test the build matrix whenever this file changes, the way
+  # python-wheels.yml does for the wheel build. Without it the matrix is
+  # unreachable before merge: `workflow_dispatch` cannot be triggered on a
+  # branch until the workflow exists on the default branch, so an edit here
+  # would otherwise get its first real run on a tag, where a failure is
+  # expensive. `create-release` and `deploy-docs` are gated on a tag ref, so a
+  # pull request only exercises `build`.
+  pull_request:
+    paths: [".github/workflows/release.yml"]
   workflow_dispatch:
 
 # Granted per job rather than workflow-wide: only create-release (draft +
