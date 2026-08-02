@@ -171,37 +171,51 @@ The package overloads `Base` (`==` / `hash` on keys via the core identity, `show
 ## CLI
 
 `infrastore` loads time series from CSV and inspects a store, talking directly to the on-disk HDF5
-and SQLite artifact (no gRPC). A global `-f/--format` selects `table` (default), `json`, or `csv`,
-and `--store` falls back to the `INFRASTORE_STORE` environment variable.
+and SQLite artifact (no gRPC). A global `-f/--format` selects `table` (default), `json`, `jsonl`, or
+`csv`; `--store` falls back to the `INFRASTORE_STORE` environment variable; and `-y/--yes` answers
+every confirmation prompt.
 
 ```sh
 cargo build -p infrastore-cli   # builds the `infrastore` binary
 IS=target/debug/infrastore
 
 # Numeric values live in a CSV; everything else is described in a descriptor JSON.
-$IS template single > load.json                              # example descriptor to edit
+$IS template SingleTimeSeries > load.json                    # example descriptor to edit
 $IS --store demo.h5 add --descriptor load.json               # creates the store on first add
 $IS --store demo.h5 list
 $IS --store demo.h5 get  --owner-id 42 --name load           # pretty table
 $IS --store demo.h5 -f csv  get  --owner-id 42 --name load   # round-trippable CSV
 $IS --store demo.h5 -f json info --owner-id 42 --name load   # metadata + stats
+$IS --store demo.h5 get  --name load --plot                  # a terminal sparkline
+$IS --store demo.h5 plot --name load --out load.svg          # a self-contained chart
 ```
 
 The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,
-resolution, timestamps, units, features); the CSV holds only numbers, except `non_sequential`, whose
-first column is the timestamp. All six dtypes and all five writable types (`single`,
-`non_sequential`, `deterministic`, `probabilistic`, `scenarios`) are supported — forecast arrays are
-flat row-major values whose count equals the product of the type's shape (see
-`infrastore template <type>`).
+resolution, timestamps, units, features); the CSV holds only numbers, plus a mandatory header row,
+except `NonSequentialTimeSeries`, whose first column is the timestamp. Durations are ISO-8601
+(`PT1H`, `P1M`). All six dtypes and all five writable types (`SingleTimeSeries`,
+`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, `Scenarios`) are supported — forecast
+arrays are flat row-major values whose count equals the product of the type's shape (see
+`infrastore template <type>`). A descriptor may also set `"layout": "wide"` to load the canonical
+`timestamp,gen_001,gen_002,...` file as one scalar series per column, mapping headers to owner ids
+through a sidecar CSV, an inline object, or the headers themselves; `infrastore grid` writes that
+same shape back out, so the two are an inverse pair. `add` additionally takes the descriptor fields
+as flags for a one-off, reads `--descriptor -` from stdin, and has `--dry-run`, `--replace`,
+`--batch-size`, and `--quiet`.
 
-Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, `store-info`,
-`summary`, `verify`, `check-consistency`, `resolutions`, `params`), content addressing (`arrays`,
-and the `data_hash` + HDF5 location on `list`/`info`), the association catalogs (`attributes`,
-`links`, read-only), bulk export (`export`, one timestamped CSV or JSON file per series, re-readable
-by `add`), and maintenance (`rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
-`remove --all`). Destructive commands take `--dry-run`. `infrastore completions <shell>` emits shell
-completions. Full reference:
-[CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
+Beyond add / list / get / grid / info / transform, the CLI covers discovery (`names`, `owner-types`,
+`owners`, `exists` — the last as an exit status), visualization
+(`plot --kind
+line|duration|heatmap|fan|overlay`, writing one self-contained SVG or HTML file),
+inspection (`stats`, `store-info`, `summary`, `verify`, `check-consistency`, `resolutions`,
+`params`), content addressing (`arrays`, and the `data_hash` + HDF5 location on `list`/`info`), both
+association catalogs read _and_ write (`attributes`, `links`, `attach`, `detach`, `link`, `unlink`,
+`reassign`), bulk export (`export`, one timestamped CSV or JSON file per series, re-readable by
+`add`), cross-store work (`diff`, which exits nonzero when two catalogs differ, and `merge`), and
+maintenance (`init`, `rename`, `copy`, `replace-owner`, `clear`, `persist`, `compact`,
+`remove --all`). Destructive commands take `--dry-run`, and `persist` refuses an existing
+destination without `--force`. `infrastore completions <shell>` emits shell completions. Full
+reference: [CLI](https://natlabrockies.github.io/infrastore/latest/reference/cli.html).
 
 ## Server
 

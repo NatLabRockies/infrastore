@@ -22,16 +22,24 @@ pub fn run(
     store_path: &Path,
     selector: &SelectorArgs,
     dir: Option<&Path>,
+    time_range: Option<&str>,
     format: Format,
 ) -> Result<(), String> {
+    // `table` is the global default, so the first `export` anyone ran used to
+    // fail on a flag they never passed. There is no table export to fall back
+    // to, and CSV is both the format `add` reads back and the one `--dir` is
+    // for, so it is what an unspecified format means here.
+    let format = match format {
+        Format::Table => Format::Csv,
+        other => other,
+    };
     let ext = match format {
         Format::Csv => "csv",
-        Format::Json => "json",
-        Format::Table => {
-            return Err("export writes files; use -f csv or -f json".to_string());
-        }
+        Format::Jsonl => "jsonl",
+        _ => "json",
     };
 
+    let range = crate::parse::parse_time_range(time_range)?;
     let store = store_access::open_readonly(store_path)?;
     let metas = store
         .list_time_series(selector.to_filter()?)
@@ -50,7 +58,9 @@ pub fn run(
     // One batched read instead of N catalog round-trips.
     let identities: Vec<_> = metas.iter().map(select::key_of).collect();
     let refs: Vec<&_> = identities.iter().collect();
-    let datas = store.bulk_read(&refs).map_err(|e| e.to_string())?;
+    let datas = store
+        .bulk_read_range(&refs, range)
+        .map_err(|e| e.to_string())?;
 
     match dir {
         None => {
@@ -185,8 +195,7 @@ fn render(
 ) -> Result<String, String> {
     match format {
         Format::Csv => render_csv(meta, data),
-        Format::Json => render_json(meta, data),
-        Format::Table => unreachable!("rejected in run"),
+        other => render_json(meta, data, other),
     }
 }
 
@@ -243,7 +252,18 @@ fn sequential_rows(
     (headers, rows)
 }
 
-fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<String, String> {
+/// One series as a JSON document: pretty for `-f json`, one compact line for
+/// `-f jsonl`.
+///
+/// `jsonl` is advertised globally as line-delimited output, and an exported file
+/// full of pretty-printed documents is not something a line-oriented consumer
+/// can read. One series is one document either way — the two formats differ only
+/// in whether it is allowed to wrap.
+fn render_json(
+    meta: &TimeSeriesMetadata,
+    data: &TimeSeriesData,
+    format: Format,
+) -> Result<String, String> {
     let mut obj = Map::new();
     obj.insert("owner_id".into(), json!(meta.owner_id));
     obj.insert("owner_type".into(), json!(meta.owner_type));
@@ -312,7 +332,10 @@ fn render_json(meta: &TimeSeriesMetadata, data: &TimeSeriesData) -> Result<Strin
             obj.insert("values".into(), json!(csv_io::array_to_json_values(arr)));
         }
     }
-    serde_json::to_string_pretty(&Value::Object(obj))
-        .map(|s| s + "\n")
-        .map_err(|e| e.to_string())
+    let value = Value::Object(obj);
+    let text = match format {
+        Format::Jsonl => serde_json::to_string(&value),
+        _ => serde_json::to_string_pretty(&value),
+    };
+    text.map(|s| s + "\n").map_err(|e| e.to_string())
 }

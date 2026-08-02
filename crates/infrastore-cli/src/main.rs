@@ -1,11 +1,14 @@
 //! `infrastore` — a command-line tool for loading and inspecting a infrastore store
 //! directly on disk (HDF5 + SQLite).
 
+mod chart;
 mod color;
 mod commands;
+mod confirm;
 mod csv_io;
 mod descriptor;
 mod fields;
+mod help;
 mod output;
 mod parse;
 mod select;
@@ -43,11 +46,13 @@ const HELP_STYLES: Styles = Styles::styled()
 /// table lists exactly the commands clap knows about, which is what stops a
 /// newly added command from silently vanishing out of the help.
 const COMMAND_GROUPS: &[(&str, &[&str])] = &[
-    ("Read data", &["list", "get", "info", "export"]),
+    ("Read data", &["list", "get", "grid", "info", "export"]),
     (
         "Write data",
         &[
+            "init",
             "add",
+            "merge",
             "transform",
             "remove",
             "rename",
@@ -56,6 +61,8 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "clear",
         ],
     ),
+    ("Discover", &["names", "owner-types", "owners", "exists"]),
+    ("Visualize", &["plot"]),
     (
         "Inspect the store",
         &[
@@ -67,10 +74,21 @@ const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "params",
         ],
     ),
-    ("Associations", &["attributes", "links"]),
+    (
+        "Associations",
+        &[
+            "attributes",
+            "links",
+            "attach",
+            "detach",
+            "link",
+            "unlink",
+            "reassign",
+        ],
+    ),
     (
         "Integrity & maintenance",
-        &["verify", "check-consistency", "compact", "persist"],
+        &["verify", "check-consistency", "compact", "persist", "diff"],
     ),
     ("Scaffolding", &["template", "completions", "help"]),
 ];
@@ -156,6 +174,7 @@ fn build_command() -> clap::Command {
     name = "infrastore",
     version,
     about = "Load and inspect an infrastore store on disk",
+    after_help = help::ROOT,
     styles = HELP_STYLES
 )]
 struct Cli {
@@ -172,20 +191,51 @@ struct Cli {
     #[arg(long, env = "RUST_LOG", global = true)]
     log_level: Option<String>,
 
+    /// Answer every confirmation prompt with yes.
+    ///
+    /// The scriptable counterpart to the per-command --force flags: a script
+    /// no longer has to know which commands prompt, or which flag each spells
+    /// it with.
+    #[arg(short = 'y', long, global = true)]
+    yes: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
+// The variants differ a lot in size (an inline `add` carries twenty-odd fields;
+// `stats` carries none). This is a parsed command line, constructed once per
+// process and matched immediately, so boxing the large variants would trade
+// clarity for an allocation nobody measures.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Add time series from a descriptor JSON + CSV data.
+    /// Add time series from a descriptor JSON + CSV data, or from flags.
+    #[command(after_help = help::ADD)]
     Add {
-        /// Descriptor JSON describing the series (single object or array of objects).
+        /// Descriptor JSON describing the series (single object or array of
+        /// objects). `-` reads it from stdin.
         #[arg(long)]
-        descriptor: PathBuf,
-        /// Override the CSV path from the descriptor (single-series descriptors only).
+        descriptor: Option<PathBuf>,
+        /// CSV data path. With --descriptor it overrides the descriptor's own
+        /// (single-series descriptors only); without one it starts an inline add.
         #[arg(long)]
         csv: Option<PathBuf>,
+        #[command(flatten)]
+        inline: commands::add::InlineArgs,
+        /// Resolve every descriptor and print what would be written, without
+        /// opening the store.
+        #[arg(long)]
+        dry_run: bool,
+        /// Remove any series that already has one of these identities first.
+        #[arg(long)]
+        replace: bool,
+        /// Commit every N series instead of the whole load in one transaction.
+        #[arg(long, value_name = "N")]
+        batch_size: Option<usize>,
+        /// Print nothing but errors.
+        #[arg(long, short = 'q')]
+        quiet: bool,
         /// Compression for a store created by this command: none, deflate, or
         /// deflate:LEVEL (0-9). Errors if the store already exists.
         #[arg(long)]
@@ -193,8 +243,40 @@ enum Commands {
         /// Disable byte-shuffle for deflate compression (only with --compression).
         #[arg(long)]
         no_shuffle: bool,
+        /// Where the SQLite catalog lives while the store is open.
+        #[arg(long, value_name = "MODE", default_value_t = store_access::CatalogChoice::Attached)]
+        catalog: store_access::CatalogChoice,
+    },
+    /// Create an empty store with an explicit compression and catalog policy.
+    #[command(after_help = help::INIT)]
+    Init {
+        /// Compression: none, deflate, or deflate:LEVEL (0-9).
+        #[arg(long)]
+        compression: Option<String>,
+        /// Disable byte-shuffle for deflate compression (only with --compression).
+        #[arg(long)]
+        no_shuffle: bool,
+        /// Where the SQLite catalog lives while the store is open.
+        #[arg(long, value_name = "MODE", default_value_t = store_access::CatalogChoice::Attached)]
+        catalog: store_access::CatalogChoice,
+    },
+    /// Copy matching series from another store into this one.
+    #[command(after_help = help::MERGE)]
+    Merge {
+        /// Source store (`.h5`) to read from.
+        #[arg(long)]
+        from: PathBuf,
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Replace a destination series that already has the same identity.
+        #[arg(long)]
+        replace: bool,
+        /// Show what would be merged without changing either store.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List stored time series matching the given filters.
+    #[command(after_help = help::LIST)]
     List {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -207,6 +289,7 @@ enum Commands {
         wide: bool,
     },
     /// Read and display a single time series.
+    #[command(after_help = help::GET)]
     Get {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -219,8 +302,73 @@ enum Commands {
         /// Show all rows in table output.
         #[arg(long)]
         full: bool,
+        /// Take the table's rows from the end of the series, not the start.
+        #[arg(long)]
+        tail: bool,
+        /// Keep only every Nth row, in every format (applied before --limit).
+        #[arg(long, value_name = "N")]
+        stride: Option<usize>,
+        /// Draw a terminal sparkline instead of the values.
+        #[arg(long)]
+        plot: bool,
+        /// Sparkline width in characters (defaults to the terminal width).
+        #[arg(long, value_name = "COLS")]
+        plot_width: Option<usize>,
+        /// Show only forecast window N.
+        #[arg(long, value_name = "N")]
+        window: Option<usize>,
+        /// Show only the forecast window issued at this timestamp.
+        #[arg(long, value_name = "TIMESTAMP")]
+        issue_time: Option<String>,
+    },
+    /// Render N series as N columns against one shared time axis.
+    #[command(after_help = help::GRID)]
+    Grid {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        #[arg(long)]
+        time_range: Option<String>,
+        /// Max rows to show in table output (default 50).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Show all rows in table output.
+        #[arg(long)]
+        full: bool,
+        /// How to name the columns.
+        #[arg(long, value_name = "MODE", default_value = "auto")]
+        label: commands::grid::ColumnLabel,
+    },
+    /// Draw a chart to a self-contained SVG or HTML file.
+    #[command(after_help = help::PLOT)]
+    Plot {
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// Which view to draw.
+        #[arg(long, default_value = "line")]
+        kind: commands::plot::Kind,
+        /// Destination file (.svg or .html); `-` writes to stdout.
+        #[arg(long, default_value = "chart.svg")]
+        out: PathBuf,
+        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        #[arg(long)]
+        time_range: Option<String>,
+        /// Chart title (defaults to the series name).
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value_t = 960.0)]
+        width: f64,
+        #[arg(long, default_value_t = 440.0)]
+        height: f64,
+        /// First forecast window to draw (fan, overlay).
+        #[arg(long, default_value_t = 0)]
+        window: usize,
+        /// How many forecast windows to overlay (overlay; default 8).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
     /// Metadata, content hash, HDF5 location, and stats for one series.
+    #[command(after_help = help::INFO)]
     Info {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -233,6 +381,7 @@ enum Commands {
     ///
     /// A selector resolving to one series removes that one; with `--all` a
     /// selector may match several.
+    #[command(after_help = help::REMOVE)]
     Remove {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -247,21 +396,23 @@ enum Commands {
         dry_run: bool,
     },
     /// Derive DeterministicSingleTimeSeries from stored SingleTimeSeries.
+    #[command(after_help = help::TRANSFORM)]
     Transform {
-        /// Forecast horizon, e.g. 24h.
+        /// Forecast horizon as an ISO-8601 duration, e.g. PT24H.
         #[arg(long)]
         horizon: String,
-        /// Forecast interval, e.g. 1h.
+        /// Forecast interval as an ISO-8601 duration, e.g. PT1H.
         #[arg(long)]
         interval: String,
-        /// Restrict to one owner category (component|supplemental_attribute).
+        /// Restrict to one owner category (Component|SupplementalAttribute).
         #[arg(long)]
         owner_category: Option<String>,
-        /// Restrict to one resolution, e.g. 1h.
+        /// Restrict to one resolution, e.g. PT1H.
         #[arg(long)]
         resolution: Option<String>,
     },
     /// Rename the single series a selector resolves to.
+    #[command(after_help = help::RENAME)]
     Rename {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -273,6 +424,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Copy the single series a selector resolves to onto another owner.
+    #[command(after_help = help::COPY)]
     Copy {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -290,6 +442,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Reassign every series from one owner to another.
+    #[command(after_help = help::REPLACE_OWNER)]
     ReplaceOwner {
         #[arg(long)]
         old: i64,
@@ -302,6 +455,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Remove all series, or all for one owner.
+    #[command(after_help = help::CLEAR)]
     Clear {
         #[arg(long)]
         owner_id: Option<i64>,
@@ -314,16 +468,24 @@ enum Commands {
         dry_run: bool,
     },
     /// Write the store to a new HDF5 + SQLite artifact.
+    #[command(after_help = help::PERSIST)]
     Persist {
         /// Destination `.h5` path.
         #[arg(long)]
         dest: PathBuf,
+        /// Overwrite an existing destination without confirming.
+        #[arg(long)]
+        force: bool,
+        /// Show what would be written without writing it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Reclaim space; print the compaction report.
     ///
     /// Rewrites the `.h5` file from the live set and replaces the original, so
     /// deleted data actually leaves the file. Nothing else may have the store
     /// open while this runs.
+    #[command(after_help = help::COMPACT)]
     Compact {
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
@@ -334,16 +496,21 @@ enum Commands {
     /// The read-direction inverse of `add`: one file per matched series into
     /// --dir, or stdout when the selector matches exactly one series. The CSV it
     /// writes is re-readable by `add`, which detects the layout from the header.
+    #[command(after_help = help::EXPORT)]
     Export {
         #[command(flatten)]
         selector: SelectorArgs,
         /// Directory to write one file per matched series.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Restrict to a half-open time range START..END (RFC3339 or epoch-ms).
+        #[arg(long)]
+        time_range: Option<String>,
     },
     /// Generate shell completions to stdout.
     ///
     /// For example `infrastore completions zsh`.
+    #[command(after_help = help::COMPLETIONS)]
     Completions {
         /// Shell to generate for.
         #[arg(value_enum)]
@@ -354,10 +521,13 @@ enum Commands {
     /// Association counts are catalog rows; array counts are distinct content
     /// hashes. Content addressing makes the two diverge, so they are namespaced
     /// (`associations.*`, `owners.*`, `arrays.*`) rather than listed flat.
+    #[command(after_help = help::STATS)]
     Stats,
     /// HDF5 + SQLite paths, on-disk format version, and compression.
+    #[command(after_help = help::STORE_INFO)]
     StoreInfo,
     /// Distinct stored arrays: content hash, HDF5 location, and sharers.
+    #[command(after_help = help::ARRAYS)]
     Arrays {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -366,6 +536,7 @@ enum Commands {
         data_hash: Option<String>,
     },
     /// Component <-> supplemental-attribute associations.
+    #[command(after_help = help::ATTRIBUTES)]
     Attributes {
         #[arg(long)]
         component_id: Option<i64>,
@@ -381,6 +552,7 @@ enum Commands {
         summary: bool,
     },
     /// Directed parent -> child component associations.
+    #[command(after_help = help::LINKS)]
     Links {
         #[arg(long)]
         parent_id: Option<i64>,
@@ -392,6 +564,7 @@ enum Commands {
         child_type: Option<String>,
     },
     /// Grouped static and/or forecast summaries.
+    #[command(after_help = help::SUMMARY)]
     Summary {
         #[arg(long)]
         static_only: bool,
@@ -410,30 +583,198 @@ enum Commands {
     /// For catalog-side checks use `infrastore check-consistency` (per-resolution grid
     /// agreement) and `infrastore compact` (which reports the unreachable arrays and
     /// feature sets a delete left behind — an expected state, not corruption).
+    #[command(after_help = help::VERIFY)]
     Verify,
     /// Verify per-resolution static grid consistency.
+    #[command(after_help = help::CHECK_CONSISTENCY)]
     CheckConsistency {
         #[arg(long)]
         resolution: Option<String>,
     },
     /// List distinct resolutions and forecast intervals.
+    #[command(after_help = help::RESOLUTIONS)]
     Resolutions,
     /// Show the store's forecast parameters.
+    #[command(after_help = help::PARAMS)]
     Params {
         #[arg(long)]
         resolution: Option<String>,
         #[arg(long)]
         interval: Option<String>,
     },
+    /// Distinct series names matching the selector.
+    #[command(after_help = help::NAMES)]
+    Names {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Distinct owner types matching the selector.
+    #[command(after_help = help::OWNER_TYPES)]
+    OwnerTypes {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Distinct owner ids that have a time series.
+    #[command(after_help = help::OWNERS)]
+    Owners {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Whether anything matches the selector (exit 0 = yes, 1 = no).
+    #[command(after_help = help::EXISTS)]
+    Exists {
+        #[command(flatten)]
+        selector: SelectorArgs,
+    },
+    /// Compare this store against another at the catalog level.
+    #[command(after_help = help::DIFF)]
+    Diff {
+        /// The other store (`.h5`) to compare against.
+        #[arg(long)]
+        against: PathBuf,
+        #[command(flatten)]
+        selector: SelectorArgs,
+        /// List the identical series too, not just the differences.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Attach supplemental attributes to components.
+    #[command(after_help = help::ATTACH)]
+    Attach {
+        #[arg(long)]
+        component_id: Option<i64>,
+        #[arg(long)]
+        component_type: Option<String>,
+        #[arg(long)]
+        attribute_id: Option<i64>,
+        #[arg(long)]
+        attribute_type: Option<String>,
+        /// Bulk import from a
+        /// `component_id,component_type,attribute_id,attribute_type` CSV.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Show what would be attached without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove supplemental-attribute attachments matching the filter.
+    #[command(after_help = help::DETACH)]
+    Detach {
+        #[arg(long)]
+        component_id: Option<i64>,
+        #[arg(long)]
+        component_type: Option<String>,
+        #[arg(long)]
+        attribute_id: Option<i64>,
+        #[arg(long)]
+        attribute_type: Option<String>,
+        /// Remove every attachment (required when no filter is given).
+        #[arg(long)]
+        all: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        force: bool,
+        /// Show how many would be detached without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Add directed parent -> child component links.
+    #[command(after_help = help::LINK)]
+    Link {
+        #[arg(long)]
+        parent_id: Option<i64>,
+        #[arg(long)]
+        parent_type: Option<String>,
+        #[arg(long)]
+        child_id: Option<i64>,
+        #[arg(long)]
+        child_type: Option<String>,
+        /// Bulk import from a `parent_id,parent_type,child_id,child_type` CSV.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Show what would be linked without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove parent -> child links matching the filter.
+    #[command(after_help = help::UNLINK)]
+    Unlink {
+        #[arg(long)]
+        parent_id: Option<i64>,
+        #[arg(long)]
+        parent_type: Option<String>,
+        #[arg(long)]
+        child_id: Option<i64>,
+        #[arg(long)]
+        child_type: Option<String>,
+        /// Remove every link (required when no filter is given).
+        #[arg(long)]
+        all: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        force: bool,
+        /// Show how many would be removed without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Move a component's associations from one id to another.
+    ///
+    /// The association counterpart of `replace-owner`, which moves time series.
+    #[command(after_help = help::REASSIGN)]
+    Reassign {
+        #[arg(long)]
+        old: i64,
+        #[arg(long)]
+        new: i64,
+        /// Move only the supplemental-attribute attachments.
+        #[arg(long)]
+        attributes: bool,
+        /// Move only the parent/child links.
+        #[arg(long)]
+        links: bool,
+        /// Show how many would move without changing the store.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print an example descriptor JSON for a time-series type.
+    ///
+    /// Durations, `type`, and `owner_category` are printed in the same spelling
+    /// the store renders them back in, so a generated descriptor lines up with
+    /// `list` / `info` / `export -f json` output for the series it creates.
+    #[command(after_help = help::TEMPLATE)]
     Template {
-        /// single|non_sequential|deterministic|probabilistic|scenarios
+        /// SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios
         #[arg(value_name = "TYPE")]
         ts_type: String,
     },
 }
 
+/// The stack `real_main` is given, which is more than the 1 MiB Windows hands
+/// the main thread by default.
+///
+/// [`build_command`] assembles every subcommand and every one of their arguments
+/// in a single clap-derive-generated call tree, and an unoptimized build gives
+/// each of those temporaries its own stack slot instead of reusing one. Measured
+/// against a `--help` run of the debug binary, that alone needs between 1 and
+/// 2 MiB — so on Windows the CLI overflowed before it could parse anything, on
+/// every invocation, while Linux and macOS (8 MiB) were fine. A spawned thread
+/// takes its stack size from this constant rather than from the executable
+/// header, which is why the work happens on one.
+const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 fn main() {
+    let worker = std::thread::Builder::new()
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(real_main)
+        .expect("spawning the worker thread");
+    if worker.join().is_err() {
+        // The panic hook has already printed the message; match the exit code a
+        // panicking main would have produced.
+        std::process::exit(101);
+    }
+}
+
+fn real_main() {
     // Parsed through `build_command` rather than `Cli::parse` so the grouped
     // help template is the one a user actually sees.
     let matches = build_command().get_matches();
@@ -442,6 +783,7 @@ fn main() {
         Err(e) => e.exit(),
     };
     init_tracing(cli.log_level.as_deref());
+    confirm::set_assume_yes(cli.yes);
     if let Err(e) = run(&cli) {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -453,8 +795,14 @@ fn run(cli: &Cli) -> Result<(), String> {
         Commands::Add {
             descriptor,
             csv,
+            inline,
+            dry_run,
+            replace,
+            batch_size,
+            quiet,
             compression,
             no_shuffle,
+            catalog,
         } => {
             let compression = compression
                 .as_deref()
@@ -462,11 +810,37 @@ fn run(cli: &Cli) -> Result<(), String> {
                 .transpose()?;
             commands::add::run(
                 &require_store(cli)?,
-                descriptor,
-                csv.as_deref(),
-                compression,
+                &commands::add::Options {
+                    descriptor: descriptor.as_deref(),
+                    csv: csv.as_deref(),
+                    inline,
+                    compression,
+                    catalog: *catalog,
+                    batch_size: *batch_size,
+                    replace: *replace,
+                    dry_run: *dry_run,
+                    quiet: *quiet,
+                    format: cli.format,
+                },
             )
         }
+        Commands::Init {
+            compression,
+            no_shuffle,
+            catalog,
+        } => {
+            let compression = compression
+                .as_deref()
+                .map(|spec| parse::parse_compression(spec, !no_shuffle))
+                .transpose()?;
+            commands::manage::init(&require_store(cli)?, compression, *catalog)
+        }
+        Commands::Merge {
+            from,
+            selector,
+            replace,
+            dry_run,
+        } => commands::manage::merge(&require_store(cli)?, from, selector, *replace, *dry_run),
         Commands::List {
             selector,
             limit,
@@ -477,13 +851,68 @@ fn run(cli: &Cli) -> Result<(), String> {
             time_range,
             limit,
             full,
+            tail,
+            stride,
+            plot,
+            plot_width,
+            window,
+            issue_time,
         } => commands::show::get(
+            &require_store(cli)?,
+            selector,
+            &commands::show::GetOptions {
+                time_range: time_range.as_deref(),
+                rows: commands::show::RowWindow {
+                    limit: *limit,
+                    full: *full,
+                    tail: *tail,
+                    stride: *stride,
+                },
+                plot: *plot,
+                plot_width: *plot_width,
+                window: *window,
+                issue_time: issue_time.as_deref(),
+            },
+            cli.format,
+        ),
+        Commands::Grid {
+            selector,
+            time_range,
+            limit,
+            full,
+            label,
+        } => commands::grid::run(
             &require_store(cli)?,
             selector,
             time_range.as_deref(),
             *limit,
             *full,
+            *label,
             cli.format,
+        ),
+        Commands::Plot {
+            selector,
+            kind,
+            out,
+            time_range,
+            title,
+            width,
+            height,
+            window,
+            limit,
+        } => commands::plot::run(
+            &require_store(cli)?,
+            selector,
+            &commands::plot::Options {
+                kind: *kind,
+                out,
+                time_range: time_range.as_deref(),
+                title: title.as_deref(),
+                width: *width,
+                height: *height,
+                window: *window,
+                limit: *limit,
+            },
         ),
         Commands::Info { selector, no_stats } => {
             commands::show::info(&require_store(cli)?, selector, *no_stats, cli.format)
@@ -556,13 +985,25 @@ fn run(cli: &Cli) -> Result<(), String> {
             *force,
             *dry_run,
         ),
-        Commands::Persist { dest } => commands::manage::persist(&require_store(cli)?, dest),
+        Commands::Persist {
+            dest,
+            force,
+            dry_run,
+        } => commands::manage::persist(&require_store(cli)?, dest, *force, *dry_run),
         Commands::Compact { force } => {
             commands::manage::compact(&require_store(cli)?, *force, cli.format)
         }
-        Commands::Export { selector, dir } => {
-            commands::export::run(&require_store(cli)?, selector, dir.as_deref(), cli.format)
-        }
+        Commands::Export {
+            selector,
+            dir,
+            time_range,
+        } => commands::export::run(
+            &require_store(cli)?,
+            selector,
+            dir.as_deref(),
+            time_range.as_deref(),
+            cli.format,
+        ),
         Commands::Completions { shell } => {
             // The same command the binary parses with, so completions can never
             // describe a different set of subcommands than `--help` does.
@@ -637,6 +1078,109 @@ fn run(cli: &Cli) -> Result<(), String> {
             resolution.as_deref(),
             interval.as_deref(),
             cli.format,
+        ),
+        Commands::Names { selector } => {
+            commands::discover::names(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::OwnerTypes { selector } => {
+            commands::discover::owner_types(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::Owners { selector } => {
+            commands::discover::owners(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::Exists { selector } => {
+            commands::discover::exists(&require_store(cli)?, selector, cli.format)
+        }
+        Commands::Diff {
+            against,
+            selector,
+            all,
+        } => commands::diff::run(&require_store(cli)?, against, selector, *all, cli.format),
+        Commands::Attach {
+            component_id,
+            component_type,
+            attribute_id,
+            attribute_type,
+            from,
+            dry_run,
+        } => commands::assoc::attach(
+            &require_store(cli)?,
+            &commands::assoc::AttachArgs {
+                component_id: *component_id,
+                component_type: component_type.as_deref(),
+                attribute_id: *attribute_id,
+                attribute_type: attribute_type.as_deref(),
+                from: from.as_deref(),
+                dry_run: *dry_run,
+            },
+        ),
+        Commands::Detach {
+            component_id,
+            component_type,
+            attribute_id,
+            attribute_type,
+            all,
+            force,
+            dry_run,
+        } => commands::assoc::detach(
+            &require_store(cli)?,
+            *component_id,
+            *attribute_id,
+            component_type.as_deref(),
+            attribute_type.as_deref(),
+            *all,
+            *force,
+            *dry_run,
+        ),
+        Commands::Link {
+            parent_id,
+            parent_type,
+            child_id,
+            child_type,
+            from,
+            dry_run,
+        } => commands::assoc::link(
+            &require_store(cli)?,
+            &commands::assoc::LinkArgs {
+                parent_id: *parent_id,
+                parent_type: parent_type.as_deref(),
+                child_id: *child_id,
+                child_type: child_type.as_deref(),
+                from: from.as_deref(),
+                dry_run: *dry_run,
+            },
+        ),
+        Commands::Unlink {
+            parent_id,
+            parent_type,
+            child_id,
+            child_type,
+            all,
+            force,
+            dry_run,
+        } => commands::assoc::unlink(
+            &require_store(cli)?,
+            *parent_id,
+            *child_id,
+            parent_type.as_deref(),
+            child_type.as_deref(),
+            *all,
+            *force,
+            *dry_run,
+        ),
+        Commands::Reassign {
+            old,
+            new,
+            attributes,
+            links,
+            dry_run,
+        } => commands::assoc::reassign(
+            &require_store(cli)?,
+            *old,
+            *new,
+            *attributes,
+            *links,
+            *dry_run,
         ),
         Commands::Template { ts_type } => commands::manage::template(ts_type),
     }
@@ -744,6 +1288,223 @@ mod tests {
             "these help lines exceed {MAX} columns; shorten the command's first \
              doc-comment line and move the detail to a following paragraph, which \
              clap renders as long help:\n{long:#?}"
+        );
+    }
+
+    /// The `infrastore ...` lines in an examples block, as argv vectors.
+    ///
+    /// Just enough shell to read what the blocks actually contain: a trailing
+    /// `\` continues onto the next line, a ` #` comment and a `>` redirection
+    /// are not part of the invocation, and `'load_*'` is one argument. Anything
+    /// fancier does not belong in an example.
+    fn example_invocations(block: &str) -> Vec<Vec<String>> {
+        let mut unwrapped = String::new();
+        for line in block.lines() {
+            match line.trim().strip_suffix('\\') {
+                Some(head) => {
+                    unwrapped.push_str(head.trim_end());
+                    unwrapped.push(' ');
+                }
+                None => {
+                    unwrapped.push_str(line.trim());
+                    unwrapped.push('\n');
+                }
+            }
+        }
+        unwrapped
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("infrastore "))
+            .map(|l| {
+                let l = l.split(" #").next().unwrap_or(l);
+                l.split('>')
+                    .next()
+                    .unwrap_or(l)
+                    .split_whitespace()
+                    .map(|w| w.trim_matches('\'').to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Every examples block, labelled by the command it belongs to. The root
+    /// help is in here too: it is the first thing a new user sees, and the
+    /// grouped listing above it names commands without showing one complete
+    /// invocation.
+    fn example_blocks() -> Vec<(String, String)> {
+        let cmd = Cli::command();
+        let mut out = vec![(
+            "(root)".to_string(),
+            cmd.get_after_help()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        )];
+        for sub in cmd.get_subcommands() {
+            // clap writes `help` itself; it has no examples to give.
+            if sub.get_name() == "help" {
+                continue;
+            }
+            out.push((
+                sub.get_name().to_string(),
+                sub.get_after_help()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+            ));
+        }
+        out
+    }
+
+    /// Every command must end its own `--help` with a worked example.
+    ///
+    /// The synopsis a command prints tells a reader what its flags are, not what
+    /// the command is *for*, and the one whose help stops at the flag list is the
+    /// one that gets guessed at. This is the guard that keeps a newly added
+    /// command from shipping without one — the same role
+    /// [`every_command_appears_in_exactly_one_group`] plays for the index.
+    #[test]
+    fn every_command_ends_its_help_with_an_example() {
+        const MAX: usize = 100;
+        for (name, block) in example_blocks() {
+            assert!(
+                block.starts_with("Examples:"),
+                "`infrastore {name} --help` has no Examples: block; add one to src/help.rs"
+            );
+
+            // An example has to be an invocation of *this* command, not prose
+            // that merely mentions it. (The root's examples run subcommands, so
+            // it is exempt from the name check but not from the rest.)
+            let invocations = example_invocations(&block);
+            assert!(
+                !invocations.is_empty(),
+                "the {name} examples contain no `infrastore ...` line:\n{block}"
+            );
+            if name != "(root)" {
+                assert!(
+                    invocations.iter().any(|argv| argv.contains(&name)),
+                    "no example in `infrastore {name} --help` actually runs {name}:\n{block}"
+                );
+            }
+
+            // Same readable-width rule the grouped listing follows: help that
+            // wraps mid-flag is worse than help split across two lines.
+            let long: Vec<&str> = block.lines().filter(|l| l.chars().count() > MAX).collect();
+            assert!(
+                long.is_empty(),
+                "these {name} help lines exceed {MAX} columns; wrap them with a trailing \
+                 backslash:\n{long:#?}"
+            );
+        }
+    }
+
+    /// And every one of those examples has to parse.
+    ///
+    /// An example that names a flag the command dropped or renamed is worse than
+    /// no example at all — it is documentation that confidently fails. Running
+    /// them through the real parser means a flag cannot be renamed without the
+    /// examples following it.
+    #[test]
+    fn every_example_parses_as_a_real_invocation() {
+        for (name, block) in example_blocks() {
+            for argv in example_invocations(&block) {
+                if let Err(e) = build_command().try_get_matches_from(&argv) {
+                    panic!(
+                        "the {name} example `{}` does not parse:\n{e}",
+                        argv.join(" ")
+                    );
+                }
+            }
+        }
+    }
+
+    /// The documentation pages whose `sh` blocks are real invocations.
+    ///
+    /// Relative to the crate, because the check is only meaningful run from a
+    /// checkout that has the docs beside it.
+    const DOC_PAGES: &[&str] = &[
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/reference/cli.md"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/how-to/use-cli.md"
+        ),
+    ];
+
+    /// The `infrastore ...` lines inside a page's ```sh fences.
+    ///
+    /// Only `sh` fences: the reference page also carries ```text blocks holding
+    /// the synopsis grammar (`--store <PATH>`), which is not meant to parse.
+    fn doc_examples(markdown: &str) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        let mut in_sh = false;
+        for line in markdown.lines() {
+            if line.trim_start().starts_with("```") {
+                in_sh = line.trim() == "```sh";
+                continue;
+            }
+            if in_sh {
+                out.extend(example_invocations(line));
+            }
+        }
+        out
+    }
+
+    /// The documented examples have to parse too, and between them they have to
+    /// cover every command.
+    ///
+    /// The reference page is where someone looks before reaching for `--help`,
+    /// so an example there that names a renamed flag misleads exactly the reader
+    /// who trusted the docs over the binary. Running them through the real
+    /// parser keeps the two honest about each other.
+    #[test]
+    fn every_command_is_shown_in_the_docs_and_every_doc_example_parses() {
+        let mut covered: BTreeSet<String> = BTreeSet::new();
+        for page in DOC_PAGES {
+            let markdown = match std::fs::read_to_string(page) {
+                Ok(t) => t,
+                Err(e) => panic!("cannot read {page}: {e}"),
+            };
+            let examples = doc_examples(&markdown);
+            assert!(
+                !examples.is_empty(),
+                "{page} has no `infrastore ...` examples in its sh blocks"
+            );
+            for argv in examples {
+                if let Err(e) = build_command().try_get_matches_from(&argv) {
+                    panic!(
+                        "the example `{}` in {page} does not parse:\n{e}",
+                        argv.join(" ")
+                    );
+                }
+                covered.extend(argv.into_iter().skip(1));
+            }
+        }
+
+        let documented: BTreeSet<String> = clap_names()
+            .into_iter()
+            .filter(|n| n != "help" && !covered.contains(n))
+            .collect();
+        assert!(
+            documented.is_empty(),
+            "these commands have no example in {DOC_PAGES:?}: {documented:?}"
+        );
+    }
+
+    /// The root help must send a reader on to the per-command examples; without
+    /// that line they are easy to never discover.
+    #[test]
+    fn the_root_help_points_at_the_per_command_examples() {
+        let mut buf = Vec::new();
+        build_command().write_help(&mut buf).expect("help renders");
+        let rendered = String::from_utf8(buf).expect("utf8 help");
+        assert!(
+            rendered.contains("Examples:"),
+            "the root --help has no examples:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("<command> --help"),
+            "the root --help must point at the per-command examples:\n{rendered}"
         );
     }
 

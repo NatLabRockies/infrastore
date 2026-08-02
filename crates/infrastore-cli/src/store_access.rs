@@ -6,7 +6,43 @@
 
 use std::path::{Path, PathBuf};
 
-use infrastore_core::{Compression, Store, create_store, open_store};
+use infrastore_core::{CatalogMode, Compression, Store, create_store, open_store};
+
+/// Where the SQLite catalog lives while the store is open.
+///
+/// Exposed as a flag because the two modes trade durability for speed in a way
+/// only the caller can choose. [`CatalogChoice::Attached`] commits (and fsyncs)
+/// to `<store>.sqlite` as it goes, so an interrupted load leaves what it had
+/// already written. [`CatalogChoice::InMemory`] keeps the catalog in RAM and
+/// writes it only at `persist`, which is much faster for a bulk load and loses
+/// *everything* if the process dies first — arrays are still streamed to the
+/// HDF5 file, but without a catalog they are unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum CatalogChoice {
+    /// The `<store>.sqlite` file, committed on every write.
+    #[default]
+    Attached,
+    /// RAM until `infrastore persist` writes the pair out.
+    InMemory,
+}
+
+impl CatalogChoice {
+    fn mode(self) -> CatalogMode {
+        match self {
+            CatalogChoice::Attached => CatalogMode::Attached,
+            CatalogChoice::InMemory => CatalogMode::InMemory,
+        }
+    }
+}
+
+impl std::fmt::Display for CatalogChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CatalogChoice::Attached => "attached",
+            CatalogChoice::InMemory => "in-memory",
+        })
+    }
+}
 
 /// The SQLite catalog paired with an HDF5 store path. Delegates to the core so
 /// the CLI cannot drift from the store's own derivation.
@@ -24,13 +60,17 @@ pub fn open_readonly(path: &Path) -> Result<Store, String> {
 
 /// Open a writable store, creating it (and its SQLite catalog) if absent.
 pub fn open_writable(path: &Path) -> Result<Store, String> {
-    open_writable_with(path, None)
+    open_writable_with(path, None, CatalogChoice::Attached)
 }
 
 /// Open a writable store; `compression` applies only when the store is being
 /// created here. Passing a compression policy for an existing store is an
 /// error — the persisted policy governs and a silent ignore would mislead.
-pub fn open_writable_with(path: &Path, compression: Option<Compression>) -> Result<Store, String> {
+pub fn open_writable_with(
+    path: &Path,
+    compression: Option<Compression>,
+    catalog: CatalogChoice,
+) -> Result<Store, String> {
     if path.exists() {
         if compression.is_some() {
             return Err(format!(
@@ -39,11 +79,16 @@ pub fn open_writable_with(path: &Path, compression: Option<Compression>) -> Resu
                 path.display()
             ));
         }
-        open_store(path, false).map_err(|e| e.to_string())
+        Store::open_with_catalog(path, false, catalog.mode()).map_err(|e| e.to_string())
     } else {
-        match compression {
-            Some(c) => Store::create_with_compression(Some(path), false, c),
-            None => create_store(Some(path), false),
+        match (compression, catalog) {
+            (None, CatalogChoice::Attached) => create_store(Some(path), false),
+            (compression, catalog) => Store::create_with_catalog(
+                Some(path),
+                false,
+                compression.unwrap_or_default(),
+                catalog.mode(),
+            ),
         }
         .map_err(|e| e.to_string())
     }

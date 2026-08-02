@@ -1,15 +1,14 @@
 {
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load",
-  "type": "single",
+  "type": "SingleTimeSeries",
   "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
+  "resolution": "PT1H",
   "features": {
     "model_year": 2030
   }
