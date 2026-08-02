@@ -33,32 +33,41 @@ impl CsvData {
     }
 }
 
-/// Peek at a CSV's header row without reading its data, so a caller can decide
-/// how many leading columns to strip. Returns an empty vec when `has_header` is
-/// false or the file is empty.
-pub fn read_header(path: &Path, has_header: bool) -> Result<Vec<String>, String> {
-    if !has_header {
-        return Ok(Vec::new());
-    }
+/// Read a data CSV's header row, so a caller can decide how many leading
+/// columns to strip.
+///
+/// Every data CSV must have one. The header is not decoration: it is what
+/// [`crate::descriptor::Descriptor::csv_layout`] reads to tell a hand-authored
+/// value-only file from one `export` wrote, and getting that wrong reorders a
+/// forecast's axes without failing. A file with no header row is therefore an
+/// error here rather than a silent fall back to the flat layout.
+pub fn read_header(path: &Path) -> Result<Vec<String>, String> {
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(false)
         .trim(csv::Trim::All)
         .from_path(path)
         .map_err(|e| format!("opening {}: {e}", path.display()))?;
-    match reader.headers() {
-        Ok(h) => Ok(h.iter().map(|s| s.to_string()).collect()),
-        // An empty file has no header row; that is not an error here — the
-        // value-count check downstream gives a better message.
-        Err(_) => Ok(Vec::new()),
+    let header: Vec<String> = match reader.headers() {
+        Ok(h) => h.iter().map(|s| s.to_string()).collect(),
+        Err(e) => return Err(format!("reading the header of {}: {e}", path.display())),
+    };
+    if header.is_empty() {
+        return Err(format!(
+            "{} is empty; every data CSV must start with a header row \
+             (e.g. `value`, or `timestamp,value`)",
+            path.display()
+        ));
     }
+    Ok(header)
 }
 
 /// Read a data CSV, stripping `leading_cols` non-value columns from the left of
-/// every row and flattening the rest row-major.
-pub fn read_csv(path: &Path, has_header: bool, leading_cols: usize) -> Result<CsvData, String> {
+/// every row and flattening the rest row-major. The first row is always the
+/// header — see [`read_header`].
+pub fn read_csv(path: &Path, leading_cols: usize) -> Result<CsvData, String> {
     let mut reader = csv::ReaderBuilder::new()
-        .has_headers(has_header)
+        .has_headers(true)
         .flexible(false)
         .trim(csv::Trim::All)
         .from_path(path)
@@ -124,6 +133,16 @@ pub fn build_typed_array(
             .map_err(|e| format!("value #{} ('{cell}'): {e}", i + 1))?;
     }
     TypedArray::new(dtype, shape, bytes)
+}
+
+/// Whether a cell would be accepted as a value of `dtype`.
+///
+/// Used to tell a header row from a first row of data, so the same grammar that
+/// reads values decides it — a cell this accepts is a value, whatever column it
+/// happens to sit in.
+pub fn parses_as(dtype: Dtype, cell: &str) -> bool {
+    let mut sink = Vec::new();
+    encode_cell(dtype, cell, &mut sink).is_ok()
 }
 
 fn encode_cell(dtype: Dtype, raw: &str, out: &mut Vec<u8>) -> Result<(), String> {

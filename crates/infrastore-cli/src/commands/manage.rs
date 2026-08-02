@@ -395,19 +395,25 @@ pub fn template(ts_type: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Every template spells its `type`, `owner_category`, and durations exactly the
+// way the CLI renders them back — `SingleTimeSeries`, `Component`, `PT1H` — so a
+// descriptor generated here can be diffed and grepped against `list`, `info`, or
+// `export -f json` output for the series it produced. The short spellings
+// (`single`, `component`) are still accepted as input; they are just not what
+// this hands you to start from.
+
 const SINGLE: &str = r#"{
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load",
-  "type": "single",
+  "type": "SingleTimeSeries",
   "element_type": "f64",
   "units": "MW",
   "ext": "Profile",
   "csv": "load.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
+  "resolution": "PT1H",
   "features": {
     "model_year": 2030
   }
@@ -417,30 +423,28 @@ const SINGLE: &str = r#"{
 const NON_SEQUENTIAL: &str = r#"{
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "events",
-  "type": "non_sequential",
+  "type": "NonSequentialTimeSeries",
   "element_type": "f64",
   "units": "MW",
-  "csv": "events.csv",
-  "has_header": true
+  "csv": "events.csv"
 }
 "#;
 
 const DETERMINISTIC: &str = r#"{
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load_forecast",
-  "type": "deterministic",
+  "type": "Deterministic",
   "element_type": "f64",
   "units": "MW",
   "csv": "forecast.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
-  "horizon": "24h",
-  "interval": "1h",
+  "resolution": "PT1H",
+  "horizon": "PT24H",
+  "interval": "PT1H",
   "count": 7
 }
 "#;
@@ -448,17 +452,16 @@ const DETERMINISTIC: &str = r#"{
 const PROBABILISTIC: &str = r#"{
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load_prob",
-  "type": "probabilistic",
+  "type": "Probabilistic",
   "element_type": "f64",
   "units": "MW",
   "csv": "prob.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
-  "horizon": "24h",
-  "interval": "1h",
+  "resolution": "PT1H",
+  "horizon": "PT24H",
+  "interval": "PT1H",
   "count": 7,
   "percentiles": [10.0, 50.0, 90.0]
 }
@@ -467,17 +470,16 @@ const PROBABILISTIC: &str = r#"{
 const SCENARIOS: &str = r#"{
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load_scenarios",
-  "type": "scenarios",
+  "type": "Scenarios",
   "element_type": "f64",
   "units": "MW",
   "csv": "scenarios.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
-  "horizon": "24h",
-  "interval": "1h",
+  "resolution": "PT1H",
+  "horizon": "PT24H",
+  "interval": "PT1H",
   "count": 7,
   "scenario_count": 10
 }

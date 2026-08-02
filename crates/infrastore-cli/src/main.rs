@@ -6,6 +6,7 @@ mod commands;
 mod csv_io;
 mod descriptor;
 mod fields;
+mod help;
 mod output;
 mod parse;
 mod select;
@@ -156,6 +157,7 @@ fn build_command() -> clap::Command {
     name = "infrastore",
     version,
     about = "Load and inspect an infrastore store on disk",
+    after_help = help::ROOT,
     styles = HELP_STYLES
 )]
 struct Cli {
@@ -179,6 +181,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Add time series from a descriptor JSON + CSV data.
+    #[command(after_help = help::ADD)]
     Add {
         /// Descriptor JSON describing the series (single object or array of objects).
         #[arg(long)]
@@ -195,6 +198,7 @@ enum Commands {
         no_shuffle: bool,
     },
     /// List stored time series matching the given filters.
+    #[command(after_help = help::LIST)]
     List {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -207,6 +211,7 @@ enum Commands {
         wide: bool,
     },
     /// Read and display a single time series.
+    #[command(after_help = help::GET)]
     Get {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -221,6 +226,7 @@ enum Commands {
         full: bool,
     },
     /// Metadata, content hash, HDF5 location, and stats for one series.
+    #[command(after_help = help::INFO)]
     Info {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -233,6 +239,7 @@ enum Commands {
     ///
     /// A selector resolving to one series removes that one; with `--all` a
     /// selector may match several.
+    #[command(after_help = help::REMOVE)]
     Remove {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -247,21 +254,23 @@ enum Commands {
         dry_run: bool,
     },
     /// Derive DeterministicSingleTimeSeries from stored SingleTimeSeries.
+    #[command(after_help = help::TRANSFORM)]
     Transform {
-        /// Forecast horizon, e.g. 24h.
+        /// Forecast horizon as an ISO-8601 duration, e.g. PT24H.
         #[arg(long)]
         horizon: String,
-        /// Forecast interval, e.g. 1h.
+        /// Forecast interval as an ISO-8601 duration, e.g. PT1H.
         #[arg(long)]
         interval: String,
-        /// Restrict to one owner category (component|supplemental_attribute).
+        /// Restrict to one owner category (Component|SupplementalAttribute).
         #[arg(long)]
         owner_category: Option<String>,
-        /// Restrict to one resolution, e.g. 1h.
+        /// Restrict to one resolution, e.g. PT1H.
         #[arg(long)]
         resolution: Option<String>,
     },
     /// Rename the single series a selector resolves to.
+    #[command(after_help = help::RENAME)]
     Rename {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -273,6 +282,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Copy the single series a selector resolves to onto another owner.
+    #[command(after_help = help::COPY)]
     Copy {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -290,6 +300,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Reassign every series from one owner to another.
+    #[command(after_help = help::REPLACE_OWNER)]
     ReplaceOwner {
         #[arg(long)]
         old: i64,
@@ -302,6 +313,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Remove all series, or all for one owner.
+    #[command(after_help = help::CLEAR)]
     Clear {
         #[arg(long)]
         owner_id: Option<i64>,
@@ -314,6 +326,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Write the store to a new HDF5 + SQLite artifact.
+    #[command(after_help = help::PERSIST)]
     Persist {
         /// Destination `.h5` path.
         #[arg(long)]
@@ -324,6 +337,7 @@ enum Commands {
     /// Rewrites the `.h5` file from the live set and replaces the original, so
     /// deleted data actually leaves the file. Nothing else may have the store
     /// open while this runs.
+    #[command(after_help = help::COMPACT)]
     Compact {
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
@@ -334,6 +348,7 @@ enum Commands {
     /// The read-direction inverse of `add`: one file per matched series into
     /// --dir, or stdout when the selector matches exactly one series. The CSV it
     /// writes is re-readable by `add`, which detects the layout from the header.
+    #[command(after_help = help::EXPORT)]
     Export {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -344,6 +359,7 @@ enum Commands {
     /// Generate shell completions to stdout.
     ///
     /// For example `infrastore completions zsh`.
+    #[command(after_help = help::COMPLETIONS)]
     Completions {
         /// Shell to generate for.
         #[arg(value_enum)]
@@ -354,10 +370,13 @@ enum Commands {
     /// Association counts are catalog rows; array counts are distinct content
     /// hashes. Content addressing makes the two diverge, so they are namespaced
     /// (`associations.*`, `owners.*`, `arrays.*`) rather than listed flat.
+    #[command(after_help = help::STATS)]
     Stats,
     /// HDF5 + SQLite paths, on-disk format version, and compression.
+    #[command(after_help = help::STORE_INFO)]
     StoreInfo,
     /// Distinct stored arrays: content hash, HDF5 location, and sharers.
+    #[command(after_help = help::ARRAYS)]
     Arrays {
         #[command(flatten)]
         selector: SelectorArgs,
@@ -366,6 +385,7 @@ enum Commands {
         data_hash: Option<String>,
     },
     /// Component <-> supplemental-attribute associations.
+    #[command(after_help = help::ATTRIBUTES)]
     Attributes {
         #[arg(long)]
         component_id: Option<i64>,
@@ -381,6 +401,7 @@ enum Commands {
         summary: bool,
     },
     /// Directed parent -> child component associations.
+    #[command(after_help = help::LINKS)]
     Links {
         #[arg(long)]
         parent_id: Option<i64>,
@@ -392,6 +413,7 @@ enum Commands {
         child_type: Option<String>,
     },
     /// Grouped static and/or forecast summaries.
+    #[command(after_help = help::SUMMARY)]
     Summary {
         #[arg(long)]
         static_only: bool,
@@ -410,15 +432,19 @@ enum Commands {
     /// For catalog-side checks use `infrastore check-consistency` (per-resolution grid
     /// agreement) and `infrastore compact` (which reports the unreachable arrays and
     /// feature sets a delete left behind — an expected state, not corruption).
+    #[command(after_help = help::VERIFY)]
     Verify,
     /// Verify per-resolution static grid consistency.
+    #[command(after_help = help::CHECK_CONSISTENCY)]
     CheckConsistency {
         #[arg(long)]
         resolution: Option<String>,
     },
     /// List distinct resolutions and forecast intervals.
+    #[command(after_help = help::RESOLUTIONS)]
     Resolutions,
     /// Show the store's forecast parameters.
+    #[command(after_help = help::PARAMS)]
     Params {
         #[arg(long)]
         resolution: Option<String>,
@@ -426,8 +452,13 @@ enum Commands {
         interval: Option<String>,
     },
     /// Print an example descriptor JSON for a time-series type.
+    ///
+    /// Durations, `type`, and `owner_category` are printed in the same spelling
+    /// the store renders them back in, so a generated descriptor lines up with
+    /// `list` / `info` / `export -f json` output for the series it creates.
+    #[command(after_help = help::TEMPLATE)]
     Template {
-        /// single|non_sequential|deterministic|probabilistic|scenarios
+        /// SingleTimeSeries|NonSequentialTimeSeries|Deterministic|Probabilistic|Scenarios
         #[arg(value_name = "TYPE")]
         ts_type: String,
     },
@@ -744,6 +775,223 @@ mod tests {
             "these help lines exceed {MAX} columns; shorten the command's first \
              doc-comment line and move the detail to a following paragraph, which \
              clap renders as long help:\n{long:#?}"
+        );
+    }
+
+    /// The `infrastore ...` lines in an examples block, as argv vectors.
+    ///
+    /// Just enough shell to read what the blocks actually contain: a trailing
+    /// `\` continues onto the next line, a ` #` comment and a `>` redirection
+    /// are not part of the invocation, and `'load_*'` is one argument. Anything
+    /// fancier does not belong in an example.
+    fn example_invocations(block: &str) -> Vec<Vec<String>> {
+        let mut unwrapped = String::new();
+        for line in block.lines() {
+            match line.trim().strip_suffix('\\') {
+                Some(head) => {
+                    unwrapped.push_str(head.trim_end());
+                    unwrapped.push(' ');
+                }
+                None => {
+                    unwrapped.push_str(line.trim());
+                    unwrapped.push('\n');
+                }
+            }
+        }
+        unwrapped
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("infrastore "))
+            .map(|l| {
+                let l = l.split(" #").next().unwrap_or(l);
+                l.split('>')
+                    .next()
+                    .unwrap_or(l)
+                    .split_whitespace()
+                    .map(|w| w.trim_matches('\'').to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Every examples block, labelled by the command it belongs to. The root
+    /// help is in here too: it is the first thing a new user sees, and the
+    /// grouped listing above it names commands without showing one complete
+    /// invocation.
+    fn example_blocks() -> Vec<(String, String)> {
+        let cmd = Cli::command();
+        let mut out = vec![(
+            "(root)".to_string(),
+            cmd.get_after_help()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        )];
+        for sub in cmd.get_subcommands() {
+            // clap writes `help` itself; it has no examples to give.
+            if sub.get_name() == "help" {
+                continue;
+            }
+            out.push((
+                sub.get_name().to_string(),
+                sub.get_after_help()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+            ));
+        }
+        out
+    }
+
+    /// Every command must end its own `--help` with a worked example.
+    ///
+    /// The synopsis a command prints tells a reader what its flags are, not what
+    /// the command is *for*, and the one whose help stops at the flag list is the
+    /// one that gets guessed at. This is the guard that keeps a newly added
+    /// command from shipping without one — the same role
+    /// [`every_command_appears_in_exactly_one_group`] plays for the index.
+    #[test]
+    fn every_command_ends_its_help_with_an_example() {
+        const MAX: usize = 100;
+        for (name, block) in example_blocks() {
+            assert!(
+                block.starts_with("Examples:"),
+                "`infrastore {name} --help` has no Examples: block; add one to src/help.rs"
+            );
+
+            // An example has to be an invocation of *this* command, not prose
+            // that merely mentions it. (The root's examples run subcommands, so
+            // it is exempt from the name check but not from the rest.)
+            let invocations = example_invocations(&block);
+            assert!(
+                !invocations.is_empty(),
+                "the {name} examples contain no `infrastore ...` line:\n{block}"
+            );
+            if name != "(root)" {
+                assert!(
+                    invocations.iter().any(|argv| argv.contains(&name)),
+                    "no example in `infrastore {name} --help` actually runs {name}:\n{block}"
+                );
+            }
+
+            // Same readable-width rule the grouped listing follows: help that
+            // wraps mid-flag is worse than help split across two lines.
+            let long: Vec<&str> = block.lines().filter(|l| l.chars().count() > MAX).collect();
+            assert!(
+                long.is_empty(),
+                "these {name} help lines exceed {MAX} columns; wrap them with a trailing \
+                 backslash:\n{long:#?}"
+            );
+        }
+    }
+
+    /// And every one of those examples has to parse.
+    ///
+    /// An example that names a flag the command dropped or renamed is worse than
+    /// no example at all — it is documentation that confidently fails. Running
+    /// them through the real parser means a flag cannot be renamed without the
+    /// examples following it.
+    #[test]
+    fn every_example_parses_as_a_real_invocation() {
+        for (name, block) in example_blocks() {
+            for argv in example_invocations(&block) {
+                if let Err(e) = build_command().try_get_matches_from(&argv) {
+                    panic!(
+                        "the {name} example `{}` does not parse:\n{e}",
+                        argv.join(" ")
+                    );
+                }
+            }
+        }
+    }
+
+    /// The documentation pages whose `sh` blocks are real invocations.
+    ///
+    /// Relative to the crate, because the check is only meaningful run from a
+    /// checkout that has the docs beside it.
+    const DOC_PAGES: &[&str] = &[
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/reference/cli.md"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/src/how-to/use-cli.md"
+        ),
+    ];
+
+    /// The `infrastore ...` lines inside a page's ```sh fences.
+    ///
+    /// Only `sh` fences: the reference page also carries ```text blocks holding
+    /// the synopsis grammar (`--store <PATH>`), which is not meant to parse.
+    fn doc_examples(markdown: &str) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        let mut in_sh = false;
+        for line in markdown.lines() {
+            if line.trim_start().starts_with("```") {
+                in_sh = line.trim() == "```sh";
+                continue;
+            }
+            if in_sh {
+                out.extend(example_invocations(line));
+            }
+        }
+        out
+    }
+
+    /// The documented examples have to parse too, and between them they have to
+    /// cover every command.
+    ///
+    /// The reference page is where someone looks before reaching for `--help`,
+    /// so an example there that names a renamed flag misleads exactly the reader
+    /// who trusted the docs over the binary. Running them through the real
+    /// parser keeps the two honest about each other.
+    #[test]
+    fn every_command_is_shown_in_the_docs_and_every_doc_example_parses() {
+        let mut covered: BTreeSet<String> = BTreeSet::new();
+        for page in DOC_PAGES {
+            let markdown = match std::fs::read_to_string(page) {
+                Ok(t) => t,
+                Err(e) => panic!("cannot read {page}: {e}"),
+            };
+            let examples = doc_examples(&markdown);
+            assert!(
+                !examples.is_empty(),
+                "{page} has no `infrastore ...` examples in its sh blocks"
+            );
+            for argv in examples {
+                if let Err(e) = build_command().try_get_matches_from(&argv) {
+                    panic!(
+                        "the example `{}` in {page} does not parse:\n{e}",
+                        argv.join(" ")
+                    );
+                }
+                covered.extend(argv.into_iter().skip(1));
+            }
+        }
+
+        let documented: BTreeSet<String> = clap_names()
+            .into_iter()
+            .filter(|n| n != "help" && !covered.contains(n))
+            .collect();
+        assert!(
+            documented.is_empty(),
+            "these commands have no example in {DOC_PAGES:?}: {documented:?}"
+        );
+    }
+
+    /// The root help must send a reader on to the per-command examples; without
+    /// that line they are easy to never discover.
+    #[test]
+    fn the_root_help_points_at_the_per_command_examples() {
+        let mut buf = Vec::new();
+        build_command().write_help(&mut buf).expect("help renders");
+        let rendered = String::from_utf8(buf).expect("utf8 help");
+        assert!(
+            rendered.contains("Examples:"),
+            "the root --help has no examples:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("<command> --help"),
+            "the root --help must point at the per-command examples:\n{rendered}"
         );
     }
 

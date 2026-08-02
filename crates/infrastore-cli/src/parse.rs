@@ -4,18 +4,51 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{ElementType, FeatureValue, OwnerCategory, Period, TimeSeriesType};
 
-/// Parse a period: an ISO-8601 duration (`PT1H`, `P1M`, `P1Y`) for calendar or
-/// fixed periods, or the legacy human form (`1h`, `15min`, `7d`) which is always
-/// a fixed-span [`Period::Fixed`].
+/// Representative ISO-8601 durations, for the error message a caller sees when
+/// theirs did not parse. Covers both kinds: fixed spans and calendar ones.
+const DURATION_EXAMPLES: &str = "PT1H, PT15M, PT30S, P1D, P1M, P1Y";
+
+/// Parse a period from an ISO-8601 duration: `PT1H`, `PT15M`, `P1D` for fixed
+/// spans, `P1M` / `P1Y` for calendar ones.
+///
+/// ISO-8601 is the only accepted spelling. The CLI used to take a human form
+/// as well (`1h`, `15min`, `7d`), but nothing the CLI *printed* was ever spelled
+/// that way — every rendered period goes through [`format_period`], which is
+/// ISO-8601 — so a duration copied out of `list`, `info`, or `export -f json`
+/// could not be pasted back into the descriptor it came from. The human form
+/// also made a bare integer mean *milliseconds*, so `--resolution 24` quietly
+/// meant 24ms rather than the day a reader of a power-systems tool assumes.
+///
+/// The retired grammar survives in [`legacy_suggestion`] as an error hint, so
+/// hitting this is a one-line fix rather than a puzzle.
 pub fn parse_period(s: &str) -> Result<Period, String> {
     let s = s.trim();
-    // ISO-8601 duration designators are uppercase `P`; the legacy human form
-    // (`1h`, `7d`) never starts with `p`, so only `P` routes to the ISO parser.
-    if s.starts_with('P') {
-        Period::from_iso8601(s).map_err(|e| e.to_string())
-    } else {
-        Ok(Period::Fixed(parse_duration(s)?))
-    }
+    Period::from_iso8601(s).map_err(|_| match legacy_suggestion(s) {
+        Some(iso) => {
+            format!("invalid duration '{s}': durations are ISO-8601 — did you mean '{iso}'?")
+        }
+        None => format!("invalid duration '{s}' (use an ISO-8601 duration: {DURATION_EXAMPLES})"),
+    })
+}
+
+/// The ISO-8601 spelling of a duration written in the retired human form (`1h`,
+/// `15min`, `500ms`, `7d`, or a bare integer of milliseconds), for the error
+/// hint above. `None` when the input is not in that form either, in which case
+/// there is nothing specific to suggest.
+fn legacy_suggestion(s: &str) -> Option<String> {
+    let split = s
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(s.len());
+    let n: i64 = s[..split].trim().parse().ok()?;
+    let d = match s[split..].trim() {
+        "" | "ms" => Duration::milliseconds(n),
+        "s" => Duration::seconds(n),
+        "min" => Duration::minutes(n),
+        "h" => Duration::hours(n),
+        "d" => Duration::days(n),
+        _ => return None,
+    };
+    Some(Period::Fixed(d).to_iso8601())
 }
 
 /// Render a [`Period`] as its canonical ISO-8601 duration string.
@@ -27,32 +60,6 @@ pub fn format_period(p: Period) -> String {
 /// (and matching calendar/fixed kinds).
 pub fn period_horizon_steps(horizon: Period, resolution: Period) -> Result<usize, String> {
     resolution.divide_into(&horizon).map_err(|e| e.to_string())
-}
-
-/// Parse a human duration such as `1h`, `15min`, `500ms`, `7d`, or a bare
-/// integer (interpreted as milliseconds). Supported units: `ms|s|min|h|d`.
-pub fn parse_duration(s: &str) -> Result<Duration, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty duration".to_string());
-    }
-    let split = s
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(s.len());
-    let (num, unit) = (s[..split].trim(), s[split..].trim());
-    let n: i64 = num.parse().map_err(|_| format!("invalid duration '{s}'"))?;
-    Ok(match unit {
-        "" | "ms" => Duration::milliseconds(n),
-        "s" => Duration::seconds(n),
-        "min" => Duration::minutes(n),
-        "h" => Duration::hours(n),
-        "d" => Duration::days(n),
-        other => {
-            return Err(format!(
-                "unknown duration unit '{other}' in '{s}' (use ms|s|min|h|d)"
-            ));
-        }
-    })
 }
 
 /// Parse an RFC3339 timestamp, or a bare integer of epoch milliseconds.
@@ -72,14 +79,17 @@ pub fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     ))
 }
 
-/// Parse an owner category, accepting `component` / `supplemental_attribute`
-/// (case-insensitive, with or without underscores).
+/// Parse an owner category. `Component` / `SupplementalAttribute` are the
+/// canonical spellings — what the CLI prints, and what `template` now writes —
+/// but matching is case-insensitive and ignores underscores, so the
+/// `supplemental_attribute` form that flags and older descriptors use keeps
+/// working.
 pub fn parse_owner_category(s: &str) -> Result<OwnerCategory, String> {
     match s.to_ascii_lowercase().replace('_', "").as_str() {
         "component" => Ok(OwnerCategory::Component),
         "supplementalattribute" => Ok(OwnerCategory::SupplementalAttribute),
         _ => Err(format!(
-            "invalid owner_category '{s}' (use 'component' or 'supplemental_attribute')"
+            "invalid owner_category '{s}' (use 'Component' or 'SupplementalAttribute')"
         )),
     }
 }
@@ -91,14 +101,22 @@ pub fn parse_element_type(s: &str) -> Result<ElementType, String> {
     s.trim().parse::<ElementType>().map_err(|e| e.to_string())
 }
 
-/// Every accepted `--type` spelling, in the order the help and error text list
-/// them. Kept in one place so the flag help, the error message, and
-/// [`parse_ts_type`] cannot drift apart.
-pub const TS_TYPE_NAMES: &str = "single|non_sequential|deterministic|deterministic_single|\
-                                 probabilistic|scenarios";
+/// The canonical `--type` / descriptor `type` spellings, in the order the help
+/// and error text list them. These are the names the core prints
+/// (`TimeSeriesType::as_str`) and the ones `template` writes. Kept in one place
+/// so the flag help, the error message, and [`parse_ts_type`] cannot drift
+/// apart.
+pub const TS_TYPE_NAMES: &str = "SingleTimeSeries|NonSequentialTimeSeries|Deterministic|\
+                                 DeterministicSingleTimeSeries|Probabilistic|Scenarios";
 
-/// Parse a time-series-type, accepting both short (`single`, `non_sequential`)
-/// and full (`SingleTimeSeries`) spellings.
+/// The lowercase shorthands [`parse_ts_type`] also accepts, for the "and these
+/// work too" half of the help and error text.
+pub const TS_TYPE_SHORT_NAMES: &str = "single|non_sequential|deterministic|deterministic_single|\
+                                       probabilistic|scenarios";
+
+/// Parse a time-series type, accepting both the canonical spelling
+/// (`SingleTimeSeries`) and the short one (`single`). Matching is
+/// case-insensitive and ignores underscores.
 pub fn parse_ts_type(s: &str) -> Result<TimeSeriesType, String> {
     Ok(match s.to_ascii_lowercase().replace('_', "").as_str() {
         "single" | "singletimeseries" => TimeSeriesType::SingleTimeSeries,
@@ -111,7 +129,8 @@ pub fn parse_ts_type(s: &str) -> Result<TimeSeriesType, String> {
         "scenarios" => TimeSeriesType::Scenarios,
         _ => {
             return Err(format!(
-                "invalid time series type '{s}' (use {TS_TYPE_NAMES})"
+                "invalid time series type '{s}' (use {TS_TYPE_NAMES}; \
+                 the short forms {TS_TYPE_SHORT_NAMES} are accepted too)"
             ));
         }
     })
@@ -226,27 +245,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn durations_round_trip() {
-        assert_eq!(parse_duration("1h").unwrap(), Duration::hours(1));
-        assert_eq!(parse_duration("15min").unwrap(), Duration::minutes(15));
-        assert_eq!(
-            parse_duration("500ms").unwrap(),
-            Duration::milliseconds(500)
-        );
-        assert_eq!(parse_duration("7d").unwrap(), Duration::days(7));
-        assert_eq!(parse_duration("250").unwrap(), Duration::milliseconds(250));
-    }
-
-    #[test]
     fn periods_round_trip() {
         use infrastore_core::Period;
         assert_eq!(
-            parse_period("1h").unwrap(),
+            parse_period("PT1H").unwrap(),
             Period::Fixed(Duration::hours(1))
         );
         assert_eq!(
-            parse_period("PT1H").unwrap(),
-            Period::Fixed(Duration::hours(1))
+            parse_period("PT15M").unwrap(),
+            Period::Fixed(Duration::minutes(15))
         );
         assert_eq!(parse_period("P1M").unwrap(), Period::Months(1));
         assert_eq!(parse_period("P1Y").unwrap(), Period::Months(12));
@@ -255,10 +262,54 @@ mod tests {
         assert_eq!(format_period(Period::Months(12)), "P1Y");
     }
 
+    /// Every period the CLI renders must be one the CLI can read back. This is
+    /// the property the human duration form broke, and the reason it is gone.
     #[test]
-    fn bad_duration_unit_errors() {
-        assert!(parse_duration("1w").is_err());
-        assert!(parse_duration("abc").is_err());
+    fn every_rendered_period_parses_back() {
+        use infrastore_core::Period;
+        for p in [
+            Period::Fixed(Duration::hours(1)),
+            Period::Fixed(Duration::minutes(15)),
+            Period::Fixed(Duration::seconds(30)),
+            Period::Fixed(Duration::milliseconds(500)),
+            Period::Fixed(Duration::days(7)),
+            Period::Months(1),
+            Period::Months(3),
+            Period::Months(12),
+        ] {
+            let rendered = format_period(p);
+            assert_eq!(parse_period(&rendered).unwrap(), p, "round trip {rendered}");
+        }
+    }
+
+    /// The human form is rejected, but with the ISO-8601 translation attached —
+    /// the whole point of keeping the retired grammar around as a hint.
+    #[test]
+    fn the_retired_human_form_is_rejected_with_a_suggestion() {
+        for (human, iso) in [
+            ("1h", "PT1H"),
+            ("15min", "PT15M"),
+            ("500ms", "PT0.5S"),
+            ("7d", "P7D"),
+            // A bare integer used to mean milliseconds, which is exactly the
+            // reading a suggestion should make explicit rather than silent.
+            ("24", "PT0.024S"),
+        ] {
+            let err = parse_period(human).expect_err("human form is no longer accepted");
+            assert!(
+                err.contains(iso),
+                "error for '{human}' should suggest '{iso}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_durations_error_without_a_suggestion() {
+        let err = parse_period("abc").unwrap_err();
+        assert!(err.contains("ISO-8601"), "{err}");
+        assert!(!err.contains("did you mean"), "{err}");
+        assert!(parse_period("1w").is_err());
+        assert!(parse_period("").is_err());
     }
 
     #[test]

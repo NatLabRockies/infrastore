@@ -127,6 +127,28 @@ fn value_lines(csv: &str) -> Vec<String> {
         .collect()
 }
 
+/// Write a data CSV, prepending the header row `add` requires.
+///
+/// Test bodies are written as data only. The generated header is deliberately
+/// *not* named `timestamp` or `issue_time`, so layout detection keeps reading
+/// the body as the flat write layout; the tests that exercise the timestamped
+/// layouts supply their own header (usually by re-adding an `export`).
+fn write_csv(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let width = body
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map_or(1, |l| l.split(',').count());
+    let header = if width <= 1 {
+        "value".to_string()
+    } else {
+        (0..width)
+            .map(|i| format!("value[{i}]"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    write(dir, name, &format!("{header}\n{body}"))
+}
+
 /// A minimal single-series descriptor with `overrides` merged in as raw JSON
 /// members, so a test can add or replace one field without restating the rest.
 fn descriptor_json(overrides: &[(&str, &str)]) -> String {
@@ -137,12 +159,11 @@ fn descriptor_json(overrides: &[(&str, &str)]) -> String {
         ("type".into(), "\"single\"".into()),
         ("element_type".into(), "\"f64\"".into()),
         ("csv".into(), "\"data.csv\"".into()),
-        ("has_header".into(), "false".into()),
         (
             "initial_timestamp".into(),
             "\"2024-01-01T00:00:00Z\"".into(),
         ),
-        ("resolution".into(), "\"1h\"".into()),
+        ("resolution".into(), "\"PT1H\"".into()),
     ];
     for (k, v) in overrides {
         match fields.iter_mut().find(|(name, _)| name == k) {
@@ -162,7 +183,7 @@ fn descriptor_json(overrides: &[(&str, &str)]) -> String {
 fn fixture(csv_body: &str, overrides: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "data.csv", csv_body);
+    write_csv(dir.path(), "data.csv", csv_body);
     let descriptor = write(dir.path(), "d.json", &descriptor_json(overrides));
     (dir, store, descriptor)
 }
@@ -185,7 +206,7 @@ fn add_ok(store: &Path, descriptor: &Path) -> String {
 
 /// Seed a store with one 4-step f64 series named `load` owned by 42.
 fn seed(dir: &Path, store: &Path) {
-    write(dir, "seed.csv", "10\n11\n12\n13\n");
+    write_csv(dir, "seed.csv", "10\n11\n12\n13\n");
     let descriptor = write(
         dir,
         "seed.json",
@@ -298,8 +319,8 @@ fn a_value_count_that_does_not_match_the_declared_shape_is_rejected() {
         "1\n2\n3\n4\n5\n",
         &[
             ("type", "\"deterministic\""),
-            ("horizon", "\"2h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT2H\""),
+            ("interval", "\"PT1H\""),
             ("count", "3"),
         ],
     );
@@ -394,17 +415,11 @@ fn a_descriptor_with_no_csv_and_no_flag_is_rejected() {
 }
 
 #[test]
-fn has_header_true_skips_the_first_row() {
-    // `has_header` defaults to true but no test ever exercised that path: every
-    // fixture sets it to false. A header row must be consumed, not parsed as data.
+fn a_header_row_is_consumed_rather_than_parsed_as_data() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     write(dir.path(), "data.csv", "value\n1.5\n2.5\n3.5\n");
-    let descriptor = write(
-        dir.path(),
-        "d.json",
-        &descriptor_json(&[("has_header", "true")]),
-    );
+    let descriptor = write(dir.path(), "d.json", &descriptor_json(&[]));
     add_ok(&store, &descriptor);
 
     let out = run(
@@ -412,17 +427,56 @@ fn has_header_true_skips_the_first_row() {
         &["-f", "csv", "get", "--owner-id", "42", "--name", "load"],
     );
     assert_eq!(value_lines(&out), vec!["1.5", "2.5", "3.5"]);
+}
 
-    // With `has_header: false` the same file fails, because "value" is not an f64
-    // — which is what makes the assertion above meaningful.
-    let store2 = dir.path().join("store2.h5");
-    let no_header = write(
-        dir.path(),
-        "d2.json",
-        &descriptor_json(&[("has_header", "false")]),
+/// The hazard created by making the header mandatory: without this guard a
+/// header-less CSV is not an error at all — its first row is eaten as column
+/// names and the series is stored silently one element short.
+#[test]
+fn a_csv_whose_first_row_is_data_is_rejected_rather_than_losing_a_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    write(dir.path(), "data.csv", "1.5\n2.5\n3.5\n");
+    let descriptor = write(dir.path(), "d.json", &descriptor_json(&[]));
+    let stderr = add_err(&store, &descriptor);
+    assert!(
+        stderr.contains("1.5") && stderr.contains("header"),
+        "the diagnostic must quote the row and say it wants a header, got: {stderr}"
     );
-    let stderr = add_err(&store2, &no_header);
-    assert!(stderr.contains("value"), "got: {stderr}");
+
+    // The same check reaches the value columns of a timestamped CSV, whose
+    // leading column is a timestamp rather than a number.
+    let ns_store = dir.path().join("ns.h5");
+    write(
+        dir.path(),
+        "ns.csv",
+        "2024-01-01T00:00:00Z,10\n2024-01-02T00:00:00Z,20\n",
+    );
+    let ns = write(
+        dir.path(),
+        "ns.json",
+        &descriptor_json(&[
+            ("csv", "\"ns.csv\""),
+            ("type", "\"non_sequential\""),
+            ("initial_timestamp", "null"),
+            ("resolution", "null"),
+        ]),
+    );
+    let stderr = add_err(&ns_store, &ns);
+    assert!(stderr.contains("header"), "got: {stderr}");
+}
+
+/// A descriptor written for an older release names a field that no longer
+/// exists. Serde's bare "unknown field" is accurate but says nothing about what
+/// changed, so `add` attaches the migration note.
+#[test]
+fn a_descriptor_carrying_has_header_is_rejected_with_a_migration_note() {
+    let (_dir, store, descriptor) = fixture("1.0\n2.0\n3.0\n", &[("has_header", "true")]);
+    let stderr = add_err(&store, &descriptor);
+    assert!(
+        stderr.contains("has_header") && stderr.contains("header row"),
+        "expected a has_header migration note, got: {stderr}"
+    );
 }
 
 #[test]
@@ -477,27 +531,27 @@ fn each_type_reports_its_own_missing_required_field() {
         // deterministic without horizon
         (
             "deterministic",
-            &[("interval", "\"1h\""), ("count", "3")],
+            &[("interval", "\"PT1H\""), ("count", "3")],
             "horizon",
         ),
         // deterministic without interval
         (
             "deterministic",
-            &[("horizon", "\"2h\""), ("count", "3")],
+            &[("horizon", "\"PT2H\""), ("count", "3")],
             "interval",
         ),
         // deterministic without count
         (
             "deterministic",
-            &[("horizon", "\"2h\""), ("interval", "\"1h\"")],
+            &[("horizon", "\"PT2H\""), ("interval", "\"PT1H\"")],
             "count",
         ),
         // probabilistic without percentiles
         (
             "probabilistic",
             &[
-                ("horizon", "\"2h\""),
-                ("interval", "\"1h\""),
+                ("horizon", "\"PT2H\""),
+                ("interval", "\"PT1H\""),
                 ("count", "3"),
             ],
             "percentiles",
@@ -626,8 +680,8 @@ fn a_scenario_count_that_cannot_be_inferred_is_rejected() {
         "1\n2\n3\n4\n5\n6\n7\n",
         &[
             ("type", "\"scenarios\""),
-            ("horizon", "\"2h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT2H\""),
+            ("interval", "\"PT1H\""),
             ("count", "3"),
         ],
     );
@@ -645,8 +699,8 @@ fn a_scenario_count_that_can_be_inferred_is_used() {
         "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
         &[
             ("type", "\"scenarios\""),
-            ("horizon", "\"2h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT2H\""),
+            ("interval", "\"PT1H\""),
             ("count", "3"),
         ],
     );
@@ -661,8 +715,8 @@ fn a_deterministic_single_time_series_descriptor_points_at_transform() {
         "1\n2\n3\n4\n",
         &[
             ("type", "\"deterministic_single\""),
-            ("horizon", "\"2h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT2H\""),
+            ("interval", "\"PT1H\""),
             ("count", "2"),
         ],
     );
@@ -827,7 +881,7 @@ fn an_attribute_owned_series_can_be_added_and_listed() {
 fn transform_derives_a_dst_that_list_shows() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "t.csv", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    write_csv(dir.path(), "t.csv", "1\n2\n3\n4\n5\n6\n7\n8\n");
     let descriptor = write(
         dir.path(),
         "t.json",
@@ -837,7 +891,7 @@ fn transform_derives_a_dst_that_list_shows() {
 
     let out = run(
         &store,
-        &["transform", "--horizon", "4h", "--interval", "2h"],
+        &["transform", "--horizon", "PT4H", "--interval", "PT2H"],
     );
     assert!(!out.is_empty() || out.is_empty()); // output shape is not the contract
 
@@ -867,7 +921,13 @@ fn transform_derives_a_dst_that_list_shows() {
     // A transform with a bad period is rejected.
     run_err(
         &store,
-        &["transform", "--horizon", "not-a-period", "--interval", "2h"],
+        &[
+            "transform",
+            "--horizon",
+            "not-a-period",
+            "--interval",
+            "PT2H",
+        ],
     );
 }
 
@@ -1000,7 +1060,7 @@ fn compact_runs_and_reports() {
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
     // Add a second series and remove it, leaving a reusable slot.
-    write(dir.path(), "b.csv", "90\n91\n92\n93\n");
+    write_csv(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
         dir.path(),
         "b.json",
@@ -1044,15 +1104,15 @@ fn compact_runs_and_reports() {
 fn params_reports_forecast_parameters() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "f.csv", "1\n2\n3\n4\n5\n6\n");
+    write_csv(dir.path(), "f.csv", "1\n2\n3\n4\n5\n6\n");
     let descriptor = write(
         dir.path(),
         "f.json",
         &descriptor_json(&[
             ("csv", "\"f.csv\""),
             ("type", "\"deterministic\""),
-            ("horizon", "\"2h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT2H\""),
+            ("interval", "\"PT1H\""),
             ("count", "3"),
         ]),
     );
@@ -1070,9 +1130,9 @@ fn params_reports_forecast_parameters() {
             "json",
             "params",
             "--resolution",
-            "1h",
+            "PT1H",
             "--interval",
-            "1h",
+            "PT1H",
         ],
     );
     assert!(out.contains("PT2H"), "got: {out}");
@@ -1092,26 +1152,43 @@ fn params_reports_forecast_parameters() {
 fn template_prints_a_usable_descriptor_for_every_type() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    for ts_type in [
-        "single",
-        "non_sequential",
-        "deterministic",
-        "probabilistic",
-        "scenarios",
+    // The short spelling still selects a template; what the template *prints* is
+    // the canonical one, which is also accepted back.
+    for (arg, canonical) in [
+        ("single", "SingleTimeSeries"),
+        ("non_sequential", "NonSequentialTimeSeries"),
+        ("deterministic", "Deterministic"),
+        ("probabilistic", "Probabilistic"),
+        ("scenarios", "Scenarios"),
     ] {
-        let out = run(&store, &["template", ts_type]);
-        // Each template must be valid JSON with a matching `type`.
+        let out = run(&store, &["template", arg]);
         let value: serde_json::Value =
-            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{ts_type}: {e}\n{out}"));
+            serde_json::from_str(&out).unwrap_or_else(|e| panic!("{arg}: {e}\n{out}"));
         assert_eq!(
             value.get("type").and_then(|v| v.as_str()),
-            Some(ts_type),
-            "{ts_type}: template's type field"
+            Some(canonical),
+            "{arg}: template's type field"
         );
+        assert_eq!(
+            value.get("owner_category").and_then(|v| v.as_str()),
+            Some("Component"),
+            "{arg}: template's owner_category"
+        );
+        assert!(value.get("element_type").is_some(), "{arg}: element_type");
         assert!(
-            value.get("element_type").is_some(),
-            "{ts_type}: element_type"
+            value.get("has_header").is_none(),
+            "{arg}: has_header is gone; a template must not reintroduce it"
         );
+        // Durations are ISO-8601, which always starts with `P` (or `-P`).
+        for key in ["resolution", "horizon", "interval"] {
+            if let Some(d) = value.get(key).and_then(|v| v.as_str()) {
+                assert!(
+                    d.starts_with('P'),
+                    "{arg}: {key} must be an ISO-8601 duration, got {d:?}"
+                );
+            }
+        }
+        assert_eq!(run(&store, &["template", canonical]), out);
     }
 
     // DST has no descriptor form.
@@ -1122,12 +1199,51 @@ fn template_prints_a_usable_descriptor_for_every_type() {
     run_err(&store, &["template", "quantum"]);
 }
 
+/// The point of the canonical spellings: the descriptor `template` prints and
+/// the catalog row it produces say the same words. `template` used to emit
+/// `single` / `component` / `1h` where `list` renders `SingleTimeSeries` /
+/// `Component` / `PT1H`, so neither a diff nor a grep could line a descriptor up
+/// against the series it created.
+#[test]
+fn a_template_descriptor_and_the_row_it_creates_agree_word_for_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store.h5");
+    let template: serde_json::Value =
+        serde_json::from_str(&run(&store, &["template", "SingleTimeSeries"])).unwrap();
+
+    // The template names `load.csv`, so that is the file it gets.
+    write_csv(dir.path(), "load.csv", "1.0\n2.0\n3.0\n");
+    let descriptor = write(dir.path(), "load.json", &template.to_string());
+    add_ok(&store, &descriptor);
+
+    let listed: serde_json::Value =
+        serde_json::from_str(&run(&store, &["-f", "json", "list"])).unwrap();
+    let row = &listed["items"][0];
+    for key in [
+        "type",
+        "owner_category",
+        "resolution",
+        "name",
+        "owner_type",
+        "owner_id",
+        "element_type",
+        "units",
+        "ext",
+        "features",
+    ] {
+        assert_eq!(
+            row[key], template[key],
+            "{key} must read back exactly as the descriptor spelled it"
+        );
+    }
+}
+
 #[test]
 fn clear_removes_everything_or_one_owner() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
-    write(dir.path(), "b.csv", "90\n91\n92\n93\n");
+    write_csv(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
         dir.path(),
         "b.json",
@@ -1233,7 +1349,7 @@ fn remove_without_all_removes_exactly_one_series() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
-    write(dir.path(), "b.csv", "90\n91\n92\n93\n");
+    write_csv(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
         dir.path(),
         "b.json",
@@ -1251,7 +1367,7 @@ fn remove_without_all_removes_exactly_one_series() {
 
     // Without `--all`, a selector matching several series is an error naming
     // them, not a partial removal.
-    write(dir.path(), "c.csv", "80\n81\n82\n83\n");
+    write_csv(dir.path(), "c.csv", "80\n81\n82\n83\n");
     let third = write(
         dir.path(),
         "c.json",
@@ -1326,7 +1442,7 @@ fn export_then_add_reproduces_the_values() {
     let descriptor = write(
         dir.path(),
         "re.json",
-        &descriptor_json(&[("csv", "\"values.csv\""), ("has_header", "true")]),
+        &descriptor_json(&[("csv", "\"values.csv\"")]),
     );
     add_ok(&fresh, &descriptor);
 
@@ -1348,7 +1464,6 @@ fn export_then_add_reproduces_the_values() {
         "ns.json",
         &descriptor_json(&[
             ("csv", "\"stamped.csv\""),
-            ("has_header", "true"),
             ("type", "\"non_sequential\""),
             ("initial_timestamp", "null"),
             ("resolution", "null"),
@@ -1375,7 +1490,7 @@ fn export_then_add_reproduces_the_values() {
 fn export_then_add_reproduces_a_non_f64_dtype() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(
+    write_csv(
         dir.path(),
         "i.csv",
         "-9223372036854775808\n0\n9223372036854775807\n",
@@ -1401,11 +1516,7 @@ fn export_then_add_reproduces_a_non_f64_dtype() {
     let re = write(
         dir.path(),
         "re.json",
-        &descriptor_json(&[
-            ("csv", "\"values.csv\""),
-            ("element_type", "\"i64\""),
-            ("has_header", "true"),
-        ]),
+        &descriptor_json(&[("csv", "\"values.csv\""), ("element_type", "\"i64\"")]),
     );
     add_ok(&fresh, &re);
 
@@ -1429,7 +1540,7 @@ fn export_writes_one_file_per_series_into_a_directory() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
-    write(dir.path(), "b.csv", "90\n91\n92\n93\n");
+    write_csv(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
         dir.path(),
         "b.json",
@@ -1467,15 +1578,15 @@ fn export_writes_one_file_per_series_into_a_directory() {
 fn export_of_a_forecast_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "f.csv", "1\n2\n3\n4\n5\n6\n");
+    write_csv(dir.path(), "f.csv", "1\n2\n3\n4\n5\n6\n");
     let descriptor = write(
         dir.path(),
         "f.json",
         &descriptor_json(&[
             ("csv", "\"f.csv\""),
             ("type", "\"deterministic\""),
-            ("horizon", "\"2h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT2H\""),
+            ("interval", "\"PT1H\""),
             ("count", "3"),
         ]),
     );
@@ -1507,7 +1618,7 @@ fn export_of_a_forecast_round_trips() {
 fn get_time_range_slices_the_series() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "t.csv", "10\n11\n12\n13\n14\n15\n16\n17\n");
+    write_csv(dir.path(), "t.csv", "10\n11\n12\n13\n14\n15\n16\n17\n");
     let descriptor = write(
         dir.path(),
         "t.json",
@@ -1580,7 +1691,7 @@ fn get_limit_and_full_control_table_truncation() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     let body: String = (0..80).map(|i| format!("{i}\n")).collect();
-    write(dir.path(), "big.csv", &body);
+    write_csv(dir.path(), "big.csv", &body);
     let descriptor = write(
         dir.path(),
         "big.json",
@@ -1632,7 +1743,7 @@ fn a_selector_matching_zero_or_several_series_reports_which() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
     seed(dir.path(), &store);
-    write(dir.path(), "b.csv", "90\n91\n92\n93\n");
+    write_csv(dir.path(), "b.csv", "90\n91\n92\n93\n");
     let second = write(
         dir.path(),
         "b.json",
@@ -1660,7 +1771,7 @@ fn a_selector_matching_zero_or_several_series_reports_which() {
 fn glob_selector_edges() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "g.csv", "1\n2\n3\n4\n");
+    write_csv(dir.path(), "g.csv", "1\n2\n3\n4\n");
     for (i, name) in ["wind_a", "wind_b", "solar", "Wind_c"].iter().enumerate() {
         let d = write(
             dir.path(),
@@ -1732,7 +1843,7 @@ fn the_store_flag_beats_the_env_var() {
 
     // A second store with different values, pointed at by the env var.
     let env_store = dir.path().join("env.h5");
-    write(dir.path(), "e.csv", "70\n71\n72\n73\n");
+    write_csv(dir.path(), "e.csv", "70\n71\n72\n73\n");
     let d = write(
         dir.path(),
         "e.json",
@@ -2128,7 +2239,7 @@ fn seed_feature_pair(dir: &Path, store: &Path) {
                 ("features", &format!("{{\"model_year\": {year}}}")),
             ]),
         );
-        write(dir, "seed.csv", "10\n11\n12\n13\n");
+        write_csv(dir, "seed.csv", "10\n11\n12\n13\n");
         add_ok(store, &d);
     }
 }
@@ -2176,7 +2287,7 @@ fn an_ambiguous_selector_names_the_flag_that_would_narrow_it() {
 fn an_ambiguous_selector_truncates_a_long_candidate_list() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "seed.csv", "10\n11\n12\n13\n");
+    write_csv(dir.path(), "seed.csv", "10\n11\n12\n13\n");
     for owner in 0..30 {
         let d = write(
             dir.path(),
@@ -2291,7 +2402,7 @@ fn an_exported_single_time_series_csv_can_be_added_back() {
     let d = write(
         dir.path(),
         "back.json",
-        &descriptor_json(&[("csv", "\"exported.csv\""), ("has_header", "true")]),
+        &descriptor_json(&[("csv", "\"exported.csv\"")]),
     );
     add_ok(&fresh, &d);
 
@@ -2322,7 +2433,7 @@ fn an_exported_forecast_csv_round_trips_through_its_transpose() {
             }
         }
     }
-    write(dir.path(), "scen.csv", &format!("{}\n", cells.join("\n")));
+    write_csv(dir.path(), "scen.csv", &format!("{}\n", cells.join("\n")));
     let d = write(
         dir.path(),
         "scen.json",
@@ -2330,9 +2441,8 @@ fn an_exported_forecast_csv_round_trips_through_its_transpose() {
             ("name", "\"scen\""),
             ("type", "\"scenarios\""),
             ("csv", "\"scen.csv\""),
-            ("has_header", "false"),
-            ("horizon", "\"3h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT3H\""),
+            ("interval", "\"PT1H\""),
             ("count", "4"),
             ("scenario_count", "2"),
         ]),
@@ -2355,9 +2465,8 @@ fn an_exported_forecast_csv_round_trips_through_its_transpose() {
             ("name", "\"scen\""),
             ("type", "\"scenarios\""),
             ("csv", "\"scen_back.csv\""),
-            ("has_header", "true"),
-            ("horizon", "\"3h\""),
-            ("interval", "\"1h\""),
+            ("horizon", "\"PT3H\""),
+            ("interval", "\"PT1H\""),
             ("count", "4"),
             ("scenario_count", "2"),
         ]),
@@ -2383,7 +2492,7 @@ fn deterministic_selects_transformed_rows_and_dst_narrows_to_them() {
     seed(dir.path(), &store);
     run(
         &store,
-        &["transform", "--horizon", "2h", "--interval", "1h"],
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
     );
 
     // `transform` writes a DeterministicSingleTimeSeries. Asking for
@@ -2429,7 +2538,7 @@ fn deterministic_selects_transformed_rows_and_dst_narrows_to_them() {
 fn list_limit_bounds_the_output_and_reports_the_remainder() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store.h5");
-    write(dir.path(), "seed.csv", "10\n11\n12\n13\n");
+    write_csv(dir.path(), "seed.csv", "10\n11\n12\n13\n");
     for owner in 0..5 {
         let d = write(
             dir.path(),

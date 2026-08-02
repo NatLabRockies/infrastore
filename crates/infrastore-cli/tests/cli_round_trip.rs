@@ -62,6 +62,27 @@ fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     path
 }
 
+/// Write a data CSV, prepending the header row `add` requires.
+///
+/// Test bodies are written as data only. The generated header is deliberately
+/// *not* named `timestamp` or `issue_time`, so layout detection keeps reading
+/// the body as the flat write layout.
+fn write_csv(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    let width = body
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map_or(1, |l| l.split(',').count());
+    let header = if width <= 1 {
+        "value".to_string()
+    } else {
+        (0..width)
+            .map(|i| format!("value[{i}]"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    write(dir, name, &format!("{header}\n{body}"))
+}
+
 #[test]
 fn single_round_trip_all_dtypes() {
     let cases: &[(&str, &str, &[&str])] = &[
@@ -75,7 +96,7 @@ fn single_round_trip_all_dtypes() {
     let dir = tempfile::tempdir().unwrap();
     for (dtype, csv_body, expected) in cases {
         let store = dir.path().join(format!("{dtype}.h5"));
-        write(dir.path(), "data.csv", csv_body);
+        write_csv(dir.path(), "data.csv", csv_body);
         let json = format!(
             r#"{{
   "owner_id": 42,
@@ -84,9 +105,8 @@ fn single_round_trip_all_dtypes() {
   "type": "single",
   "element_type": "{dtype}",
   "csv": "data.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }}"#
         );
         let descriptor = write(dir.path(), "s.json", &json);
@@ -117,7 +137,7 @@ fn single_round_trip_all_dtypes() {
 fn non_sequential_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("ns.h5");
-    write(
+    write_csv(
         dir.path(),
         "ns.csv",
         "2024-01-01T00:00:00Z,10\n2024-01-01T05:00:00Z,20\n2024-01-02T00:00:00Z,30\n",
@@ -131,8 +151,7 @@ fn non_sequential_round_trip() {
   "name": "events",
   "type": "non_sequential",
   "element_type": "f64",
-  "csv": "ns.csv",
-  "has_header": false
+  "csv": "ns.csv"
 }"#,
     );
     run(
@@ -158,7 +177,7 @@ fn forecast_round_trips() {
 
     // Deterministic: H=2 (2h/1h), count=3 -> 6 flat values.
     let det_store = dir.path().join("det.h5");
-    write(dir.path(), "det.csv", "1\n2\n3\n4\n5\n6\n");
+    write_csv(dir.path(), "det.csv", "1\n2\n3\n4\n5\n6\n");
     let det = write(
         dir.path(),
         "det.json",
@@ -169,11 +188,10 @@ fn forecast_round_trips() {
   "type": "deterministic",
   "element_type": "i64",
   "csv": "det.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
-  "horizon": "2h",
-  "interval": "1h",
+  "resolution": "PT1H",
+  "horizon": "PT2H",
+  "interval": "PT1H",
   "count": 3
 }"#,
     );
@@ -195,7 +213,7 @@ fn forecast_round_trips() {
     // Probabilistic: P=3, H=2, count=2 -> 12 flat values.
     let prob_store = dir.path().join("prob.h5");
     let prob_vals: String = (1..=12).map(|i| format!("{i}\n")).collect();
-    write(dir.path(), "prob.csv", &prob_vals);
+    write_csv(dir.path(), "prob.csv", &prob_vals);
     let prob = write(
         dir.path(),
         "prob.json",
@@ -206,11 +224,10 @@ fn forecast_round_trips() {
   "type": "probabilistic",
   "element_type": "i64",
   "csv": "prob.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
-  "horizon": "2h",
-  "interval": "1h",
+  "resolution": "PT1H",
+  "horizon": "PT2H",
+  "interval": "PT1H",
   "count": 2,
   "percentiles": [10.0, 50.0, 90.0]
 }"#,
@@ -235,7 +252,7 @@ fn forecast_round_trips() {
     // Scenarios: scenario_count inferred (8 values / (H=2 * count=2) = 2).
     let scen_store = dir.path().join("scen.h5");
     let scen_vals: String = (1..=8).map(|i| format!("{i}\n")).collect();
-    write(dir.path(), "scen.csv", &scen_vals);
+    write_csv(dir.path(), "scen.csv", &scen_vals);
     let scen = write(
         dir.path(),
         "scen.json",
@@ -246,11 +263,10 @@ fn forecast_round_trips() {
   "type": "scenarios",
   "element_type": "i64",
   "csv": "scen.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
-  "horizon": "2h",
-  "interval": "1h",
+  "resolution": "PT1H",
+  "horizon": "PT2H",
+  "interval": "PT1H",
   "count": 2
 }"#,
     );
@@ -276,7 +292,7 @@ fn forecast_round_trips() {
 fn multidim_single_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("md.h5");
-    write(dir.path(), "md.csv", "1,2\n3,4\n5,6\n");
+    write_csv(dir.path(), "md.csv", "1,2\n3,4\n5,6\n");
     let descriptor = write(
         dir.path(),
         "md.json",
@@ -287,10 +303,9 @@ fn multidim_single_round_trip() {
   "type": "single",
   "element_type": "f64",
   "csv": "md.csv",
-  "has_header": false,
   "element_shape": [2],
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }"#,
     );
     run(
@@ -308,7 +323,7 @@ fn multidim_single_round_trip() {
 fn list_info_and_json_succeed() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("ok.h5");
-    write(dir.path(), "d.csv", "1\n2\n3\n4\n");
+    write_csv(dir.path(), "d.csv", "1\n2\n3\n4\n");
     let descriptor = write(
         dir.path(),
         "d.json",
@@ -320,9 +335,8 @@ fn list_info_and_json_succeed() {
   "element_type": "f64",
   "units": "MW",
   "csv": "d.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }"#,
     );
     run(
@@ -384,8 +398,8 @@ fn list_info_and_json_succeed() {
 fn batch_json_array_adds_multiple() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("batch.h5");
-    write(dir.path(), "a.csv", "1\n2\n3\n");
-    write(dir.path(), "b.csv", "4\n5\n6\n");
+    write_csv(dir.path(), "a.csv", "1\n2\n3\n");
+    write_csv(dir.path(), "b.csv", "4\n5\n6\n");
     let descriptor = write(
         dir.path(),
         "batch.json",
@@ -397,9 +411,8 @@ fn batch_json_array_adds_multiple() {
     "type": "single",
     "element_type": "f64",
     "csv": "a.csv",
-    "has_header": false,
     "initial_timestamp": "2024-01-01T00:00:00Z",
-    "resolution": "1h"
+    "resolution": "PT1H"
   },
   {
     "owner_id": 10,
@@ -408,9 +421,8 @@ fn batch_json_array_adds_multiple() {
     "type": "single",
     "element_type": "f64",
     "csv": "b.csv",
-    "has_header": false,
     "initial_timestamp": "2024-01-01T00:00:00Z",
-    "resolution": "1h"
+    "resolution": "PT1H"
   }
 ]"#,
     );
@@ -434,7 +446,7 @@ fn batch_json_array_adds_multiple() {
 
 /// Seed a store with two SingleTimeSeries (owners 1 and 2, name "load").
 fn seed_two(dir: &Path, store: &Path) {
-    write(dir, "d.csv", "1.0\n2.0\n3.0\n4.0\n");
+    write_csv(dir, "d.csv", "1.0\n2.0\n3.0\n4.0\n");
     for owner in [1, 2] {
         let json = format!(
             r#"{{
@@ -444,9 +456,8 @@ fn seed_two(dir: &Path, store: &Path) {
   "type": "single",
   "element_type": "f64",
   "csv": "d.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }}"#
         );
         let descriptor = write(dir, "s.json", &json);
@@ -544,7 +555,7 @@ fn run_err(store: &Path, args: &[&str]) -> String {
 
 /// Seed one store with distinctly-named series for glob/export tests.
 fn seed_named(dir: &Path, store: &Path, names: &[&str]) {
-    write(dir, "n.csv", "1.0\n2.0\n3.0\n");
+    write_csv(dir, "n.csv", "1.0\n2.0\n3.0\n");
     for (i, name) in names.iter().enumerate() {
         let json = format!(
             r#"{{
@@ -554,9 +565,8 @@ fn seed_named(dir: &Path, store: &Path, names: &[&str]) {
   "type": "single",
   "element_type": "f64",
   "csv": "n.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }}"#,
             i + 1
         );
@@ -673,7 +683,7 @@ fn export_to_dir_and_stdout() {
 fn ext_round_trips_through_descriptor() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("lt.h5");
-    write(dir.path(), "lt.csv", "1.0\n2.0\n");
+    write_csv(dir.path(), "lt.csv", "1.0\n2.0\n");
     let descriptor = write(
         dir.path(),
         "lt.json",
@@ -685,9 +695,8 @@ fn ext_round_trips_through_descriptor() {
   "element_type": "f64",
   "ext": "Profile",
   "csv": "lt.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }"#,
     );
     run(
@@ -704,7 +713,7 @@ fn ext_round_trips_through_descriptor() {
 fn compression_flag_only_on_creation() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("comp.h5");
-    write(dir.path(), "c.csv", "1.0\n2.0\n");
+    write_csv(dir.path(), "c.csv", "1.0\n2.0\n");
     let descriptor = write(
         dir.path(),
         "c.json",
@@ -715,9 +724,8 @@ fn compression_flag_only_on_creation() {
   "type": "single",
   "element_type": "f64",
   "csv": "c.csv",
-  "has_header": false,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h"
+  "resolution": "PT1H"
 }"#,
     );
     run(

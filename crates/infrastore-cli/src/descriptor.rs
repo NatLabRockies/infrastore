@@ -36,8 +36,6 @@ pub struct Descriptor {
     pub ext: Option<String>,
     /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
     pub csv: Option<String>,
-    #[serde(default = "default_true")]
-    pub has_header: bool,
     #[serde(default)]
     pub element_shape: Vec<usize>,
     #[serde(default)]
@@ -53,14 +51,13 @@ pub struct Descriptor {
     pub scenario_count: Option<usize>,
 }
 
-fn default_true() -> bool {
-    true
-}
 fn default_owner_category() -> String {
-    "component".to_string()
+    infrastore_core::OwnerCategory::Component
+        .as_str()
+        .to_string()
 }
 
-/// The physical shape of a companion CSV, decided by [`Descriptor::csv_layout`].
+/// The physical shape of a companion CSV, decided by [`csv_layout`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsvLayout {
     /// Every column is a value, flattened row-major into the array. The
@@ -83,6 +80,75 @@ impl CsvLayout {
             CsvLayout::ForecastTimestamped => 2,
         }
     }
+}
+
+/// Which physical layout a companion CSV is in, read off its header row.
+///
+/// `add` originally required each type's rawest form: bare values for a
+/// SingleTimeSeries or a forecast, `timestamp,value...` for a
+/// NonSequentialTimeSeries. But `export` writes timestamps for every type — they
+/// are the useful part of the output — so an exported file could not be fed back
+/// in, even though `export` is meant to be `add`'s inverse. Detecting the shape
+/// from the header closes that loop without a new flag and without changing what
+/// a hand-written value-only CSV means.
+///
+/// This is why the header row is mandatory rather than optional: the detection
+/// has no other input, and guessing wrong on a forecast transposes its axes
+/// silently rather than failing.
+fn csv_layout(header: &[String], ts_type: TimeSeriesType) -> CsvLayout {
+    let col = |i: usize| header.get(i).map(|s| s.trim().to_ascii_lowercase());
+    let first_is = |name: &str| col(0).as_deref() == Some(name);
+
+    match ts_type {
+        TimeSeriesType::NonSequentialTimeSeries => CsvLayout::Timestamped,
+        TimeSeriesType::SingleTimeSeries => {
+            if first_is("timestamp") {
+                CsvLayout::Timestamped
+            } else {
+                CsvLayout::Values
+            }
+        }
+        // Deterministic / Probabilistic / Scenarios.
+        _ => {
+            if first_is("issue_time") && col(1).as_deref() == Some("target_time") {
+                CsvLayout::ForecastTimestamped
+            } else {
+                CsvLayout::Values
+            }
+        }
+    }
+}
+
+/// Reject a CSV whose "header" is really its first row of data.
+///
+/// The header row is mandatory, which on its own would trade one silent failure
+/// for another: hand a header-less file to `add` and the CSV reader eats row one
+/// as column names, storing a series quietly one element short. Nothing
+/// downstream can catch that — the remaining rows parse fine and the length is
+/// whatever it is.
+///
+/// A header cell that parses as a value of the declared dtype is the signature
+/// of that mistake, so it is worth one cheap check. Only the *value* columns are
+/// tested: in a timestamped layout the leading column of a header-less file
+/// holds timestamps, which are not dtype-parseable and would mask the rest.
+fn reject_headerless(
+    csv_path: &Path,
+    header: &[String],
+    layout: CsvLayout,
+    dtype: infrastore_core::Dtype,
+) -> Result<(), String> {
+    let values = &header[header.len().min(layout.leading_cols())..];
+    if values.is_empty() || !values.iter().all(|cell| csv_io::parses_as(dtype, cell)) {
+        return Ok(());
+    }
+    Err(format!(
+        "the first row of {} ({}) is {} data, not a header. Every data CSV must \
+         start with a header row — add one (e.g. `value`, or `timestamp,value`), or \
+         delete the row if it is a stray value.",
+        csv_path.display(),
+        values.join(","),
+        dtype.as_str(),
+    ))
 }
 
 /// The forecast value cells in stored-array order, whichever layout the CSV is
@@ -164,15 +230,20 @@ pub fn load(path: &Path) -> Result<Vec<Descriptor>, String> {
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    serde_json::from_value(v.clone())
-                        .map_err(|e| format!("parsing descriptor[{i}] in {}: {e}", path.display()))
+                    serde_json::from_value(v.clone()).map_err(|e| {
+                        format!(
+                            "parsing descriptor[{i}] in {}: {}",
+                            path.display(),
+                            explain(e)
+                        )
+                    })
                 })
                 .collect::<Result<_, _>>()?;
             Ok(series)
         }
         serde_json::Value::Object(_) => {
             let one: Descriptor = serde_json::from_value(value)
-                .map_err(|e| format!("parsing descriptor {}: {e}", path.display()))?;
+                .map_err(|e| format!("parsing descriptor {}: {}", path.display(), explain(e)))?;
             Ok(vec![one])
         }
         _ => Err(format!(
@@ -180,6 +251,24 @@ pub fn load(path: &Path) -> Result<Vec<Descriptor>, String> {
             path.display()
         )),
     }
+}
+
+/// A serde error, plus a migration note for a field this schema used to have.
+///
+/// `deny_unknown_fields` turns a retired key into `unknown field
+/// \`has_header\`, expected one of ...`, which is accurate but tells a reader
+/// with a working descriptor from an older release nothing about *why* it
+/// stopped being accepted or what to do instead.
+fn explain(e: serde_json::Error) -> String {
+    let msg = e.to_string();
+    if msg.contains("has_header") {
+        return format!(
+            "{msg}\n  note: `has_header` was removed — every data CSV must now have a \
+             header row. Drop the key; if the CSV has no header, add one (e.g. `value`, \
+             or `timestamp,value`)."
+        );
+    }
+    msg
 }
 
 impl Descriptor {
@@ -225,8 +314,10 @@ impl Descriptor {
         let owner_category = parse::parse_owner_category(&self.owner_category)?;
         let per_step: usize = self.element_shape.iter().product::<usize>().max(1);
         let csv_path = self.csv_path(base_dir, override_csv)?;
-        let layout = self.csv_layout(&csv_path, ts_type)?;
-        let csv = csv_io::read_csv(&csv_path, self.has_header, layout.leading_cols())?;
+        let header = csv_io::read_header(&csv_path)?;
+        let layout = csv_layout(&header, ts_type);
+        reject_headerless(&csv_path, &header, layout, dtype)?;
+        let csv = csv_io::read_csv(&csv_path, layout.leading_cols())?;
 
         let mut data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
         // The descriptor's `element_type`, `units`, and `ext` describe the
@@ -239,42 +330,6 @@ impl Descriptor {
             owner_category,
             data,
             features: self.features()?,
-        })
-    }
-
-    /// Which physical layout the companion CSV is in.
-    ///
-    /// `add` originally required each type's rawest form: bare values for a
-    /// SingleTimeSeries or a forecast, `timestamp,value...` for a
-    /// NonSequentialTimeSeries. But `export` writes timestamps for every type —
-    /// they are the useful part of the output — so an exported file could not be
-    /// fed back in, even though `export` is meant to be `add`'s inverse.
-    /// Detecting the shape from the header closes that loop without a new flag
-    /// and without changing what a hand-written value-only CSV means.
-    fn csv_layout(&self, csv_path: &Path, ts_type: TimeSeriesType) -> Result<CsvLayout, String> {
-        // Without a header there is nothing to detect, so the historical
-        // per-type default stands.
-        let header = csv_io::read_header(csv_path, self.has_header)?;
-        let col = |i: usize| header.get(i).map(|s| s.trim().to_ascii_lowercase());
-        let first_is = |name: &str| col(0).as_deref() == Some(name);
-
-        Ok(match ts_type {
-            TimeSeriesType::NonSequentialTimeSeries => CsvLayout::Timestamped,
-            TimeSeriesType::SingleTimeSeries => {
-                if first_is("timestamp") {
-                    CsvLayout::Timestamped
-                } else {
-                    CsvLayout::Values
-                }
-            }
-            // Deterministic / Probabilistic / Scenarios.
-            _ => {
-                if first_is("issue_time") && col(1).as_deref() == Some("target_time") {
-                    CsvLayout::ForecastTimestamped
-                } else {
-                    CsvLayout::Values
-                }
-            }
         })
     }
 

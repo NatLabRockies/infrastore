@@ -179,7 +179,7 @@ cargo build -p infrastore-cli   # builds the `infrastore` binary
 IS=target/debug/infrastore
 
 # Numeric values live in a CSV; everything else is described in a descriptor JSON.
-$IS template single > load.json                              # example descriptor to edit
+$IS template SingleTimeSeries > load.json                    # example descriptor to edit
 $IS --store demo.h5 add --descriptor load.json               # creates the store on first add
 $IS --store demo.h5 list
 $IS --store demo.h5 get  --owner-id 42 --name load           # pretty table
@@ -188,10 +188,11 @@ $IS --store demo.h5 -f json info --owner-id 42 --name load   # metadata + stats
 ```
 
 The descriptor carries the metadata that does not fit a CSV grid (owner, name, type, dtype,
-resolution, timestamps, units, features); the CSV holds only numbers, except `non_sequential`, whose
-first column is the timestamp. All six dtypes and all five writable types (`single`,
-`non_sequential`, `deterministic`, `probabilistic`, `scenarios`) are supported — forecast arrays are
-flat row-major values whose count equals the product of the type's shape (see
+resolution, timestamps, units, features); the CSV holds only numbers, plus a mandatory header row,
+except `NonSequentialTimeSeries`, whose first column is the timestamp. Durations are ISO-8601
+(`PT1H`, `P1M`). All six dtypes and all five writable types (`SingleTimeSeries`,
+`NonSequentialTimeSeries`, `Deterministic`, `Probabilistic`, `Scenarios`) are supported — forecast
+arrays are flat row-major values whose count equals the product of the type's shape (see
 `infrastore template <type>`).
 
 Beyond add / list / get / info / transform, the CLI covers inspection (`stats`, `store-info`,

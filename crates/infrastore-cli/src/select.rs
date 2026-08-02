@@ -16,7 +16,7 @@ pub struct SelectorArgs {
     /// Owner ID of the time series.
     #[arg(long)]
     pub owner_id: Option<i64>,
-    /// Owner category (component|supplemental_attribute).
+    /// Owner category (Component|SupplementalAttribute).
     #[arg(long)]
     pub owner_category: Option<String>,
     /// Time series name.
@@ -32,14 +32,16 @@ pub struct SelectorArgs {
         long = "type",
         value_name = "TYPE",
         long_help = "Time series type. One of:\n  \
-                     single, non_sequential, deterministic, deterministic_single,\n  \
-                     probabilistic, scenarios\n\
+                     SingleTimeSeries, NonSequentialTimeSeries, Deterministic,\n  \
+                     DeterministicSingleTimeSeries, Probabilistic, Scenarios\n\
+                     The lowercase short forms (single, non_sequential,\n\
+                     deterministic_single, ...) are accepted too.\n\
                      `deterministic` also matches the DeterministicSingleTimeSeries rows\n\
                      that `transform` produces (they list with their own type); use\n\
                      `deterministic_single` to select only those."
     )]
     pub ts_type: Option<String>,
-    /// Resolution, e.g. 1h or 15min.
+    /// Resolution as an ISO-8601 duration, e.g. PT1H or PT15M.
     #[arg(long)]
     pub resolution: Option<String>,
     /// Feature filter, repeatable: key=value.

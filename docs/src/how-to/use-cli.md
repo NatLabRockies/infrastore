@@ -21,7 +21,7 @@ element_type, resolution, initial timestamp, units, features) lives in a **descr
 a starting point for any type with `template`:
 
 ```sh
-infrastore template single > load.json       # print an example descriptor to edit
+infrastore template SingleTimeSeries > load.json   # print an example descriptor to edit
 ```
 
 Edit it to point at your data and metadata:
@@ -30,15 +30,14 @@ Edit it to point at your data and metadata:
 {
   "owner_id": 42,
   "owner_type": "Generator",
-  "owner_category": "component",
+  "owner_category": "Component",
   "name": "load",
-  "type": "single",
+  "type": "SingleTimeSeries",
   "element_type": "f64",
   "units": "MW",
   "csv": "load.csv",
-  "has_header": true,
   "initial_timestamp": "2024-01-01T00:00:00Z",
-  "resolution": "1h",
+  "resolution": "PT1H",
   "features": {
     "model_year": 2030
   }
@@ -55,6 +54,11 @@ value
 102.8
 101.0
 ```
+
+**Every data CSV needs a header row.** It is not decoration: `add` reads it to tell a hand-written
+value-only file from one `export` wrote (see
+[Reading back, and re-adding](../reference/cli.md#reading-back-and-re-adding)). A file whose first
+row is data is rejected rather than quietly losing that row to the header.
 
 The descriptor rejects unknown keys, so a typo (`resolutionn`) is a hard error rather than a
 silently ignored setting.
@@ -104,8 +108,8 @@ of the array's content hash: rows with equal hashes share one array on disk.
 `--type`, `--resolution`, and repeated `--feature key=value` (`--feature` is the only repeatable
 one); if more than one series matches, `infrastore` lists the candidates so you can narrow the
 query. The owner is the `(owner_id, owner_category)` pair, so a component and a supplemental
-attribute may share a numeric id — add `--owner-category` (`component` / `supplemental_attribute`)
-to disambiguate. Large series truncate in `table` output — pass `--limit N` or `--full`.
+attribute may share a numeric id — add `--owner-category` (`Component` / `SupplementalAttribute`) to
+disambiguate. Large series truncate in `table` output — pass `--limit N` or `--full`.
 
 ## 5. Find the Bytes on Disk
 
@@ -151,33 +155,33 @@ infrastore --store demo.h5 get --owner-id 42 --name load \
   --time-range 2024-01-01T01:00:00Z..2024-01-01T03:00:00Z
 ```
 
-Beware that inputs and outputs are spelled differently. You type the short, lowercase forms
-(`--type single`, `--owner-category component`), but `list`/`get`/`info` print the canonical
-CamelCase names (`SingleTimeSeries`, `Component`). Both spellings are accepted as input, so
-`-f json list` output can be fed back into a selector unchanged; just don't expect the rendered
-value to string-match what you typed.
+Selectors accept either spelling: `--type single` and `--type SingleTimeSeries` mean the same thing,
+as do `--owner-category component` and `--owner-category Component`. What the CLI _prints_ — in
+`list`/`get`/`info` output and in what `template` writes — is always the canonical CamelCase name,
+so descriptors, rendered rows, and `-f json` output all string-match each other. The lowercase forms
+are a typing shortcut on the command line, not a second vocabulary.
 
 ## 7. Forecasts
 
-All five writable types work (`single`, `non_sequential`, `deterministic`, `probabilistic`,
-`scenarios`). `infrastore template deterministic` prints a descriptor to edit, but it is plain JSON
-and says nothing about the data layout, so here is the rule:
+All five writable types work (`SingleTimeSeries`, `NonSequentialTimeSeries`, `Deterministic`,
+`Probabilistic`, `Scenarios`). `infrastore template Deterministic` prints a descriptor to edit, but
+it is plain JSON and says nothing about the data layout, so here is the rule:
 
 Forecast CSVs are a flat, **row-major** stream of values with no structure of their own. The count
 must equal the product of the type's shape:
 
 | Type            | Shape                             |
 | --------------- | --------------------------------- |
-| `deterministic` | `[H, count, *element_shape]`      |
-| `probabilistic` | `[num_percentiles, H, count, *E]` |
-| `scenarios`     | `[scenario_count, H, count, *E]`  |
+| `Deterministic` | `[H, count, *element_shape]`      |
+| `Probabilistic` | `[num_percentiles, H, count, *E]` |
+| `Scenarios`     | `[scenario_count, H, count, *E]`  |
 
-`H = horizon / resolution` — with the template's `"horizon": "24h"`, `"resolution": "1h"`, and
-`"count": 7`, a scalar `deterministic` needs exactly `24 * 7 = 168` values (plus the header row that
-`has_header: true` skips). Use `-f json` to read the flat values back at full fidelity. `get -f csv`
-on a forecast emits **timestamped analysis rows** instead — one row per `(window, step)` with
-`issue_time`/`target_time` columns and one value column per percentile or scenario — so it is not
-re-ingestible by `add` (static series' `get -f csv` still round-trips).
+`H = horizon / resolution` — with the template's `"horizon": "PT24H"`, `"resolution": "PT1H"`, and
+`"count": 7`, a scalar `Deterministic` needs exactly `24 * 7 = 168` values, plus the header row. Use
+`-f json` to read the flat values back at full fidelity. `get -f csv` on a forecast emits
+**timestamped analysis rows** instead — one row per `(window, step)` with `issue_time`/`target_time`
+columns and one value column per percentile or scenario — so it is not re-ingestible by `add`
+(static series' `get -f csv` still round-trips).
 
 `DeterministicSingleTimeSeries` is not added from CSV — store a `SingleTimeSeries`, then derive it.
 `transform` takes **no selector**: it rewrites _every_ `SingleTimeSeries` in the store. `--horizon`
@@ -185,7 +189,7 @@ must fit inside each one (`horizon / resolution` steps must not exceed its `leng
 6-row hourly `load` above, a 24-hour horizon fails and a 3-hour one works:
 
 ```sh
-infrastore --store demo.h5 transform --horizon 3h --interval 1h
+infrastore --store demo.h5 transform --horizon PT3H --interval PT1H
 ```
 
 The derived series keeps the source's owner, name, and resolution, so `load` now matches two entries
