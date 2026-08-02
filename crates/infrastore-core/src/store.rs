@@ -3097,6 +3097,12 @@ impl Store {
     /// full metadata database reproduces all time series — static, forecast, and
     /// non-sequential — without reconstructing per-type semantics.
     ///
+    /// Saving an [`CatalogMode::Attached`] store onto its own path is a no-op:
+    /// the destination already *is* this store, and the flush above made it
+    /// durable. The [`CatalogMode::InMemory`] counterpart is not — there the
+    /// arrays are already at `path` and the save is what writes the catalog
+    /// beside them, which is the scratch-directory workflow.
+    ///
     /// # Atomicity, and its limit
     ///
     /// Both halves are written to temporary siblings, fsynced, and only then
@@ -3123,6 +3129,26 @@ impl Store {
             ));
         }
         self.flush()?;
+
+        // Saving an attached catalog onto its own artifact is already done: the
+        // `flush` above checkpointed the catalog and flushed HDF5, so both
+        // halves are durable, paired, and exactly what a staged save would
+        // produce. Running the staged path anyway would rename a fresh catalog
+        // over the file this store's own connection still has open — which
+        // orphans that connection and leaves its `-wal` to be recovered against
+        // a database it does not belong to, corrupting the store.
+        //
+        // This is a no-op only for `Attached`. An in-memory catalog saving to
+        // its own HDF5 path is the scratch-directory workflow `CatalogMode`
+        // exists for, and has real work to do: the sidecar does not exist yet.
+        if self.catalog == CatalogMode::Attached
+            && self
+                .file_path
+                .as_deref()
+                .is_some_and(|src| same_file(src, path))
+        {
+            return Ok(());
+        }
 
         let sqlite_path = catalog_sqlite_path(path);
         let tmp_h5 = persist_temp_path(path);
@@ -3216,6 +3242,16 @@ impl Store {
     fn swap_into_place(tmp_h5: &Path, h5: &Path, tmp_sqlite: &Path, sqlite: &Path) -> Result<()> {
         sync_parent_dir(h5)?;
         std::fs::rename(tmp_h5, h5)?;
+        // A `-wal`/`-shm` pair beside the destination belongs to the catalog
+        // being replaced — a writer that crashed there left one behind. SQLite
+        // would recover it over the database landing in its place, resurrecting
+        // the old catalog's pages, so the save silently would not take (and,
+        // with the stamp, the artifact then fails to open at all). Clearing them
+        // *before* the rename keeps the crash window harmless: what it can
+        // interrupt is the replacement of a catalog that is already outlived by
+        // the HDF5 half renamed above, and which the stamp already flags.
+        remove_if_exists(&sqlite_sidecar(sqlite, "-wal"))?;
+        remove_if_exists(&sqlite_sidecar(sqlite, "-shm"))?;
         std::fs::rename(tmp_sqlite, sqlite)?;
         sync_parent_dir(h5)
     }
@@ -3872,6 +3908,25 @@ fn persist_temp_path(target: &Path) -> PathBuf {
     };
     p.set_file_name(new_name);
     p
+}
+
+/// SQLite's `-wal` / `-shm` sidecar beside a database file. The suffix is
+/// appended to the whole filename, extension included, so `set_extension` is the
+/// wrong tool here.
+fn sqlite_sidecar(sqlite: &Path, suffix: &str) -> PathBuf {
+    let mut name = sqlite.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Whether two paths name the same file. Falls back to comparing the paths as
+/// written when either cannot be canonicalized — a destination that does not
+/// exist yet is the common case, and it is by definition not the source.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {

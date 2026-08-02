@@ -237,6 +237,16 @@ unchanged.
 A store written before the stamp existed carries neither half of it. That reads as "unstamped" and
 skips the check rather than failing, so older artifacts keep opening.
 
+The swap also clears any `-wal`/`-shm` sidecar beside the destination catalog. A sidecar there
+belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite
+would recover it over the database renamed into its place, resurrecting the replaced catalog's pages
+so the save silently would not take.
+
+Saving an `Attached` store onto **its own path** is a no-op: the destination already is that store,
+and the flush at the start of `persist_to` has made it durable. The `InMemory` counterpart is real
+work rather than a no-op — the arrays are already at `path` and the save is what writes the catalog
+beside them, which is exactly the scratch-directory workflow.
+
 Compaction rewrites only the HDF5 half, so it carries the existing stamp into the rewritten file
 rather than minting a new one — a fresh stamp there would manufacture exactly the mismatch the stamp
 exists to detect.

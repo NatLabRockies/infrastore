@@ -261,6 +261,99 @@ fn persist_is_rejected_while_a_transaction_is_open() {
     );
 }
 
+/// An attached catalog *is* the file a save would write, and the store holds it
+/// open. Staging a replacement and renaming it over that open connection orphans
+/// the connection and leaves its `-wal` to be recovered against a database it
+/// does not belong to — which reads back as a malformed image. `flush` has
+/// already made the pair durable, so there is nothing left to do.
+#[test]
+fn persisting_an_attached_catalog_onto_its_own_path_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+
+    let mut store = create_store(Some(&path), false).unwrap();
+    add(&mut store, 1, 100.0);
+    store.persist_to(&path).unwrap();
+
+    // The catalog the store still writes through has to be the one on disk.
+    add(&mut store, 2, 200.0);
+    drop(store);
+
+    let reopened = open_store(&path, true).expect("the store survived saving onto itself");
+    assert_eq!(read_values(&reopened, 1)[0], 100.0);
+    assert_eq!(
+        read_values(&reopened, 2)[0],
+        200.0,
+        "writes after a self-save must reach the catalog on disk"
+    );
+}
+
+/// The in-memory counterpart is the scratch-directory workflow, not a no-op:
+/// the arrays are already at `path` and the save is what creates the sidecar.
+#[test]
+fn persisting_an_in_memory_catalog_onto_its_own_path_writes_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scratch.h5");
+
+    let mut store = scratch_store(&path);
+    add(&mut store, 1, 100.0);
+    assert!(!catalog_sqlite_path(&path).exists());
+    store.persist_to(&path).unwrap();
+    drop(store);
+
+    assert!(
+        catalog_sqlite_path(&path).exists(),
+        "the save wrote a catalog"
+    );
+    let reopened = open_store(&path, true).unwrap();
+    assert_eq!(read_values(&reopened, 1)[0], 100.0);
+}
+
+/// A `-wal` beside the destination belongs to the catalog being replaced — a
+/// writer that crashed there leaves one. SQLite would recover it over the
+/// database renamed into its place, resurrecting the replaced catalog's pages,
+/// so the save silently would not take.
+#[test]
+fn persist_clears_a_stale_wal_beside_the_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+    let dest = dir.path().join("system.h5");
+
+    // Build the destination, capturing its live `-wal` before the clean close
+    // checkpoints it away. Restoring that copy is what a crashed writer leaves.
+    let wal = sqlite_sidecar(&catalog_sqlite_path(&dest), "-wal");
+    let hoarded = dir.path().join("hoarded-wal");
+    {
+        let mut victim = create_store(Some(&dest), false).unwrap();
+        add(&mut victim, 99, 900.0);
+        std::fs::copy(&wal, &hoarded).expect("an attached catalog journals through a -wal");
+    }
+    std::fs::copy(&hoarded, &wal).unwrap();
+
+    let mut store = scratch_store(&scratch);
+    add(&mut store, 1, 100.0);
+    store.persist_to(&dest).unwrap();
+    drop(store);
+
+    assert!(
+        !wal.exists(),
+        "the swap must not leave the replaced catalog's -wal"
+    );
+    let saved = open_store(&dest, true).expect("the saved pair opens");
+    assert_eq!(read_values(&saved, 1)[0], 100.0);
+    assert_eq!(
+        keys_for(&saved, 99),
+        0,
+        "the replaced catalog must not come back"
+    );
+}
+
+fn sqlite_sidecar(sqlite: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = sqlite.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
+}
+
 // ---------------------------------------------------------------------------
 // The generation stamp
 // ---------------------------------------------------------------------------
