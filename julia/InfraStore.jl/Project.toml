@@ -1,7 +1,7 @@
 name = "InfraStore"
 uuid = "6aee0376-896a-4a59-96ff-12f221c99746"
 authors = ["Daniel Thom"]
-version = "0.4.0"
+version = "0.5.1"
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"

@@ -14,8 +14,57 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The release version lives in several files that must agree (see
+  # docs/src/releasing.md). v0.5.0 was tagged with pyproject.toml still at
+  # 0.4.0, and because maturin lets `[project] version` win over the Cargo
+  # workspace version, all three wheel jobs cheerfully built 0.4.0 artifacts.
+  # Only the upload noticed -- by which point 0.4.0 was already on PyPI, and a
+  # filename there can never be reused, so the tag was unpublishable. Check the
+  # versions up front, in seconds, instead of ten minutes into a release.
+  versions:
+    name: versions agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned rather than relying on the image's python3: the script needs
+      # tomllib (3.11+), and a release gate must not break on an image bump.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Every file checked here is TOML, so parse them rather than grepping.
+      # `yggdrasil/build_tarballs.jl` is deliberately excluded: it also pins the
+      # release commit SHA, which cannot exist until this commit does, so it is
+      # bumped in a follow-up commit (see releasing.md step 5a).
+      - name: Check every version site agrees, and matches the tag
+        run: |
+          python3 - "$GITHUB_REF_TYPE" "$GITHUB_REF_NAME" <<'PY'
+          import pathlib, sys, tomllib
+
+          ref_type, ref_name = sys.argv[1], sys.argv[2]
+          load = lambda p: tomllib.loads(pathlib.Path(p).read_text())
+          cargo = load("Cargo.toml")
+          deps = cargo["workspace"]["dependencies"]
+          sites = {
+              "Cargo.toml [workspace.package]": cargo["workspace"]["package"]["version"],
+              "Cargo.toml infrastore-core pin": deps["infrastore-core"]["version"],
+              "Cargo.toml infrastore-proto pin": deps["infrastore-proto"]["version"],
+              "crates/infrastore-py/pyproject.toml": load("crates/infrastore-py/pyproject.toml")["project"]["version"],
+              "julia/InfraStore.jl/Project.toml": load("julia/InfraStore.jl/Project.toml")["version"],
+          }
+          if ref_type == "tag" and ref_name.startswith("v"):
+              sites[f"git tag {ref_name}"] = ref_name[1:]
+
+          for name, version in sites.items():
+              print(f"{version}\t{name}")
+          if len(set(sites.values())) > 1:
+              print("::error::version sites disagree; see the listing above")
+              sys.exit(1)
+          print(f"::notice::all version sites agree at {next(iter(sites.values()))}")
+          PY
+
   wheels:
     name: wheels ${{ matrix.os }}
+    needs: versions
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
