@@ -177,7 +177,10 @@ fn open_copy_leaves_the_original_alone() {
     );
 
     // The round trip a consumer actually runs: change the copy, save back over
-    // the original. The original is only replaced by the final atomic rename.
+    // the original. The original is only replaced by the final atomic rename —
+    // and nothing may still hold it open, since Windows refuses to rename over
+    // a file with a live handle.
+    drop(original);
     let mut copy = open_store(&dest, false).unwrap();
     copy.persist_to(&src).unwrap();
     let reloaded = open_store(&src, true).unwrap();
@@ -206,24 +209,31 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
 
     // Rebuild what a crashed writer leaves: owner 1 checkpointed into the main
     // database, owner 2 committed but living only in the `-wal`.
-    let hoard = (
-        dir.path().join("h.h5"),
-        dir.path().join("h.sqlite"),
-        dir.path().join("h.wal"),
-    );
+    //
+    // Assembled from two snapshots rather than one, because only the catalog can
+    // be copied out from under a live store. HDF5 holds a byte-range lock on an
+    // open file, so copying the `.h5` mid-write fails on Windows — and it is not
+    // needed: the arrays are the same either way, and letting them close cleanly
+    // gives the crashed catalog real arrays to point at.
+    let hoard_sqlite = dir.path().join("h.sqlite");
+    let hoard_wal = dir.path().join("h.wal");
     {
         let mut store = create_store(Some(&src), false).unwrap();
         add(&mut store, 1, 100.0);
-        store.flush().unwrap();
-        add(&mut store, 2, 200.0);
-        std::fs::copy(&src, &hoard.0).unwrap();
-        std::fs::copy(&sqlite, &hoard.1).unwrap();
-        std::fs::copy(&wal, &hoard.2).expect("an attached catalog journals through a -wal");
+        store.flush().unwrap(); // checkpoints owner 1 into the main database
     }
-    // Dropping the store checkpointed the WAL away; restore the crashed trio.
-    for (from, to) in [(&hoard.0, &src), (&hoard.1, &sqlite), (&hoard.2, &wal)] {
-        std::fs::copy(from, to).unwrap();
+    // Snapshotted closed, so the copy is safe on every platform.
+    std::fs::copy(&sqlite, &hoard_sqlite).unwrap();
+    {
+        let mut store = open_store(&src, false).unwrap();
+        add(&mut store, 2, 200.0); // committed, but still only in the `-wal`
+        std::fs::copy(&wal, &hoard_wal).expect("an attached catalog journals through a -wal");
     }
+    // That clean close checkpointed owner 2 into the main database and removed
+    // the `-wal`. Restoring the pre-owner-2 catalog beside the `-wal` written on
+    // top of it is exactly the pair a killed writer leaves behind.
+    std::fs::copy(&hoard_sqlite, &sqlite).unwrap();
+    std::fs::copy(&hoard_wal, &wal).unwrap();
 
     let dest = dir.path().join("copy.h5");
     let copy = open_store_copy(&src, &dest, CatalogMode::Attached).unwrap();

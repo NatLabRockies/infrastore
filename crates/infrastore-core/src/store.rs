@@ -723,11 +723,14 @@ impl Store {
     /// [`Self::create_with_catalog`] refuses one.
     ///
     /// This copies what is *on disk*. A caller that also holds `src` open in
-    /// this process must [`Self::flush`] it first — though the point of this
-    /// call is that nothing needs to hold `src` open at all. Copying a source
-    /// whose writer crashed reproduces the state that writer left, which can
-    /// include catalog rows whose arrays never reached the HDF5 file;
-    /// [`Self::verify_integrity`] reports those as dangling.
+    /// this process must [`Self::flush`] it first — and on Windows must close it
+    /// outright, because HDF5 keeps a byte-range lock on an open file and the
+    /// copy fails with `ERROR_LOCK_VIOLATION`. Neither is a real constraint: the
+    /// point of this call is that nothing needs to hold `src` open at all.
+    ///
+    /// Copying a source whose writer crashed reproduces the state that writer
+    /// left, which can include catalog rows whose arrays never reached the HDF5
+    /// file; [`Self::verify_integrity`] reports those as dangling.
     pub fn open_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<Self> {
         reject_existing_artifact(dest)?;
         let dest_sqlite = catalog_sqlite_path(dest);
