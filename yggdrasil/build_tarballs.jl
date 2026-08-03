@@ -41,7 +41,7 @@
 using BinaryBuilder, Pkg
 
 name = "InfraStore"
-version = v"0.3.0"
+version = v"0.5.0"
 
 # Pin to the commit the release tag points at. Yggdrasil requires a full commit
 # SHA here -- a tag name is not accepted -- and the commit must already be
@@ -55,7 +55,7 @@ version = v"0.3.0"
 sources = [
     GitSource(
         "https://github.com/NatLabRockies/infrastore.git",
-        "aef311d13c6530b96f0a4d30a14814dfe54cf149",
+        "a30cd0f69640f71c8638874cb99049ae733fb889",
     ),
     DirectorySource("./bundled"),
 ]
