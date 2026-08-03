@@ -724,18 +724,39 @@ impl Store {
     ///
     /// This copies what is *on disk*. A caller that also holds `src` open in
     /// this process must [`Self::flush`] it first — though the point of this
-    /// call is that nothing needs to hold `src` open at all.
+    /// call is that nothing needs to hold `src` open at all. Copying a source
+    /// whose writer crashed reproduces the state that writer left, which can
+    /// include catalog rows whose arrays never reached the HDF5 file;
+    /// [`Self::verify_integrity`] reports those as dangling.
     pub fn open_copy(src: &Path, dest: &Path, catalog: CatalogMode) -> Result<Self> {
         reject_existing_artifact(dest)?;
-        std::fs::copy(src, dest)?;
-        // A source with no catalog is the half-artifact a `CatalogMode::InMemory`
-        // store leaves before its first save. Copying nothing keeps the copy
-        // honest about that; opening it then fails the paired-stamp check
-        // instead of quietly presenting an empty store.
-        let src_sqlite = catalog_sqlite_path(src);
-        if src_sqlite.exists() {
-            std::fs::copy(&src_sqlite, catalog_sqlite_path(dest))?;
-        }
+        let dest_sqlite = catalog_sqlite_path(dest);
+        let copied = (|| -> Result<()> {
+            std::fs::copy(src, dest)?;
+            // A source with no catalog is the half-artifact a
+            // `CatalogMode::InMemory` store leaves before its first save. Copying
+            // nothing keeps the copy honest about that; opening it then fails the
+            // paired-stamp check instead of quietly presenting an empty store.
+            let src_sqlite = catalog_sqlite_path(src);
+            if src_sqlite.exists() {
+                // Deliberately not `fs::copy`. A catalog whose writer crashed
+                // still holds committed rows in its `-wal`, and copying the main
+                // database alone drops them — silently, because the copy then
+                // opens fine and simply lists fewer series. `VACUUM INTO` reads
+                // through committed WAL content, the same way `persist_to`'s
+                // catalog half does, and writes one self-contained file that
+                // needs no sidecar of its own. The source is opened read-only,
+                // so this still never writes to it.
+                MetadataStore::open_path(&src_sqlite, true)?.backup_to(&dest_sqlite)?;
+            }
+            Ok(())
+        })();
+        // A half-copied destination is the state `reject_existing_artifact` will
+        // refuse next time, stranding the caller on a path they never wrote to.
+        copied.inspect_err(|_| {
+            let _ = std::fs::remove_file(dest);
+            let _ = std::fs::remove_file(&dest_sqlite);
+        })?;
         Self::open_with_catalog(dest, false, catalog)
     }
 

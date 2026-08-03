@@ -185,6 +185,77 @@ fn open_copy_leaves_the_original_alone() {
     assert!(reloaded.verify_integrity().unwrap().ok());
 }
 
+/// Committed rows sitting in a crashed source's `-wal` must reach the copy.
+///
+/// SQLite in WAL mode holds committed transactions in the sidecar until a
+/// checkpoint, so a writer that died leaves rows the main database does not have
+/// yet. Copying `<src>.sqlite` with `fs::copy` dropped them — and dropped them
+/// silently, because the copy then opened cleanly and simply listed fewer
+/// series. The catalog half goes through `VACUUM INTO` instead, which reads
+/// through committed WAL content.
+#[test]
+fn open_copy_carries_rows_still_in_the_sources_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("system.h5");
+    let sqlite = catalog_sqlite_path(&src);
+    let wal = {
+        let mut name = sqlite.as_os_str().to_os_string();
+        name.push("-wal");
+        std::path::PathBuf::from(name)
+    };
+
+    // Rebuild what a crashed writer leaves: owner 1 checkpointed into the main
+    // database, owner 2 committed but living only in the `-wal`.
+    let hoard = (
+        dir.path().join("h.h5"),
+        dir.path().join("h.sqlite"),
+        dir.path().join("h.wal"),
+    );
+    {
+        let mut store = create_store(Some(&src), false).unwrap();
+        add(&mut store, 1, 100.0);
+        store.flush().unwrap();
+        add(&mut store, 2, 200.0);
+        std::fs::copy(&src, &hoard.0).unwrap();
+        std::fs::copy(&sqlite, &hoard.1).unwrap();
+        std::fs::copy(&wal, &hoard.2).expect("an attached catalog journals through a -wal");
+    }
+    // Dropping the store checkpointed the WAL away; restore the crashed trio.
+    for (from, to) in [(&hoard.0, &src), (&hoard.1, &sqlite), (&hoard.2, &wal)] {
+        std::fs::copy(from, to).unwrap();
+    }
+
+    let dest = dir.path().join("copy.h5");
+    let copy = open_store_copy(&src, &dest, CatalogMode::Attached).unwrap();
+    let mut owners: Vec<i64> = copy
+        .list_keys(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|k| k.owner_id())
+        .collect();
+    owners.sort_unstable();
+    assert_eq!(
+        owners,
+        [1, 2],
+        "a row committed to the source's -wal did not reach the copy"
+    );
+    // And durably: `VACUUM INTO` wrote a self-contained database, so the copy
+    // still has both rows once its own connection is gone.
+    drop(copy);
+    assert_eq!(
+        open_store(&dest, true)
+            .unwrap()
+            .list_keys(ListFilter::new())
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // The source is still exactly what it was — copying it is not a recovery
+    // that mutates it.
+    assert!(wal.exists(), "open_copy checkpointed the source's -wal");
+}
+
 #[test]
 fn open_copy_refuses_a_destination_that_already_holds_a_store() {
     let dir = tempfile::tempdir().unwrap();
