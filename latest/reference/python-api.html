@@ -216,12 +216,16 @@ def create(
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
     catalog: str | None = None,     # "attached" or "memory"; None matches the backend
+    overwrite: bool = False,        # discard an artifact already at `path`
 ) -&gt; Store: ...
 
 @classmethod
 def open(
     cls, path: str, read_only: bool = False, catalog: str = "attached"
 ) -&gt; Store: ...
+
+@classmethod
+def open_copy(cls, src: str, dest: str, catalog: str = "attached") -&gt; Store: ...
 </code></pre>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
@@ -236,9 +240,20 @@ to the HDF5 file either way. The default (<code>None</code>) matches the backend
 <code>in_memory=True</code>, else <code>"attached"</code> — so existing call sites are unchanged. An unknown <code>catalog</code>
 raises <code>InvalidParameterError</code>. See
 <a href="../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
+<li><code>create(path=...)</code> raises <code>StoreExistsError</code> if <code>path</code> or <code>path + ".sqlite"</code> already holds a
+store. Creating there would discard the arrays while keeping the catalog, leaving a store that
+reopens cleanly with every array missing — see
+<a href="../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a>.
+<code>overwrite=True</code> discards both halves on purpose; it is rejected for <code>in_memory=True</code>, which has
+no artifact to replace.</li>
 <li><code>open(path, read_only=True)</code> — read-only open; writes raise <code>ReadOnlyStoreError</code>.</li>
 <li><code>open(path, catalog="memory")</code> — loads the catalog into RAM; the HDF5 half is still opened in
 place. <code>store.catalog</code> reports the mode.</li>
+<li><code>open_copy(src, dest)</code> — copies both halves to <code>dest</code> and opens the copy read-write, leaving <code>src</code>
+untouched. <strong>This is the safe way to load a store you intend to change.</strong> <code>open()</code> defaults to
+read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+so an interrupted write is unrecoverable. Change the copy and <code>persist_to(src)</code> — one atomic
+rename replaces the original. Raises <code>StoreExistsError</code> if <code>dest</code> already holds a store.</li>
 </ul>
 <p>The store is also a context manager: <code>with Store.create(...) as store:</code> closes it on exit.
 <code>store.close()</code> drops the underlying handle and releases its files; subsequent operations raise
@@ -345,6 +360,12 @@ def compact(self) -&gt; dict: ...
 def verify_integrity(self) -&gt; dict: ...
 # {"ok": bool, "errors": list[str]}
 def flush(self) -&gt; None: ...
+def persist_to(self, path: str) -&gt; None: ...
+def persist_catalog(self) -&gt; None: ...
+# Writes an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to
+# match the HDF5 file already beside it. Unlike persist_to, copies no arrays:
+# they are already in place. A checkpoint, not a mode switch — the catalog
+# stays in RAM. For catalog="attached" this is flush().
 
 # -- transactions --
 # Span several operations so they all take effect or none do. Removals are
@@ -820,6 +841,8 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 <tr><td><code>IncompatibleFormatError</code></td><td>Store written in an incompatible on-disk format</td></tr>
 <tr><td><code>IncompatibleForecastError</code></td><td>Forecast parameters clash with existing forecasts</td></tr>
 <tr><td><code>StorageError</code></td><td>SQLite catalog or serialization failure</td></tr>
+<tr><td><code>StoreExistsError</code></td><td>Creating a store where one already exists</td></tr>
+<tr><td><code>MismatchedArtifactError</code></td><td>The <code>.h5</code> and <code>.sqlite</code> halves came from two saves</td></tr>
 </tbody></table>
 </div>
 <p>A malformed ISO 8601 period string raises <code>InvalidParameterError</code> (inside the hierarchy). Only a

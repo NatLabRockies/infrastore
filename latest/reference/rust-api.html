@@ -221,16 +221,31 @@ pub fn create_store_with_compression(
     in_memory: bool,
     compression: Compression,
 ) -&gt; Result&lt;Store&gt;
+pub fn create_store_replacing(
+    path: &amp;Path,
+    compression: Compression,
+    catalog: CatalogMode,
+) -&gt; Result&lt;Store&gt;
 pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
+pub fn open_store_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
 <span class="boring">}</span></code></pre></pre>
 <ul>
 <li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
-<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata).</li>
+<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata). <strong>Fails
+with <a href="#errors"><code>StoreExists</code></a> if either half is already there</strong>; see
+<a href="../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a> for why
+creating over an existing store is refused rather than allowed to truncate it.</li>
 <li><code>create_store_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
+<li><code>create_store_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
+catalog's <code>-wal</code>/<code>-shm</code> sidecars, then creates. Destructive and not atomic: an interrupted call
+can leave neither the old store nor the new one.</li>
 <li><code>open_store(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
+<li><code>open_store_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
+read-write, leaving <code>src</code> untouched. The safe way to load a store you intend to change: mutating
+an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.</li>
 </ul>
-<p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::open</code> are the inherent-method
-equivalents.</p>
+<p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::create_replacing</code> / <code>Store::open</code> /
+<code>Store::open_copy</code> are the inherent-method equivalents.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub enum Compression {
@@ -542,6 +557,10 @@ a whole is sound. See
 existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
 (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
 reproduces every series — static, forecast, non-sequential — without per-type reconstruction.</li>
+<li><strong><code>persist_catalog</code></strong> — Writes an in-memory catalog to this store's own <code>&lt;path&gt;.sqlite</code>, stamped
+to match the HDF5 file already beside it. Unlike <code>persist_to</code>, copies no arrays: they are already
+in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
+<code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
 <h3 id="introspection"><a class="header" href="#introspection">Introspection</a></h3>
 <p>Grouped catalog queries the bindings use instead of listing every association and aggregating in the
@@ -1368,6 +1387,13 @@ pub enum TimeSeriesError {
     /// The store on disk was written in a different, incompatible on-disk
     /// format. There is no in-place upgrade; see the file-format reference.
     IncompatibleFormat { found: String, expected: &amp;'static str },
+    /// The two halves do not carry the same generation stamp, so they came from
+    /// different saves. Both unstamped (an artifact predating the stamp) is
+    /// legal; exactly one stamped is not. `"none"` renders a missing stamp.
+    MismatchedArtifact { h5: String, sqlite: String },
+    /// A store already exists where one was about to be created. See
+    /// [`create_store`](#constructors).
+    StoreExists { path: String },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Serde(serde_json::Error),

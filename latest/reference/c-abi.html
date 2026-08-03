@@ -237,6 +237,8 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 <tr><td><code>INFRASTORE_ERR_IO</code></td><td>8</td><td>I/O failure</td></tr>
 <tr><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td><td>9</td><td>The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.</td></tr>
 <tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td><td>10</td><td>An attachment or parent/child edge with the same identity already exists. Distinct from <code>INFRASTORE_ERR_DUPLICATE</code>, which is about time-series identity.</td></tr>
+<tr><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td><td>11</td><td>A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use <code>infrastore_store_create_replacing</code> to discard it on purpose.</td></tr>
+<tr><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td><td>12</td><td>The HDF5 file and its <code>.sqlite</code> catalog do not carry the same generation stamp: they are halves of two different saves.</td></tr>
 <tr><td><code>INFRASTORE_ERR_INTERNAL</code></td><td>99</td><td>Unexpected internal error</td></tr>
 </tbody></table>
 </div>
@@ -252,6 +254,18 @@ int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, u
                                          uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
+   store is already at `path`. This one discards it first — both halves plus the catalog's
+   -wal/-shm sidecars — and is destructive and not atomic. */
+int32_t infrastore_store_create_replacing(const char *path, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* Copy both halves of the store at `src` to `dest` and open the copy read-write, leaving `src`
+   untouched. The safe way to load a store you intend to change: mutating an artifact in place is
+   unrecoverable if interrupted, since HDF5 has no journal. INFRASTORE_ERR_STORE_EXISTS if `dest`
+   already holds a store. */
+int32_t infrastore_store_open_copy(const char *src, const char *dest, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
 void    infrastore_store_free(struct InfraStore *handle);
@@ -800,6 +814,10 @@ int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
 /* Persist the store's data to `path` (HDF5) and `&lt;path&gt;.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
+/* Write an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to match the HDF5 file
+   already beside it. Unlike infrastore_store_persist, copies no arrays: they are already in
+   place. A checkpoint, not a mode switch. For catalog_mode=0 this is infrastore_store_flush. */
+int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t infrastore_store_clear(struct InfraStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */

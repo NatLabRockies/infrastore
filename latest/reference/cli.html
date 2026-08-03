@@ -499,11 +499,15 @@ no descriptor file for them to sit beside.</p>
 <p><code>init --compression</code> (or <code>add --compression</code>) sets the HDF5 compression policy for a store the
 command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle);
 passing it for an existing store is an error, since the persisted policy governs.</p>
-<p><code>--catalog</code> decides where the SQLite catalog lives while the store is open. <code>attached</code> (the default)
-commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already written.
-<code>in-memory</code> holds the catalog in RAM and writes it only at <code>persist</code> — much faster for a bulk load,
-and it loses <em>everything</em> if the process dies first: arrays still stream to the <code>.h5</code> file, but
-without a catalog they are unreachable.</p>
+<p><code>--catalog</code> decides where the SQLite catalog lives <strong>while the command runs</strong>. <code>attached</code> (the
+default) commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already
+written. <code>in-memory</code> holds the catalog in RAM instead of journaling every commit — much faster for a
+bulk load, and it loses <em>everything</em> if the process dies before the command finishes: arrays still
+stream to the <code>.h5</code> file, but without a catalog they are unreachable.</p>
+<p>Either way the command writes the catalog out before it exits, so the store is complete when it
+returns. The modes cannot differ on that: the CLI runs one command per process, so a catalog still
+in RAM at exit is not deferred, it is gone — no later <code>persist</code> could write <em>that</em> process's
+catalog.</p>
 <h3 id="selectors"><a class="header" href="#selectors">Selectors</a></h3>
 <p><code>get</code>, <code>info</code>, and <code>remove</code> identify exactly one series with these flags; <code>list</code> accepts the same
 flags as filters. Every flag is optional. Only <code>--feature</code> may be repeated; the rest take a single

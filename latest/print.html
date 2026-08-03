@@ -1237,6 +1237,43 @@ feature set; the set is left unreachable for a later <code>compact()</code> to s
 <p>The HDF5 backend buffers writes. Call <code>flush()</code> (which issues <code>H5Fflush</code>) before copying the files
 for backup or archival; afterward both <code>system.h5</code> and <code>system.h5.sqlite</code> can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.</p>
+<h2 id="protecting-a-saved-artifact"><a class="header" href="#protecting-a-saved-artifact">Protecting a Saved Artifact</a></h2>
+<p>The dangerous moment for a store is not the crash. Every path that writes an artifact stages to a
+temporary sibling and renames, so a power loss leaves either the old file or the new one, never a
+half-written one. What actually destroys a saved store is an ordinary call aimed at a path that
+already holds one.</p>
+<p><strong>Creating over an existing store is refused.</strong> Creating truncates the HDF5 file but only <em>opens</em>
+the catalog beside it, then stamps both halves with one fresh generation. Left unguarded, a build
+script re-run against last week's output produced an empty array file paired with the old catalog's
+rows — a store that opens cleanly, reports every series still present, and has nothing behind any of
+them. Nothing short of <code>verify_integrity()</code> notices. <code>create</code> therefore fails with <code>StoreExists</code> if
+either half is already at the path; the check covers both, because an orphaned catalog poisons fresh
+arrays exactly as an orphaned HDF5 file poisons a fresh catalog. Discarding the destination on
+purpose is a separate, explicitly named call (<code>Store::create_replacing</code>, <code>overwrite=True</code> in Python,
+<code>overwrite=true</code> in Julia), which removes both halves and the catalog's sidecars first.</p>
+<h3 id="working-on-a-copy"><a class="header" href="#working-on-a-copy">Working on a Copy</a></h3>
+<p><code>open()</code> defaults to <strong>read-write</strong> in every binding. That is the one place the library will damage
+a file you care about: mutations land in the artifact directly, and HDF5 has neither a journal nor a
+repair tool, so an interrupted write there is unrecoverable.</p>
+<p><code>open_copy(src, dest)</code> copies both halves and opens the copy, leaving the source byte-for-byte
+alone. Change the copy, then <code>persist_to(src)</code> — the original is only replaced by the final atomic
+rename. Both shipped consumers (infrasys and InfrastructureSystems.jl) already work this way; the
+call exists so the pattern lives in one place rather than being reimplemented per consumer.</p>
+<p>Reserve a read-write <code>open()</code> on a user's artifact for when in-place mutation is genuinely what you
+mean, and prefer <code>read_only=True</code> for anything that only reads.</p>
+<h3 id="one-writer-and-not-on-a-network-filesystem"><a class="header" href="#one-writer-and-not-on-a-network-filesystem">One writer, and not on a network filesystem</a></h3>
+<p>The store assumes a single writer. On an ordinary filesystem HDF5's file lock enforces most of that
+for you — this build links HDF5 2.0 with locking on. But it is configured <strong>best-effort</strong>: where the
+filesystem reports that locking is unavailable, HDF5 proceeds without it and says nothing. Lustre,
+GPFS, and NFS without <code>lockd</code> all land there, and they are exactly where large runs live. SQLite's
+WAL journaling is likewise unsafe over NFS.</p>
+<p>So: keep a live store on local disk, let one process write it, and copy the finished artifact to
+shared storage afterwards. Two concurrent writers on a filesystem without working locks will corrupt
+the HDF5 file, and no amount of care inside this library can prevent it.</p>
+<p><code>verify_integrity()</code> is the backstop. Every array carries a SHA-256 companion, and the check
+re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
+worth running against an artifact whose history you do not trust. The CLI exposes it as
+<code>infrastore verify</code>.</p>
 <h2 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h2>
 <p>The catalog does not have to be the <code>.sqlite</code> file while a store is open. <code>CatalogMode</code> picks
 between two placements, independently of where the arrays live:</p>
@@ -1254,9 +1291,17 @@ the HDF5 file, so this does <strong>not</strong> require the data to fit in memo
 <code>persist_to</code>.</p>
 <p>Two caveats. Opening with <code>InMemory</code> reads <code>&lt;path&gt;.sqlite</code> into RAM but still opens the HDF5 half
 <strong>in place</strong>, so mutations land in the original file; a caller that means to leave the source
-untouched until an explicit save must open a copy. And a scratch store that never reached
-<code>persist_to</code>, reopened as <code>Attached</code>, reads as <em>empty</em> rather than failing — a read-write open of a
-missing catalog creates a fresh one, so the arrays are present but nothing names them.</p>
+untouched until an explicit save wants <code>open_copy</code> (see <a href="explanation/storage-model.html#working-on-a-copy">Working on a Copy</a>).
+And a scratch store that never reached its first save is a half-artifact: a stamped HDF5 file with
+no catalog. Reopening it as <code>Attached</code> creates a fresh, unstamped catalog beside it, and the
+<a href="explanation/storage-model.html#saving-one-pair-two-renames">paired stamp</a> rejects that combination — which is the right answer,
+because the arrays are there but nothing names them.</p>
+<p><code>persist_catalog()</code> is the cheap way to land an in-memory catalog when the arrays are already in
+their final place. <code>persist_to</code> aimed at another path has to copy the array file; <code>persist_catalog</code>
+writes only the <code>.sqlite</code> half, stamped to match the HDF5 file already sitting beside it. That is
+what makes <code>InMemory</code> usable for what it is good for — skipping per-commit journaling during a bulk
+load — without paying a full copy of the arrays to land the result. It is a checkpoint, not a mode
+switch: the catalog stays in RAM, and later changes are again RAM-only until the next call.</p>
 <h2 id="saving-one-pair-two-renames"><a class="header" href="#saving-one-pair-two-renames">Saving: One Pair, Two Renames</a></h2>
 <p><code>persist_to</code> writes both halves to temporary siblings, fsyncs them, and only then renames them into
 place, so a crash before the first rename leaves the destination untouched.</p>
@@ -1271,8 +1316,20 @@ the target, so a crash between them destroys whatever pair was there before. Tha
 trade — loud, detectable loss beats silent corruption. <strong>Do not assume the destination is intact
 after a failed <code>persist_to</code></strong>; recover by saving again from the store, which is still live and
 unchanged.</p>
-<p>A store written before the stamp existed carries neither half of it. That reads as "unstamped" and
-skips the check rather than failing, so older artifacts keep opening.</p>
+<p>A store written before the stamp existed carries neither half of it. That is the one legitimate
+unstamped state, and it opens. <strong>One</strong> stamped half is not: every path that writes a stamp writes
+both halves together (<code>create</code>, <code>persist_to</code>, and <code>compact</code>, which carries the existing one across),
+so a lone stamp means a half was replaced, copied, or created without its partner. It is rejected as
+a mismatch, which closes the migration-window hole where a save interrupted between its two renames,
+onto a destination predating the stamp, would otherwise have paired new arrays with an old catalog
+in silence.</p>
+<p>Each save stages through a sibling named uniquely to itself (<code>&lt;target&gt;.persist-&lt;tag&gt;</code>). A fixed name
+would be a corruption vector rather than a convenience: nothing locks a <code>persist_to</code>
+<strong>destination</strong>, so two processes saving to one path would each clear the other's in-flight temp
+while the stamping and rename that follow still resolve that name — publishing a partially written
+file as a finished save. The cost of uniqueness is that an interrupted save's temps are no longer
+swept by the next one; a temp belonging to a live concurrent save cannot be told apart from an
+abandoned one, so they are left for you to delete once no save is in flight.</p>
 <p>The swap also clears any <code>-wal</code>/<code>-shm</code> sidecar beside the destination catalog. A sidecar there
 belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite
 would recover it over the database renamed into its place, resurrecting the replaced catalog's pages
@@ -4141,16 +4198,31 @@ pub fn create_store_with_compression(
     in_memory: bool,
     compression: Compression,
 ) -&gt; Result&lt;Store&gt;
+pub fn create_store_replacing(
+    path: &amp;Path,
+    compression: Compression,
+    catalog: CatalogMode,
+) -&gt; Result&lt;Store&gt;
 pub fn open_store(path: &amp;Path, read_only: bool) -&gt; Result&lt;Store&gt;
+pub fn open_store_copy(src: &amp;Path, dest: &amp;Path, catalog: CatalogMode) -&gt; Result&lt;Store&gt;
 <span class="boring">}</span></code></pre></pre>
 <ul>
 <li><code>create_store(None, true)</code> — in-memory store, no filesystem I/O.</li>
-<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata).</li>
+<li><code>create_store(Some(path), false)</code> — creates <code>path</code> (HDF5) and <code>path.sqlite</code> (metadata). <strong>Fails
+with <a href="reference/rust-api.html#errors"><code>StoreExists</code></a> if either half is already there</strong>; see
+<a href="reference/../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a> for why
+creating over an existing store is refused rather than allowed to truncate it.</li>
 <li><code>create_store_with_compression(...)</code> — as above but with an explicit HDF5 compression policy.</li>
+<li><code>create_store_replacing(...)</code> — discards any artifact already at <code>path</code>, both halves plus the
+catalog's <code>-wal</code>/<code>-shm</code> sidecars, then creates. Destructive and not atomic: an interrupted call
+can leave neither the old store nor the new one.</li>
 <li><code>open_store(path, read_only)</code> — opens an existing pair. <code>read_only = true</code> rejects all writes.</li>
+<li><code>open_store_copy(src, dest, catalog)</code> — copies both halves to <code>dest</code> and opens the copy
+read-write, leaving <code>src</code> untouched. The safe way to load a store you intend to change: mutating
+an artifact in place is unrecoverable if interrupted, since HDF5 has no journal.</li>
 </ul>
-<p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::open</code> are the inherent-method
-equivalents.</p>
+<p><code>Store::create</code> / <code>Store::create_with_compression</code> / <code>Store::create_replacing</code> / <code>Store::open</code> /
+<code>Store::open_copy</code> are the inherent-method equivalents.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub enum Compression {
@@ -4462,6 +4534,10 @@ a whole is sound. See
 existing targets. An on-disk store is flushed and copied; an in-memory store is materialized
 (every distinct array by hash, plus the whole catalog). Because arrays are content-addressed, this
 reproduces every series — static, forecast, non-sequential — without per-type reconstruction.</li>
+<li><strong><code>persist_catalog</code></strong> — Writes an in-memory catalog to this store's own <code>&lt;path&gt;.sqlite</code>, stamped
+to match the HDF5 file already beside it. Unlike <code>persist_to</code>, copies no arrays: they are already
+in place. A checkpoint, not a mode switch — the catalog stays in RAM afterwards. For a
+<code>CatalogMode::Attached</code> store this is <code>flush</code>.</li>
 </ul>
 <h3 id="introspection"><a class="header" href="#introspection">Introspection</a></h3>
 <p>Grouped catalog queries the bindings use instead of listing every association and aggregating in the
@@ -5288,6 +5364,13 @@ pub enum TimeSeriesError {
     /// The store on disk was written in a different, incompatible on-disk
     /// format. There is no in-place upgrade; see the file-format reference.
     IncompatibleFormat { found: String, expected: &amp;'static str },
+    /// The two halves do not carry the same generation stamp, so they came from
+    /// different saves. Both unstamped (an artifact predating the stamp) is
+    /// legal; exactly one stamped is not. `"none"` renders a missing stamp.
+    MismatchedArtifact { h5: String, sqlite: String },
+    /// A store already exists where one was about to be created. See
+    /// [`create_store`](#constructors).
+    StoreExists { path: String },
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Serde(serde_json::Error),
@@ -5415,12 +5498,16 @@ def create(
     compression_level: int = 3,     # 0–9, DEFLATE only
     shuffle: bool = True,           # byte-shuffle filter, DEFLATE only
     catalog: str | None = None,     # "attached" or "memory"; None matches the backend
+    overwrite: bool = False,        # discard an artifact already at `path`
 ) -&gt; Store: ...
 
 @classmethod
 def open(
     cls, path: str, read_only: bool = False, catalog: str = "attached"
 ) -&gt; Store: ...
+
+@classmethod
+def open_copy(cls, src: str, dest: str, catalog: str = "attached") -&gt; Store: ...
 </code></pre>
 <ul>
 <li><code>create(in_memory=True)</code> — in-memory store; <code>path</code> and compression arguments are ignored.</li>
@@ -5435,9 +5522,20 @@ to the HDF5 file either way. The default (<code>None</code>) matches the backend
 <code>in_memory=True</code>, else <code>"attached"</code> — so existing call sites are unchanged. An unknown <code>catalog</code>
 raises <code>InvalidParameterError</code>. See
 <a href="reference/../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
+<li><code>create(path=...)</code> raises <code>StoreExistsError</code> if <code>path</code> or <code>path + ".sqlite"</code> already holds a
+store. Creating there would discard the arrays while keeping the catalog, leaving a store that
+reopens cleanly with every array missing — see
+<a href="reference/../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a>.
+<code>overwrite=True</code> discards both halves on purpose; it is rejected for <code>in_memory=True</code>, which has
+no artifact to replace.</li>
 <li><code>open(path, read_only=True)</code> — read-only open; writes raise <code>ReadOnlyStoreError</code>.</li>
 <li><code>open(path, catalog="memory")</code> — loads the catalog into RAM; the HDF5 half is still opened in
 place. <code>store.catalog</code> reports the mode.</li>
+<li><code>open_copy(src, dest)</code> — copies both halves to <code>dest</code> and opens the copy read-write, leaving <code>src</code>
+untouched. <strong>This is the safe way to load a store you intend to change.</strong> <code>open()</code> defaults to
+read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+so an interrupted write is unrecoverable. Change the copy and <code>persist_to(src)</code> — one atomic
+rename replaces the original. Raises <code>StoreExistsError</code> if <code>dest</code> already holds a store.</li>
 </ul>
 <p>The store is also a context manager: <code>with Store.create(...) as store:</code> closes it on exit.
 <code>store.close()</code> drops the underlying handle and releases its files; subsequent operations raise
@@ -5544,6 +5642,12 @@ def compact(self) -&gt; dict: ...
 def verify_integrity(self) -&gt; dict: ...
 # {"ok": bool, "errors": list[str]}
 def flush(self) -&gt; None: ...
+def persist_to(self, path: str) -&gt; None: ...
+def persist_catalog(self) -&gt; None: ...
+# Writes an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to
+# match the HDF5 file already beside it. Unlike persist_to, copies no arrays:
+# they are already in place. A checkpoint, not a mode switch — the catalog
+# stays in RAM. For catalog="attached" this is flush().
 
 # -- transactions --
 # Span several operations so they all take effect or none do. Removals are
@@ -6019,6 +6123,8 @@ store.remove_parent_child_associations(parent_types=["Bus"])   # -&gt; 1
 <tr><td><code>IncompatibleFormatError</code></td><td>Store written in an incompatible on-disk format</td></tr>
 <tr><td><code>IncompatibleForecastError</code></td><td>Forecast parameters clash with existing forecasts</td></tr>
 <tr><td><code>StorageError</code></td><td>SQLite catalog or serialization failure</td></tr>
+<tr><td><code>StoreExistsError</code></td><td>Creating a store where one already exists</td></tr>
+<tr><td><code>MismatchedArtifactError</code></td><td>The <code>.h5</code> and <code>.sqlite</code> halves came from two saves</td></tr>
 </tbody></table>
 </div>
 <p>A malformed ISO 8601 period string raises <code>InvalidParameterError</code> (inside the hierarchy). Only a
@@ -6069,9 +6175,9 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>,
 <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
 <code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
-<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_store</code>, <code>persist!</code>, <code>read_only</code>,
-<code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>,
-<code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
+<code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
+<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
 <code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
@@ -6082,9 +6188,12 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <pre><code class="language-julia">Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
         compression_level::Integer=3, shuffle::Bool=true,
-        catalog::Union{Nothing,Symbol,AbstractString}=nothing) -&gt; Store
+        catalog::Union{Nothing,Symbol,AbstractString}=nothing,
+        overwrite::Bool=false) -&gt; Store
 open_store(path::AbstractString; read_only::Bool=false,
            catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
+open_copy(src::AbstractString, dest::AbstractString;
+          catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
 catalog_mode(store::Store) -&gt; Symbol
 </code></pre>
 <ul>
@@ -6095,12 +6204,24 @@ catalog_mode(store::Store) -&gt; Symbol
 reused on later appends; it is ignored for in-memory stores. An unknown <code>compression</code> throws
 <code>ArgumentError</code>.</li>
 <li><code>catalog=:attached</code> makes the catalog the <code>.sqlite</code> file, where every commit is durable;
-<code>catalog=:memory</code> holds it in RAM so it reaches disk only through <code>persist!</code>. Arrays stream to the
-HDF5 file either way. The default (<code>nothing</code>) matches the backend — <code>:memory</code> when <code>in_memory</code> is
-true, else <code>:attached</code> — so existing call sites are unchanged. An unknown <code>catalog</code> throws
-<code>ArgumentError</code>. See
+<code>catalog=:memory</code> holds it in RAM so it reaches disk only through <code>persist!</code> or
+<code>persist_catalog!</code>. Arrays stream to the HDF5 file either way. The default (<code>nothing</code>) matches the
+backend — <code>:memory</code> when <code>in_memory</code> is true, else <code>:attached</code> — so existing call sites are
+unchanged. An unknown <code>catalog</code> throws <code>ArgumentError</code>. See
 <a href="reference/../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
+<li><code>Store(in_memory=false, path=...)</code> throws <code>StoreExistsError</code> if <code>path</code> or <code>$path.sqlite</code> already
+holds a store. Creating there would discard the arrays while keeping the catalog, leaving a store
+that reopens cleanly with every array missing — see
+<a href="reference/../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a>.
+<code>overwrite=true</code> discards both halves on purpose; it throws <code>ArgumentError</code> for an in-memory
+store, which has no artifact to replace.</li>
 <li><code>open_store(path; read_only=true)</code> — opens an existing on-disk pair.</li>
+<li><code>open_copy(src, dest)</code> — copies both halves to <code>dest</code> and opens the copy read-write, leaving <code>src</code>
+untouched. <strong>This is the safe way to load a store you intend to change.</strong> <code>open_store</code> defaults to
+read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+so an interrupted write is unrecoverable. Change the copy and <code>persist!(store, src)</code> — one atomic
+rename replaces the original. Throws <code>StoreExistsError</code> if <code>dest</code> already holds a store. Has a
+do-block form.</li>
 <li><code>catalog_mode(store)</code> returns <code>:attached</code> or <code>:memory</code>.</li>
 </ul>
 <p>The store registers a finalizer; close it eagerly with <code>close!(store)</code>.</p>
@@ -6617,6 +6738,11 @@ verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
                                       # .h5 file from the live set and replaces it (single writer)
 flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
+persist!(store, path) -&gt; Nothing  # write both halves to `path` + `$path.sqlite`, replacing them
+persist_catalog!(store) -&gt; Nothing  # write an in-memory catalog to this store's own $path.sqlite,
+                                    # stamped to match the .h5 already beside it. Copies no arrays:
+                                    # they are already in place. A checkpoint, not a mode switch;
+                                    # for catalog=:attached this is flush!.
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only
@@ -6802,6 +6928,8 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 <tr><td><code>ReadOnlyStoreError</code></td><td><code>INFRASTORE_ERR_READ_ONLY</code></td></tr>
 <tr><td><code>IncompatibleFormatError</code></td><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td></tr>
 <tr><td><code>IOError</code></td><td><code>INFRASTORE_ERR_IO</code></td></tr>
+<tr><td><code>StoreExistsError</code></td><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td></tr>
+<tr><td><code>MismatchedArtifactError</code></td><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td></tr>
 <tr><td><code>GenericError</code></td><td>Any other non-zero code (carries the numeric <code>code</code>)</td></tr>
 </tbody></table>
 </div>
@@ -6903,6 +7031,8 @@ output they are owned <code>char *</code> strings — free each with <code>infra
 <tr><td><code>INFRASTORE_ERR_IO</code></td><td>8</td><td>I/O failure</td></tr>
 <tr><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td><td>9</td><td>The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.</td></tr>
 <tr><td><code>INFRASTORE_ERR_DUPLICATE_ASSOCIATION</code></td><td>10</td><td>An attachment or parent/child edge with the same identity already exists. Distinct from <code>INFRASTORE_ERR_DUPLICATE</code>, which is about time-series identity.</td></tr>
+<tr><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td><td>11</td><td>A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use <code>infrastore_store_create_replacing</code> to discard it on purpose.</td></tr>
+<tr><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td><td>12</td><td>The HDF5 file and its <code>.sqlite</code> catalog do not carry the same generation stamp: they are halves of two different saves.</td></tr>
 <tr><td><code>INFRASTORE_ERR_INTERNAL</code></td><td>99</td><td>Unexpected internal error</td></tr>
 </tbody></table>
 </div>
@@ -6918,6 +7048,18 @@ int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, u
                                          uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
+   store is already at `path`. This one discards it first — both halves plus the catalog's
+   -wal/-shm sidecars — and is destructive and not atomic. */
+int32_t infrastore_store_create_replacing(const char *path, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* Copy both halves of the store at `src` to `dest` and open the copy read-write, leaving `src`
+   untouched. The safe way to load a store you intend to change: mutating an artifact in place is
+   unrecoverable if interrupted, since HDF5 has no journal. INFRASTORE_ERR_STORE_EXISTS if `dest`
+   already holds a store. */
+int32_t infrastore_store_open_copy(const char *src, const char *dest, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
 void    infrastore_store_free(struct InfraStore *handle);
@@ -7466,6 +7608,10 @@ int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
 /* Persist the store's data to `path` (HDF5) and `&lt;path&gt;.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
+/* Write an in-memory catalog to this store's own &lt;path&gt;.sqlite, stamped to match the HDF5 file
+   already beside it. Unlike infrastore_store_persist, copies no arrays: they are already in
+   place. A checkpoint, not a mode switch. For catalog_mode=0 this is infrastore_store_flush. */
+int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t infrastore_store_clear(struct InfraStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */
@@ -8318,11 +8464,15 @@ no descriptor file for them to sit beside.</p>
 <p><code>init --compression</code> (or <code>add --compression</code>) sets the HDF5 compression policy for a store the
 command creates (<code>none</code>, <code>deflate</code>, or <code>deflate:LEVEL</code> with <code>--no-shuffle</code> to disable byte-shuffle);
 passing it for an existing store is an error, since the persisted policy governs.</p>
-<p><code>--catalog</code> decides where the SQLite catalog lives while the store is open. <code>attached</code> (the default)
-commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already written.
-<code>in-memory</code> holds the catalog in RAM and writes it only at <code>persist</code> — much faster for a bulk load,
-and it loses <em>everything</em> if the process dies first: arrays still stream to the <code>.h5</code> file, but
-without a catalog they are unreachable.</p>
+<p><code>--catalog</code> decides where the SQLite catalog lives <strong>while the command runs</strong>. <code>attached</code> (the
+default) commits to <code>&lt;store&gt;.sqlite</code> as it goes, so an interrupted load keeps what it had already
+written. <code>in-memory</code> holds the catalog in RAM instead of journaling every commit — much faster for a
+bulk load, and it loses <em>everything</em> if the process dies before the command finishes: arrays still
+stream to the <code>.h5</code> file, but without a catalog they are unreachable.</p>
+<p>Either way the command writes the catalog out before it exits, so the store is complete when it
+returns. The modes cannot differ on that: the CLI runs one command per process, so a catalog still
+in RAM at exit is not deferred, it is gone — no later <code>persist</code> could write <em>that</em> process's
+catalog.</p>
 <h3 id="selectors"><a class="header" href="#selectors">Selectors</a></h3>
 <p><code>get</code>, <code>info</code>, and <code>remove</code> identify exactly one series with these flags; <code>list</code> accepts the same
 flags as filters. Every flag is optional. Only <code>--feature</code> may be repeated; the rest take a single

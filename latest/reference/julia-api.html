@@ -214,9 +214,9 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <code>key_info</code>, <code>list_array_groups</code>, <code>list_children</code>, <code>list_components_with_attributes</code>, <code>list_keys</code>,
 <code>list_names</code>, <code>list_owner_ids</code>, <code>list_owner_types</code>, <code>list_parent_child_associations</code>,
 <code>list_parents</code>, <code>list_supplemental_attribute_associations</code>, <code>list_supplemental_attribute_ids</code>,
-<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_store</code>, <code>persist!</code>, <code>read_only</code>,
-<code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>, <code>commit_transaction!</code>,
-<code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
+<code>list_time_series</code>, <code>num_distinct_arrays</code>, <code>open_copy</code>, <code>open_store</code>, <code>persist!</code>,
+<code>persist_catalog!</code>, <code>read_only</code>, <code>rollback_transaction!</code>, <code>transaction</code>, <code>begin_transaction!</code>,
+<code>commit_transaction!</code>, <code>remove_by_filter!</code>, <code>remove_parent_child_associations!</code>,
 <code>remove_supplemental_attribute_associations!</code>, <code>remove_time_series!</code>, <code>rename_time_series!</code>,
 <code>replace_owner!</code>, <code>replace_parent_child_component_id!</code>,
 <code>replace_supplemental_attribute_component_id!</code>, <code>static_grid</code>, <code>static_groups</code>, <code>static_read!</code>,
@@ -227,9 +227,12 @@ or from the <code>InfraStore_jll</code> binary package when installed.</p>
 <pre><code class="language-julia">Store(; in_memory::Bool=true, path::Union{Nothing,AbstractString}=nothing,
         compression::Union{Symbol,AbstractString}=:deflate,
         compression_level::Integer=3, shuffle::Bool=true,
-        catalog::Union{Nothing,Symbol,AbstractString}=nothing) -&gt; Store
+        catalog::Union{Nothing,Symbol,AbstractString}=nothing,
+        overwrite::Bool=false) -&gt; Store
 open_store(path::AbstractString; read_only::Bool=false,
            catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
+open_copy(src::AbstractString, dest::AbstractString;
+          catalog::Union{Symbol,AbstractString}=:attached) -&gt; Store
 catalog_mode(store::Store) -&gt; Symbol
 </code></pre>
 <ul>
@@ -240,12 +243,24 @@ catalog_mode(store::Store) -&gt; Symbol
 reused on later appends; it is ignored for in-memory stores. An unknown <code>compression</code> throws
 <code>ArgumentError</code>.</li>
 <li><code>catalog=:attached</code> makes the catalog the <code>.sqlite</code> file, where every commit is durable;
-<code>catalog=:memory</code> holds it in RAM so it reaches disk only through <code>persist!</code>. Arrays stream to the
-HDF5 file either way. The default (<code>nothing</code>) matches the backend — <code>:memory</code> when <code>in_memory</code> is
-true, else <code>:attached</code> — so existing call sites are unchanged. An unknown <code>catalog</code> throws
-<code>ArgumentError</code>. See
+<code>catalog=:memory</code> holds it in RAM so it reaches disk only through <code>persist!</code> or
+<code>persist_catalog!</code>. Arrays stream to the HDF5 file either way. The default (<code>nothing</code>) matches the
+backend — <code>:memory</code> when <code>in_memory</code> is true, else <code>:attached</code> — so existing call sites are
+unchanged. An unknown <code>catalog</code> throws <code>ArgumentError</code>. See
 <a href="../explanation/storage-model.html#where-the-catalog-lives">Where the Catalog Lives</a>.</li>
+<li><code>Store(in_memory=false, path=...)</code> throws <code>StoreExistsError</code> if <code>path</code> or <code>$path.sqlite</code> already
+holds a store. Creating there would discard the arrays while keeping the catalog, leaving a store
+that reopens cleanly with every array missing — see
+<a href="../explanation/storage-model.html#protecting-a-saved-artifact">protecting a saved artifact</a>.
+<code>overwrite=true</code> discards both halves on purpose; it throws <code>ArgumentError</code> for an in-memory
+store, which has no artifact to replace.</li>
 <li><code>open_store(path; read_only=true)</code> — opens an existing on-disk pair.</li>
+<li><code>open_copy(src, dest)</code> — copies both halves to <code>dest</code> and opens the copy read-write, leaving <code>src</code>
+untouched. <strong>This is the safe way to load a store you intend to change.</strong> <code>open_store</code> defaults to
+read-write, and mutations then land in that file directly; HDF5 has no journal and no repair tool,
+so an interrupted write is unrecoverable. Change the copy and <code>persist!(store, src)</code> — one atomic
+rename replaces the original. Throws <code>StoreExistsError</code> if <code>dest</code> already holds a store. Has a
+do-block form.</li>
 <li><code>catalog_mode(store)</code> returns <code>:attached</code> or <code>:memory</code>.</li>
 </ul>
 <p>The store registers a finalizer; close it eagerly with <code>close!(store)</code>.</p>
@@ -762,6 +777,11 @@ verify_integrity(store) -&gt; Int    # number of integrity errors; 0 == intact
 compact!(store) -&gt; CompactionReport   # reclaims both halves; on an on-disk store this rewrites the
                                       # .h5 file from the live set and replaces it (single writer)
 flush!(store) -&gt; Nothing          # sync to disk; afterwards .h5 and .sqlite can be copied
+persist!(store, path) -&gt; Nothing  # write both halves to `path` + `$path.sqlite`, replacing them
+persist_catalog!(store) -&gt; Nothing  # write an in-memory catalog to this store's own $path.sqlite,
+                                    # stamped to match the .h5 already beside it. Copies no arrays:
+                                    # they are already in place. A checkpoint, not a mode switch;
+                                    # for catalog=:attached this is flush!.
 
 transaction(f, store)             # do-block: commit if `f` returns, roll back if it throws.
                                   # Spans any number of operations; removals are reversible only
@@ -947,6 +967,8 @@ remove_parent_child_associations!(store; parent_types=["Bus"])   # 1
 <tr><td><code>ReadOnlyStoreError</code></td><td><code>INFRASTORE_ERR_READ_ONLY</code></td></tr>
 <tr><td><code>IncompatibleFormatError</code></td><td><code>INFRASTORE_ERR_INCOMPATIBLE_FORMAT</code></td></tr>
 <tr><td><code>IOError</code></td><td><code>INFRASTORE_ERR_IO</code></td></tr>
+<tr><td><code>StoreExistsError</code></td><td><code>INFRASTORE_ERR_STORE_EXISTS</code></td></tr>
+<tr><td><code>MismatchedArtifactError</code></td><td><code>INFRASTORE_ERR_MISMATCHED_ARTIFACT</code></td></tr>
 <tr><td><code>GenericError</code></td><td>Any other non-zero code (carries the numeric <code>code</code>)</td></tr>
 </tbody></table>
 </div>
