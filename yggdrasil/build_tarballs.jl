@@ -55,7 +55,7 @@ version = v"0.5.1"
 sources = [
     GitSource(
         "https://github.com/NatLabRockies/infrastore.git",
-        "a30cd0f69640f71c8638874cb99049ae733fb889",
+        "32f95c8965f2ce4c84ccf9c2c46032fd28bae073",
     ),
     DirectorySource("./bundled"),
 ]
