@@ -24,6 +24,7 @@ use infrastore_core::{
 use crate::chart::{self, svg};
 use crate::color;
 use crate::csv_io;
+use crate::output::{self, Format};
 use crate::select::{self, SelectorArgs};
 use crate::store_access;
 
@@ -54,6 +55,8 @@ pub struct Options<'a> {
     /// Which forecast window `fan` draws, and how many windows `overlay` shows.
     pub window: usize,
     pub limit: Option<usize>,
+    /// Only shapes the "wrote it" line — the chart itself is always SVG.
+    pub format: Format,
 }
 
 pub fn run(store_path: &Path, selector: &SelectorArgs, opts: &Options<'_>) -> Result<(), String> {
@@ -66,11 +69,16 @@ pub fn run(store_path: &Path, selector: &SelectorArgs, opts: &Options<'_>) -> Re
         Kind::Fan => fan(&store, selector, opts)?,
         Kind::Overlay => overlay(&store, selector, opts)?,
     };
-    write_out(opts.out, opts.title.unwrap_or("infrastore"), &document)
+    write_out(
+        opts.out,
+        opts.title.unwrap_or("infrastore"),
+        &document,
+        opts.format,
+    )
 }
 
 /// Write the SVG, wrapping it in an HTML page when the destination asks for one.
-fn write_out(out: &Path, title: &str, document: &str) -> Result<(), String> {
+fn write_out(out: &Path, title: &str, document: &str, format: Format) -> Result<(), String> {
     let is_html = out
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
@@ -79,13 +87,17 @@ fn write_out(out: &Path, title: &str, document: &str) -> Result<(), String> {
     } else {
         document.to_string()
     };
+    // `-` puts the chart itself on stdout, so there is no room there for a
+    // status line in any format.
     if out.as_os_str() == "-" {
-        print!("{body}");
-        return Ok(());
+        return output::write_raw(&body);
     }
     std::fs::write(out, body).map_err(|e| format!("writing {}: {e}", out.display()))?;
-    println!("{}", color::header(&format!("Wrote {}.", out.display())));
-    Ok(())
+    output::report(
+        format,
+        || serde_json::json!({ "wrote": out.display().to_string() }),
+        || println!("{}", color::header(&format!("Wrote {}.", out.display()))),
+    )
 }
 
 // --- views ----------------------------------------------------------------

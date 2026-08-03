@@ -51,9 +51,17 @@ pub fn ask_strict(prompt: &str, how_to_force: &str) -> Result<bool, String> {
     prompt_yes_no(prompt)
 }
 
+/// Prompt on stderr, not stdout.
+///
+/// The question and the abort notice are addressed to whoever is sitting at the
+/// terminal, not to whatever is reading the command's output — and a prompt
+/// written to stdout lands in the middle of the JSON that `-f json | jq` is
+/// waiting on. stderr is still the terminal in the interactive case this only
+/// runs in, so the human sees it either way.
 fn prompt_yes_no(prompt: &str) -> Result<bool, String> {
-    print!("{prompt}");
-    std::io::stdout().flush().ok();
+    let mut err = std::io::stderr();
+    write!(err, "{prompt}").ok();
+    err.flush().ok();
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)
@@ -62,7 +70,7 @@ fn prompt_yes_no(prompt: &str) -> Result<bool, String> {
     if answer == "y" || answer == "yes" {
         Ok(true)
     } else {
-        println!("{}", crate::color::dim("Aborted."));
+        writeln!(err, "{}", crate::color::dim_err("Aborted.")).ok();
         Ok(false)
     }
 }
