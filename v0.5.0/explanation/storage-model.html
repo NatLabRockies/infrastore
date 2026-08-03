@@ -1,0 +1,535 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Storage Model - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.5.0/docs/src/explanation/storage-model.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="storage-model"><a class="header" href="#storage-model">Storage Model</a></h1>
+<p>A persistent store is <strong>two files that travel together</strong>:</p>
+<pre><code class="language-text">system.h5          # HDF5 — the numerical arrays
+system.h5.sqlite   # SQLite  — the metadata associations
+</code></pre>
+<p>The catalog path is derived by appending <code>.sqlite</code> to the HDF5 file name. This page explains the
+split and how the two halves stay consistent. For the exact bytes, dataset names, and table columns,
+see the <a href="../reference/file-format.html">On-Disk File Format reference</a>.</p>
+<h2 id="why-split-arrays-from-metadata"><a class="header" href="#why-split-arrays-from-metadata">Why Split Arrays From Metadata</a></h2>
+<p>Arrays and metadata pull in opposite directions:</p>
+<div class="table-wrapper"><table><thead><tr><th>Concern</th><th>Arrays</th><th>Metadata</th></tr></thead><tbody>
+<tr><td>Size</td><td>Large (thousands of values each)</td><td>Small (a row plus a shared feature set)</td></tr>
+<tr><td>Access pattern</td><td>Bulk read by content</td><td>Filtered queries by owner, name, features</td></tr>
+<tr><td>Mutation</td><td>Immutable; whole-array add/delete, dedup-on-write</td><td>Insert / delete with constraints</td></tr>
+<tr><td>Best tool</td><td>HDF5 (chunked, compressed)</td><td>SQLite (indexes, transactions)</td></tr>
+</tbody></table>
+</div>
+<p>Forcing both into one format would compromise one of them. Instead, each lives where it is
+strongest, and the <code>Store</code> layer coordinates them.</p>
+<h2 id="the-array-side-hdf5"><a class="header" href="#the-array-side-hdf5">The Array Side: HDF5</a></h2>
+<p>Arrays live under <code>time_series/single/</code> in the HDF5 file, in one of <strong>two storage modes</strong>.</p>
+<p>Stored arrays are <strong>immutable</strong>: a value array is added or deleted as a whole and is never edited in
+place — there is no API to mutate a row, slice, or column of an array already in the store. Changing
+data means writing a new array (content-addressed and deduplicated on write) and, if desired,
+deleting the old one.</p>
+<p><strong>Packed mode</strong> holds <code>SingleTimeSeries</code> (and the backing array of a
+<code>DeterministicSingleTimeSeries</code>). Arrays that share a <code>(dtype, element_shape, length, resolution)</code>
+are packed together as columns of one dataset named <code>sts_{dtype}_{shape}_{length}_{res}</code>, with shape
+<code>(length, cols, *element_shape)</code>. The column count <code>cols</code> is sized to the batch that created the
+dataset (capped so one chunk stays within a byte budget); an incremental, one-at-a-time write path
+uses a default width of 1,000:</p>
+<pre class="mermaid">flowchart TB
+    subgraph ds[&quot;dataset&amp;nbsp;sts_f64_s_8760_PT1H&amp;nbsp;&amp;nbsp;shape&amp;nbsp;(8760,&amp;nbsp;cols)&quot;]
+        direction LR
+        C0[&quot;col 0&lt;br/&gt;series A&quot;]
+        C1[&quot;col 1&lt;br/&gt;series B&quot;]
+        C2[&quot;col 2&lt;br/&gt;(free)&quot;]
+        CN[&quot;col cols-1&lt;br/&gt;(free)&quot;]
+    end
+    H[&quot;companion sts_f64_s_8760_PT1H_h&lt;br/&gt;cols hash strings&quot;]
+    C0 -.hash.-&gt; H
+    C1 -.hash.-&gt; H
+
+    style C0 fill:#28a745,color:#fff
+    style C1 fill:#28a745,color:#fff
+    style C2 fill:#6c757d,color:#fff
+    style CN fill:#6c757d,color:#fff
+    style H fill:#6f42c1,color:#fff
+</pre>
+<ul>
+<li><strong>Columns are series, rows are timesteps.</strong> Chunking is <code>(1, cols, *element_shape)</code>, so one HDF5
+chunk holds a single timestamp across every column. The layout favors <strong>bulk writes</strong> (a batch
+fills whole chunks in one pass) and <strong>reads across series by timestamp</strong> (one timestamp is one
+chunk). The reverse directions are the slow ones, by design: reading a single series in full
+touches every chunk band, and adding one series at a time rewrites a chunk band per timestep.</li>
+<li><strong>A companion dataset holds the hashes.</strong> For each packed dataset there is a sibling
+<code>{dataset}_h</code>, a <code>(cols, 64)</code> array of <code>u8</code>; row <code>i</code> holds the SHA-256 hex of column <code>i</code> as raw
+bytes, or is all-zero if the slot is free. This is the on-disk index the backend rebuilds on open.</li>
+<li><strong>Datasets spill when full</strong> into <code>…__1</code>, <code>…__2</code>, and so on — when a batch exceeds the per-dataset
+column cap, or when incremental writes fill a default-width (1,000-column) dataset.</li>
+<li><strong>Compression is configurable</strong> at store creation and applies to every data variable (packed and
+standalone). The default is DEFLATE (zlib) level 3 with the byte-shuffle filter; you may change
+the level (0–9), disable shuffle, or turn compression off entirely. The choice is recorded in a
+<code>compression</code> global attribute and restored when the store is reopened for appends, so later
+writes reuse the same filter. Compression is a storage detail only — arrays decode transparently
+regardless of the filter, so stores written with different settings stay mutually readable and the
+data-format version is unaffected. In-memory stores ignore the setting.</li>
+</ul>
+<p>Packed mode holds every <strong>static</strong> series. <code>SingleTimeSeries</code> (and the array behind a
+<code>DeterministicSingleTimeSeries</code>) pool by resolution into <code>sts_…</code> datasets; <code>NonSequentialTimeSeries</code>
+pool by their <em>timestamp vector</em> into <code>nsts_…</code> datasets, because the chunking is timestamp-major and
+so only means something for arrays on a common time axis. An irregular series carries that axis
+explicitly, and the catalog already content-addresses it, so the interned hash is the cohort key —
+which is what lets a <code>StaticReader</code> sweep irregular series the same way it sweeps regular ones.</p>
+<p><strong>Standalone mode</strong> holds the dense forecast arrays (<code>Deterministic</code>, <code>Probabilistic</code>, <code>Scenarios</code>)
+and any <code>NonSequentialTimeSeries</code> alone on its time axis — a pool spreads one array over <code>length</code>
+chunks, so a cohort of one is not worth packing. Each is its own typed, multi-dimensional variable
+<code>arr_{hex_hash}</code> — no column packing and no companion hash (the variable name carries the hash).
+Lone irregular series are shaped <code>[length, *element_shape]</code> and chunked whole; dense forecasts are
+shaped <code>[H, count, *element_shape]</code> (with extra leading axes for <code>Probabilistic</code> / <code>Scenarios</code>) and
+chunked in bounded blocks along the <code>count</code> (window) axis, so reading one forecast window
+decompresses a single block rather than the whole array. The <code>ForecastReader</code> caches a block at a
+time to match.</p>
+<p>The <a href="../reference/file-format.html#hdf5-layout">file-format reference</a> gives the precise naming and
+dimension scheme. Nothing on the array side distinguishes a forecast from a static series of the
+same physical shape — the type, timestamps, and windowing parameters all live in metadata.</p>
+<h2 id="the-metadata-side-sqlite"><a class="header" href="#the-metadata-side-sqlite">The Metadata Side: SQLite</a></h2>
+<p>The catalog holds six tables. The first four describe time series; the last two record relationships
+between catalog entities and have nothing to do with time series at all.</p>
+<ul>
+<li><strong><code>time_series_associations</code></strong> — one row per
+<code>(owner_id, owner_category, time_series_type, name, resolution, interval, features)</code> association,
+including the <code>data_hash</code> that links it to a packed column or standalone variable, the array
+typing (<code>dtype</code>, <code>element_shape</code>), the opaque package-owned <code>ext</code> payload, plus temporal fields,
+forecast parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>, <code>percentiles</code>), units, and the
+<code>features_hash</code>.</li>
+<li><strong><code>feature_sets</code></strong> — the expanded key/value pairs of a feature map, one row per key, typed by a
+<code>value_kind</code> discriminator. The table is <strong>content-addressed</strong>, exactly as arrays are: its primary
+key is <code>(features_hash, key)</code> — the same hash the association row already carries, so no join
+column is needed. A feature set is therefore stored <strong>once and shared</strong> by every association whose
+hash matches, not copied per association; an empty map stores no rows at all. Because the rows are
+shared, there is deliberately no foreign key to <code>time_series_associations</code> and no
+<code>ON DELETE CASCADE</code> (see <a href="#compaction">Compaction</a> below).</li>
+<li><strong><code>schema_version</code></strong> — a single <code>version</code> column holding the catalog schema version (currently
+<code>1</code>).</li>
+<li><strong><code>supplemental_attribute_associations</code></strong> — which supplemental attributes are attached to which
+components, as <code>(component_id, component_type, attribute_id, attribute_type)</code>. Identity is the
+<code>(component_id, attribute_id)</code> pair.</li>
+<li><strong><code>parent_child_associations</code></strong> — directed edges between components, as
+<code>(parent_id, parent_type, child_id, child_type)</code>. Identity is the <em>ordered</em>
+<code>(parent_id, child_id)</code> pair.</li>
+</ul>
+<p>The last two are described in
+<a href="./data-model.html#associations-between-entities">Associations Between Entities</a>. They carry no
+foreign keys and no cascade, and they are independent of <code>time_series_associations</code> in both
+directions: removing a time series never touches them, and removing an association never touches a
+series. They were also added without a <code>data_format_version</code> bump, so a store written before they
+existed simply gains them on its first writable open — which is why every read of them tolerates the
+table being absent.</p>
+<p>A unique index over
+<code>(owner_id, owner_category, time_series_type, name, resolution, interval, features_hash)</code> enforces
+the <a href="./data-model.html#keys">key uniqueness</a> invariant at the database level. <code>owner_category</code> is part
+of the key, so a component and a supplemental attribute that share an <code>owner_id</code> are independent;
+<code>interval</code> is part of the key too, so forecasts of one variable that differ only by interval are
+distinct. Because SQLite treats <code>NULL</code> as distinct in a <code>UNIQUE</code> index, a second index folds <code>NULL</code>
+<code>resolution</code> and <code>interval</code> to a sentinel so series without them (e.g. <code>NonSequentialTimeSeries</code>, or
+any static series, which carry no interval) are still constrained. Indexes on <code>data_hash</code>,
+<code>(owner_id, owner_category)</code>, and <code>resolution</code> keep lookups fast.</p>
+<h2 id="keeping-the-two-files-consistent"><a class="header" href="#keeping-the-two-files-consistent">Keeping the Two Files Consistent</a></h2>
+<p>Because a write touches both files, <code>Store</code> follows a careful ordering so a failure cannot leave a
+dangling reference:</p>
+<pre class="mermaid">sequenceDiagram
+    participant C as add_time_series
+    participant B as HDF5 backend
+    participant M as SQLite
+    C-&gt;&gt;B: put_array(hash, data)
+    Note over C,B: idempotent on hash — staged for rollback
+    C-&gt;&gt;M: BEGIN
+    C-&gt;&gt;M: INSERT association
+    alt insert succeeds
+        C-&gt;&gt;M: COMMIT
+        C--&gt;&gt;C: return TimeSeriesKey
+    else insert fails (duplicate etc.)
+        C-&gt;&gt;M: ROLLBACK
+        C-&gt;&gt;B: remove_array(staged hashes)
+        C--&gt;&gt;C: return Err
+    end
+</pre>
+<ul>
+<li><strong>Array first, metadata second.</strong> <code>put_array</code> is idempotent — calling it with an already-present
+hash is a no-op — so staging the array before committing metadata is safe.</li>
+<li><strong>Metadata commit is the point of no return.</strong> If the SQLite insert fails (most commonly a
+<code>DuplicateTimeSeries</code> constraint violation), the transaction rolls back and any array column
+staged <em>in this call</em> is removed, returning the store to its prior state.</li>
+<li><strong>Bulk writes are all-or-nothing.</strong> <code>add_time_series_bulk</code> (and the buffered <code>bulk_add</code> session)
+group packed series by shape and stage each group as one batch-sized block — filling whole chunks
+— then insert every association in one transaction; any error rolls the whole batch back and
+removes the staged arrays.</li>
+</ul>
+<p>On delete, the order reverses and is reference-counted: the association rows are removed inside a
+transaction, then an array column is only zeroed/freed if no remaining association references that
+hash. This is what lets two keys <a href="./content-addressing.html">share one array</a> safely. Feature sets are
+shared too, but they are <strong>not</strong> reference-counted — deleting an association never deletes its
+feature set; the set is left unreachable for a later <code>compact()</code> to sweep.</p>
+<h2 id="persistence-and-copying"><a class="header" href="#persistence-and-copying">Persistence and Copying</a></h2>
+<p>The HDF5 backend buffers writes. Call <code>flush()</code> (which issues <code>H5Fflush</code>) before copying the files
+for backup or archival; afterward both <code>system.h5</code> and <code>system.h5.sqlite</code> can be copied as a pair
+without closing the handle. The two files must always be kept together — neither is usable alone.</p>
+<h2 id="protecting-a-saved-artifact"><a class="header" href="#protecting-a-saved-artifact">Protecting a Saved Artifact</a></h2>
+<p>The dangerous moment for a store is not the crash. Every path that writes an artifact stages to a
+temporary sibling and renames, so a power loss leaves either the old file or the new one, never a
+half-written one. What actually destroys a saved store is an ordinary call aimed at a path that
+already holds one.</p>
+<p><strong>Creating over an existing store is refused.</strong> Creating truncates the HDF5 file but only <em>opens</em>
+the catalog beside it, then stamps both halves with one fresh generation. Left unguarded, a build
+script re-run against last week's output produced an empty array file paired with the old catalog's
+rows — a store that opens cleanly, reports every series still present, and has nothing behind any of
+them. Nothing short of <code>verify_integrity()</code> notices. <code>create</code> therefore fails with <code>StoreExists</code> if
+either half is already at the path; the check covers both, because an orphaned catalog poisons fresh
+arrays exactly as an orphaned HDF5 file poisons a fresh catalog. Discarding the destination on
+purpose is a separate, explicitly named call (<code>Store::create_replacing</code>, <code>overwrite=True</code> in Python,
+<code>overwrite=true</code> in Julia), which removes both halves and the catalog's sidecars first.</p>
+<h3 id="working-on-a-copy"><a class="header" href="#working-on-a-copy">Working on a Copy</a></h3>
+<p><code>open()</code> defaults to <strong>read-write</strong> in every binding. That is the one place the library will damage
+a file you care about: mutations land in the artifact directly, and HDF5 has neither a journal nor a
+repair tool, so an interrupted write there is unrecoverable.</p>
+<p><code>open_copy(src, dest)</code> copies both halves and opens the copy, leaving the source byte-for-byte
+alone. Change the copy, then <code>persist_to(src)</code> — the original is only replaced by the final atomic
+rename. Both shipped consumers (infrasys and InfrastructureSystems.jl) already work this way; the
+call exists so the pattern lives in one place rather than being reimplemented per consumer.</p>
+<p>Reserve a read-write <code>open()</code> on a user's artifact for when in-place mutation is genuinely what you
+mean, and prefer <code>read_only=True</code> for anything that only reads.</p>
+<h3 id="one-writer-and-not-on-a-network-filesystem"><a class="header" href="#one-writer-and-not-on-a-network-filesystem">One writer, and not on a network filesystem</a></h3>
+<p>The store assumes a single writer. On an ordinary filesystem HDF5's file lock enforces most of that
+for you — this build links HDF5 2.0 with locking on. But it is configured <strong>best-effort</strong>: where the
+filesystem reports that locking is unavailable, HDF5 proceeds without it and says nothing. Lustre,
+GPFS, and NFS without <code>lockd</code> all land there, and they are exactly where large runs live. SQLite's
+WAL journaling is likewise unsafe over NFS.</p>
+<p>So: keep a live store on local disk, let one process write it, and copy the finished artifact to
+shared storage afterwards. Two concurrent writers on a filesystem without working locks will corrupt
+the HDF5 file, and no amount of care inside this library can prevent it.</p>
+<p><code>verify_integrity()</code> is the backstop. Every array carries a SHA-256 companion, and the check
+re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
+worth running against an artifact whose history you do not trust. The CLI exposes it as
+<code>infrastore verify</code>.</p>
+<h2 id="where-the-catalog-lives"><a class="header" href="#where-the-catalog-lives">Where the Catalog Lives</a></h2>
+<p>The catalog does not have to be the <code>.sqlite</code> file while a store is open. <code>CatalogMode</code> picks
+between two placements, independently of where the arrays live:</p>
+<div class="table-wrapper"><table><thead><tr><th>Mode</th><th>Catalog</th><th>Durability</th></tr></thead><tbody>
+<tr><td><code>Attached</code></td><td>is the <code>&lt;path&gt;.sqlite</code> file</td><td>every commit, as soon as the OS writes back</td></tr>
+<tr><td><code>InMemory</code></td><td>held in RAM, loaded on open</td><td>only at <code>persist_to</code> — a crash loses it</td></tr>
+</tbody></table>
+</div>
+<p><code>Attached</code> is the default and what a long-lived on-disk store wants: the CLI mutates one command per
+process and relies on each one landing.</p>
+<p><code>InMemory</code> suits a consumer that builds a store in a scratch directory beside its own volatile state
+— a <code>System</code> under construction, say. A crash loses that state regardless, so journaling the scratch
+catalog buys nothing, and skipping it removes per-commit WAL and fsync work. Arrays still stream to
+the HDF5 file, so this does <strong>not</strong> require the data to fit in memory. Nothing is durable until
+<code>persist_to</code>.</p>
+<p>Two caveats. Opening with <code>InMemory</code> reads <code>&lt;path&gt;.sqlite</code> into RAM but still opens the HDF5 half
+<strong>in place</strong>, so mutations land in the original file; a caller that means to leave the source
+untouched until an explicit save wants <code>open_copy</code> (see <a href="#working-on-a-copy">Working on a Copy</a>).
+And a scratch store that never reached its first save is a half-artifact: a stamped HDF5 file with
+no catalog. Reopening it as <code>Attached</code> creates a fresh, unstamped catalog beside it, and the
+<a href="#saving-one-pair-two-renames">paired stamp</a> rejects that combination — which is the right answer,
+because the arrays are there but nothing names them.</p>
+<p><code>persist_catalog()</code> is the cheap way to land an in-memory catalog when the arrays are already in
+their final place. <code>persist_to</code> aimed at another path has to copy the array file; <code>persist_catalog</code>
+writes only the <code>.sqlite</code> half, stamped to match the HDF5 file already sitting beside it. That is
+what makes <code>InMemory</code> usable for what it is good for — skipping per-commit journaling during a bulk
+load — without paying a full copy of the arrays to land the result. It is a checkpoint, not a mode
+switch: the catalog stays in RAM, and later changes are again RAM-only until the next call.</p>
+<h2 id="saving-one-pair-two-renames"><a class="header" href="#saving-one-pair-two-renames">Saving: One Pair, Two Renames</a></h2>
+<p><code>persist_to</code> writes both halves to temporary siblings, fsyncs them, and only then renames them into
+place, so a crash before the first rename leaves the destination untouched.</p>
+<p>The renames cannot be made atomic together — POSIX renames one path at a time. A <strong>generation
+stamp</strong> covers the gap: each save mints a fresh value and writes it into both the HDF5
+<code>catalog_generation</code> root attribute and the catalog's <code>catalog_identity</code> table. A crash between the
+two renames therefore leaves halves whose stamps disagree, and the next <code>open</code> fails with
+<code>MismatchedArtifact</code> instead of reading a store that quietly contradicts itself. The same check
+catches one half being copied without the other.</p>
+<p>What the stamp does <em>not</em> give you is a destination that survives a failed save. The renames replace
+the target, so a crash between them destroys whatever pair was there before. That is a deliberate
+trade — loud, detectable loss beats silent corruption. <strong>Do not assume the destination is intact
+after a failed <code>persist_to</code></strong>; recover by saving again from the store, which is still live and
+unchanged.</p>
+<p>A store written before the stamp existed carries neither half of it. That is the one legitimate
+unstamped state, and it opens. <strong>One</strong> stamped half is not: every path that writes a stamp writes
+both halves together (<code>create</code>, <code>persist_to</code>, and <code>compact</code>, which carries the existing one across),
+so a lone stamp means a half was replaced, copied, or created without its partner. It is rejected as
+a mismatch, which closes the migration-window hole where a save interrupted between its two renames,
+onto a destination predating the stamp, would otherwise have paired new arrays with an old catalog
+in silence.</p>
+<p>Each save stages through a sibling named uniquely to itself (<code>&lt;target&gt;.persist-&lt;tag&gt;</code>). A fixed name
+would be a corruption vector rather than a convenience: nothing locks a <code>persist_to</code>
+<strong>destination</strong>, so two processes saving to one path would each clear the other's in-flight temp
+while the stamping and rename that follow still resolve that name — publishing a partially written
+file as a finished save. The cost of uniqueness is that an interrupted save's temps are no longer
+swept by the next one; a temp belonging to a live concurrent save cannot be told apart from an
+abandoned one, so they are left for you to delete once no save is in flight.</p>
+<p>The swap also clears any <code>-wal</code>/<code>-shm</code> sidecar beside the destination catalog. A sidecar there
+belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite
+would recover it over the database renamed into its place, resurrecting the replaced catalog's pages
+so the save silently would not take.</p>
+<p>Saving an <code>Attached</code> store onto <strong>its own path</strong> is a no-op: the destination already is that store,
+and the flush at the start of <code>persist_to</code> has made it durable. The <code>InMemory</code> counterpart is real
+work rather than a no-op — the arrays are already at <code>path</code> and the save is what writes the catalog
+beside them, which is exactly the scratch-directory workflow.</p>
+<p>Compaction rewrites only the HDF5 half, so it carries the existing stamp into the rewritten file
+rather than minting a new one — a fresh stamp there would manufacture exactly the mismatch the stamp
+exists to detect.</p>
+<h2 id="compaction"><a class="header" href="#compaction">Compaction</a></h2>
+<p><code>compact()</code> reclaims space in both halves of the artifact, and the two halves behave differently.</p>
+<p><strong>On the array side, compaction rewrites the file.</strong> Deleting a series frees its column slot (reused
+transparently by the next compatible write, via <code>first_free</code>) or unlinks its standalone dataset, but
+HDF5 cannot hand either back to the filesystem in place, so neither shrinks the <code>.h5</code>. Compaction
+therefore materializes every array the catalog still references into a fresh sibling file and
+renames it over the original, reopening the store on the result. What does not survive the trip:
+freed slots, datasets nothing references, and the slack in packed pools sized for growth rather than
+for the cohort actually stored. The report says how much went — <code>slots_reclaimed</code>,
+<code>datasets_dropped</code>, and <code>bytes_reclaimed</code> (how much smaller the file got).</p>
+<p>Because the file is replaced, compaction assumes the compacting process is its only user. That is
+the store's single-writer model in general; the difference is that here a concurrent reader on Unix
+silently keeps reading the pre-compaction file, and on Windows the rename fails outright.</p>
+<p><strong>On the catalog side, compaction sweeps.</strong> Because feature sets are shared, deleting an association
+cannot cascade into them: removing the last association that referenced a set leaves it unreachable.
+<code>compact()</code> deletes those rows and reports the count as <code>feature_sets_reclaimed</code> (and
+<code>timestamp_sets_reclaimed</code> for timestamp vectors), before the rewrite, so the rewrite's liveness
+scan sees the swept catalog. (Clearing the whole store is the exception that needs no sweep: it
+orphans every set by construction, so it drops them all outright.)</p>
+<p>See <a href="../reference/rust-api.html#store"><code>compact</code></a>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../explanation/data-model.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../explanation/content-addressing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../explanation/data-model.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../explanation/content-addressing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
