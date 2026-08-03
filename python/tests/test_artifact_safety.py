@@ -246,5 +246,11 @@ def test_open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty(tmp_p
         add(store, 1, 100.0)
         store.flush()
 
+    copy = tmp_path / "copy.h5"
     with pytest.raises(MismatchedArtifactError):
-        Store.open_copy(scratch, tmp_path / "copy.h5")
+        Store.open_copy(scratch, copy)
+
+    # And it leaves nothing at the destination: a path the caller never
+    # successfully wrote to must not be one they then have to clean up.
+    assert not copy.exists()
+    assert not (tmp_path / "copy.h5.sqlite").exists()

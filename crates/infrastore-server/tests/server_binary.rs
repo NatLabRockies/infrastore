@@ -404,12 +404,10 @@ fn a_mismatched_artifact_stops_the_server_at_startup() {
             "the binary must not serve an artifact whose halves disagree"
         );
         stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        // `main` returns `Result`, so the runtime prints the error's `Debug`
-        // form: today an operator sees `MismatchedArtifact { h5: .., sqlite: .. }`
-        // rather than the sentence the error carries. The refusal and the named
-        // cause are the contract asserted here; printing `Display` instead would
-        // be an improvement this test would still accept.
-        if stderr.contains("MismatchedArtifact") || stderr.contains("generation stamp") {
+        // The sentence the error carries, not its `Debug` form: an operator
+        // reading this needs to know the halves are from two saves, which
+        // `MismatchedArtifact { h5: .., sqlite: .. }` does not tell them.
+        if stderr.contains("generation stamp") {
             return;
         }
         std::thread::sleep(StdDuration::from_millis(200));

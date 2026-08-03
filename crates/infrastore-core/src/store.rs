@@ -720,7 +720,10 @@ impl Store {
     /// same thing with the failure modes handled in one place.
     ///
     /// `dest` must not already hold either half of a store, for the same reason
-    /// [`Self::create_with_catalog`] refuses one.
+    /// [`Self::create_with_catalog`] refuses one. Nothing is left at `dest` if
+    /// this call fails, whether the copy or the open of the copy is what failed
+    /// — otherwise the next attempt would refuse a path the caller never
+    /// successfully wrote to.
     ///
     /// This copies what is *on disk*. A caller that also holds `src` open in
     /// this process must [`Self::flush`] it first — and on Windows must close it
@@ -754,13 +757,18 @@ impl Store {
             }
             Ok(())
         })();
-        // A half-copied destination is the state `reject_existing_artifact` will
-        // refuse next time, stranding the caller on a path they never wrote to.
-        copied.inspect_err(|_| {
-            let _ = std::fs::remove_file(dest);
-            let _ = std::fs::remove_file(&dest_sqlite);
-        })?;
-        Self::open_with_catalog(dest, false, catalog)
+        // The open is inside the cleanup, not after it. A destination left
+        // behind is the state `reject_existing_artifact` refuses next time,
+        // stranding the caller on a path they never successfully wrote — and
+        // that is just as true when the copy succeeded and the *open* failed,
+        // which is what a half-artifact source (arrays with no catalog) does
+        // every time.
+        copied
+            .and_then(|()| Self::open_with_catalog(dest, false, catalog))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(dest);
+                let _ = std::fs::remove_file(&dest_sqlite);
+            })
     }
 
     /// Like [`Self::open`], but places the catalog explicitly. See

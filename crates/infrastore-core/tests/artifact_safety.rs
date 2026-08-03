@@ -318,11 +318,20 @@ fn open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty() {
         matches!(err, TimeSeriesError::MismatchedArtifact { .. }),
         "expected MismatchedArtifact, got {err:?}"
     );
-    // Current behavior, recorded rather than endorsed: the cleanup that removes a
-    // half-copied destination covers a failed *copy*, not a failed open, so the
-    // copied arrays stay at `dest` and the next attempt there hits StoreExists.
-    // Recovering means deleting a path the caller never successfully wrote.
-    assert!(attached.exists());
+    // And it takes the copied arrays with it. A destination left behind is the
+    // state `StoreExists` refuses next time, stranding the caller on a path they
+    // never successfully wrote — which is as true of a failed open as of a
+    // failed copy.
+    assert!(
+        !attached.exists(),
+        "the failed copy left a destination behind"
+    );
+    assert!(!catalog_sqlite_path(&attached).exists());
+    // So the same call can simply be tried again.
+    let err = open_store_copy(&scratch, &attached, CatalogMode::Attached)
+        .err()
+        .expect("still a half-artifact");
+    assert!(matches!(err, TimeSeriesError::MismatchedArtifact { .. }));
 
     let loaded = dir.path().join("in-memory-copy.h5");
     assert!(

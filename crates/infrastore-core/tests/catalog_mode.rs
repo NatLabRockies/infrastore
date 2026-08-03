@@ -565,8 +565,10 @@ fn a_read_only_store_can_still_save_elsewhere() {
 /// It is not quite "touches nothing on disk": SQLite needs the `-shm` index to
 /// read a WAL-mode database and creates the sidecar pair even for a read-only
 /// connection, then cannot check them back in when it closes. They are left
-/// empty — no rows, nothing to recover — but they do appear, which matters on
-/// read-only media and to anything watching the directory.
+/// empty — no rows, nothing to recover — and deleting them here would break a
+/// concurrent reader holding the same index, so they stay. Where they cannot be
+/// created at all, the read falls back to `immutable=1`; see
+/// `a_store_on_read_only_media_still_opens`.
 #[test]
 fn a_read_only_in_memory_catalog_writes_nothing_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -611,6 +613,55 @@ fn a_read_only_in_memory_catalog_writes_nothing_back() {
             0,
             "a read-only load journaled something"
         );
+    }
+}
+
+/// A store nobody can write to must still be readable — both ways of reading
+/// one.
+///
+/// A WAL-mode catalog needs its `-shm` index, and SQLite creates that sidecar
+/// even for a read-only connection. On media that refuses the write — a
+/// read-only mount, a shared archive, a directory this process does not own —
+/// creating it fails and, before the `immutable=1` fallback, took the whole open
+/// with it: a complete, uncorrupted artifact that could not be opened at all.
+#[cfg(unix)]
+#[test]
+fn a_store_on_read_only_media_still_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        add(&mut store, 1, 100.0);
+    }
+    // The clean close checkpointed and removed the sidecars, which is what
+    // makes the fallback safe to take: no committed rows live outside the
+    // database file.
+    assert!(!sqlite_sidecar(&catalog_sqlite_path(&path), "-wal").exists());
+
+    let perms = std::fs::metadata(dir.path()).unwrap().permissions();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Root ignores the mode bits, so there is nothing to test there.
+    let enforced = std::fs::File::create(dir.path().join("probe")).is_err();
+
+    let result = std::panic::catch_unwind(|| {
+        if !enforced {
+            return;
+        }
+        let attached = open_store(&path, true).expect("a read-only attached open");
+        assert_eq!(read_values(&attached, 1)[0], 100.0);
+        drop(attached);
+
+        let loaded = open_store_with_catalog(&path, true, CatalogMode::InMemory)
+            .expect("a read-only load into memory");
+        assert_eq!(read_values(&loaded, 1)[0], 100.0);
+    });
+
+    // Restore before the temp dir is dropped, or its own cleanup cannot run.
+    std::fs::set_permissions(dir.path(), perms).unwrap();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
     }
 }
 
