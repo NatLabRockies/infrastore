@@ -8,15 +8,21 @@ use std::path::{Path, PathBuf};
 
 use infrastore_core::{CatalogMode, Compression, Store, create_store, open_store};
 
-/// Where the SQLite catalog lives while the store is open.
+/// Where the SQLite catalog lives *while a command runs*.
 ///
-/// Exposed as a flag because the two modes trade durability for speed in a way
-/// only the caller can choose. [`CatalogChoice::Attached`] commits (and fsyncs)
-/// to `<store>.sqlite` as it goes, so an interrupted load leaves what it had
-/// already written. [`CatalogChoice::InMemory`] keeps the catalog in RAM and
-/// writes it only at `persist`, which is much faster for a bulk load and loses
-/// *everything* if the process dies first — arrays are still streamed to the
-/// HDF5 file, but without a catalog they are unreachable.
+/// Exposed as a flag because the two modes trade crash-durability for speed in
+/// a way only the caller can choose. [`CatalogChoice::Attached`] commits (and
+/// fsyncs) to `<store>.sqlite` as it goes, so an interrupted load leaves what it
+/// had already written. [`CatalogChoice::InMemory`] keeps the catalog in RAM,
+/// skipping per-commit journaling — much faster for a bulk load, and losing
+/// *everything* if the process dies first, since the arrays streamed to the HDF5
+/// file are unreachable without a catalog to name them.
+///
+/// Either way the command writes the catalog out before it exits
+/// (`Store::persist_catalog`), so both modes leave a complete artifact. They
+/// cannot differ on that: the CLI runs one command per process, so a catalog
+/// still in RAM at exit is not deferred, it is lost — there is no later command
+/// that could still write *this* process's catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum CatalogChoice {
     /// The `<store>.sqlite` file, committed on every write.

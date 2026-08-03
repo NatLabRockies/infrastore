@@ -191,6 +191,54 @@ The HDF5 backend buffers writes. Call `flush()` (which issues `H5Fflush`) before
 for backup or archival; afterward both `system.h5` and `system.h5.sqlite` can be copied as a pair
 without closing the handle. The two files must always be kept together — neither is usable alone.
 
+## Protecting a Saved Artifact
+
+The dangerous moment for a store is not the crash. Every path that writes an artifact stages to a
+temporary sibling and renames, so a power loss leaves either the old file or the new one, never a
+half-written one. What actually destroys a saved store is an ordinary call aimed at a path that
+already holds one.
+
+**Creating over an existing store is refused.** Creating truncates the HDF5 file but only _opens_
+the catalog beside it, then stamps both halves with one fresh generation. Left unguarded, a build
+script re-run against last week's output produced an empty array file paired with the old catalog's
+rows — a store that opens cleanly, reports every series still present, and has nothing behind any of
+them. Nothing short of `verify_integrity()` notices. `create` therefore fails with `StoreExists` if
+either half is already at the path; the check covers both, because an orphaned catalog poisons fresh
+arrays exactly as an orphaned HDF5 file poisons a fresh catalog. Discarding the destination on
+purpose is a separate, explicitly named call (`Store::create_replacing`, `overwrite=True` in Python,
+`overwrite=true` in Julia), which removes both halves and the catalog's sidecars first.
+
+### Working on a Copy
+
+`open()` defaults to **read-write** in every binding. That is the one place the library will damage
+a file you care about: mutations land in the artifact directly, and HDF5 has neither a journal nor a
+repair tool, so an interrupted write there is unrecoverable.
+
+`open_copy(src, dest)` copies both halves and opens the copy, leaving the source byte-for-byte
+alone. Change the copy, then `persist_to(src)` — the original is only replaced by the final atomic
+rename. Both shipped consumers (infrasys and InfrastructureSystems.jl) already work this way; the
+call exists so the pattern lives in one place rather than being reimplemented per consumer.
+
+Reserve a read-write `open()` on a user's artifact for when in-place mutation is genuinely what you
+mean, and prefer `read_only=True` for anything that only reads.
+
+### One writer, and not on a network filesystem
+
+The store assumes a single writer. On an ordinary filesystem HDF5's file lock enforces most of that
+for you — this build links HDF5 2.0 with locking on. But it is configured **best-effort**: where the
+filesystem reports that locking is unavailable, HDF5 proceeds without it and says nothing. Lustre,
+GPFS, and NFS without `lockd` all land there, and they are exactly where large runs live. SQLite's
+WAL journaling is likewise unsafe over NFS.
+
+So: keep a live store on local disk, let one process write it, and copy the finished artifact to
+shared storage afterwards. Two concurrent writers on a filesystem without working locks will corrupt
+the HDF5 file, and no amount of care inside this library can prevent it.
+
+`verify_integrity()` is the backstop. Every array carries a SHA-256 companion, and the check
+re-reads and re-hashes all of them, so corruption is detectable even when it is not preventable —
+worth running against an artifact whose history you do not trust. The CLI exposes it as
+`infrastore verify`.
+
 ## Where the Catalog Lives
 
 The catalog does not have to be the `.sqlite` file while a store is open. `CatalogMode` picks
@@ -212,9 +260,18 @@ the HDF5 file, so this does **not** require the data to fit in memory. Nothing i
 
 Two caveats. Opening with `InMemory` reads `<path>.sqlite` into RAM but still opens the HDF5 half
 **in place**, so mutations land in the original file; a caller that means to leave the source
-untouched until an explicit save must open a copy. And a scratch store that never reached
-`persist_to`, reopened as `Attached`, reads as _empty_ rather than failing — a read-write open of a
-missing catalog creates a fresh one, so the arrays are present but nothing names them.
+untouched until an explicit save wants `open_copy` (see [Working on a Copy](#working-on-a-copy)).
+And a scratch store that never reached its first save is a half-artifact: a stamped HDF5 file with
+no catalog. Reopening it as `Attached` creates a fresh, unstamped catalog beside it, and the
+[paired stamp](#saving-one-pair-two-renames) rejects that combination — which is the right answer,
+because the arrays are there but nothing names them.
+
+`persist_catalog()` is the cheap way to land an in-memory catalog when the arrays are already in
+their final place. `persist_to` aimed at another path has to copy the array file; `persist_catalog`
+writes only the `.sqlite` half, stamped to match the HDF5 file already sitting beside it. That is
+what makes `InMemory` usable for what it is good for — skipping per-commit journaling during a bulk
+load — without paying a full copy of the arrays to land the result. It is a checkpoint, not a mode
+switch: the catalog stays in RAM, and later changes are again RAM-only until the next call.
 
 ## Saving: One Pair, Two Renames
 
@@ -234,8 +291,21 @@ trade — loud, detectable loss beats silent corruption. **Do not assume the des
 after a failed `persist_to`**; recover by saving again from the store, which is still live and
 unchanged.
 
-A store written before the stamp existed carries neither half of it. That reads as "unstamped" and
-skips the check rather than failing, so older artifacts keep opening.
+A store written before the stamp existed carries neither half of it. That is the one legitimate
+unstamped state, and it opens. **One** stamped half is not: every path that writes a stamp writes
+both halves together (`create`, `persist_to`, and `compact`, which carries the existing one across),
+so a lone stamp means a half was replaced, copied, or created without its partner. It is rejected as
+a mismatch, which closes the migration-window hole where a save interrupted between its two renames,
+onto a destination predating the stamp, would otherwise have paired new arrays with an old catalog
+in silence.
+
+Each save stages through a sibling named uniquely to itself (`<target>.persist-<tag>`). A fixed name
+would be a corruption vector rather than a convenience: nothing locks a `persist_to`
+**destination**, so two processes saving to one path would each clear the other's in-flight temp
+while the stamping and rename that follow still resolve that name — publishing a partially written
+file as a finished save. The cost of uniqueness is that an interrupted save's temps are no longer
+swept by the next one; a temp belonging to a live concurrent save cannot be told apart from an
+abandoned one, so they are left for you to delete once no save is in flight.
 
 The swap also clears any `-wal`/`-shm` sidecar beside the destination catalog. A sidecar there
 belongs to the catalog being replaced — a writer that crashed at that path leaves one — and SQLite

@@ -42,20 +42,22 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
 
 ## Status Codes
 
-| Macro                                  | Value | Meaning                                                                                                                                                  |
-| -------------------------------------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `INFRASTORE_OK`                        | 0     | Success                                                                                                                                                  |
-| `INFRASTORE_ERR_NULL_POINTER`          | 1     | A required pointer was `NULL`                                                                                                                            |
-| `INFRASTORE_ERR_INVALID_UTF8`          | 2     | A string argument was not UTF-8                                                                                                                          |
-| `INFRASTORE_ERR_INVALID_PARAMETER`     | 3     | A bad argument value                                                                                                                                     |
-| `INFRASTORE_ERR_NOT_FOUND`             | 4     | No matching series / array                                                                                                                               |
-| `INFRASTORE_ERR_DUPLICATE`             | 5     | Key already exists                                                                                                                                       |
-| `INFRASTORE_ERR_INTEGRITY`             | 6     | On-disk inconsistency                                                                                                                                    |
-| `INFRASTORE_ERR_READ_ONLY`             | 7     | Write on a read-only store                                                                                                                               |
-| `INFRASTORE_ERR_IO`                    | 8     | I/O failure                                                                                                                                              |
-| `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`   | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.                           |
-| `INFRASTORE_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity. |
-| `INFRASTORE_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                                |
+| Macro                                  | Value | Meaning                                                                                                                                                                                        |
+| -------------------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `INFRASTORE_OK`                        | 0     | Success                                                                                                                                                                                        |
+| `INFRASTORE_ERR_NULL_POINTER`          | 1     | A required pointer was `NULL`                                                                                                                                                                  |
+| `INFRASTORE_ERR_INVALID_UTF8`          | 2     | A string argument was not UTF-8                                                                                                                                                                |
+| `INFRASTORE_ERR_INVALID_PARAMETER`     | 3     | A bad argument value                                                                                                                                                                           |
+| `INFRASTORE_ERR_NOT_FOUND`             | 4     | No matching series / array                                                                                                                                                                     |
+| `INFRASTORE_ERR_DUPLICATE`             | 5     | Key already exists                                                                                                                                                                             |
+| `INFRASTORE_ERR_INTEGRITY`             | 6     | On-disk inconsistency                                                                                                                                                                          |
+| `INFRASTORE_ERR_READ_ONLY`             | 7     | Write on a read-only store                                                                                                                                                                     |
+| `INFRASTORE_ERR_IO`                    | 8     | I/O failure                                                                                                                                                                                    |
+| `INFRASTORE_ERR_INCOMPATIBLE_FORMAT`   | 9     | The store on disk was written in a different, incompatible on-disk format than this build reads. There is no in-place upgrade.                                                                 |
+| `INFRASTORE_ERR_DUPLICATE_ASSOCIATION` | 10    | An attachment or parent/child edge with the same identity already exists. Distinct from `INFRASTORE_ERR_DUPLICATE`, which is about time-series identity.                                       |
+| `INFRASTORE_ERR_STORE_EXISTS`          | 11    | A store already exists where one was about to be created. Creating there would discard its arrays while keeping its catalog. Use `infrastore_store_create_replacing` to discard it on purpose. |
+| `INFRASTORE_ERR_MISMATCHED_ARTIFACT`   | 12    | The HDF5 file and its `.sqlite` catalog do not carry the same generation stamp: they are halves of two different saves.                                                                        |
+| `INFRASTORE_ERR_INTERNAL`              | 99    | Unexpected internal error                                                                                                                                                                      |
 
 ## Lifecycle
 
@@ -71,6 +73,18 @@ int32_t infrastore_store_create_with_catalog(const char *path, bool in_memory, u
                                          uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_open_with_catalog(const char *path, bool read_only, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* The create entry points above fail with INFRASTORE_ERR_STORE_EXISTS when either half of a
+   store is already at `path`. This one discards it first — both halves plus the catalog's
+   -wal/-shm sidecars — and is destructive and not atomic. */
+int32_t infrastore_store_create_replacing(const char *path, uint8_t compression_kind,
+                                         uint8_t deflate_level, bool shuffle, uint8_t catalog_mode,
+                                         struct InfraStore **out);
+/* Copy both halves of the store at `src` to `dest` and open the copy read-write, leaving `src`
+   untouched. The safe way to load a store you intend to change: mutating an artifact in place is
+   unrecoverable if interrupted, since HDF5 has no journal. INFRASTORE_ERR_STORE_EXISTS if `dest`
+   already holds a store. */
+int32_t infrastore_store_open_copy(const char *src, const char *dest, uint8_t catalog_mode,
                                          struct InfraStore **out);
 int32_t infrastore_store_catalog_mode(const struct InfraStore *handle, uint8_t *out);
 void    infrastore_store_free(struct InfraStore *handle);
@@ -677,6 +691,10 @@ int32_t infrastore_store_in_transaction(struct InfraStore *handle, bool *out);
 /* Persist the store's data to `path` (HDF5) and `<path>.sqlite` (metadata),
    materializing an in-memory store to disk. Existing target files are overwritten. */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
+/* Write an in-memory catalog to this store's own <path>.sqlite, stamped to match the HDF5 file
+   already beside it. Unlike infrastore_store_persist, copies no arrays: they are already in
+   place. A checkpoint, not a mode switch. For catalog_mode=0 this is infrastore_store_flush. */
+int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
 /* has_owner=false clears all; when true, the owner is the pair (owner_id, owner_category). */
 int32_t infrastore_store_clear(struct InfraStore *handle, bool has_owner, int64_t owner_id,
                        int32_t owner_category); /* owner_category: 0=Component, 1=SupplementalAttribute */

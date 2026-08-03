@@ -63,10 +63,16 @@ end
 """
     Store(; in_memory=true, path=nothing,
             compression=:deflate, compression_level=3, shuffle=true,
-            catalog=nothing)
+            catalog=nothing, overwrite=false)
 
 Construct a new store. Pass `path` (and `in_memory=false`) to persist to an
 HDF5 file on disk.
+
+Throws [`StoreExistsError`](@ref) if `path` (or `\$path.sqlite`) already holds a
+store: creating there would discard its arrays while keeping its catalog,
+leaving a store that reopens cleanly with every array missing. Pass
+`overwrite=true` to discard the existing artifact on purpose, or use
+[`open_store`](@ref) to keep it.
 
 `compression` selects the on-disk filter for HDF5 data variables:
 `:deflate` (default) applies DEFLATE at `compression_level` (0–9) with optional
@@ -96,6 +102,7 @@ function Store(;
     compression_level::Integer=3,
     shuffle::Bool=true,
     catalog::Union{Nothing, Symbol, AbstractString}=nothing,
+    overwrite::Bool=false,
 )
     kind = Symbol(compression)
     compression_kind = if kind === :none
@@ -111,16 +118,34 @@ function Store(;
     end
     catalog_mode = _catalog_code(catalog, in_memory)
     out = Ref{Ptr{Cvoid}}(C_NULL)
-    cpath = path === nothing ? C_NULL : String(path)
-    code = @ccall lib_path().infrastore_store_create_with_catalog(
-        cpath::Cstring,
-        in_memory::Bool,
-        compression_kind::UInt8,
-        UInt8(compression_level)::UInt8,
-        shuffle::Bool,
-        catalog_mode::UInt8,
-        out::Ref{Ptr{Cvoid}},
-    )::Int32
+    if overwrite
+        in_memory && throw(
+            ArgumentError(
+                "overwrite=true is meaningless for an in-memory store: there is no artifact to replace"
+            ),
+        )
+        path === nothing &&
+            throw(ArgumentError("path is required when in_memory=false"))
+        code = @ccall lib_path().infrastore_store_create_replacing(
+            String(path)::Cstring,
+            compression_kind::UInt8,
+            UInt8(compression_level)::UInt8,
+            shuffle::Bool,
+            catalog_mode::UInt8,
+            out::Ref{Ptr{Cvoid}},
+        )::Int32
+    else
+        cpath = path === nothing ? C_NULL : String(path)
+        code = @ccall lib_path().infrastore_store_create_with_catalog(
+            cpath::Cstring,
+            in_memory::Bool,
+            compression_kind::UInt8,
+            UInt8(compression_level)::UInt8,
+            shuffle::Bool,
+            catalog_mode::UInt8,
+            out::Ref{Ptr{Cvoid}},
+        )::Int32
+    end
     _check(code)
     return Store(out[])
 end
@@ -131,9 +156,10 @@ end
 Open an existing on-disk store.
 
 `catalog=:memory` reads `\$path.sqlite` into RAM and leaves the file alone; later
-mutations reach disk only through [`persist!`](@ref). The HDF5 half is still
-opened in place, so a caller that means to leave the original untouched until an
-explicit save must open a copy.
+mutations reach disk only through [`persist!`](@ref) or
+[`persist_catalog!`](@ref). The HDF5 half is still opened in place, so with
+`read_only=false` mutations land in `path` itself — use [`open_copy`](@ref) to
+leave the original untouched until an explicit save.
 """
 function open_store(
     path::AbstractString;
@@ -147,6 +173,55 @@ function open_store(
     )::Int32
     _check(code)
     return Store(out[])
+end
+
+"""
+    open_copy(src, dest; catalog=:attached)
+
+Copy the store at `src` to `dest` and open the copy read-write.
+
+Both halves are copied, so `dest` is a complete, independent store, and `src` is
+never opened for writing.
+
+This is the safe way to load a store you care about and then change it.
+[`open_store`](@ref) defaults to read-write, and every mutation then lands in
+that file directly — HDF5 has no journal and no repair tool, so an interrupted
+write there is unrecoverable. Working on a copy and calling `persist!(store,
+src)` leaves the original intact until one atomic rename replaces it.
+
+Throws [`StoreExistsError`](@ref) if `dest` already holds a store.
+"""
+function open_copy(
+    src::AbstractString,
+    dest::AbstractString;
+    catalog::Union{Symbol, AbstractString}=:attached,
+)
+    catalog_mode = _catalog_code(catalog, false)
+    out = Ref{Ptr{Cvoid}}(C_NULL)
+    code = @ccall lib_path().infrastore_store_open_copy(
+        src::Cstring, dest::Cstring, catalog_mode::UInt8, out::Ref{Ptr{Cvoid}}
+    )::Int32
+    _check(code)
+    return Store(out[])
+end
+
+"""
+    open_copy(f::Function, src, dest; catalog=:attached)
+
+Do-block form: copy and open, run `f(store)`, and guarantee `close!` on exit.
+"""
+function open_copy(
+    f::Function,
+    src::AbstractString,
+    dest::AbstractString;
+    catalog::Union{Symbol, AbstractString}=:attached,
+)
+    s = open_copy(src, dest; catalog=catalog)
+    try
+        return f(s)
+    finally
+        close!(s)
+    end
 end
 
 """

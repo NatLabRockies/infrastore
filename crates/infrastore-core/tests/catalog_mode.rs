@@ -103,13 +103,17 @@ fn an_in_memory_catalog_discards_changes_when_the_store_is_dropped() {
         store.flush().unwrap();
     }
 
-    // Documented mode-1 semantics: the arrays are on disk but nothing names
-    // them, so a reopen that creates a fresh catalog sees an empty store.
-    let store = open_store(&scratch, false).unwrap();
-    assert_eq!(
-        keys_for(&store, 1),
-        0,
-        "catalog changes were never persisted, so nothing is addressable"
+    // Mode-1 semantics: the arrays are on disk but nothing names them. Reopening
+    // attached creates a fresh, unstamped catalog beside a stamped HDF5 file, and
+    // the paired-stamp check now refuses that rather than presenting the arrays
+    // as an empty store — an abandoned scratch half-artifact is exactly the case
+    // where "opens fine, contains nothing" is the wrong answer.
+    let err = open_store(&scratch, false)
+        .err()
+        .expect("a half-artifact must not open");
+    assert!(
+        matches!(err, TimeSeriesError::MismatchedArtifact { .. }),
+        "expected MismatchedArtifact, got {err:?}"
     );
 }
 
@@ -417,13 +421,49 @@ fn an_unstamped_artifact_still_opens() {
         store.flush().unwrap();
     }
 
-    // Stand in for a store written before the stamp existed. Half-unstamped is
-    // the strictly harder case: the check must skip rather than compare against
-    // a missing value.
+    // Stand in for a store written before the stamp existed: *neither* half
+    // carries one. That is the only legitimate unstamped state, because every
+    // path that writes a stamp writes both halves together.
     delete_generation_attr(&path);
+    delete_catalog_generation(&path);
 
     let store = open_store(&path, true).unwrap();
     assert_eq!(read_values(&store, 1)[0], 100.0);
+}
+
+/// One stamped half and one unstamped is a mismatch, not a legacy artifact.
+///
+/// This is the hole the pre-stamp migration window left open: a `persist_to`
+/// interrupted between its two renames, onto a destination whose previous pair
+/// predated stamping, leaves a freshly stamped HDF5 file beside an unstamped
+/// catalog. Skipping the check there would silently pair new arrays with an old
+/// catalog — the exact failure the stamp exists to prevent.
+#[test]
+fn one_stamped_half_is_a_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for strip_h5 in [true, false] {
+        let path = dir.path().join(format!("store{strip_h5}.h5"));
+        {
+            let mut store = create_store(Some(&path), false).unwrap();
+            add(&mut store, 1, 100.0);
+            store.flush().unwrap();
+        }
+        if strip_h5 {
+            delete_generation_attr(&path);
+        } else {
+            delete_catalog_generation(&path);
+        }
+
+        let err = open_store(&path, true)
+            .err()
+            .expect("a half-stamped pair must not open");
+        assert!(
+            matches!(err, TimeSeriesError::MismatchedArtifact { .. }),
+            "stripping the {} stamp: expected MismatchedArtifact, got {err:?}",
+            if strip_h5 { "HDF5" } else { "catalog" }
+        );
+    }
 }
 
 #[test]
@@ -465,4 +505,11 @@ fn generation_attr(path: &std::path::Path) -> Option<String> {
 fn delete_generation_attr(path: &std::path::Path) {
     let f = hdf5_metno::File::open_rw(path).unwrap();
     f.delete_attr("catalog_generation").unwrap();
+}
+
+/// Strip the catalog half's stamp, the way an artifact predating stamping has
+/// no `catalog_identity` row to begin with.
+fn delete_catalog_generation(path: &std::path::Path) {
+    let conn = rusqlite::Connection::open(catalog_sqlite_path(path)).unwrap();
+    conn.execute("DELETE FROM catalog_identity", []).unwrap();
 }

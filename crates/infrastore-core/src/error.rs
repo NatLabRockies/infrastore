@@ -38,12 +38,28 @@ pub enum TimeSeriesError {
     },
 
     #[error(
-        "the HDF5 file and its catalog carry different generation stamps \
-         ({h5} vs {sqlite}); they are halves of two different saves, most likely \
-         because a save was interrupted between writing the two files or because \
-         one of them was copied without the other"
+        "the HDF5 file and its catalog do not carry the same generation stamp \
+         (HDF5: {h5}, catalog: {sqlite}); they are halves of two different saves, \
+         most likely because a save was interrupted between writing the two files \
+         or because one of them was copied, replaced, or created without the other"
     )]
     MismatchedArtifact { h5: String, sqlite: String },
+
+    /// A store already exists where one was about to be created.
+    ///
+    /// Creating truncates the HDF5 file but only *opens* the catalog beside it,
+    /// so creating over an existing artifact would leave an empty array file
+    /// paired with the old catalog's rows — a store that reopens cleanly and
+    /// reports every series still present while every array is a dangling
+    /// reference. Refusing is the only point that can tell "fresh store" apart
+    /// from "this path already holds a save".
+    #[error(
+        "a store already exists at {path}; creating one there would discard its \
+         arrays while leaving its catalog in place, which reopens as a store whose \
+         every array is missing. Open it instead, or create it with the explicit \
+         replacing form if you meant to discard it"
+    )]
+    StoreExists { path: String },
 
     #[error("store is read-only")]
     ReadOnlyStore,

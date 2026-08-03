@@ -40,6 +40,19 @@
  */
 #define INFRASTORE_ERR_DUPLICATE_ASSOCIATION 10
 
+/**
+ * A store already exists where one was about to be created. Creating there
+ * would discard its arrays while keeping its catalog, leaving a store that
+ * reopens cleanly with every array missing.
+ */
+#define INFRASTORE_ERR_STORE_EXISTS 11
+
+/**
+ * The HDF5 file and its catalog do not carry the same generation stamp: they
+ * are halves of two different saves.
+ */
+#define INFRASTORE_ERR_MISMATCHED_ARTIFACT 12
+
 #define INFRASTORE_ERR_INTERNAL 99
 
 /**
@@ -171,6 +184,54 @@ int32_t infrastore_store_create_with_catalog(const char *path,
                                              bool shuffle,
                                              uint8_t catalog_mode,
                                              struct InfraStore **out);
+
+/**
+ * Create a store at `path`, discarding any artifact already there.
+ *
+ * The destructive counterpart to `infrastore_store_create_with_catalog`, which fails with
+ * `INFRASTORE_ERR_STORE_EXISTS` when either half of a store is already at the path. Both halves go
+ * — the HDF5 file, `<path>.sqlite`, and the catalog's `-wal`/`-shm` sidecars — because leaving the
+ * catalog would pair a fresh, empty array file with the old catalog's rows.
+ *
+ * Not atomic: the old artifact is removed before the new one exists, so an interrupted call can
+ * leave neither. For callers whose explicit intent is to discard the destination.
+ *
+ * `compression_kind`, `deflate_level`, `shuffle`, and `catalog_mode` are as in
+ * `infrastore_store_create_with_catalog`.
+ *
+ * # Safety
+ *
+ * `path` must point to a valid, null-terminated UTF-8 string, and `out` must be valid for writing
+ * one pointer. The returned handle must be released exactly once with `infrastore_store_free`.
+ */
+int32_t infrastore_store_create_replacing(const char *path,
+                                          uint8_t compression_kind,
+                                          uint8_t deflate_level,
+                                          bool shuffle,
+                                          uint8_t catalog_mode,
+                                          struct InfraStore **out);
+
+/**
+ * Copy the store at `src` to `dest` and open the copy read-write.
+ *
+ * Both halves are copied, so `dest` is a complete, independent store, and `src` is never opened
+ * for writing. This is the safe way to load a store and then change it: opening the original
+ * read-write puts every mutation into that file, and HDF5 has no journal and no repair tool, so an
+ * interrupted write there is unrecoverable. Working on the copy and calling
+ * `infrastore_store_persist` back over the original replaces it with one atomic rename.
+ *
+ * Fails with `INFRASTORE_ERR_STORE_EXISTS` if `dest` already holds either half of a store.
+ *
+ * # Safety
+ *
+ * `src` and `dest` must point to valid, null-terminated UTF-8 strings, and `out` must be valid for
+ * writing one pointer. The returned handle must be released exactly once with
+ * `infrastore_store_free`.
+ */
+int32_t infrastore_store_open_copy(const char *src,
+                                   const char *dest,
+                                   uint8_t catalog_mode,
+                                   struct InfraStore **out);
 
 /**
  * Open an existing store, choosing where the SQLite catalog lives.
@@ -779,6 +840,24 @@ int32_t infrastore_store_flush(struct InfraStore *handle);
  * UTF-8 C string.
  */
 int32_t infrastore_store_persist(struct InfraStore *handle, const char *path);
+
+/**
+ * Write an in-memory catalog to this store's own `<path>.sqlite`, pairing it with the HDF5 file
+ * already there.
+ *
+ * `infrastore_store_persist` aimed at another path copies the arrays; this writes only the
+ * catalog, because the arrays are already where they belong. That is what makes `catalog_mode=1`
+ * usable for what it is good for — skipping per-commit journaling during a bulk load — without
+ * copying the array file to land the result.
+ *
+ * A checkpoint, not a mode switch: the catalog stays in memory and later changes are again
+ * RAM-only until the next call. For an attached catalog this is `infrastore_store_flush`.
+ *
+ * # Safety
+ *
+ * `handle` must be a live store handle returned by this library.
+ */
+int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
 
 /**
  * Write the full metadata record for `key` as a JSON object string, using the
