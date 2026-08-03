@@ -2746,3 +2746,82 @@ fn shell_completions_cover_the_grouped_commands() {
         assert!(script.contains(name), "{name} missing from completions");
     }
 }
+
+/// Write a one-series store at `store` and return the descriptor that built it.
+fn seeded_store(dir: &Path, store: &Path, owner: &str) -> PathBuf {
+    let csv = write_csv(dir, &format!("{owner}.csv"), "1\n2\n3\n");
+    let json = format!(
+        r#"{{"owner_id": 1, "owner_type": "Generator", "name": "{owner}",
+             "type": "SingleTimeSeries", "element_type": "f64", "csv": "{}",
+             "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}}"#,
+        csv.file_name().unwrap().to_str().unwrap()
+    );
+    let descriptor = write(dir, &format!("{owner}.json"), &json);
+    run(
+        store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+    descriptor
+}
+
+/// A store whose two halves came from different saves must be refused at the
+/// CLI, with the core's diagnostic reaching the user.
+///
+/// This is the shape a user meets it in: a half moved or copied on its own, or a
+/// save interrupted between its two renames. The wrong outcome is not an ugly
+/// message — it is a successful `list` reporting an empty or contradictory store
+/// over arrays that are all still there.
+#[test]
+fn a_store_whose_halves_disagree_is_refused_with_a_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    let other = dir.path().join("other.h5");
+    let descriptor = seeded_store(dir.path(), &store, "load");
+    seeded_store(dir.path(), &other, "wind");
+    assert!(run(&store, &["list"]).contains("load"));
+
+    // The other store's catalog beside these arrays: two halves, two saves.
+    fs::copy(
+        dir.path().join("other.h5.sqlite"),
+        dir.path().join("system.h5.sqlite"),
+    )
+    .unwrap();
+
+    // Every command, read or write: a half-artifact must not be read from and
+    // must not be extended.
+    for args in [
+        vec!["list"],
+        vec!["store-info"],
+        vec!["names"],
+        vec!["add", "--descriptor", descriptor.to_str().unwrap()],
+    ] {
+        let err = run_err(&store, &args);
+        assert!(
+            err.contains("generation stamp"),
+            "`{args:?}` must refuse a mismatched artifact with the core's diagnostic:\n{err}"
+        );
+    }
+}
+
+/// The other half-artifact shape — arrays with no catalog at all, which is what
+/// a scratch run killed before it landed one leaves behind.
+///
+/// The read path opens the catalog before it can compare stamps, so what the
+/// user gets is SQLite's own "unable to open database file" rather than the
+/// generation-stamp explanation. It is a nonzero exit naming the missing file,
+/// which is the important part; that it does not explain *why* a store can be
+/// missing half of itself is worth improving, and this pins the current wording
+/// so the improvement is deliberate.
+#[test]
+fn a_store_with_no_catalog_half_names_the_file_it_cannot_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("system.h5");
+    seeded_store(dir.path(), &store, "load");
+    fs::remove_file(dir.path().join("system.h5.sqlite")).unwrap();
+
+    let err = run_err(&store, &["list"]);
+    assert!(
+        err.contains("system.h5.sqlite"),
+        "the diagnostic must name the half that is missing:\n{err}"
+    );
+}

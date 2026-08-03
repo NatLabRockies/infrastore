@@ -47,6 +47,28 @@ fn read_values(store: &Store, owner: i64) -> Vec<f64> {
     s.data.to_f64_vec().unwrap()
 }
 
+/// Every owner with a key in `store`, sorted.
+fn owners(store: &Store) -> Vec<i64> {
+    let mut ids: Vec<i64> = store
+        .list_keys(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|k| k.owner_id())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The staging files a save leaves in `dir` — none, once it has returned.
+fn staging_strays(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".persist-") || n.contains(".repack-"))
+        .collect()
+}
+
 /// A saved store at `path` holding one series for owner 1.
 fn saved_store(path: &std::path::Path) {
     let mut store = create_store(Some(path), false).unwrap();
@@ -266,6 +288,81 @@ fn open_copy_carries_rows_still_in_the_sources_wal() {
     assert!(wal.exists(), "open_copy checkpointed the source's -wal");
 }
 
+/// A source with no catalog is the half-artifact an in-memory-catalog store
+/// leaves when its process dies before landing one. `open_copy` copies no
+/// catalog for it — deliberately, so the copy stays honest about what the source
+/// is — and the copy then fails to open rather than presenting the arrays as an
+/// empty store.
+#[test]
+fn open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+    {
+        let mut store = create_store_with_catalog(
+            Some(&scratch),
+            false,
+            Compression::default(),
+            CatalogMode::InMemory,
+        )
+        .unwrap();
+        add(&mut store, 1, 100.0);
+        store.flush().unwrap();
+    }
+    assert!(!catalog_sqlite_path(&scratch).exists());
+
+    let attached = dir.path().join("attached-copy.h5");
+    let err = open_store_copy(&scratch, &attached, CatalogMode::Attached)
+        .err()
+        .expect("a copy of a half-artifact must not open");
+    assert!(
+        matches!(err, TimeSeriesError::MismatchedArtifact { .. }),
+        "expected MismatchedArtifact, got {err:?}"
+    );
+    // Current behavior, recorded rather than endorsed: the cleanup that removes a
+    // half-copied destination covers a failed *copy*, not a failed open, so the
+    // copied arrays stay at `dest` and the next attempt there hits StoreExists.
+    // Recovering means deleting a path the caller never successfully wrote.
+    assert!(attached.exists());
+
+    let loaded = dir.path().join("in-memory-copy.h5");
+    assert!(
+        open_store_copy(&scratch, &loaded, CatalogMode::InMemory).is_err(),
+        "loading the copy's catalog into memory needs a catalog to load"
+    );
+}
+
+/// The mode flows through to the copy: `open_copy` hands back a store whose
+/// catalog is in RAM, so changes stay there until a checkpoint lands them beside
+/// the copied arrays. The source is untouched throughout.
+#[test]
+fn open_copy_can_hand_back_an_in_memory_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("system.h5");
+    let dest = dir.path().join("scratch.h5");
+    saved_store(&src);
+
+    let mut copy = open_store_copy(&src, &dest, CatalogMode::InMemory).unwrap();
+    assert_eq!(copy.catalog_mode(), CatalogMode::InMemory);
+    add(&mut copy, 2, 200.0);
+    copy.flush().unwrap();
+    assert!(
+        owners(&open_store(&dest, true).unwrap()) == vec![1],
+        "the copied catalog on disk is still the source's until a checkpoint"
+    );
+
+    copy.persist_catalog().unwrap();
+    drop(copy);
+
+    let landed = open_store(&dest, true).unwrap();
+    assert_eq!(read_values(&landed, 1)[0], 100.0);
+    assert_eq!(read_values(&landed, 2)[0], 200.0);
+    assert_eq!(
+        owners(&open_store(&src, true).unwrap()),
+        vec![1],
+        "nothing reached the source"
+    );
+}
+
 #[test]
 fn open_copy_refuses_a_destination_that_already_holds_a_store() {
     let dir = tempfile::tempdir().unwrap();
@@ -455,4 +552,237 @@ fn persist_stages_through_a_unique_temp() {
         strays.is_empty(),
         "a completed save left its staged temps behind: {strays:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// When a save fails
+// ---------------------------------------------------------------------------
+//
+// Every path here stages, and every one of them can fail partway. The staging
+// is what makes the failures survivable, but the recovery code — reopening the
+// backend the save dropped, clearing the temps, leaving the caller's store
+// live — only runs when something goes wrong, which is precisely when it is
+// least tested. Each test below drives one of those paths.
+//
+// The injection is a destination that cannot be written: a directory that does
+// not exist, or one standing where a file has to land. Both fail the same way
+// on Unix and Windows, which a permission bit does not.
+
+/// A save that cannot even stage must leave the store exactly as usable as it
+/// was. `persist_to` drops the live HDF5 handle before copying the file, so the
+/// real subject here is the reopen on the failure path: without it the store is
+/// stranded on a placeholder backend and every later call reads an empty store.
+#[test]
+fn a_failed_save_leaves_a_disk_backed_store_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("store.h5");
+
+    let mut store = create_store(Some(&src), false).unwrap();
+    add(&mut store, 1, 100.0);
+
+    let doomed = dir.path().join("no-such-dir").join("system.h5");
+    assert!(
+        store.persist_to(&doomed).is_err(),
+        "staging into a directory that does not exist cannot succeed"
+    );
+
+    // Still the same store: readable, writable, and saveable.
+    assert_eq!(read_values(&store, 1)[0], 100.0);
+    add(&mut store, 2, 200.0);
+    let good = dir.path().join("system.h5");
+    store.persist_to(&good).unwrap();
+    drop(store);
+
+    let saved = open_store(&good, true).unwrap();
+    assert_eq!(owners(&saved), vec![1, 2]);
+    assert!(
+        staging_strays(dir.path()).is_empty(),
+        "the failed save left staging files: {:?}",
+        staging_strays(dir.path())
+    );
+}
+
+/// The same for the other half of `persist_to`: a store whose arrays live in
+/// memory materializes them into the staged file instead of copying one.
+#[test]
+fn a_failed_save_leaves_an_in_memory_store_live() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let mut store = create_store(None, true).unwrap();
+    add(&mut store, 1, 100.0);
+
+    let doomed = dir.path().join("no-such-dir").join("system.h5");
+    assert!(store.persist_to(&doomed).is_err());
+
+    assert_eq!(read_values(&store, 1)[0], 100.0);
+    add(&mut store, 2, 200.0);
+    let good = dir.path().join("system.h5");
+    store.persist_to(&good).unwrap();
+    drop(store);
+
+    assert_eq!(owners(&open_store(&good, true).unwrap()), vec![1, 2]);
+    assert!(staging_strays(dir.path()).is_empty());
+}
+
+/// A checkpoint that cannot land must not consume the catalog it was writing.
+/// It stays in RAM, still complete, still writable, and the next attempt lands
+/// everything — including what was added after the failure.
+#[test]
+fn a_failed_catalog_checkpoint_keeps_the_catalog_in_ram() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+    let sqlite = catalog_sqlite_path(&scratch);
+
+    let mut store = create_store_with_catalog(
+        Some(&scratch),
+        false,
+        Compression::default(),
+        CatalogMode::InMemory,
+    )
+    .unwrap();
+    add(&mut store, 1, 100.0);
+
+    // A directory where the sidecar belongs: staging succeeds, the rename does
+    // not.
+    std::fs::create_dir(&sqlite).unwrap();
+    assert!(store.persist_catalog().is_err());
+    assert!(
+        staging_strays(dir.path()).is_empty(),
+        "the failed checkpoint left staging files: {:?}",
+        staging_strays(dir.path())
+    );
+
+    std::fs::remove_dir(&sqlite).unwrap();
+    add(&mut store, 2, 200.0);
+    store.persist_catalog().unwrap();
+    drop(store);
+
+    assert_eq!(owners(&open_store(&scratch, true).unwrap()), vec![1, 2]);
+}
+
+/// The documented limit of `persist_to`, pinned rather than papered over.
+///
+/// The two renames cannot be atomic together, so a save that fails after the
+/// first one has already replaced the destination's array half. The docs say
+/// callers must not assume the destination survived a failed save; this proves
+/// it, and proves the other half of the bargain — the stamp turns the resulting
+/// half-save into a loud `MismatchedArtifact` instead of a store that quietly
+/// contradicts itself.
+#[test]
+fn a_failed_save_can_still_have_replaced_the_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+    let dest = dir.path().join("system.h5");
+    let dest_sqlite = catalog_sqlite_path(&dest);
+
+    let mut store = create_store(Some(&scratch), false).unwrap();
+    add(&mut store, 1, 100.0);
+
+    // Let the arrays land and block the catalog behind them.
+    std::fs::create_dir(&dest_sqlite).unwrap();
+    assert!(store.persist_to(&dest).is_err());
+    drop(store);
+
+    assert!(
+        dest.exists(),
+        "the array half was renamed into place before the failure"
+    );
+    assert!(
+        staging_strays(dir.path()).is_empty(),
+        "the failed save left staging files: {:?}",
+        staging_strays(dir.path())
+    );
+
+    std::fs::remove_dir(&dest_sqlite).unwrap();
+    let err = open_store(&dest, false)
+        .err()
+        .expect("a half-saved destination must not open");
+    assert!(
+        matches!(err, TimeSeriesError::MismatchedArtifact { .. }),
+        "expected MismatchedArtifact, got {err:?}"
+    );
+}
+
+/// Staging names are unique per call, so nothing sweeps the temps an
+/// interrupted save or compaction leaves behind. They accumulate — a cost worth
+/// knowing about — but they must be inert: never adopted as this call's staging
+/// area, never mistaken for a store, never removed on someone else's behalf.
+#[test]
+fn stale_staging_files_are_inert() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    let dest = dir.path().join("system.h5");
+
+    let litter = [
+        dir.path().join("store.h5.repack-0123456789abcdef"),
+        dir.path().join("system.h5.persist-0123456789abcdef"),
+        dir.path().join("system.h5.sqlite.persist-0123456789abcdef"),
+    ];
+    for f in &litter {
+        std::fs::write(f, b"leftover from an interrupted save").unwrap();
+    }
+
+    let mut store = create_store(Some(&path), false).unwrap();
+    add(&mut store, 1, 100.0);
+    store.compact().unwrap();
+    store.persist_to(&dest).unwrap();
+    drop(store);
+
+    assert_eq!(owners(&open_store(&dest, true).unwrap()), vec![1]);
+    for f in &litter {
+        assert_eq!(
+            std::fs::read(f).unwrap(),
+            b"leftover from an interrupted save",
+            "{} was adopted or rewritten",
+            f.display()
+        );
+    }
+}
+
+/// The scratch-directory workflow's recovery path. A run that dies before
+/// landing its catalog leaves the array half behind; the next run must refuse to
+/// create over it rather than pairing a fresh empty catalog with somebody
+/// else's arrays, and the explicit destructive form must be the way through.
+#[test]
+fn an_abandoned_scratch_file_blocks_recreation_until_it_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+    {
+        let mut store = create_store_with_catalog(
+            Some(&scratch),
+            false,
+            Compression::default(),
+            CatalogMode::InMemory,
+        )
+        .unwrap();
+        add(&mut store, 1, 100.0);
+        store.flush().unwrap();
+    }
+
+    let err = create_store_with_catalog(
+        Some(&scratch),
+        false,
+        Compression::default(),
+        CatalogMode::InMemory,
+    )
+    .err()
+    .expect("the leftover array half must block a fresh create");
+    assert!(
+        matches!(err, TimeSeriesError::StoreExists { .. }),
+        "expected StoreExists, got {err:?}"
+    );
+
+    let mut fresh =
+        create_store_replacing(&scratch, Compression::default(), CatalogMode::InMemory).unwrap();
+    add(&mut fresh, 7, 700.0);
+    fresh.persist_catalog().unwrap();
+    drop(fresh);
+
+    let store = open_store(&scratch, true).unwrap();
+    assert_eq!(
+        owners(&store),
+        vec![7],
+        "the abandoned run's arrays did not come back"
+    );
+    assert!(store.verify_integrity().unwrap().ok());
 }

@@ -19,7 +19,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, TimeZone, Utc};
 use infrastore_core::{
-    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, create_store,
+    Features, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray, catalog_sqlite_path,
+    create_store,
 };
 use infrastore_proto::pb::{CountsReq, catalog_store_client::CatalogStoreClient};
 use tonic::metadata::MetadataValue;
@@ -360,4 +361,58 @@ async fn api_key_auth_through_the_binary_accepts_and_rejects() {
         let resp = client.get_counts(CountsReq {}).await.unwrap().into_inner();
         assert_eq!(resp.static_time_series, 1, "key {key_text}");
     }
+}
+
+/// A store whose halves came from different saves must stop the server at
+/// startup, with the reason on stderr.
+///
+/// The server opens read-only and serves whatever it opened, so a mismatched
+/// pair that started successfully would serve one save's catalog over another
+/// save's arrays to every client — reads failing or, worse, resolving to the
+/// wrong array. Refusing to start is the only place this can be caught once.
+#[test]
+fn a_mismatched_artifact_stops_the_server_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = write_store(dir.path());
+
+    // Restamp the catalog so it belongs to a different save than the arrays
+    // beside it — what a `persist_to` interrupted between its two renames, or a
+    // half copied on its own, leaves behind.
+    rusqlite::Connection::open(catalog_sqlite_path(&store))
+        .unwrap()
+        .execute(
+            "UPDATE catalog_identity SET generation = 'from-a-different-save'",
+            [],
+        )
+        .unwrap();
+
+    let config = write_config(dir.path(), &store, free_port(), "none", &[]);
+
+    // Retried for the same reason `spawn_server` retries: a store this process
+    // has just closed can still be briefly unopenable by another process, and
+    // the binary reports that as "not an infrastore hdf5 store". That transient
+    // is not the refusal under test, so it is retried rather than asserted on.
+    let mut stderr = String::new();
+    for _ in 0..5 {
+        let output = Command::new(BIN)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "the binary must not serve an artifact whose halves disagree"
+        );
+        stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        // `main` returns `Result`, so the runtime prints the error's `Debug`
+        // form: today an operator sees `MismatchedArtifact { h5: .., sqlite: .. }`
+        // rather than the sentence the error carries. The refusal and the named
+        // cause are the contract asserted here; printing `Display` instead would
+        // be an improvement this test would still accept.
+        if stderr.contains("MismatchedArtifact") || stderr.contains("generation stamp") {
+            return;
+        }
+        std::thread::sleep(StdDuration::from_millis(200));
+    }
+    panic!("the startup failure never named the mismatch; last stderr was: {stderr}");
 }

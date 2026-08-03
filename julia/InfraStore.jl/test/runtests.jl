@@ -3613,3 +3613,80 @@ end
         end
     end
 end
+
+@testset "an abandoned in-memory catalog leaves a half artifact" begin
+    mktempdir() do dir
+        path = joinpath(dir, "scratch.h5")
+        # A scratch run that dies before landing its catalog: the arrays are on
+        # disk, stamped, and nothing names them.
+        store = Store(in_memory=false, path=path, catalog=:memory)
+        add_time_series!(
+            store, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+        )
+        flush!(store)
+        close!(store)
+        @test !isfile(path * ".sqlite")
+
+        # Reopening attached would otherwise pair those arrays with a fresh empty
+        # catalog and read as a store with nothing in it. The paired stamp is what
+        # turns that into a loud failure.
+        @test_throws InfraStore.MismatchedArtifactError open_store(path)
+
+        # And the leftover half blocks a fresh create until it is replaced on
+        # purpose.
+        @test_throws InfraStore.StoreExistsError Store(
+            in_memory=false, path=path, catalog=:memory
+        )
+        Store(in_memory=false, path=path, catalog=:memory, overwrite=true) do fresh
+            add_time_series!(
+                fresh, 7, "Generator", Component,
+                SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+            )
+            persist_catalog!(fresh)
+        end
+        open_store(path; read_only=true) do reopened
+            @test [k.owner_id for k in list_keys(reopened)] == [7]
+        end
+    end
+end
+
+@testset "compaction and rollback under an in-memory catalog" begin
+    mktempdir() do dir
+        path = joinpath(dir, "scratch.h5")
+        store = Store(in_memory=false, path=path, catalog=:memory)
+        for owner in (1, 2)
+            add_time_series!(
+                store, owner, "Generator", Component,
+                SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load"),
+            )
+        end
+
+        # A rollback undoes the array half against the backend, which the catalog
+        # living in RAM does not change.
+        begin_transaction!(store)
+        add_time_series!(
+            store, 3, "Generator", Component,
+            SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(101.0:124.0), "load"),
+        )
+        rollback_transaction!(store)
+        @test isempty(list_keys(store; owner_id=3))
+
+        # Compaction rewrites only the arrays; the catalog is still RAM-only, so
+        # the rewritten file has to keep the stamp it is paired with.
+        remove_time_series!(
+            store, get_time_series_key(SingleTimeSeries, store, 2, Component, "load")
+        )
+        report = compact!(store)
+        @test report.slots_reclaimed + report.datasets_dropped > 0
+        @test !isfile(path * ".sqlite")
+
+        persist_catalog!(store)
+        close!(store)
+
+        open_store(path; read_only=true) do reopened
+            @test [k.owner_id for k in list_keys(reopened)] == [1]
+            @test verify_integrity(reopened) == 0
+        end
+    end
+end

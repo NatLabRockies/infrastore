@@ -359,6 +359,262 @@ fn sqlite_sidecar(sqlite: &std::path::Path, suffix: &str) -> std::path::PathBuf 
 }
 
 // ---------------------------------------------------------------------------
+// Operations that predate `CatalogMode`, run in the mode that came second
+// ---------------------------------------------------------------------------
+
+/// Compaction rewrites the array half and sweeps the catalog. With the catalog
+/// in RAM only the first of those lands, so what has to hold is that the
+/// rewritten file still carries the stamp the in-memory catalog is holding —
+/// otherwise the checkpoint that follows would pair two halves that disagree.
+#[test]
+fn compaction_still_pairs_with_an_in_memory_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+
+    {
+        let mut store = scratch_store(&scratch);
+        add(&mut store, 1, 100.0);
+        add(&mut store, 2, 200.0);
+        store
+            .clear_time_series(Some((2, OwnerCategory::Component)))
+            .unwrap();
+
+        let report = store.compact().unwrap();
+        assert!(
+            report.slots_reclaimed + report.datasets_dropped > 0,
+            "the removed series left something for the rewrite to reclaim: {report:?}"
+        );
+        assert!(
+            !catalog_sqlite_path(&scratch).exists(),
+            "compaction must not land a catalog the caller never asked to write"
+        );
+
+        store.persist_catalog().unwrap();
+    }
+
+    assert!(
+        generation_attr(&scratch).is_some(),
+        "the rewrite carried the stamp across"
+    );
+    let store = open_store(&scratch, true)
+        .expect("the rewritten arrays pair with the catalog checkpointed after them");
+    assert_eq!(read_values(&store, 1)[0], 100.0);
+    assert_eq!(keys_for(&store, 2), 0);
+    assert!(store.verify_integrity().unwrap().ok());
+}
+
+/// A rollback has to undo both halves, and only one of them is a database. The
+/// array side is undone by removing what the transaction wrote — which happens
+/// against the backend, so the catalog living in RAM changes nothing about it.
+/// The failure this guards against is a rolled-back array surviving as an
+/// orphan that the eventual checkpoint then never names.
+#[test]
+fn a_rollback_under_an_in_memory_catalog_takes_its_arrays_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+
+    {
+        let mut store = scratch_store(&scratch);
+        add(&mut store, 1, 100.0);
+
+        store.begin_transaction().unwrap();
+        add(&mut store, 2, 200.0);
+        store.rollback_transaction().unwrap();
+        assert_eq!(keys_for(&store, 2), 0);
+
+        store.persist_catalog().unwrap();
+    }
+
+    let mut store = open_store(&scratch, false).unwrap();
+    assert_eq!(read_values(&store, 1)[0], 100.0);
+    assert_eq!(keys_for(&store, 2), 0);
+    assert!(
+        store.verify_integrity().unwrap().ok(),
+        "the rolled-back array is gone, not left behind hashing wrong"
+    );
+    let report = store.compact().unwrap();
+    assert_eq!(
+        report.datasets_dropped, 0,
+        "a rollback leaves no unreferenced dataset for a later compaction to find: {report:?}"
+    );
+}
+
+/// The buffered form writes nothing until `commit`, so dropping it must leave
+/// the array file exactly as it found it — no half-written arrays for a catalog
+/// checkpoint to miss.
+#[test]
+fn a_dropped_bulk_add_writes_no_arrays() {
+    let dir = tempfile::tempdir().unwrap();
+    let scratch = dir.path().join("scratch.h5");
+
+    let mut store = scratch_store(&scratch);
+    add(&mut store, 1, 100.0);
+    store.flush().unwrap();
+    let before = std::fs::metadata(&scratch).unwrap().len();
+
+    {
+        let mut bulk = store.bulk_add();
+        bulk.add(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(200.0)),
+            Features::new(),
+        );
+        assert_eq!(bulk.len(), 1);
+    }
+
+    store.flush().unwrap();
+    assert_eq!(keys_for(&store, 2), 0);
+    assert_eq!(
+        std::fs::metadata(&scratch).unwrap().len(),
+        before,
+        "a discarded batch must not have reached the file"
+    );
+}
+
+/// The two halves of `persist_to` are not symmetric, and the difference is
+/// visible in the result. A store whose arrays are already a file gets that
+/// file *copied*, dead space and all; a store whose arrays are in memory gets
+/// them *materialized*, which writes only what the catalog still references.
+/// Neither is wrong — the copy preserves the live layout — but a caller sizing
+/// a save should know which one they are getting.
+#[test]
+fn saving_copies_an_array_file_but_materializes_an_in_memory_one() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Arrays on disk: the freed slot travels into the save.
+    let src = dir.path().join("src.h5");
+    let from_disk = dir.path().join("from-disk.h5");
+    {
+        let mut store = create_store(Some(&src), false).unwrap();
+        add(&mut store, 1, 100.0);
+        add(&mut store, 2, 200.0);
+        store
+            .clear_time_series(Some((2, OwnerCategory::Component)))
+            .unwrap();
+        store.persist_to(&from_disk).unwrap();
+    }
+    let mut saved = open_store(&from_disk, false).unwrap();
+    let copied = saved.compact().unwrap();
+    assert!(
+        copied.slots_reclaimed > 0,
+        "the copy inherited the source's freed slot: {copied:?}"
+    );
+
+    // Arrays in memory: only the live set is written out.
+    let from_memory = dir.path().join("from-memory.h5");
+    {
+        let mut store = create_store(None, true).unwrap();
+        add(&mut store, 1, 100.0);
+        add(&mut store, 2, 200.0);
+        store
+            .clear_time_series(Some((2, OwnerCategory::Component)))
+            .unwrap();
+        store.persist_to(&from_memory).unwrap();
+    }
+    let mut saved = open_store(&from_memory, false).unwrap();
+    let materialized = saved.compact().unwrap();
+    assert_eq!(
+        materialized.slots_reclaimed, 0,
+        "materializing writes the live set, so the save starts compact: {materialized:?}"
+    );
+}
+
+/// `persist_catalog` refuses a read-only store; `persist_to` deliberately does
+/// not. Saving elsewhere writes nothing the caller opened read-only, and it is
+/// the "load someone's artifact, save my own copy" flow. This pins the
+/// asymmetry so neither guard drifts by accident.
+#[test]
+fn a_read_only_store_can_still_save_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.h5");
+    let dest = dir.path().join("dest.h5");
+    {
+        let mut store = create_store(Some(&src), false).unwrap();
+        add(&mut store, 1, 100.0);
+    }
+    let (before_len, before_stamp) = (
+        std::fs::metadata(&src).unwrap().len(),
+        generation_attr(&src),
+    );
+
+    let mut store = open_store(&src, true).unwrap();
+    store.persist_to(&dest).unwrap();
+    drop(store);
+
+    assert_eq!(
+        std::fs::metadata(&src).unwrap().len(),
+        before_len,
+        "the source was read-only and must be untouched"
+    );
+    assert_eq!(generation_attr(&src), before_stamp);
+    assert_ne!(
+        generation_attr(&dest),
+        before_stamp,
+        "a save mints its own stamp, so the copy is not mistaken for the source"
+    );
+    assert_eq!(read_values(&open_store(&dest, true).unwrap(), 1)[0], 100.0);
+}
+
+/// Read-only and in-memory are independent notions of "does not write", and a
+/// store can hold both. Loading a catalog into RAM read-only must leave the
+/// database it was read from byte-for-byte alone, and mutations must be refused
+/// rather than merely stranded in RAM.
+///
+/// It is not quite "touches nothing on disk": SQLite needs the `-shm` index to
+/// read a WAL-mode database and creates the sidecar pair even for a read-only
+/// connection, then cannot check them back in when it closes. They are left
+/// empty — no rows, nothing to recover — but they do appear, which matters on
+/// read-only media and to anything watching the directory.
+#[test]
+fn a_read_only_in_memory_catalog_writes_nothing_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        add(&mut store, 1, 100.0);
+    }
+    let sqlite = catalog_sqlite_path(&path);
+    let before = std::fs::read(&sqlite).unwrap();
+
+    let mut store = open_store_with_catalog(&path, true, CatalogMode::InMemory).unwrap();
+    assert_eq!(store.catalog_mode(), CatalogMode::InMemory);
+    assert_eq!(read_values(&store, 1)[0], 100.0);
+
+    let denied = store.add_time_series(
+        2,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(series(200.0)),
+        Features::new(),
+    );
+    assert!(
+        matches!(denied, Err(TimeSeriesError::ReadOnlyStore)),
+        "expected ReadOnlyStore, got {denied:?}"
+    );
+    assert!(matches!(
+        store.persist_catalog(),
+        Err(TimeSeriesError::ReadOnlyStore)
+    ));
+    drop(store);
+
+    assert_eq!(
+        std::fs::read(&sqlite).unwrap(),
+        before,
+        "reading a catalog into memory must not rewrite the database it came from"
+    );
+    let wal = sqlite_sidecar(&sqlite, "-wal");
+    if wal.exists() {
+        assert_eq!(
+            std::fs::metadata(&wal).unwrap().len(),
+            0,
+            "a read-only load journaled something"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The generation stamp
 // ---------------------------------------------------------------------------
 
@@ -464,6 +720,37 @@ fn one_stamped_half_is_a_mismatch() {
             if strip_h5 { "HDF5" } else { "catalog" }
         );
     }
+}
+
+/// The one hole the stamp does not close, pinned so that closing it stays a
+/// decision rather than an accident.
+///
+/// An artifact predating stamping carries no stamp on either half. Delete its
+/// catalog and the attached open creates a fresh, also-unstamped one: the halves
+/// agree, so the store opens — as an empty store, with every array still on disk
+/// and now unreachable. `verify_integrity` is array-side only and reports it
+/// clean. A stamped artifact in the same state is caught, because the surviving
+/// HDF5 stamp has no partner.
+#[test]
+fn an_unstamped_artifact_that_lost_its_catalog_opens_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.h5");
+    {
+        let mut store = create_store(Some(&path), false).unwrap();
+        add(&mut store, 1, 100.0);
+    }
+    delete_generation_attr(&path);
+    std::fs::remove_file(catalog_sqlite_path(&path)).unwrap();
+
+    let store = open_store(&path, false).expect("both halves unstamped, so the pair agrees");
+    assert!(
+        store.list_keys(ListFilter::default()).unwrap().is_empty(),
+        "the arrays are still in the file, but nothing names them any more"
+    );
+    assert!(
+        store.verify_integrity().unwrap().ok(),
+        "and it verifies clean: the check covers stored arrays, not the catalog that lost them"
+    );
 }
 
 #[test]
