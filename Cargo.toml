@@ -19,6 +19,7 @@ repository = "https://github.com/NatLabRockies/infrastore"
 readme = "README.md"
 
 [workspace.dependencies]
+bytemuck = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"

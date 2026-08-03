@@ -4391,25 +4391,30 @@ fn resolve_windows(
                 )));
             }
 
-            // Collect all k in [0, count) whose window start is in [start, end).
-            let mut w0 = count; // sentinel: no window selected yet
-            let mut w1 = 0usize;
-            for k in 0..count {
-                let ws = window_start(k)?;
-                if ws >= start && ws < end {
-                    if w0 == count {
-                        w0 = k;
-                    }
-                    w1 = k + 1;
+            // The selection — the k in [0, count) whose window start lies in
+            // [start, end) — is contiguous, because window starts increase
+            // monotonically. `start` is on the grid, so `start_k` is already the
+            // range's first index; all that is left is its end, the first window
+            // at or past `end`. Binary search rather than a walk: `count` can be
+            // a year of windows, and each step here is calendar arithmetic.
+            let mut lo = start_k;
+            let mut hi = count;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if window_start(mid)? < end {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
                 }
             }
+            let w1 = lo;
 
             // Empty selection: report the initial timestamp at the requested start.
-            if w0 == count {
+            if w1 <= start_k {
                 return Ok((0, 0, window_start(start_k)?));
             }
 
-            Ok((w0, w1, window_start(w0)?))
+            Ok((start_k, w1, window_start(start_k)?))
         }
     }
 }
@@ -4607,6 +4612,90 @@ mod resolve_windows_tests {
             rw(48, 60),
             Err(TimeSeriesError::InvalidParameter(_))
         ));
+    }
+
+    /// The pre-optimization walk over every window: the binary search has to
+    /// agree with it everywhere, since the range it picks is what a caller's
+    /// `time_range` read returns.
+    fn linear_scan(
+        window_start: impl Fn(usize) -> DateTime<Utc>,
+        count: usize,
+        range: (DateTime<Utc>, DateTime<Utc>),
+    ) -> (usize, usize) {
+        let (start, end) = range;
+        let mut w0 = count;
+        let mut w1 = 0usize;
+        for k in 0..count {
+            let ws = window_start(k);
+            if ws >= start && ws < end {
+                if w0 == count {
+                    w0 = k;
+                }
+                w1 = k + 1;
+            }
+        }
+        if w0 == count { (0, 0) } else { (w0, w1) }
+    }
+
+    #[test]
+    fn fixed_interval_search_matches_the_linear_scan() {
+        let res = Period::Fixed(Duration::hours(1));
+        let horizon = Period::Fixed(Duration::hours(6));
+        let interval = Period::Fixed(Duration::hours(12));
+        let count = 7usize;
+        let at = |k: usize| t(k as i64 * 12);
+
+        for start_k in 0..count {
+            let start = at(start_k);
+            // Every end from the start itself to well past the last window,
+            // hourly — so both on-boundary and interior ends are covered.
+            for end_h in 0..=96 {
+                let end = start + Duration::hours(end_h);
+                let range = Some((start, end));
+                let (w0, w1, first) =
+                    resolve_windows(t(0), res, horizon, interval, count, range).unwrap();
+                assert_eq!(
+                    (w0, w1),
+                    linear_scan(at, count, (start, end)),
+                    "start={start_k} end=+{end_h}h"
+                );
+                // Aligned start, so the reported first timestamp is the start
+                // itself whether or not the selection came back empty.
+                assert_eq!(first, start, "start={start_k} end=+{end_h}h");
+            }
+        }
+    }
+
+    #[test]
+    fn monthly_interval_search_matches_the_linear_scan() {
+        // Calendar months are the case plain arithmetic cannot shortcut.
+        let initial = Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
+        let res = Period::Fixed(Duration::hours(1));
+        let horizon = Period::Fixed(Duration::days(1));
+        let interval = Period::Months(1);
+        let count = 12usize;
+        let at = |k: usize| interval.add_to(initial, k as i64).unwrap();
+
+        for start_k in 0..count {
+            let start = at(start_k);
+            for end_k in start_k..=count + 1 {
+                for offset in [Duration::zero(), Duration::days(1), Duration::hours(-1)] {
+                    let end = at(end_k) + offset;
+                    if end < start {
+                        continue;
+                    }
+                    let range = Some((start, end));
+                    let (w0, w1, first) =
+                        resolve_windows(initial, res, horizon, interval, count, range).unwrap();
+                    assert_eq!(
+                        (w0, w1),
+                        linear_scan(at, count, (start, end)),
+                        "start={start_k} end={end_k}{offset:?}"
+                    );
+                    assert_eq!(first, start, "start={start_k} end={end_k}{offset:?}");
+                }
+            }
+        }
     }
 
     #[test]

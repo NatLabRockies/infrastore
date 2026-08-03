@@ -31,28 +31,8 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     }
 
     match data.dtype {
-        Dtype::F64 => {
-            for c in data.bytes.chunks_exact(8) {
-                let v = f64::from_le_bytes(c.try_into().unwrap());
-                let bits = if v.is_nan() {
-                    f64::NAN.to_bits()
-                } else {
-                    v.to_bits()
-                };
-                hasher.update(bits.to_le_bytes());
-            }
-        }
-        Dtype::F32 => {
-            for c in data.bytes.chunks_exact(4) {
-                let v = f32::from_le_bytes(c.try_into().unwrap());
-                let bits = if v.is_nan() {
-                    f32::NAN.to_bits()
-                } else {
-                    v.to_bits()
-                };
-                hasher.update(bits.to_le_bytes());
-            }
-        }
+        Dtype::F64 => update_f64_canonical_nans(&mut hasher, &data.bytes),
+        Dtype::F32 => update_f32_canonical_nans(&mut hasher, &data.bytes),
         Dtype::I64
         | Dtype::I32
         | Dtype::I16
@@ -70,6 +50,57 @@ pub fn array_hash(data: &TypedArray) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// Feed `f64` bytes to `hasher` with every NaN collapsed to one canonical bit
+/// pattern.
+///
+/// A non-NaN element hashes as exactly the little-endian bytes it is stored as,
+/// so runs of them — the overwhelming common case — go in with a single
+/// `update` rather than one per element. That is the whole point: `Sha256::update`
+/// has real per-call cost, and an 8-byte-at-a-time loop makes hashing an array
+/// scale with its element count instead of its size.
+///
+/// A trailing partial element is ignored, matching `chunks_exact`. It cannot
+/// occur for a well-formed [`TypedArray`], whose byte length is validated
+/// against `shape × dtype.size()`.
+fn update_f64_canonical_nans(hasher: &mut Sha256, bytes: &[u8]) {
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    const FRAC_MASK: u64 = 0x000f_ffff_ffff_ffff;
+
+    let bytes = &bytes[..bytes.len() - bytes.len() % 8];
+    let mut run_start = 0;
+    for (index, chunk) in bytes.chunks_exact(8).enumerate() {
+        let bits = u64::from_le_bytes(chunk.try_into().unwrap());
+        // IEEE NaN: exponent all ones, mantissa non-zero. Covers signaling and
+        // sign-negative NaNs, exactly as `f64::is_nan` does.
+        if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
+            let offset = index * 8;
+            hasher.update(&bytes[run_start..offset]);
+            hasher.update(f64::NAN.to_bits().to_le_bytes());
+            run_start = offset + 8;
+        }
+    }
+    hasher.update(&bytes[run_start..]);
+}
+
+/// [`update_f64_canonical_nans`] for 4-byte elements.
+fn update_f32_canonical_nans(hasher: &mut Sha256, bytes: &[u8]) {
+    const EXP_MASK: u32 = 0x7f80_0000;
+    const FRAC_MASK: u32 = 0x007f_ffff;
+
+    let bytes = &bytes[..bytes.len() - bytes.len() % 4];
+    let mut run_start = 0;
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let bits = u32::from_le_bytes(chunk.try_into().unwrap());
+        if bits & EXP_MASK == EXP_MASK && bits & FRAC_MASK != 0 {
+            let offset = index * 4;
+            hasher.update(&bytes[run_start..offset]);
+            hasher.update(f32::NAN.to_bits().to_le_bytes());
+            run_start = offset + 4;
+        }
+    }
+    hasher.update(&bytes[run_start..]);
 }
 
 /// Compute the canonical content hash for a `Features` map.
@@ -142,11 +173,14 @@ pub fn timestamps_hash(timestamps: &[DateTime<Utc>]) -> [u8; 32] {
 
 /// Hex-encode a 32-byte hash for storage in TEXT columns / HDF5 hash datasets.
 pub fn hash_hex(hash: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for byte in hash {
-        s.push_str(&format!("{:02x}", byte));
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 64];
+    for (byte, pair) in hash.iter().zip(out.chunks_exact_mut(2)) {
+        pair[0] = HEX[(byte >> 4) as usize];
+        pair[1] = HEX[(byte & 0x0f) as usize];
     }
-    s
+    // Every byte written above came from `HEX`, so this cannot fail.
+    String::from_utf8(out.to_vec()).expect("hex digits are ASCII")
 }
 
 #[cfg(test)]
@@ -197,6 +231,105 @@ mod tests {
         // Mutating an actual value still changes the hash.
         let c = f64_array(vec![3], &[1.5, alt_nan, 3.0]);
         assert_ne!(array_hash(&c), array_hash(&b));
+    }
+
+    /// The pre-optimization loop: decode every element, canonicalize NaNs, and
+    /// feed the bits back one element at a time. `array_hash`'s run-batching
+    /// must be indistinguishable from this, since the result is on-disk state.
+    fn reference_array_hash(data: &TypedArray) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(data.dtype.as_str().as_bytes());
+        hasher.update([0u8]);
+        hasher.update((data.shape.len() as u64).to_le_bytes());
+        for dim in &data.shape {
+            hasher.update((*dim as u64).to_le_bytes());
+        }
+        match data.dtype {
+            Dtype::F64 => {
+                for c in data.bytes.chunks_exact(8) {
+                    let v = f64::from_le_bytes(c.try_into().unwrap());
+                    let bits = if v.is_nan() {
+                        f64::NAN.to_bits()
+                    } else {
+                        v.to_bits()
+                    };
+                    hasher.update(bits.to_le_bytes());
+                }
+            }
+            Dtype::F32 => {
+                for c in data.bytes.chunks_exact(4) {
+                    let v = f32::from_le_bytes(c.try_into().unwrap());
+                    let bits = if v.is_nan() {
+                        f32::NAN.to_bits()
+                    } else {
+                        v.to_bits()
+                    };
+                    hasher.update(bits.to_le_bytes());
+                }
+            }
+            _ => hasher.update(&data.bytes),
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&hasher.finalize());
+        out
+    }
+
+    #[test]
+    fn float_hashing_matches_the_element_at_a_time_reference() {
+        // NaN placement drives the run-batching, so cover the boundaries: none,
+        // leading, trailing, adjacent, interior, and all.
+        let n = f64::NAN;
+        let alt = f64::from_bits(0xfff8_0000_0000_0001); // negative signaling NaN
+        let cases: Vec<Vec<f64>> = vec![
+            vec![],
+            vec![1.0],
+            vec![n],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![n, 1.0, 2.0, 3.0],
+            vec![1.0, 2.0, 3.0, n],
+            vec![1.0, n, alt, 4.0],
+            vec![n, n, n, n],
+            vec![
+                0.0,
+                -0.0,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::MIN_POSITIVE,
+            ],
+        ];
+        for values in cases {
+            let a = f64_array(vec![values.len()], &values);
+            assert_eq!(
+                array_hash(&a),
+                reference_array_hash(&a),
+                "f64 mismatch for {values:?}"
+            );
+
+            let f32_values: Vec<f32> = values.iter().map(|v| *v as f32).collect();
+            let bytes: Vec<u8> = f32_values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let b = TypedArray::new(Dtype::F32, vec![f32_values.len()], bytes).unwrap();
+            assert_eq!(
+                array_hash(&b),
+                reference_array_hash(&b),
+                "f32 mismatch for {values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hash_hex_encodes_lowercase_and_pads() {
+        let mut hash = [0u8; 32];
+        hash[0] = 0x00;
+        hash[1] = 0x0f;
+        hash[2] = 0xa5;
+        hash[31] = 0xff;
+        let hex = hash_hex(&hash);
+        assert_eq!(hex.len(), 64);
+        assert!(hex.starts_with("000fa5"));
+        assert!(hex.ends_with("ff"));
+        // Matches the `format!`-per-byte encoding it replaced.
+        let expected: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, expected);
     }
 
     #[test]

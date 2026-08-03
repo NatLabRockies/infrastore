@@ -128,6 +128,9 @@ fn standalone_ranges(time: Range<usize>, element_shape: &[usize]) -> Vec<Range<u
 
 // ---- typed read/write helpers ---------------------------------------------
 
+/// Element-by-element decode of little-endian `$bytes` into `Vec<$t>`. Only the
+/// big-endian path needs it; see [`le_values!`].
+#[cfg(not(target_endian = "little"))]
 macro_rules! vec_from_le {
     ($bytes:expr, $t:ty, $n:expr) => {
         $bytes
@@ -137,13 +140,62 @@ macro_rules! vec_from_le {
     };
 }
 
+/// View little-endian `$bytes` as `Cow<[$t]>` for handing to libhdf5.
+///
+/// A [`TypedArray`]'s buffer is already in the layout libhdf5 wants on a
+/// little-endian host, so this borrows it outright whenever the slice is
+/// `$t`-aligned — which is the case for a whole array buffer, and is the point:
+/// a write no longer allocates and fills a second copy of the data first. A
+/// misaligned slice (a sub-slice of a packed write, say) still only costs a
+/// memcpy. Big-endian hosts decode element by element, as before.
+macro_rules! le_values {
+    ($bytes:expr, $t:ty, $n:expr) => {{
+        #[cfg(target_endian = "little")]
+        {
+            match bytemuck::try_cast_slice::<u8, $t>($bytes) {
+                Ok(values) => std::borrow::Cow::Borrowed(values),
+                // Alignment is the only failure mode reachable here: callers
+                // pass whole elements, so the length is always a multiple of
+                // `size_of::<$t>()`.
+                Err(_) => std::borrow::Cow::Owned(bytemuck::pod_collect_to_vec::<u8, $t>($bytes)),
+            }
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            std::borrow::Cow::<[$t]>::Owned(vec_from_le!($bytes, $t, $n))
+        }
+    }};
+}
+
+/// The inverse of [`le_values!`]: `$values` in its canonical little-endian byte
+/// form. A memcpy on a little-endian host, an element-wise swap elsewhere.
+macro_rules! le_bytes {
+    ($values:expr, $t:ty) => {{
+        #[cfg(target_endian = "little")]
+        {
+            bytemuck::cast_slice::<$t, u8>($values).to_vec()
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            $values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>()
+        }
+    }};
+}
+
 /// Read the hyperslab `ranges` of `ds` as little-endian bytes.
 fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result<Vec<u8>> {
     let s = sel(ranges);
     macro_rules! rd {
         ($t:ty) => {{
             let a = ds.read_slice::<$t, _, ndarray::IxDyn>(s).map_err(map_h5)?;
-            a.iter().flat_map(|v| v.to_le_bytes()).collect()
+            match a.as_slice() {
+                // A hyperslab read is standard-layout, so this is the path taken.
+                Some(values) => le_bytes!(values, $t),
+                None => a.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            }
         }};
     }
     Ok(match dtype {
@@ -159,7 +211,10 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
         Dtype::U8 => rd!(u8),
         Dtype::Bool => {
             let a = ds.read_slice::<u8, _, ndarray::IxDyn>(s).map_err(map_h5)?;
-            a.iter().copied().collect()
+            match a.as_slice() {
+                Some(values) => values.to_vec(),
+                None => a.iter().copied().collect(),
+            }
         }
     })
 }
@@ -167,13 +222,10 @@ fn read_sel(ds: &h5::Dataset, dtype: Dtype, ranges: Vec<Range<usize>>) -> Result
 /// Read the whole dataset as little-endian bytes (row-major).
 fn read_all(ds: &h5::Dataset, dtype: Dtype) -> Result<Vec<u8>> {
     macro_rules! rd {
-        ($t:ty) => {
-            ds.read_raw::<$t>()
-                .map_err(map_h5)?
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect()
-        };
+        ($t:ty) => {{
+            let v = ds.read_raw::<$t>().map_err(map_h5)?;
+            le_bytes!(&v, $t)
+        }};
     }
     Ok(match dtype {
         Dtype::F64 => rd!(f64),
@@ -203,8 +255,8 @@ fn write_sel(
     let dyn_shape = ndarray::IxDyn(shape);
     macro_rules! wr {
         ($t:ty, $n:expr) => {{
-            let v = vec_from_le!(bytes, $t, $n);
-            let view = ndarray::ArrayViewD::from_shape(dyn_shape, &v)
+            let v = le_values!(bytes, $t, $n);
+            let view = ndarray::ArrayViewD::from_shape(dyn_shape, v.as_ref())
                 .map_err(|e| TimeSeriesError::IntegrityError(format!("shape error: {e}")))?;
             ds.write_slice(view, s).map_err(map_h5)
         }};
@@ -232,8 +284,8 @@ fn write_sel(
 fn write_all(ds: &h5::Dataset, dtype: Dtype, bytes: &[u8]) -> Result<()> {
     macro_rules! wr {
         ($t:ty, $n:expr) => {{
-            let v = vec_from_le!(bytes, $t, $n);
-            ds.write_raw(&v).map_err(map_h5)
+            let v = le_values!(bytes, $t, $n);
+            ds.write_raw(v.as_ref()).map_err(map_h5)
         }};
     }
     match dtype {

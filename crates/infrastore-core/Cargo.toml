@@ -29,6 +29,10 @@ default = ["vendored"]
 vendored = ["hdf5-metno/static", "hdf5-metno/zlib"]
 
 [dependencies]
+# Reinterprets a `TypedArray`'s little-endian byte buffer as the typed slice
+# libhdf5 wants (and back), so a read or write does not also pay for an
+# element-by-element copy of the whole array. See `storage/hdf5.rs`.
+bytemuck = { workspace = true, features = ["extern_crate_alloc"] }
 chrono = { workspace = true }
 ndarray = { workspace = true }
 thiserror = { workspace = true }
