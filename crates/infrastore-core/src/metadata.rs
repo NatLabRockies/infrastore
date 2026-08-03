@@ -689,9 +689,7 @@ impl MetadataStore {
 
     pub fn open_path(path: &Path, read_only: bool) -> Result<Self> {
         let conn = if read_only {
-            let flags =
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-            Connection::open_with_flags(path, flags)?
+            open_read_only(path)?
         } else {
             Connection::open(path)?
         };
@@ -722,10 +720,7 @@ impl MetadataStore {
     /// writable in-memory database picks the table up. `read_only` is therefore
     /// only the software guard on mutation, not a property of the connection.
     pub fn open_path_into_memory(path: &Path, read_only: bool) -> Result<Self> {
-        let src = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-        )?;
+        let src = open_read_only(path)?;
         let mut conn = Connection::open_in_memory()?;
         {
             // Both handles are exclusively ours, so there is no reader to yield
@@ -2488,6 +2483,77 @@ fn map_unique_violation(e: rusqlite::Error) -> TimeSeriesError {
         }
         other => other.into(),
     }
+}
+
+/// Open a catalog file read-only, including on read-only media.
+///
+/// A WAL-mode database needs its `-shm` index to be read, and SQLite creates
+/// that sidecar even for a read-only connection. Where the file cannot be
+/// created — a read-only mount, a directory the process may not write, an
+/// archive served to a reader — the open fails outright, which used to make a
+/// perfectly readable store unopenable for the two callers that read one
+/// without writing: a `read_only` [`Store::open`] and the load-into-memory of
+/// [`MetadataStore::open_path_into_memory`].
+///
+/// SQLite's answer is `immutable=1`, which reads the database file directly and
+/// builds no index. It is only correct where nothing can be writing, and it
+/// *ignores* a `-wal`: a database with one would silently read as though the
+/// rows committed there did not exist. So it is the fallback, not the default,
+/// and it is only tried when there is no `-wal` beside the database. A crashed
+/// writer's sidecar on read-only media therefore still fails loudly, with
+/// SQLite's own message, rather than quietly dropping its rows.
+///
+/// The probe read is what forces the index to be set up: opening a connection
+/// is lazy, so without it the failure would surface later, at an arbitrary
+/// query, past any chance to fall back.
+fn open_read_only(path: &Path) -> Result<Connection> {
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let probe = |conn: &Connection| -> rusqlite::Result<()> {
+        conn.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+    };
+    let direct = Connection::open_with_flags(path, flags)
+        .and_then(|conn| probe(&conn).map(|()| conn))
+        .map_err(TimeSeriesError::from);
+    let Err(e) = direct else {
+        return direct;
+    };
+    if sqlite_sidecar(path, "-wal").exists() {
+        return Err(e);
+    }
+    let immutable = Connection::open_with_flags(sqlite_uri(path, "immutable=1"), flags)
+        .and_then(|conn| probe(&conn).map(|()| conn));
+    // The fallback's own failure is reported as the original one: it is the
+    // error for the way the database is actually meant to be opened, and
+    // `immutable=1` is an implementation detail of this function.
+    immutable.map_err(|_| e)
+}
+
+/// `path` as a SQLite `file:` URI carrying `query`.
+///
+/// Only the three characters SQLite reads as URI syntax are escaped; everything
+/// else, including spaces, is passed through. Windows separators become forward
+/// slashes, which SQLite accepts for a drive-letter path (`file:C:/dir/db`).
+fn sqlite_uri(path: &Path, query: &str) -> String {
+    let mut out = String::from("file:");
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '?' => out.push_str("%3f"),
+            '#' => out.push_str("%23"),
+            '\\' => out.push('/'),
+            c => out.push(c),
+        }
+    }
+    out.push('?');
+    out.push_str(query);
+    out
+}
+
+/// The `-wal` / `-shm` companion of a SQLite database path.
+fn sqlite_sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
 }
 
 /// Canonical ISO-8601 encoding of a period for storage in the catalog.

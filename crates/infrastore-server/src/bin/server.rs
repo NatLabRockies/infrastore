@@ -17,7 +17,18 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    // Returning the error from `main` would print its `Debug` form, which for a
+    // startup failure is the difference between an operator reading
+    // `MismatchedArtifact { h5: "..", sqlite: ".." }` and reading the sentence
+    // that explains what to do about it.
+    if let Err(e) = run().await {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();

@@ -185,3 +185,72 @@ def test_persist_catalog_is_a_checkpoint_not_a_mode_switch(tmp_path):
         store.persist_catalog()
         with Store.open(path, read_only=True) as reopened:
             assert sorted(k.owner_id for k in reopened.list_keys()) == [1, 2]
+
+
+def test_a_failed_catalog_checkpoint_keeps_the_catalog_in_ram(tmp_path):
+    """A checkpoint that cannot land must not consume the catalog it was
+    writing. It stays in RAM, still complete and still writable, and the next
+    attempt lands everything — including what was added after the failure."""
+    scratch = tmp_path / "scratch.h5"
+    sidecar = tmp_path / "scratch.h5.sqlite"
+
+    with Store.create(scratch, catalog="memory") as store:
+        add(store, 1, 100.0)
+
+        # A directory where the sidecar belongs: staging succeeds, the rename
+        # cannot.
+        sidecar.mkdir()
+        with pytest.raises(Exception):
+            store.persist_catalog()
+        sidecar.rmdir()
+
+        add(store, 2, 200.0)
+        store.persist_catalog()
+
+    with Store.open(scratch, read_only=True) as reopened:
+        assert sorted(k.owner_id for k in reopened.list_keys()) == [1, 2]
+
+
+def test_an_abandoned_scratch_file_blocks_recreation(tmp_path):
+    """The scratch-directory workflow's recovery path.
+
+    A run that dies before landing its catalog leaves the array half behind. The
+    next run must refuse to create over it rather than pairing a fresh empty
+    catalog with the leftover arrays, and ``overwrite=True`` must be the way
+    through.
+    """
+    scratch = tmp_path / "scratch.h5"
+    with Store.create(scratch, catalog="memory") as store:
+        add(store, 1, 100.0)
+        store.flush()  # arrays land; the catalog dies with the process
+
+    with pytest.raises(StoreExistsError):
+        Store.create(scratch, catalog="memory")
+
+    with Store.create(scratch, catalog="memory", overwrite=True) as fresh:
+        add(fresh, 7, 700.0)
+        fresh.persist_catalog()
+
+    with Store.open(scratch, read_only=True) as store:
+        assert [k.owner_id for k in store.list_keys()] == [7]
+
+
+def test_open_copy_of_a_half_artifact_refuses_rather_than_reading_it_empty(tmp_path):
+    """A source with no catalog is what an abandoned scratch run leaves.
+
+    ``open_copy`` copies no catalog for it, deliberately, and the copy then fails
+    to open rather than presenting the arrays as an empty store.
+    """
+    scratch = tmp_path / "scratch.h5"
+    with Store.create(scratch, catalog="memory") as store:
+        add(store, 1, 100.0)
+        store.flush()
+
+    copy = tmp_path / "copy.h5"
+    with pytest.raises(MismatchedArtifactError):
+        Store.open_copy(scratch, copy)
+
+    # And it leaves nothing at the destination: a path the caller never
+    # successfully wrote to must not be one they then have to clean up.
+    assert not copy.exists()
+    assert not (tmp_path / "copy.h5.sqlite").exists()
