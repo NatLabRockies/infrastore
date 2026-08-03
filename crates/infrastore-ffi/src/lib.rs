@@ -9605,4 +9605,268 @@ mod abi_tests {
 
         unsafe { infrastore_store_free(store) };
     }
+
+    // ---- Artifact-safety exports ------------------------------------------
+    //
+    // `infrastore_store_create_replacing`, `_open_copy`, and `_persist_catalog`
+    // are reachable from the Julia wrapper, but the wrapper validates its own
+    // arguments before it calls, so nothing there can drive a null `out`, an
+    // out-of-range `compression_kind`/`catalog_mode`, or the two error codes
+    // these guards return. Those are the ABI contract every binding switches on,
+    // so they are asserted by value here.
+
+    /// A store at `path` holding one f64 series for owner 1.
+    fn abi_store_with_one_series(path: &std::path::Path) -> CString {
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+        let mut store: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
+            INFRASTORE_OK,
+            "create failed: {}",
+            last_error()
+        );
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0, 3.0]);
+        unsafe {
+            infrastore_key_free(key);
+            assert_eq!(infrastore_store_flush(store), INFRASTORE_OK);
+            infrastore_store_free(store);
+        }
+        path_c
+    }
+
+    /// How many keys `store` lists, via the JSON listing export.
+    fn abi_key_count(store: *mut InfraStoreHandle) -> usize {
+        let mut out: *mut c_char = ptr::null_mut();
+        let mut len = 0u64;
+        assert_eq!(
+            unsafe {
+                infrastore_store_list_keys(
+                    store,
+                    false,
+                    0,
+                    false,
+                    0,
+                    false,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut out,
+                    &mut len,
+                )
+            },
+            INFRASTORE_OK,
+            "list failed: {}",
+            last_error()
+        );
+        let json = unsafe { CStr::from_ptr(out) }.to_str().unwrap().to_string();
+        unsafe { infrastore_string_free(out) };
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_array().expect("a JSON array of keys").len()
+    }
+
+    /// Creating where a store already lives is refused, by code, through the ABI.
+    #[test]
+    fn abi_create_over_an_existing_store_reports_store_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_c = abi_store_with_one_series(&dir.path().join("abi.h5"));
+
+        let mut store: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_create(path_c.as_ptr(), false, &mut store) },
+            INFRASTORE_ERR_STORE_EXISTS
+        );
+        assert!(
+            store.is_null(),
+            "a refused create must not hand back a handle"
+        );
+        assert!(
+            last_error().contains("already exists"),
+            "unhelpful message: {}",
+            last_error()
+        );
+
+        // ...and the explicit replacing form goes through, dropping the old rows.
+        let mut replaced: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                infrastore_store_create_replacing(path_c.as_ptr(), 1, 3, true, 0, &mut replaced)
+            },
+            INFRASTORE_OK,
+            "replacing create failed: {}",
+            last_error()
+        );
+        assert_eq!(abi_key_count(replaced), 0, "the replaced catalog survived");
+        unsafe { infrastore_store_free(replaced) };
+    }
+
+    /// The argument guards on the two new constructors, by code.
+    #[test]
+    fn abi_new_constructors_reject_bad_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_c = abi_store_with_one_series(&dir.path().join("abi.h5"));
+        let dest = CString::new(dir.path().join("copy.h5").to_str().unwrap()).unwrap();
+        let mut out: *mut InfraStoreHandle = ptr::null_mut();
+
+        // A null `out` has nowhere to put the handle.
+        assert_eq!(
+            unsafe {
+                infrastore_store_create_replacing(path_c.as_ptr(), 1, 3, true, 0, ptr::null_mut())
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert_eq!(
+            unsafe {
+                infrastore_store_open_copy(path_c.as_ptr(), dest.as_ptr(), 0, ptr::null_mut())
+            },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        // A null path is a null pointer, not invalid UTF-8. Unlike
+        // `infrastore_store_create`, neither of these takes an optional path:
+        // there is no in-memory form of replacing or copying an artifact.
+        assert_eq!(
+            unsafe { infrastore_store_create_replacing(ptr::null(), 1, 3, true, 0, &mut out) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert_eq!(
+            unsafe { infrastore_store_open_copy(ptr::null(), dest.as_ptr(), 0, &mut out) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        assert_eq!(
+            unsafe { infrastore_store_open_copy(path_c.as_ptr(), ptr::null(), 0, &mut out) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+        // Out-of-range enum codes. The Julia wrapper maps its own symbols and so
+        // can never send these, which is exactly why they are pinned here.
+        assert_eq!(
+            unsafe { infrastore_store_create_replacing(path_c.as_ptr(), 7, 3, true, 0, &mut out) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(
+            last_error().contains("compression_kind"),
+            "{}",
+            last_error()
+        );
+        assert_eq!(
+            unsafe { infrastore_store_create_replacing(path_c.as_ptr(), 1, 3, true, 9, &mut out) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(last_error().contains("catalog_mode"), "{}", last_error());
+        assert_eq!(
+            unsafe { infrastore_store_open_copy(path_c.as_ptr(), dest.as_ptr(), 9, &mut out) },
+            INFRASTORE_ERR_INVALID_PARAMETER
+        );
+        assert!(out.is_null(), "a rejected call must not hand back a handle");
+    }
+
+    /// `open_copy` carries the data, leaves the source alone, and refuses a
+    /// destination that already holds a store.
+    #[test]
+    fn abi_open_copy_copies_and_refuses_a_live_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("abi.h5");
+        let src_c = abi_store_with_one_series(&src);
+        let src_bytes = std::fs::read(&src).unwrap();
+        let dest = dir.path().join("copy.h5");
+        let dest_c = CString::new(dest.to_str().unwrap()).unwrap();
+
+        let mut copy: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_open_copy(src_c.as_ptr(), dest_c.as_ptr(), 0, &mut copy) },
+            INFRASTORE_OK,
+            "open_copy failed: {}",
+            last_error()
+        );
+        assert_eq!(abi_key_count(copy), 1, "the copy lost the source's series");
+        unsafe { infrastore_store_free(copy) };
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            src_bytes,
+            "open_copy wrote to the source"
+        );
+
+        // The destination now holds a store, so a second copy onto it is refused
+        // for the same reason a create would be.
+        let mut again: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_open_copy(src_c.as_ptr(), dest_c.as_ptr(), 0, &mut again) },
+            INFRASTORE_ERR_STORE_EXISTS
+        );
+        assert!(again.is_null());
+    }
+
+    /// `persist_catalog` lands an in-memory catalog beside the arrays already
+    /// written, without copying them.
+    #[test]
+    fn abi_persist_catalog_writes_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scratch.h5");
+        let path_c = CString::new(path.to_str().unwrap()).unwrap();
+        let sqlite = std::path::PathBuf::from(format!("{}.sqlite", path.display()));
+
+        let mut store: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                // catalog_mode = 1: the catalog stays in RAM.
+                infrastore_store_create_with_catalog(
+                    path_c.as_ptr(),
+                    false,
+                    1,
+                    3,
+                    true,
+                    1,
+                    &mut store,
+                )
+            },
+            INFRASTORE_OK,
+            "create failed: {}",
+            last_error()
+        );
+        let key = abi_add_f64(store, 1, "load", &[1.0, 2.0, 3.0]);
+        unsafe { infrastore_key_free(key) };
+        assert!(!sqlite.exists(), "an in-memory catalog writes nothing yet");
+
+        assert_eq!(
+            unsafe { infrastore_store_persist_catalog(store) },
+            INFRASTORE_OK,
+            "persist_catalog failed: {}",
+            last_error()
+        );
+        assert!(sqlite.exists(), "the catalog did not reach disk");
+        unsafe { infrastore_store_free(store) };
+
+        // The pair opens, which is the whole point: a stamped HDF5 file beside a
+        // catalog stamped to match it.
+        let mut reopened: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_open(path_c.as_ptr(), true, &mut reopened) },
+            INFRASTORE_OK,
+            "reopen failed: {}",
+            last_error()
+        );
+        assert_eq!(abi_key_count(reopened), 1);
+        unsafe { infrastore_store_free(reopened) };
+
+        assert_eq!(
+            unsafe { infrastore_store_persist_catalog(ptr::null_mut()) },
+            INFRASTORE_ERR_NULL_POINTER
+        );
+    }
+
+    /// Half an artifact does not open, and says so with its own code.
+    #[test]
+    fn abi_a_half_artifact_reports_mismatched_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abi.h5");
+        let path_c = abi_store_with_one_series(&path);
+        std::fs::remove_file(format!("{}.sqlite", path.display())).unwrap();
+
+        let mut store: *mut InfraStoreHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { infrastore_store_open(path_c.as_ptr(), false, &mut store) },
+            INFRASTORE_ERR_MISMATCHED_ARTIFACT
+        );
+        assert!(store.is_null());
+    }
 }

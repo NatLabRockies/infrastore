@@ -350,6 +350,73 @@ fn persist_catalog_is_a_checkpoint_not_a_mode_switch() {
     assert_eq!(read_values(&reopened, 2)[0], 200.0);
 }
 
+/// The three states in which landing a catalog is refused, and the one in which
+/// it degrades to a flush.
+///
+/// Each is a documented contract with a distinct reason, and each is a way a
+/// caller can otherwise believe a checkpoint happened when it did not.
+#[test]
+fn persist_catalog_refuses_what_it_cannot_pair() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No HDF5 file means no half to pair a catalog with. `persist_to` is the
+    // call that materializes an in-memory store; this one has nothing to sit
+    // beside.
+    let mut in_memory = create_store(None, true).unwrap();
+    add(&mut in_memory, 1, 100.0);
+    let err = in_memory
+        .persist_catalog()
+        .expect_err("an in-memory store has no artifact to pair with");
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "expected InvalidParameter, got {err:?}"
+    );
+
+    // An open transaction holds uncommitted rows a rollback would take back;
+    // writing them out would publish a state the caller has not committed to.
+    let scratch = dir.path().join("scratch.h5");
+    let mut store = create_store_with_catalog(
+        Some(&scratch),
+        false,
+        Compression::default(),
+        CatalogMode::InMemory,
+    )
+    .unwrap();
+    add(&mut store, 1, 100.0);
+    store.begin_transaction().unwrap();
+    let err = store
+        .persist_catalog()
+        .expect_err("an open transaction must block the checkpoint");
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(_)),
+        "expected InvalidParameter, got {err:?}"
+    );
+    store.rollback_transaction().unwrap();
+    store.persist_catalog().unwrap();
+    drop(store);
+
+    // A read-only store may not write either half.
+    let mut ro = open_store(&scratch, true).unwrap();
+    assert!(matches!(
+        ro.persist_catalog().err(),
+        Some(TimeSeriesError::ReadOnlyStore)
+    ));
+    drop(ro);
+
+    // For an attached catalog the file already *is* the catalog, so this is a
+    // flush rather than an error — the same call works whichever mode a caller
+    // happens to hold.
+    let attached = dir.path().join("attached.h5");
+    let mut store = create_store(Some(&attached), false).unwrap();
+    add(&mut store, 7, 700.0);
+    store.persist_catalog().unwrap();
+    drop(store);
+    assert_eq!(
+        read_values(&open_store(&attached, true).unwrap(), 7)[0],
+        700.0
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Staging
 // ---------------------------------------------------------------------------
