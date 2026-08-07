@@ -140,10 +140,10 @@ jobs:
       # `target/`: it keys on the target triple and drops the workspace's own
       # build artifacts from the cache, so a release build cannot pick up a
       # stale `infrastore` binary from an earlier run.
-      # Skipped on the manylinux jobs: rust-cache keys on the host toolchain,
-      # which those jobs do not install (ubuntu-24.04 runner images no longer
-      # ship Rust), and the container's cargo home is ephemeral anyway. A
-      # release-cadence cold build is an acceptable cost for that simplicity.
+      # Skipped on the manylinux jobs: the build runs in the container with an
+      # ephemeral cargo home, so the host cache would hold only target/, keyed
+      # by a host toolchain the build never uses. A release-cadence cold build
+      # is an acceptable cost for that simplicity.
       - name: Cache Cargo
         if: ${{ !matrix.manylinux }}
         uses: Swatinem/rust-cache@v2
@@ -203,10 +203,15 @@ jobs:
           export PATH="${HOME}/.cargo/bin:${PATH}"
           cargo build --release --locked --all-features \
             --target "${BUILD_TARGET}" -p infrastore-ffi
+          # The container runs as root; hand the products back to the host
+          # user so later steps and runner cleanup never meet root-owned
+          # files (a hosted runner would not care, a self-hosted one would).
+          chown -R "${CHOWN_TO}" target
           EOF
           docker run --rm \
             -v "$PWD:/work" -w /work \
             -e BUILD_TARGET="${{ matrix.target }}" \
+            -e CHOWN_TO="$(id -u):$(id -g)" \
             "${{ matrix.manylinux }}" \
             bash .manylinux-build.sh
           rm .manylinux-build.sh
