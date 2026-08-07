@@ -1,5 +1,8 @@
 # Build the release executables and the C ABI shared library, attach them to a
-# draft GitHub Release, and publish versioned documentation.
+# draft GitHub Release, and publish versioned documentation. The lib targets
+# additionally package per-platform Julia artifact tarballs
+# (libinfrastore_ffi.<triplet>.tar.gz, internal layout lib/<library>) that
+# InfraStore.jl's Artifacts.toml points at; see JULIA_ARTIFACT_PLAN.md.
 #
 # This is the third workflow that fires on a `v*` tag. The other two publish to
 # package registries and are deliberately not duplicated here:
@@ -41,17 +44,37 @@ jobs:
         # `payload` selects what gets built and packaged:
         #   bins -> the `infrastore` CLI and the `infrastore-server` binary
         #   lib  -> libinfrastore_ffi + the generated C header, which is what
-        #           InfraStore.jl dlopens via INFRASTORE_LIB
+        #           InfraStore.jl dlopens via INFRASTORE_LIB, plus the Julia
+        #           artifact tarball (see "Package Julia artifact" below)
         #
-        # Linux is built twice on purpose. musl gives statically linked
+        # `artifact_triplet` names the Julia artifact tarball, in
+        # BinaryBuilder-style triplet form. `manylinux` routes the build into
+        # that container image (see the container build step for why).
+        # `macosx_deployment_target` is the Darwin analogue of the glibc
+        # floor: without it the dylib requires the runner's own macOS version.
+        #
+        # Linux appears three times on purpose. musl gives statically linked
         # executables that run on any distro, including the older glibc on HPC
         # login nodes -- but a musl-built cdylib loaded into a glibc Julia
         # process puts two libcs in one address space, so the shared library
-        # comes from a separate gnu build instead.
+        # comes from gnu builds instead, one per architecture, run inside
+        # manylinux2014 containers so their floor is glibc 2.17 rather than
+        # the bare runner's ~2.39.
         include:
           - os: macos-14
             target: aarch64-apple-darwin
             payload: bins+lib
+            artifact_triplet: aarch64-apple-darwin
+            # Matches what python-wheels.yml targets on this runner.
+            macosx_deployment_target: "14.0"
+
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            payload: lib
+            artifact_triplet: x86_64-apple-darwin
+            # Deliberately older than the runner: Intel Macs largely stopped
+            # at macOS 13, and the SDK supports targeting it.
+            macosx_deployment_target: "13.0"
 
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
@@ -60,23 +83,40 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             payload: lib
+            artifact_triplet: x86_64-linux-gnu
+            manylinux: quay.io/pypa/manylinux2014_x86_64
 
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            payload: lib
+            artifact_triplet: aarch64-linux-gnu
+            manylinux: quay.io/pypa/manylinux2014_aarch64
+
+          # The tarball is named per Julia convention (mingw32) even though
+          # the build is MSVC -- Pkg selects on the arch/os keys in
+          # Artifacts.toml; the triplet is only a filename.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             payload: bins+lib
+            artifact_triplet: x86_64-w64-mingw32
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      # Skipped on the manylinux jobs: their toolchain lives inside the
+      # container, installed by the container build step below.
       - name: Setup Rust
+        if: ${{ !matrix.manylinux }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       # infrastore-proto's build script shells out to protoc, so the server
-      # build needs it. Harmless on the ffi-only target.
+      # build needs it. The lib-only jobs build just infrastore-ffi, which has
+      # no proto dependency.
       - name: Setup protobuf compiler
+        if: contains(matrix.payload, 'bins')
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -100,7 +140,12 @@ jobs:
       # `target/`: it keys on the target triple and drops the workspace's own
       # build artifacts from the cache, so a release build cannot pick up a
       # stale `infrastore` binary from an earlier run.
+      # Skipped on the manylinux jobs: the build runs in the container with an
+      # ephemeral cargo home, so the host cache would hold only target/, keyed
+      # by a host toolchain the build never uses. A release-cadence cold build
+      # is an acceptable cost for that simplicity.
       - name: Cache Cargo
+        if: ${{ !matrix.manylinux }}
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -111,9 +156,13 @@ jobs:
       # internal tool. `--locked` pins the committed Cargo.lock -- a release
       # should build exactly what CI tested.
       - name: Build
+        if: ${{ !matrix.manylinux }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -n "${{ matrix.macosx_deployment_target }}" ]; then
+            export MACOSX_DEPLOYMENT_TARGET="${{ matrix.macosx_deployment_target }}"
+          fi
           packages=()
           case "${{ matrix.payload }}" in
             *bins*) packages+=(-p infrastore-cli -p infrastore-server) ;;
@@ -123,6 +172,68 @@ jobs:
           esac
           cargo build --release --locked --all-features \
             --target ${{ matrix.target }} "${packages[@]}"
+
+      # The gnu cdylibs build inside manylinux2014 containers (glibc 2.17) so
+      # the artifact loads on old HPC images. Built on the bare runner they
+      # would inherit its glibc as their floor and fail at dlopen time on
+      # older systems -- silently, because the runner that built them can
+      # always load them. python-wheels.yml gets the same property via
+      # cibuildwheel, which spawns these same images itself; a `container:`
+      # job is not an option because the runner's Node-based actions
+      # (checkout, upload) cannot execute on glibc 2.17.
+      #
+      # The container brings its own Rust (host triple == target, so no cross
+      # setup) and a pip-installed cmake (the vendored HDF5 needs >= 3.26; the
+      # image's Python bin dir goes first on PATH so pip's console script
+      # wins). The workspace is bind-mounted, so products land in target/
+      # exactly like a host build and the later steps need no special casing.
+      - name: Build (manylinux container)
+        if: matrix.manylinux
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .manylinux-build.sh <<'EOF'
+          set -euo pipefail
+          PYBIN=$(ls -d /opt/python/cp3*/bin | sort -V | tail -1)
+          export PATH="${PYBIN}:${PATH}"
+          pip install --quiet cmake
+          cmake --version
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          cargo build --release --locked --all-features \
+            --target "${BUILD_TARGET}" -p infrastore-ffi
+          # The container runs as root; hand the products back to the host
+          # user so later steps and runner cleanup never meet root-owned
+          # files (a hosted runner would not care, a self-hosted one would).
+          chown -R "${CHOWN_TO}" target
+          EOF
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -e BUILD_TARGET="${{ matrix.target }}" \
+            -e CHOWN_TO="$(id -u):$(id -g)" \
+            "${{ matrix.manylinux }}" \
+            bash .manylinux-build.sh
+          rm .manylinux-build.sh
+
+      # The acceptance check from JULIA_ARTIFACT_PLAN.md: fail the release if
+      # any dynamic symbol requires a glibc newer than the manylinux2014
+      # floor. This is what makes the floor enforced rather than hoped-for.
+      - name: Enforce the glibc floor
+        if: matrix.manylinux
+        shell: bash
+        run: |
+          set -euo pipefail
+          so="target/${{ matrix.target }}/release/libinfrastore_ffi.so"
+          syms=$(objdump -T "$so" | grep -oE 'GLIBC_[0-9.]+' | sort -uV || true)
+          echo "referenced glibc symbol versions:"
+          echo "$syms"
+          bad=$(echo "$syms" | sed 's/GLIBC_//' \
+            | awk -F. 'NF && !($1 < 2 || ($1 == 2 && $2 <= 17))' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::glibc floor exceeded: version(s) $bad required, max allowed is 2.17"
+            exit 1
+          fi
 
       # An executable that links but does not start is still a broken release,
       # and nothing downstream would notice -- the archive step only copies
@@ -140,6 +251,34 @@ jobs:
           esac
           "$out/infrastore$exe" --version
           "$out/infrastore-server$exe" --help > /dev/null
+
+      # Same rationale for the shared library: an artifact that packages but
+      # does not dlopen is a broken release for every Julia user. ctypes both
+      # loads the library and resolves a known export. On Linux this also
+      # proves the container-built .so loads outside the container.
+      - name: Smoke-test the shared library
+        if: contains(matrix.payload, 'lib')
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          case "$RUNNER_OS" in
+            Linux)   lib="$out/libinfrastore_ffi.so" ;;
+            macOS)   lib="$out/libinfrastore_ffi.dylib" ;;
+            Windows) lib="$out/infrastore_ffi.dll" ;;
+          esac
+          case "$RUNNER_OS" in
+            Windows) py=python ;;
+            *)       py=python3 ;;
+          esac
+          "$py" - "$lib" <<'EOF'
+          import ctypes
+          import sys
+
+          lib = ctypes.CDLL(sys.argv[1])
+          assert lib.infrastore_last_error_message is not None
+          print("loaded", sys.argv[1])
+          EOF
 
       - name: Create release archive
         id: archive
@@ -209,6 +348,45 @@ jobs:
           cd ..
 
           echo "name=$name" >> "$GITHUB_OUTPUT"
+          ls -lh release
+
+      # The Julia artifact tarball: what InfraStore.jl's Artifacts.toml points
+      # at, one per platform, named by BinaryBuilder-style triplet. The
+      # internal layout is a stability contract -- lib_path() resolves
+      # artifact"libinfrastore_ffi"/lib/<library> -- so changing it breaks
+      # every registered version that points at these URLs.
+      - name: Package Julia artifact
+        if: contains(matrix.payload, 'lib')
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          rm -rf artifact-staging
+          mkdir -p artifact-staging/lib
+
+          case "$RUNNER_OS" in
+            Linux)   lib="libinfrastore_ffi.so" ;;
+            macOS)   lib="libinfrastore_ffi.dylib" ;;
+            Windows) lib="infrastore_ffi.dll" ;;
+          esac
+          cp "$out/$lib" artifact-staging/lib/
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Same LC_ID_DYLIB scrub as the release archive above.
+            install_name_tool -id @rpath/libinfrastore_ffi.dylib \
+              artifact-staging/lib/libinfrastore_ffi.dylib
+          fi
+          cp LICENSE artifact-staging/
+
+          name="libinfrastore_ffi.${{ matrix.artifact_triplet }}.tar.gz"
+          tar czf "release/$name" -C artifact-staging .
+
+          cd release
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name" > "$name.sha256"
+          else
+            shasum -a 256 "$name" > "$name.sha256"
+          fi
+          cd ..
           ls -lh release
 
       # upload@v7 pairs with download@v8 in create-release. That is a newer
