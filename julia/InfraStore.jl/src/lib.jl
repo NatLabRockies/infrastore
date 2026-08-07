@@ -1,32 +1,32 @@
 # ---- libinfrastore_ffi resolution ---------------------------------
 #
 # Resolution order:
-#   1. `INFRASTORE_LIB` environment variable (development override).
-#   2. `InfraStore_jll` (the BinaryBuilder/Yggdrasil binary) when installed.
-# The JLL is looked up without a hard dependency so this package still loads and
-# works via the env var before the JLL is published to the registry.
+#   1. `INFRASTORE_LIB` environment variable (development override). This is
+#      what lets a local `cargo build` shadow the released binary; CI depends
+#      on it.
+#   2. The `libinfrastore_ffi` artifact (see Artifacts.toml): a per-platform
+#      tarball hosted on this repository's GitHub Releases, downloaded by Pkg
+#      at install time.
+# The InfraStore_jll route was dropped while the Yggdrasil recipe waits for
+# review; "Switching back to the JLL" in docs/src/releasing.md is the road
+# back.
 
 const _LIB_REF = Ref{String}("")
 
-function _jll_library_path()
-    pkgid = Base.identify_package("InfraStore_jll")
-    pkgid === nothing && return ""
-    mod = try
-        Base.require(pkgid)
-    catch
-        return ""
-    end
-    return if isdefined(mod, :libinfrastore_ffi)
-        String(getproperty(mod, :libinfrastore_ffi))
+function _library_filename()
+    return if Sys.iswindows()
+        "infrastore_ffi.dll"
+    elseif Sys.isapple()
+        "libinfrastore_ffi.dylib"
     else
-        ""
+        "libinfrastore_ffi.so"
     end
 end
 
 """
 Path to the `libinfrastore_ffi` cdylib. Override with the
 `INFRASTORE_LIB` environment variable (development builds); otherwise the
-`InfraStore_jll` binary is used.
+platform's `libinfrastore_ffi` artifact is used.
 """
 function lib_path()
     if !isempty(_LIB_REF[])
@@ -34,11 +34,12 @@ function lib_path()
     end
     p = get(ENV, "INFRASTORE_LIB", "")
     if isempty(p)
-        p = _jll_library_path()
+        p = joinpath(artifact"libinfrastore_ffi", "lib", _library_filename())
     end
-    isempty(p) && error(
-        "Could not locate libinfrastore_ffi. Set the INFRASTORE_LIB " *
-        "environment variable to a built cdylib, or install InfraStore_jll.",
+    isfile(p) || error(
+        "Could not locate libinfrastore_ffi at $(p). Set the INFRASTORE_LIB " *
+        "environment variable to a built cdylib, or reinstall the package to " *
+        "fetch the artifact.",
     )
     _LIB_REF[] = p
     return p

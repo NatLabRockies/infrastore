@@ -179,122 +179,96 @@ and docs jobs are both gated on a tag ref, so a `workflow_dispatch` run only exe
 
 ### 5. Julia → General
 
-Two registrations, in order. The JLL must exist before `InfraStore.jl` can depend on it.
+`InfraStore.jl` ships its binaries as a self-hosted artifact: `julia/InfraStore.jl/Artifacts.toml`
+names one `libinfrastore_ffi.<triplet>.tar.gz` per platform, built and attached to the GitHub
+Release by `release.yml` on the tag. No JLL and no Yggdrasil review sits in the release path; the
+only human gates are General's one-time three-day review of a new package and the 15-minute
+AutoMerge on every version after. (The Yggdrasil recipe still exists for the day its PR merges — see
+[Switching back to the JLL](#switching-back-to-the-jll).)
 
-**5a. `InfraStore_jll`** — the compiled `libinfrastore_ffi`, one binary per platform.
+The ordering wrinkle this flow exists to solve: `Artifacts.toml` cannot be in the tagged commit,
+because its URLs and hashes do not exist until the tag's binaries are built and uploaded.
+Registration is therefore decoupled from the tag — Registrator registers whatever commit the comment
+lands on:
 
-1. Update the `GitSource` SHA in `yggdrasil/build_tarballs.jl` to the release commit
-   (`git rev-parse v0.1.0^{commit}`) and `version` to match. Yggdrasil requires a full commit SHA; a
-   tag name is not accepted. Only changes under `crates/`, `Cargo.toml`, or `Cargo.lock` need a new
-   SHA — edits to the recipe itself do not, since Yggdrasil builds from its own copy of it.
-2. Test the recipe locally. It has no cross-recipe includes, so it runs from this repository
-   directly (BinaryBuilder needs Docker on macOS):
+1. **Publish the GitHub Release** for the tag (CI leaves it as a draft). This must come first: a
+   draft's asset URLs are not publicly downloadable.
+2. **Regenerate `Artifacts.toml`** on a branch:
+
+   ```sh
+   julia julia/generate_artifacts.jl v0.6.0
+   ```
+
+3. **Run the suite against the artifact**, with `INFRASTORE_LIB` unset — this is the path users get,
+   and CI's `julia-artifact` job only smoke-tests it (between releases the wrapper on `main` may
+   call FFI exports the released binary does not carry yet, so the full suite cannot run in CI
+   unconditionally):
+
+   ```sh
+   julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+   julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+   ```
+
+4. **Merge, then comment on the merged commit** with
+   [Registrator](https://github.com/JuliaRegistries/Registrator.jl), passing the subdirectory, which
+   is required because the package is not at the repository root:
+
+   ```
+   @JuliaRegistrator register subdir=julia/InfraStore.jl
+   ```
+
+   The Registrator GitHub app must be installed on the repository (an org owner approves that); the
+   JuliaHub web interface is the fallback.
+
+General's AutoMerge requires a public repository, an OSI-approved license file in the package
+directory, and `[compat]` bounds for every non-stdlib dependency including `julia`. There is no
+initial-version requirement — only prerelease and build metadata are rejected — so a package may
+first register at any plain version (this one registered at 0.6.0). New packages sit a three-day
+waiting period before merge. AutoMerge installs and loads the package on Linux x86_64, which
+downloads the artifact, so a wrong hash or URL in `Artifacts.toml` fails registration instead of
+shipping.
+
+**Release assets are permanent.** Every registered version's `Artifacts.toml` points at this
+repository's release URLs forever. Deleting an asset or a release — or moving the repository without
+a redirect — breaks `Pkg.add` for every registered version that references it.
+
+#### Switching back to the JLL
+
+The Yggdrasil route was the original plan and remains the eventual destination; it stalled because
+no maintainer would review a Rust recipe (see `JULIA_ARTIFACT_PLAN.md` for the full history). The
+recipe lives on under `yggdrasil/`, pinned to the release it was last synced with. When the
+[Yggdrasil PR](https://github.com/JuliaPackaging/Yggdrasil/pull/14290) finally merges:
+
+1. Refresh the recipe's `version` and `GitSource` SHA to the current release
+   (`git rev-parse vX.Y.Z^{commit}`; Yggdrasil requires a full commit SHA, not a tag). Only changes
+   under `crates/`, `Cargo.toml`, or `Cargo.lock` need a new SHA — edits to the recipe itself do
+   not, since Yggdrasil builds from its own copy. To test it locally (BinaryBuilder needs Docker on
+   macOS):
+
    ```sh
    cd yggdrasil
    julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
    ```
-   A platform argument replaces the recipe's `platforms` list rather than filtering it, but the
-   listed platforms carry no extra tags, so bare triplets are exactly right. Omit the argument to
-   build all five.
-3. Copy the recipe into a [Yggdrasil](https://github.com/JuliaPackaging/Yggdrasil) fork under
-   `I/InfraStore/` and open a PR. Their CI builds every platform in the list and all must pass.
-   Merging is done by Yggdrasil maintainers, so allow for review time.
+
+   A platform argument replaces the recipe's `platforms` list rather than filtering it; the listed
+   platforms carry no extra tags, so bare triplets are exactly right.
+
+2. Once `InfraStore_jll` is registered, cut the next `InfraStore.jl` version: delete
+   `Artifacts.toml` and `julia/generate_artifacts.jl`, swap `lib_path()` to the JLL (the shape is
+   parked on the `julia-jll-dep` branch), add `InfraStore_jll` to `[deps]` with a `[compat]` bound
+   matching the version the JLL **first registers as** (check the registry: a bound below the
+   earliest published version resolves to nothing), and drop the `julia-artifact` CI job. JLL UUIDs
+   are deterministic — `BinaryBuilder.jll_uuid("InfraStore_jll")`.
+
+3. Register that version with the same Registrator comment; it auto-merges in about 15 minutes. The
+   artifact-era release assets stay up forever regardless (see above).
 
 The recipe builds with the default `vendored` feature — see [HDF5 linkage](#hdf5-linkage) for why
 the JLL statically links its own HDF5/zlib instead of depending on `HDF5_jll`. Expect Yggdrasil
 reviewers to ask about that; the rationale is written out in the recipe's header comment. `HDF5_DIR`
-must remain unset during the build: `hdf5-metno-sys` only takes its build-from-source path when the
-`static` feature is enabled and `HDF5_DIR` is absent.
-
-The recipe patches one thing in the source tree: it drops sha2's `asm` feature, because
-BinaryBuilder forbids forcing an arch via `-march` and the ARMv8 crypto kernels cannot be assembled
-there (x86-64 still detects SHA-NI at runtime).
-
-**5b. `InfraStore.jl`** — the `ccall` wrapper and high-level API.
-
-These changes are drafted below but **must not be applied until the JLL is registered** — adding a
-dependency on a package General does not yet carry makes `Pkg.instantiate()` fail, which would break
-the Julia test job.
-
-**Step 1 — `julia/InfraStore.jl/Project.toml`.** Add the dependency and its compat bound:
-
-```toml
- [deps]
- Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
-+InfraStore_jll = "e72452fb-83b3-5caa-ac95-1fd73ac75842"
- JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
-
- [compat]
-+InfraStore_jll = "0.2"
- JSON = "0.21, 1"
- julia = "1.10"
-```
-
-The compat bound must match the version the JLL **first registers as**, not the version this
-document was written against. `InfraStore_jll` was never published at 0.1.x — the initial Yggdrasil
-PR was retargeted before it merged — so the floor is `"0.2"`. Check the registry rather than
-assuming: a bound below the earliest published version resolves to nothing.
-
-JLL UUIDs are derived deterministically from the package name, so that value is already known —
-`BinaryBuilder.jll_uuid("InfraStore_jll")`. (The same call reproduces the published UUIDs of
-`HDF5_jll` exactly, which is how it was checked.)
-
-**Step 2 — `julia/InfraStore.jl/src/lib.jl`.** Replace `_jll_library_path` and `lib_path` with a
-direct import. `INFRASTORE_LIB` stays ahead of the JLL: that ordering is what lets a local
-`cargo build` shadow the released binary with no code change, and the CI job relies on it.
-
-The import itself belongs in `src/InfraStore.jl` with the other module-level `using` lines, in the
-`using X: X` form — the pre-commit Julia formatter rewrites a bare `import` and will otherwise fail
-the hook:
-
-```julia
-using InfraStore_jll: InfraStore_jll
-```
-
-Then, in `src/lib.jl`:
-
-```julia
-const _LIB_REF = Ref{String}("")
-
-"""
-Path to the `libinfrastore_ffi` cdylib. The `INFRASTORE_LIB` environment
-variable takes precedence (development builds); otherwise the
-`InfraStore_jll` binary is used.
-"""
-function lib_path()
-    if !isempty(_LIB_REF[])
-        return _LIB_REF[]
-    end
-    p = get(ENV, "INFRASTORE_LIB", "")
-    if isempty(p)
-        # The JLL is built for a fixed platform list, so a user on a target it
-        # does not cover (musl, i686, armv7, ...) gets a loadable package with
-        # no product. Say so, rather than failing later inside a `ccall`.
-        InfraStore_jll.is_available() || error(
-            "InfraStore_jll provides no binary for this platform. Build the " *
-            "cdylib from source and point INFRASTORE_LIB at it.",
-        )
-        p = InfraStore_jll.libinfrastore_ffi
-    end
-    _LIB_REF[] = p
-    return p
-end
-```
-
-The `Base.identify_package` lookup this replaces exists only to let the package work before the JLL
-is registered; once it is a real dependency, the soft lookup is dead weight.
-
-**Step 3 — register.** Comment on the release commit with
-[Registrator](https://github.com/JuliaRegistries/Registrator.jl), passing the subdirectory, which is
-required because the package is not at the repository root:
-
-```
-@JuliaRegistrator register subdir=julia/InfraStore.jl
-```
-
-General's AutoMerge requires a public repository, an OSI-approved license file in the package
-directory, `[compat]` bounds for every non-stdlib dependency including `julia`, and version `0.1.0`
-for a new package. New packages also sit for a three-day waiting period before auto-merge.
+must remain unset during the build. The recipe patches one thing in the source tree: it drops sha2's
+`asm` feature, because BinaryBuilder forbids forcing an arch via `-march` and the ARMv8 crypto
+kernels cannot be assembled there (x86-64 still detects SHA-NI at runtime).
 
 ### 6. Downstream
 
