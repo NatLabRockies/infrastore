@@ -328,100 +328,92 @@ to <code>gh-pages</code> at once.</p>
 <p>To rehearse the builds without cutting a release, run the workflow manually — the <code>create-release</code>
 and docs jobs are both gated on a tag ref, so a <code>workflow_dispatch</code> run only exercises the matrix.</p>
 <h3 id="5-julia--general"><a class="header" href="#5-julia--general">5. Julia → General</a></h3>
-<p>Two registrations, in order. The JLL must exist before <code>InfraStore.jl</code> can depend on it.</p>
-<p><strong>5a. <code>InfraStore_jll</code></strong> — the compiled <code>libinfrastore_ffi</code>, one binary per platform.</p>
+<p><code>InfraStore.jl</code> ships its binaries as a self-hosted artifact: <code>julia/InfraStore.jl/Artifacts.toml</code>
+names one <code>libinfrastore_ffi.&lt;triplet&gt;.tar.gz</code> per platform, built and attached to the GitHub
+Release by <code>release.yml</code> on the tag. No JLL and no Yggdrasil review sits in the release path; the
+only human gates are General's one-time three-day review of a new package and the 15-minute
+AutoMerge on every version after. (The Yggdrasil recipe still exists for the day its PR merges — see
+<a href="#switching-back-to-the-jll">Switching back to the JLL</a>.)</p>
+<p>The ordering wrinkle this flow exists to solve: <code>Artifacts.toml</code> cannot be in the tagged commit,
+because its URLs and hashes do not exist until the tag's binaries are built and uploaded.
+Registration is therefore decoupled from the tag — Registrator registers whatever commit the comment
+lands on:</p>
 <ol>
-<li>Update the <code>GitSource</code> SHA in <code>yggdrasil/build_tarballs.jl</code> to the release commit
-(<code>git rev-parse v0.1.0^{commit}</code>) and <code>version</code> to match. Yggdrasil requires a full commit SHA; a
-tag name is not accepted. Only changes under <code>crates/</code>, <code>Cargo.toml</code>, or <code>Cargo.lock</code> need a new
-SHA — edits to the recipe itself do not, since Yggdrasil builds from its own copy of it.</li>
-<li>Test the recipe locally. It has no cross-recipe includes, so it runs from this repository
-directly (BinaryBuilder needs Docker on macOS):
+<li>
+<p><strong>Publish the GitHub Release</strong> for the tag (CI leaves it as a draft). This must come first: a
+draft's asset URLs are not publicly downloadable.</p>
+</li>
+<li>
+<p><strong>Regenerate <code>Artifacts.toml</code></strong> on a branch:</p>
+<pre><code class="language-sh">julia julia/generate_artifacts.jl v0.6.0
+</code></pre>
+</li>
+<li>
+<p><strong>Run the suite against the artifact</strong>, with <code>INFRASTORE_LIB</code> unset — this is the path users get,
+and CI's <code>julia-artifact</code> job only smoke-tests it (between releases the wrapper on <code>main</code> may
+call FFI exports the released binary does not carry yet, so the full suite cannot run in CI
+unconditionally):</p>
+<pre><code class="language-sh">julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+julia --project=julia/InfraStore.jl julia/InfraStore.jl/test/runtests.jl
+</code></pre>
+</li>
+<li>
+<p><strong>Merge, then comment on the merged commit</strong> with
+<a href="https://github.com/JuliaRegistries/Registrator.jl">Registrator</a>, passing the subdirectory, which
+is required because the package is not at the repository root:</p>
+<pre><code>@JuliaRegistrator register subdir=julia/InfraStore.jl
+</code></pre>
+<p>The Registrator GitHub app must be installed on the repository (an org owner approves that); the
+JuliaHub web interface is the fallback.</p>
+</li>
+</ol>
+<p>General's AutoMerge requires a public repository, an OSI-approved license file in the package
+directory, and <code>[compat]</code> bounds for every non-stdlib dependency including <code>julia</code>. There is no
+initial-version requirement — only prerelease and build metadata are rejected — so a package may
+first register at any plain version (this one registered at 0.6.0). New packages sit a three-day
+waiting period before merge. AutoMerge installs and loads the package on Linux x86_64, which
+downloads the artifact, so a wrong hash or URL in <code>Artifacts.toml</code> fails registration instead of
+shipping.</p>
+<p><strong>Release assets are permanent.</strong> Every registered version's <code>Artifacts.toml</code> points at this
+repository's release URLs forever. Deleting an asset or a release — or moving the repository without
+a redirect — breaks <code>Pkg.add</code> for every registered version that references it.</p>
+<h4 id="switching-back-to-the-jll"><a class="header" href="#switching-back-to-the-jll">Switching back to the JLL</a></h4>
+<p>The Yggdrasil route was the original plan and remains the eventual destination; it stalled because
+no maintainer would review a Rust recipe (see <code>JULIA_ARTIFACT_PLAN.md</code> for the full history). The
+recipe lives on under <code>yggdrasil/</code>, pinned to the release it was last synced with. When the
+<a href="https://github.com/JuliaPackaging/Yggdrasil/pull/14290">Yggdrasil PR</a> finally merges:</p>
+<ol>
+<li>
+<p>Refresh the recipe's <code>version</code> and <code>GitSource</code> SHA to the current release
+(<code>git rev-parse vX.Y.Z^{commit}</code>; Yggdrasil requires a full commit SHA, not a tag). Only changes
+under <code>crates/</code>, <code>Cargo.toml</code>, or <code>Cargo.lock</code> need a new SHA — edits to the recipe itself do
+not, since Yggdrasil builds from its own copy. To test it locally (BinaryBuilder needs Docker on
+macOS):</p>
 <pre><code class="language-sh">cd yggdrasil
 julia build_tarballs.jl --verbose --debug x86_64-linux-gnu
 </code></pre>
-A platform argument replaces the recipe's <code>platforms</code> list rather than filtering it, but the
-listed platforms carry no extra tags, so bare triplets are exactly right. Omit the argument to
-build all five.</li>
-<li>Copy the recipe into a <a href="https://github.com/JuliaPackaging/Yggdrasil">Yggdrasil</a> fork under
-<code>I/InfraStore/</code> and open a PR. Their CI builds every platform in the list and all must pass.
-Merging is done by Yggdrasil maintainers, so allow for review time.</li>
+<p>A platform argument replaces the recipe's <code>platforms</code> list rather than filtering it; the listed
+platforms carry no extra tags, so bare triplets are exactly right.</p>
+</li>
+<li>
+<p>Once <code>InfraStore_jll</code> is registered, cut the next <code>InfraStore.jl</code> version: delete
+<code>Artifacts.toml</code> and <code>julia/generate_artifacts.jl</code>, swap <code>lib_path()</code> to the JLL (the shape is
+parked on the <code>julia-jll-dep</code> branch), add <code>InfraStore_jll</code> to <code>[deps]</code> with a <code>[compat]</code> bound
+matching the version the JLL <strong>first registers as</strong> (check the registry: a bound below the
+earliest published version resolves to nothing), and drop the <code>julia-artifact</code> CI job. JLL UUIDs
+are deterministic — <code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>.</p>
+</li>
+<li>
+<p>Register that version with the same Registrator comment; it auto-merges in about 15 minutes. The
+artifact-era release assets stay up forever regardless (see above).</p>
+</li>
 </ol>
 <p>The recipe builds with the default <code>vendored</code> feature — see <a href="#hdf5-linkage">HDF5 linkage</a> for why
 the JLL statically links its own HDF5/zlib instead of depending on <code>HDF5_jll</code>. Expect Yggdrasil
 reviewers to ask about that; the rationale is written out in the recipe's header comment. <code>HDF5_DIR</code>
-must remain unset during the build: <code>hdf5-metno-sys</code> only takes its build-from-source path when the
-<code>static</code> feature is enabled and <code>HDF5_DIR</code> is absent.</p>
-<p>The recipe patches one thing in the source tree: it drops sha2's <code>asm</code> feature, because
-BinaryBuilder forbids forcing an arch via <code>-march</code> and the ARMv8 crypto kernels cannot be assembled
-there (x86-64 still detects SHA-NI at runtime).</p>
-<p><strong>5b. <code>InfraStore.jl</code></strong> — the <code>ccall</code> wrapper and high-level API.</p>
-<p>These changes are drafted below but <strong>must not be applied until the JLL is registered</strong> — adding a
-dependency on a package General does not yet carry makes <code>Pkg.instantiate()</code> fail, which would break
-the Julia test job.</p>
-<p><strong>Step 1 — <code>julia/InfraStore.jl/Project.toml</code>.</strong> Add the dependency and its compat bound:</p>
-<pre><code class="language-toml"> [deps]
- Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
-+InfraStore_jll = "e72452fb-83b3-5caa-ac95-1fd73ac75842"
- JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
-
- [compat]
-+InfraStore_jll = "0.2"
- JSON = "0.21, 1"
- julia = "1.10"
-</code></pre>
-<p>The compat bound must match the version the JLL <strong>first registers as</strong>, not the version this
-document was written against. <code>InfraStore_jll</code> was never published at 0.1.x — the initial Yggdrasil
-PR was retargeted before it merged — so the floor is <code>"0.2"</code>. Check the registry rather than
-assuming: a bound below the earliest published version resolves to nothing.</p>
-<p>JLL UUIDs are derived deterministically from the package name, so that value is already known —
-<code>BinaryBuilder.jll_uuid("InfraStore_jll")</code>. (The same call reproduces the published UUIDs of
-<code>HDF5_jll</code> exactly, which is how it was checked.)</p>
-<p><strong>Step 2 — <code>julia/InfraStore.jl/src/lib.jl</code>.</strong> Replace <code>_jll_library_path</code> and <code>lib_path</code> with a
-direct import. <code>INFRASTORE_LIB</code> stays ahead of the JLL: that ordering is what lets a local
-<code>cargo build</code> shadow the released binary with no code change, and the CI job relies on it.</p>
-<p>The import itself belongs in <code>src/InfraStore.jl</code> with the other module-level <code>using</code> lines, in the
-<code>using X: X</code> form — the pre-commit Julia formatter rewrites a bare <code>import</code> and will otherwise fail
-the hook:</p>
-<pre><code class="language-julia">using InfraStore_jll: InfraStore_jll
-</code></pre>
-<p>Then, in <code>src/lib.jl</code>:</p>
-<pre><code class="language-julia">const _LIB_REF = Ref{String}("")
-
-"""
-Path to the `libinfrastore_ffi` cdylib. The `INFRASTORE_LIB` environment
-variable takes precedence (development builds); otherwise the
-`InfraStore_jll` binary is used.
-"""
-function lib_path()
-    if !isempty(_LIB_REF[])
-        return _LIB_REF[]
-    end
-    p = get(ENV, "INFRASTORE_LIB", "")
-    if isempty(p)
-        # The JLL is built for a fixed platform list, so a user on a target it
-        # does not cover (musl, i686, armv7, ...) gets a loadable package with
-        # no product. Say so, rather than failing later inside a `ccall`.
-        InfraStore_jll.is_available() || error(
-            "InfraStore_jll provides no binary for this platform. Build the " *
-            "cdylib from source and point INFRASTORE_LIB at it.",
-        )
-        p = InfraStore_jll.libinfrastore_ffi
-    end
-    _LIB_REF[] = p
-    return p
-end
-</code></pre>
-<p>The <code>Base.identify_package</code> lookup this replaces exists only to let the package work before the JLL
-is registered; once it is a real dependency, the soft lookup is dead weight.</p>
-<p><strong>Step 3 — register.</strong> Comment on the release commit with
-<a href="https://github.com/JuliaRegistries/Registrator.jl">Registrator</a>, passing the subdirectory, which is
-required because the package is not at the repository root:</p>
-<pre><code>@JuliaRegistrator register subdir=julia/InfraStore.jl
-</code></pre>
-<p>General's AutoMerge requires a public repository, an OSI-approved license file in the package
-directory, <code>[compat]</code> bounds for every non-stdlib dependency including <code>julia</code>, and version <code>0.1.0</code>
-for a new package. New packages also sit for a three-day waiting period before auto-merge.</p>
+must remain unset during the build. The recipe patches one thing in the source tree: it drops sha2's
+<code>asm</code> feature, because BinaryBuilder forbids forcing an arch via <code>-march</code> and the ARMv8 crypto
+kernels cannot be assembled there (x86-64 still detects SHA-NI at runtime).</p>
 <h3 id="6-downstream"><a class="header" href="#6-downstream">6. Downstream</a></h3>
 <p><code>InfrastructureSystems.jl</code> depends on <code>InfraStore.jl</code> for its Rust time-series backend: add
 <code>InfraStore</code> to its <code>[deps]</code> and replace the raw <code>ccall</code>s in <code>src/rust_time_series_store.jl</code> with
