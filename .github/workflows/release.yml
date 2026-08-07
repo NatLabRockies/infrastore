@@ -2,7 +2,7 @@
 # draft GitHub Release, and publish versioned documentation. The lib targets
 # additionally package per-platform Julia artifact tarballs
 # (libinfrastore_ffi.<triplet>.tar.gz, internal layout lib/<library>) that
-# InfraStore.jl's Artifacts.toml points at; see JULIA_ARTIFACT_PLAN.md.
+# InfraStore.jl's Artifacts.toml points at; see docs/src/releasing.md.
 #
 # This is the third workflow that fires on a `v*` tag. The other two publish to
 # package registries and are deliberately not duplicated here:
@@ -216,8 +216,8 @@ jobs:
             bash .manylinux-build.sh
           rm .manylinux-build.sh
 
-      # The acceptance check from JULIA_ARTIFACT_PLAN.md: fail the release if
-      # any dynamic symbol requires a glibc newer than the manylinux2014
+      # The acceptance check for the self-hosted artifacts: fail the release
+      # if any dynamic symbol requires a glibc newer than the manylinux2014
       # floor. This is what makes the floor enforced rather than hoped-for.
       - name: Enforce the glibc floor
         if: matrix.manylinux

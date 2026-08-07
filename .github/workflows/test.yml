@@ -255,3 +255,48 @@ jobs:
           path: |
             lcov.info
             julia-lcov.info
+
+  # The only job that exercises artifact-based library resolution: everywhere
+  # else INFRASTORE_LIB points at the locally built cdylib, so with the
+  # variable set the Artifacts.toml path never runs at all. This downloads the
+  # *released* binary named by Artifacts.toml, so it is deliberately a smoke
+  # test, not the full suite: between releases the wrapper on main may grow
+  # calls the released FFI does not export yet, and the full suite would fail
+  # spuriously. The suite runs against the artifact anyway right before each
+  # registration (see docs/src/releasing.md).
+  julia-artifact:
+    name: Julia artifact resolution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.12"
+
+      - name: Resolve the library through Artifacts.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset INFRASTORE_LIB
+          julia --project=julia/InfraStore.jl -e 'using Pkg; Pkg.instantiate()'
+          julia --project=julia/InfraStore.jl <<'JULIA'
+          using Dates
+          using InfraStore
+
+          path = InfraStore.lib_path()
+          startswith(path, first(Base.DEPOT_PATH)) ||
+              error("expected an artifact path in the depot, got: $(path)")
+          println("resolved: ", path)
+
+          store = Store(; in_memory=true)
+          ts = SingleTimeSeries(
+              DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "smoke"
+          )
+          key = add_time_series!(store, 1, "Generator", Component, ts)
+          got = get_time_series(store, key)
+          got.data == collect(1.0:24.0) || error("round trip mismatch")
+          println("artifact round trip OK")
+          JULIA
