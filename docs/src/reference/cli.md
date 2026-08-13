@@ -480,7 +480,9 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 | `csv`                          | unless `--csv` is passed | Path relative to the descriptor; `--csv` overrides it.        |
 | `element_shape`                | optional                 | Trailing per-step dims; default scalar (`[]`).                |
 | `units`                        | optional                 | Free-form label.                                              |
-| `ext`                          | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
+| `quantity_kind`                | optional                 | What the values measure, e.g. `ActivePower` (QUDT name).      |
+| `unit_system`                  | optional                 | `natural_units` or `component_base`; unset = unspecified.     |
+| `application_data`             | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
 | `features`                     | optional                 | JSON object; int/float/bool/string values. See below.         |
 | `initial_timestamp`            | all but non-sequential   |                                                               |
 | `resolution`                   | all but non-sequential   | ISO-8601 duration, e.g. `PT1H`.                               |
@@ -501,11 +503,12 @@ Inside `features`, a name that shadows a time-series or key field (`name`, `reso
 
 Every field above also exists as an `add` flag, for a one-off that does not deserve a file:
 `--owner-id`, `--owner-type`, `--owner-category`, `--name`, `--type`, `--element-type`, `--units`,
-`--ext`, `--element-shape` (repeatable), `--feature` (repeatable), `--initial-timestamp`,
-`--resolution`, `--horizon`, `--interval`, `--count`, `--percentile` (repeatable),
-`--scenario-count`, `--layout`, `--owner-map`, `--owner-id-from`. The inline form is a shortcut for
-authoring one descriptor, not a second schema — both go down the same code path — so `--descriptor`
-and the inline flags cannot be combined. Keep the descriptor as the repeatable and batch form.
+`--quantity-kind`, `--unit-system`, `--application-data`, `--element-shape` (repeatable),
+`--feature` (repeatable), `--initial-timestamp`, `--resolution`, `--horizon`, `--interval`,
+`--count`, `--percentile` (repeatable), `--scenario-count`, `--layout`, `--owner-map`,
+`--owner-id-from`. The inline form is a shortcut for authoring one descriptor, not a second schema —
+both go down the same code path — so `--descriptor` and the inline flags cannot be combined. Keep
+the descriptor as the repeatable and batch form.
 
 ### Wide layout
 
@@ -519,7 +522,7 @@ timestamp,gen_001,gen_002,...,gen_500
 In the default `long` layout every value column is part of _one_ series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. `"layout": "wide"` reads it
 as 500 separate scalar series instead, sharing this descriptor's `name`, `type`, `resolution`,
-`units`, `ext`, and `features`, and differing only by owner:
+`units`, `application_data`, and `features`, and differing only by owner:
 
 ```json
 {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::array::TypedArray;
 use super::element_type::ElementType;
+use super::metadata::UnitSystem;
 use super::period::Period;
 
 /// Discriminator for the six time series types defined in the spec.
@@ -203,10 +204,17 @@ pub struct SingleTimeSeries {
     /// identity: it cannot be filtered on, and two series differing only in
     /// their label are a duplicate.
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never
-    /// interprets it. End users are not expected to set it.
-    pub ext: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. End users are not expected to set it.
+    pub application_data: Option<String>,
 }
 
 impl SingleTimeSeries {
@@ -226,7 +234,9 @@ impl SingleTimeSeries {
             name: name.into(),
             element_type,
             units: None,
-            ext: None,
+            quantity_kind: None,
+            unit_system: None,
+            application_data: None,
         }
     }
 }
@@ -245,9 +255,21 @@ impl SingleTimeSeries {
         self
     }
 
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
+        self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
         self
     }
 }
@@ -280,10 +302,17 @@ pub struct NonSequentialTimeSeries {
     /// identity: it cannot be filtered on, and two series differing only in
     /// their label are a duplicate.
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never
-    /// interprets it. End users are not expected to set it.
-    pub ext: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. End users are not expected to set it.
+    pub application_data: Option<String>,
 }
 
 impl NonSequentialTimeSeries {
@@ -310,7 +339,9 @@ impl NonSequentialTimeSeries {
             name: name.into(),
             element_type,
             units: None,
-            ext: None,
+            quantity_kind: None,
+            unit_system: None,
+            application_data: None,
         })
     }
 }
@@ -329,9 +360,21 @@ impl NonSequentialTimeSeries {
         self
     }
 
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
+        self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
         self
     }
 }
@@ -368,10 +411,17 @@ pub struct Deterministic {
     /// identity: it cannot be filtered on, and two series differing only in
     /// their label are a duplicate.
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never
-    /// interprets it. End users are not expected to set it.
-    pub ext: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. End users are not expected to set it.
+    pub application_data: Option<String>,
 }
 
 impl Deterministic {
@@ -421,7 +471,9 @@ impl Deterministic {
             name: name.into(),
             element_type,
             units: None,
-            ext: None,
+            quantity_kind: None,
+            unit_system: None,
+            application_data: None,
         })
     }
 }
@@ -458,10 +510,17 @@ pub struct Probabilistic {
     /// identity: it cannot be filtered on, and two series differing only in
     /// their label are a duplicate.
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never
-    /// interprets it. End users are not expected to set it.
-    pub ext: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. End users are not expected to set it.
+    pub application_data: Option<String>,
 }
 
 impl Deterministic {
@@ -478,9 +537,21 @@ impl Deterministic {
         self
     }
 
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
+        self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
         self
     }
 }
@@ -542,7 +613,9 @@ impl Probabilistic {
             name: name.into(),
             element_type,
             units: None,
-            ext: None,
+            quantity_kind: None,
+            unit_system: None,
+            application_data: None,
         })
     }
 }
@@ -579,10 +652,17 @@ pub struct Scenarios {
     /// identity: it cannot be filtered on, and two series differing only in
     /// their label are a duplicate.
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload (typically JSON) stored verbatim
-    /// for a binding to reconstruct its domain objects; the store never
-    /// interprets it. End users are not expected to set it.
-    pub ext: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`),
+    /// or `None`. Free-form; the recommended vocabulary is a QUDT `QuantityKind`
+    /// local name. See [`crate::TimeSeriesMetadata::quantity_kind`].
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    /// See [`UnitSystem`].
+    pub unit_system: Option<UnitSystem>,
+    /// Opaque, package-owned payload (typically JSON) stored verbatim for an
+    /// application to reconstruct its domain objects; the store never interprets
+    /// it. End users are not expected to set it.
+    pub application_data: Option<String>,
 }
 
 impl Probabilistic {
@@ -599,9 +679,21 @@ impl Probabilistic {
         self
     }
 
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
+        self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
         self
     }
 }
@@ -651,7 +743,9 @@ impl Scenarios {
             name: name.into(),
             element_type,
             units: None,
-            ext: None,
+            quantity_kind: None,
+            unit_system: None,
+            application_data: None,
         })
     }
 }
@@ -708,10 +802,56 @@ impl Scenarios {
         self
     }
 
-    /// Set the opaque extension payload carried through to the metadata row.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.ext = Some(ext.into());
+    /// Set the quantity kind the values measure (e.g. `"ActivePower"`).
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.quantity_kind = Some(quantity_kind.into());
         self
+    }
+
+    /// Declare which unit basis the values are expressed in.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Set the opaque application payload carried through to the metadata row.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.application_data = Some(application_data.into());
+        self
+    }
+}
+
+/// The descriptive attributes a series carries alongside its array: everything
+/// that describes the values without addressing them.
+///
+/// None of these are part of a series' identity — they are absent from
+/// [`crate::TimeSeriesKey`] and from both content hashes — so the read path
+/// reconstructs a series from its array and then fills these in from the
+/// catalog row via [`TimeSeriesData::set_descriptors`].
+///
+/// This is a struct rather than a positional argument list because three of the
+/// five fields are `Option<String>`: as bare parameters, `units`,
+/// `quantity_kind`, and `application_data` would be silently interchangeable at
+/// every call site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Descriptors {
+    pub element_type: ElementType,
+    pub units: Option<String>,
+    pub quantity_kind: Option<String>,
+    pub unit_system: Option<UnitSystem>,
+    pub application_data: Option<String>,
+}
+
+impl Descriptors {
+    /// The descriptors of a series that declares nothing but its element type.
+    pub fn new(element_type: ElementType) -> Self {
+        Self {
+            element_type,
+            units: None,
+            quantity_kind: None,
+            unit_system: None,
+            application_data: None,
+        }
     }
 }
 
@@ -772,14 +912,36 @@ impl TimeSeriesData {
         }
     }
 
-    /// The opaque extension payload, or `None`.
-    pub fn ext(&self) -> Option<&str> {
+    /// The quantity kind the values measure, or `None`.
+    pub fn quantity_kind(&self) -> Option<&str> {
         match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.ext.as_deref(),
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.ext.as_deref(),
-            TimeSeriesData::Deterministic(d) => d.ext.as_deref(),
-            TimeSeriesData::Probabilistic(p) => p.ext.as_deref(),
-            TimeSeriesData::Scenarios(s) => s.ext.as_deref(),
+            TimeSeriesData::SingleTimeSeries(s) => s.quantity_kind.as_deref(),
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.quantity_kind.as_deref(),
+            TimeSeriesData::Deterministic(d) => d.quantity_kind.as_deref(),
+            TimeSeriesData::Probabilistic(p) => p.quantity_kind.as_deref(),
+            TimeSeriesData::Scenarios(s) => s.quantity_kind.as_deref(),
+        }
+    }
+
+    /// The declared unit basis, or `None` if unspecified.
+    pub fn unit_system(&self) -> Option<UnitSystem> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.unit_system,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.unit_system,
+            TimeSeriesData::Deterministic(d) => d.unit_system,
+            TimeSeriesData::Probabilistic(p) => p.unit_system,
+            TimeSeriesData::Scenarios(s) => s.unit_system,
+        }
+    }
+
+    /// The opaque application payload, or `None`.
+    pub fn application_data(&self) -> Option<&str> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.application_data.as_deref(),
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.application_data.as_deref(),
+            TimeSeriesData::Deterministic(d) => d.application_data.as_deref(),
+            TimeSeriesData::Probabilistic(p) => p.application_data.as_deref(),
+            TimeSeriesData::Scenarios(s) => s.application_data.as_deref(),
         }
     }
 
@@ -795,9 +957,21 @@ impl TimeSeriesData {
         self
     }
 
-    /// Set the opaque extension payload on the wrapped series.
-    pub fn with_ext(mut self, ext: impl Into<String>) -> Self {
-        self.set_ext(Some(ext.into()));
+    /// Set the quantity kind on the wrapped series.
+    pub fn with_quantity_kind(mut self, quantity_kind: impl Into<String>) -> Self {
+        self.set_quantity_kind(Some(quantity_kind.into()));
+        self
+    }
+
+    /// Declare the unit basis on the wrapped series.
+    pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
+        self.set_unit_system(Some(unit_system));
+        self
+    }
+
+    /// Set the opaque application payload on the wrapped series.
+    pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
+        self.set_application_data(Some(application_data.into()));
         self
     }
 
@@ -823,28 +997,54 @@ impl TimeSeriesData {
         }
     }
 
-    /// Set the extension payload in place.
-    pub fn set_ext(&mut self, ext: Option<String>) {
+    /// Set the quantity kind in place.
+    pub fn set_quantity_kind(&mut self, quantity_kind: Option<String>) {
         match self {
-            TimeSeriesData::SingleTimeSeries(s) => s.ext = ext,
-            TimeSeriesData::NonSequentialTimeSeries(s) => s.ext = ext,
-            TimeSeriesData::Deterministic(d) => d.ext = ext,
-            TimeSeriesData::Probabilistic(p) => p.ext = ext,
-            TimeSeriesData::Scenarios(s) => s.ext = ext,
+            TimeSeriesData::SingleTimeSeries(s) => s.quantity_kind = quantity_kind,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.quantity_kind = quantity_kind,
+            TimeSeriesData::Deterministic(d) => d.quantity_kind = quantity_kind,
+            TimeSeriesData::Probabilistic(p) => p.quantity_kind = quantity_kind,
+            TimeSeriesData::Scenarios(s) => s.quantity_kind = quantity_kind,
+        }
+    }
+
+    /// Set the unit basis in place.
+    pub fn set_unit_system(&mut self, unit_system: Option<UnitSystem>) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.unit_system = unit_system,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.unit_system = unit_system,
+            TimeSeriesData::Deterministic(d) => d.unit_system = unit_system,
+            TimeSeriesData::Probabilistic(p) => p.unit_system = unit_system,
+            TimeSeriesData::Scenarios(s) => s.unit_system = unit_system,
+        }
+    }
+
+    /// Set the application payload in place.
+    pub fn set_application_data(&mut self, application_data: Option<String>) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.application_data = application_data,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.application_data = application_data,
+            TimeSeriesData::Deterministic(d) => d.application_data = application_data,
+            TimeSeriesData::Probabilistic(p) => p.application_data = application_data,
+            TimeSeriesData::Scenarios(s) => s.application_data = application_data,
         }
     }
 
     /// Set the descriptive attributes in place. Used on the read path to fill
     /// a reconstructed series in from its catalog row.
-    pub fn set_descriptors(
-        &mut self,
-        element_type: ElementType,
-        units: Option<String>,
-        ext: Option<String>,
-    ) {
+    pub fn set_descriptors(&mut self, descriptors: Descriptors) {
+        let Descriptors {
+            element_type,
+            units,
+            quantity_kind,
+            unit_system,
+            application_data,
+        } = descriptors;
         self.set_element_type(element_type);
         self.set_units(units);
-        self.set_ext(ext);
+        self.set_quantity_kind(quantity_kind);
+        self.set_unit_system(unit_system);
+        self.set_application_data(application_data);
     }
 
     pub fn as_single(&self) -> Option<&SingleTimeSeries> {

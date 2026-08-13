@@ -340,7 +340,9 @@ class Store:
         features: dict[str, int | float | bool | str] | None = None,
         units: str | None = None,
         element_type: str | None = None,
-        ext: str | None = None,
+        application_data: str | None = None,
+        quantity_kind: str | None = None,
+        unit_system: str | None = None,
     ) -> TimeSeriesKey: ...
     def add_time_series_bulk(self, items: list[dict[str, Any]]) -> list[TimeSeriesKey]: ...
     def transform_single_time_series(

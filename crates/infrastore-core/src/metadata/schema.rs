@@ -29,6 +29,19 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- NonSequentialTimeSeries, which is the only one that carries one.
     timestamps_hash   BLOB,
     units             TEXT,
+    -- What kind of physical quantity the values measure, free-form, with QUDT
+    -- `QuantityKind` local names as the recommended vocabulary. Deliberately
+    -- unconstrained: composite economic quantities an energy modeler needs
+    -- ($/MWh, MMBtu/MWh) are exactly where QUDT's coverage thins out, so a
+    -- CHECK here would turn a fuel-price series into a schema migration.
+    quantity_kind     TEXT,
+    -- `UnitSystem::as_str`: 'natural_units' or 'component_base'. NULL means
+    -- unspecified, NOT natural units -- every row written before this column
+    -- existed is NULL. Stored as text rather than an integer code because,
+    -- unlike `owner_category` and `time_series_type`, it sits in no index, and
+    -- left without a CHECK so a third basis can land without bumping
+    -- `DATA_FORMAT_VERSION`.
+    unit_system       TEXT,
     percentiles_json  TEXT,
     -- The logical element type in its canonical string form (`ElementType`):
     -- a dtype spelling for plain scalars, else `tuple(N,dtype)` or one of the
@@ -36,7 +49,7 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- of the stored bytes is derived from it.
     element_type      TEXT    NOT NULL DEFAULT 'f64',
     element_shape     TEXT,
-    ext      TEXT,
+    application_data  TEXT,
     -- Content-address hashes are grouped at the end of the row. Column order is
     -- cosmetic: every INSERT/SELECT in metadata.rs names its columns explicitly,
     -- so nothing depends on ordinal position.
@@ -159,7 +172,8 @@ CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution
 
 -- Secondary indexes for the filter/discovery surface. Without these, every
 -- predicate below is a full-table scan, and the table's rows are wide enough
--- (ext) that scans get expensive well before row counts get large. Measured on
+-- (application_data) that scans get expensive well before row counts get
+-- large. Measured on
 -- a 405k-row catalog (100k owners):
 --
 --   * idx_ts_type       count_by_type / counts_by_type / list() with a type
@@ -326,7 +340,8 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, element_type, element_shape, ext,
+       units, quantity_kind, unit_system,
+       element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash

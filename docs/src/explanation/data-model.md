@@ -122,7 +122,7 @@ or `bool`) and a shape `[length, k1, k2, …]`. The first axis is time; the trai
 example the 3 coefficients of a quadratic cost curve (element shape `[3]`). The association's
 `element_type` says what those elements mean and how a ragged value (a piecewise curve, say) is
 packed into a fixed-width row — see [Element types](../reference/element-types.md). The optional
-`ext` payload travels alongside for a binding's own use; the store never interprets it.
+`application_data` payload travels alongside for a binding's own use; the store never interprets it.
 
 ### Forecasts
 
@@ -178,10 +178,16 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 time series with one of these names raises `InvalidParameter`:
 
 ```text
-count, data, data_hash, dtype, element_shape, ext, features, horizon, initial_timestamp,
-interval, length, name, owner_category, owner_id, owner_type, percentiles, resolution,
-scenario_count, time_series_type, timestamps, units
+application_data, count, data, data_hash, dtype, element_shape, element_type, ext, features,
+horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
+percentiles, quantity_kind, resolution, scenario_count, time_series_type, timestamps, unit_system,
+units
 ```
+
+`dtype` and `ext` no longer name metadata fields — `element_type` and `application_data` replaced
+them — but both stay reserved. `dtype` is still how every binding spells a `TypedArray`'s physical
+type, and a consumer still passing the retired `ext=` should fail loudly rather than have it
+silently accepted as an ordinary feature.
 
 The match is exact and case-sensitive, like every other identifier in the catalog: `resolution` is
 rejected, while `Resolution` and `resolution_hours` are ordinary feature names. The rule applies to
@@ -234,19 +240,39 @@ Each association can also carry:
 
 - **`units`** — a free-form, end-user-facing label such as `"MW"`. No dimensional analysis is
   performed.
-- **`ext`** — an opaque, **package-owned** extension payload stored verbatim (typically JSON) that a
-  binding writes and reads for its own purposes. The store never parses or interprets it, and end
-  users are not expected to set it. Element typing does _not_ live here: that is `element_type`
-  below, a first-class column the store owns and validates.
+- **`quantity_kind`** — what kind of physical quantity the values measure, e.g. `"ActivePower"`,
+  `"Energy"`, `"Length"`. Free-form; the recommended vocabulary is a
+  [QUDT](https://www.qudt.org/pages/QUDToverviewPage.html) `QuantityKind` local name. It sits
+  _above_ `units` rather than duplicating it, for two reasons. A units library's dimensional
+  analysis cannot separate active from reactive power — both are `[M L^2 T^-3]` — but a quantity
+  kind can. And when `unit_system` is `component_base` the values are per-unit and therefore
+  dimensionless, so this is the only surviving record of what they measure and which base converts
+  them back. The column is deliberately unconstrained: the composite economic quantities an energy
+  modeler needs (`$/MWh`, `MMBtu/MWh`) are exactly where QUDT's coverage thins out.
+- **`unit_system`** — which basis the values are expressed in: `natural_units` (the units named by
+  `units`) or `component_base` (per-unit against the owning component's own base). This is the
+  per-unit declaration power-systems modelers know as the _unit system_; PowerSystems.jl spells the
+  same idea `UnitSystem`, with `NATURAL_UNITS` and `DEVICE_BASE`. It is a **label, not a
+  conversion**: the store holds no base value and rescales nothing, so converting `component_base`
+  values back to natural units is the consumer's job, using the base that lives on the owning
+  component in its own object graph. Unset means _unspecified_, which is deliberately **not** the
+  same as `natural_units` — every association written before this field existed is unset, and
+  reading those as natural units would assert a basis nobody declared.
+- **`application_data`** — an opaque, **package-owned** extension payload stored verbatim (typically
+  JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
+  it, and end users are not expected to set it. Element typing does _not_ live here: that is
+  `element_type` below, a first-class column the store owns and validates.
 - **`element_type`** — what the array's elements _mean_, in the store's own language-neutral
   vocabulary: a dtype spelling (`f64`, `i64`, …) for plain numbers, else `tuple(N,dtype)` or one of
   the function-data kinds (`linear_function`, `quadratic_function`, `piecewise_linear`,
   `piecewise_step`). It supersedes a separate physical `dtype`: the dtype of the stored bytes is
-  derived from it. Unlike `units` and `ext` it is _not_ inert — the write path validates the array's
-  dtype and per-step shape against it. See [Element types](../reference/element-types.md).
+  derived from it. Unlike `units` and `application_data` it is _not_ inert — the write path
+  validates the array's dtype and per-step shape against it. See
+  [Element types](../reference/element-types.md).
 
-`units` and `ext` are recorded in metadata and returned on read, but they do not affect identity or
-storage.
+`units`, `quantity_kind`, `unit_system`, and `application_data` are recorded in metadata and
+returned on read, but they do not affect identity or storage: they are absent from the key and from
+both content hashes, so two series differing only in a descriptor are a duplicate.
 
 ## Associations Between Entities
 

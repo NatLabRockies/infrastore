@@ -147,7 +147,7 @@ impl Store {
 
     pub fn list_time_series(&self, filter: ListFilter) -> Result<Vec<TimeSeriesMetadata>>;
     // Key-centric listing: the same rows reduced to their keys, dropping storage
-    // detail (`data_hash`, `dtype`, `ext`, `percentiles`).
+    // detail (`data_hash`, `dtype`, `application_data`, `percentiles`).
     pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>>;
     // …and with each key's array content hash, so callers can group series that
     // share stored data (dedup'd arrays; an STS and any DST derived from it).
@@ -717,7 +717,9 @@ pub struct SingleTimeSeries {
     pub name: String,
     pub element_type: ElementType,   // never optional; see below
     pub units: Option<String>,
-    pub ext: Option<String>,
+    pub quantity_kind: Option<String>,
+    pub unit_system: Option<UnitSystem>,
+    pub application_data: Option<String>,
 }
 
 impl SingleTimeSeries {
@@ -727,7 +729,9 @@ impl SingleTimeSeries {
     ) -> Self;
     pub fn with_element_type(self, element_type: ElementType) -> Self;
     pub fn with_units(self, units: impl Into<String>) -> Self;
-    pub fn with_ext(self, ext: impl Into<String>) -> Self;
+    pub fn with_quantity_kind(self, quantity_kind: impl Into<String>) -> Self;
+    pub fn with_unit_system(self, unit_system: UnitSystem) -> Self;
+    pub fn with_application_data(self, application_data: impl Into<String>) -> Self;
 }
 ```
 
@@ -1036,10 +1040,48 @@ pub fn validate_features(features: &Features) -> Result<()>;
 
 The full record returned by `list_time_series` and `get_metadata`: owner fields, `time_series_type`,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
-`length`, `horizon`, `interval`, `count`, `timestamps`), `features`, `units`,
-`percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
-`element_shape: Vec<usize>`, and `ext: Option<String>`. The span fields (`resolution`, `horizon`,
-`interval`) are `Option<Period>`.
+`length`, `horizon`, `interval`, `count`, `timestamps`), `features`, the descriptors (`units`,
+`quantity_kind: Option<String>`, `unit_system: Option<UnitSystem>`,
+`application_data: Option<String>`), `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and
+the array typing: `dtype: Dtype`, `element_shape: Vec<usize>`. The span fields (`resolution`,
+`horizon`, `interval`) are `Option<Period>`.
+
+### `UnitSystem`
+
+```rust
+pub enum UnitSystem { NaturalUnits, ComponentBase }
+
+impl UnitSystem {
+    pub fn as_str(&self) -> &'static str;      // "natural_units" / "component_base"
+    pub fn parse(s: &str) -> Option<Self>;
+}
+```
+
+`None` on a metadata row means _unspecified_, not `NaturalUnits`. See
+[Optional descriptors](../explanation/data-model.md#optional-descriptors).
+
+### `Descriptors`
+
+The descriptive attributes a series carries alongside its array, applied to a reconstructed series
+by `TimeSeriesData::set_descriptors`:
+
+```rust
+pub struct Descriptors {
+    pub element_type: ElementType,
+    pub units: Option<String>,
+    pub quantity_kind: Option<String>,
+    pub unit_system: Option<UnitSystem>,
+    pub application_data: Option<String>,
+}
+
+impl Descriptors {
+    pub fn new(element_type: ElementType) -> Self;   // everything else unset
+}
+```
+
+It is a struct rather than a positional argument list because three of the five fields are
+`Option<String>`: as bare parameters, `units`, `quantity_kind`, and `application_data` would be
+silently interchangeable at every call site.
 
 ### `ListFilter`
 
@@ -1062,8 +1104,8 @@ ListFilter::new()
 ### `AddRequest`
 
 The element type of `add_time_series_bulk` (and of `BulkAdd::push`), mirroring the `add_time_series`
-arguments plus an optional `ext` — an opaque, package-owned payload (typically JSON) stored
-verbatim. The series name lives on the `TimeSeriesData` object, not here.
+arguments plus an optional `application_data` — an opaque, package-owned payload (typically JSON)
+stored verbatim. The series name lives on the `TimeSeriesData` object, not here.
 
 ```rust
 pub struct AddRequest {
@@ -1073,7 +1115,7 @@ pub struct AddRequest {
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option<String>,
-    pub ext: Option<String>,
+    pub application_data: Option<String>,
 }
 ```
 
@@ -1095,7 +1137,7 @@ impl BulkAdd<'_> {
         data: TimeSeriesData,
         features: Features,
         units: Option<String>,
-    ) -> &mut Self;                                             // ext = None
+    ) -> &mut Self;                                             // application_data = None
     pub fn len(&self) -> usize;          // requests buffered so far
     pub fn is_empty(&self) -> bool;
     pub fn commit(self) -> Result<Vec<TimeSeriesKey>>;          // keys in push order

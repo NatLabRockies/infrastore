@@ -114,7 +114,7 @@ class TestNameGlob:
 class TestReservedFeatureNames:
     def test_reserved_feature_name_raises_invalid_parameter(self):
         store = Store.create(in_memory=True)
-        for name in ("name", "resolution", "owner_id", "ext"):
+        for name in ("name", "resolution", "owner_id", "application_data"):
             with pytest.raises(infrastore.InvalidParameterError, match=name):
                 store.add_time_series(
                     1,

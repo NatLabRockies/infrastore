@@ -99,7 +99,7 @@ meta = get_metadata(
 )
 # meta :: TimeSeriesMetadata — the whole record: owner_id/owner_type/owner_category,
 #          name, time_series_type, data_hash, initial_timestamp, resolution, length,
-#          horizon/interval/count, percentiles, dtype, element_shape, features, units, ext
+#          horizon/interval/count, percentiles, dtype, element_shape, features, units, application_data
 
 # Any other stored type: pass it first, exactly as get_time_series does. Omitting
 # the type reads a SingleTimeSeries.
@@ -147,9 +147,9 @@ got_by_key = get_time_series(Deterministic, store, key)
 `Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name)`
 carries the percentile vector, and
 `Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name)` takes
-`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a `ext=`
-keyword. Read the corresponding type back with `get_time_series(Probabilistic, …)` /
-`get_time_series(Scenarios, …)`.
+`scenario_count` from `data`'s leading axis. Every forecast constructor also accepts a
+`application_data=` keyword. Read the corresponding type back with
+`get_time_series(Probabilistic, …)` / `get_time_series(Scenarios, …)`.
 
 If two forecasts of one owner/name/type differ only by `interval` (say day-ahead and intra-day),
 pass `interval=` to pin the one you want; without it the read is ambiguous and throws

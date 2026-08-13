@@ -28,10 +28,11 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   add functions. The owner identity is the pair `(owner_id, owner_category)` — a component and a
   supplemental attribute may share a numeric `owner_id` and stay distinct — and the category is
   recorded with the association at add time.
-- **`ext`** is an optional opaque, package-owned payload (typically JSON) passed verbatim to the add
-  functions and stored uninterpreted. Element typing does not go here — that is `element_type`.
-- **Strings** are null-terminated UTF-8. Optional string arguments (`ext`, `features_json`, `units`)
-  accept `NULL`.
+- **`application_data`** is an optional opaque, package-owned payload (typically JSON) passed
+  verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
+  `element_type`.
+- **Strings** are null-terminated UTF-8. Optional string arguments (`application_data`,
+  `features_json`, `units`, `quantity_kind`, `unit_system`) accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string. An
   add call whose feature names shadow a time-series or key field (`name`, `resolution`, `owner_id`,
   …) fails with `INFRASTORE_ERR_INVALID_PARAMETER`; see
@@ -108,9 +109,11 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                             const char *element_type, /* e.g. "f64", "piecewise_linear" */
                             uint64_t ndims, const uint64_t *dims_ptr,
                             const uint8_t *data_ptr, uint64_t data_byte_len,
-                            const char *ext,         /* optional */
+                            const char *application_data,         /* optional */
                             const char *features_json,        /* optional */
                             const char *units,                /* optional */
+                            const char *quantity_kind,        /* optional */
+                            const char *unit_system,          /* optional: "natural_units" | "component_base" */
                             struct InfraStoreKey **out_key);          /* owned; infrastore_key_free */
 
 int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
@@ -119,8 +122,11 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             int32_t *out_dtype,
                             int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                             uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
-                            char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
-                            char **out_element_type);  /* optional (NULL skips); owned, same free */
+                            char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
+                            char **out_element_type,   /* optional (NULL skips); owned, same free */
+                            char **out_units,          /* optional (NULL skips); owned, same free */
+                            char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
+                            char **out_unit_system);   /* optional (NULL skips); owned, same free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
 /* All-or-nothing batched remove: on any error (including one missing key)
@@ -143,10 +149,10 @@ alongside the typed data buffer. `infrastore_store_get_non_sequential` returns o
 shape, and raw-byte buffers (free with `infrastore_buffer_free_i64`, `infrastore_buffer_free_i64`,
 and `infrastore_buffer_free_u8`) plus the dtype code and, in `out_element_type`, the canonical
 element-type string. The shape is the full `[length, *element_shape]` array shape (the first dim is
-time, so callers can recover an N-dimensional per-step element shape). `out_ext` is the optional
-opaque package-owned payload, returned as an owned C string of its full length (NULL when unset;
-free with `infrastore_string_free`) — the same convention as `infrastore_store_get_single`. Earlier
-revisions copied it into a caller-sized buffer, which invited silent truncation.
+time, so callers can recover an N-dimensional per-step element shape). `out_application_data` is the
+optional opaque package-owned payload, returned as an owned C string of its full length (NULL when
+unset; free with `infrastore_string_free`) — the same convention as `infrastore_store_get_single`.
+Earlier revisions copied it into a caller-sized buffer, which invited silent truncation.
 
 ```c
 int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
@@ -156,8 +162,9 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     const char *element_type,
                                     uint64_t ndims, const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr, uint64_t data_byte_len,
-                                    const char *ext, const char *features_json,
+                                    const char *application_data, const char *features_json,
                                     const char *units,
+                                    const char *quantity_kind, const char *unit_system,
                                     struct InfraStoreKey **out_key);
 
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
@@ -165,9 +172,11 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     int32_t *out_dtype,
                                     int64_t **out_shape, uint64_t *out_shape_len,  /* infrastore_buffer_free_i64 */
                                     uint8_t **out_data, uint64_t *out_data_byte_len,  /* infrastore_buffer_free_u8 */
-                                    char **out_ext,           /* optional (NULL skips); owned, infrastore_string_free */
+                                    char **out_application_data,           /* optional (NULL skips); owned, infrastore_string_free */
                                     char **out_element_type,  /* optional (NULL skips); owned, same free */
-                                    char **out_units);        /* optional (NULL skips); owned, same free */
+                                    char **out_units,         /* optional (NULL skips); owned, same free */
+                                    char **out_quantity_kind, /* optional (NULL skips); owned, same free */
+                                    char **out_unit_system);  /* optional (NULL skips); owned, same free */
 ```
 
 ## Attribute-Based Access
@@ -250,7 +259,8 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
    infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
    time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
    horizon, interval, count, length, percentiles, element_type, element_shape, features,
-   units, ext — fields that do not apply to the key's type are null. One export
+   units, quantity_kind, unit_system, application_data — fields that do not apply to the key's
+   type are null. One export
    covers every time series type, static and forecast alike. Probe-then-fetch:
    call with buf = NULL, cap = 0 to learn *out_len, then again with an
    out_len+1-byte buffer. INFRASTORE_ERR_NOT_FOUND if the key names nothing stored. */
@@ -319,7 +329,7 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                               const char *element_type,
                               uint64_t ndims, const uint64_t *dims_ptr,
                               const uint8_t *data_ptr, uint64_t data_byte_len,
-                              const char *ext,          /* optional */
+                              const char *application_data,          /* optional */
                               const char *features_json, const char *units,
                               struct InfraStoreKey **out_key);
 
@@ -333,7 +343,7 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                    const char *element_type,
                               uint64_t ndims, const uint64_t *dims_ptr,
                                    const uint8_t *data_ptr, uint64_t data_byte_len,
-                                   const char *ext,     /* optional */
+                                   const char *application_data,     /* optional */
                                    const char *features_json, const char *units,
                                    struct InfraStoreKey **out_key);
 
@@ -392,7 +402,7 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                               uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                               double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
                               int32_t *out_matched_type,  /* concrete matched TimeSeriesType */
-                              char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                              char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
                               char **out_element_type);  /* optional (NULL skips); owned, same free */
 ```
 
@@ -417,7 +427,7 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle, co
                                      uint8_t **out_data, uint64_t *out_data_byte_len, /* infrastore_buffer_free_u8 */
                                      double **out_percentiles, uint64_t *out_percentiles_len, /* infrastore_buffer_free_f64 */
                                      int32_t *out_matched_type,
-                                     char **out_ext,   /* optional (NULL skips); owned, infrastore_string_free */
+                                     char **out_application_data,   /* optional (NULL skips); owned, infrastore_string_free */
                                      char **out_element_type);  /* optional (NULL skips); owned, same free */
 ```
 

@@ -24,4 +24,11 @@
 /// irregular series are now column-packed into `nsts_…` datasets keyed by that
 /// same hash, instead of one standalone `arr_…` dataset each. Both halves of a
 /// 0.13.0 store are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.14.0";
+/// 0.15.0 renamed the `ext` column to `application_data` and added the
+/// `quantity_kind` and `unit_system` columns, all on
+/// `time_series_associations`. New *columns* on an existing table are not the
+/// additive case described above: the DDL is `CREATE TABLE IF NOT EXISTS`, so a
+/// 0.14.0 store re-opened for writing keeps its old column set and every
+/// statement naming the new columns fails. Stores written by 0.14.0 and earlier
+/// are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.15.0";

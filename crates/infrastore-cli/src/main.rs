@@ -284,7 +284,7 @@ enum Commands {
         #[arg(long)]
         limit: Option<usize>,
         /// Add the remaining metadata columns (timestamps, horizon, count,
-        /// element shape, ext).
+        /// element shape, application_data).
         #[arg(long)]
         wide: bool,
     },

@@ -101,8 +101,10 @@ message TimeSeriesMetadata {
   string          element_type              = 21;  // canonical element-type string
   // (17 is reserved: the former int32 dtype code)
   repeated uint64 element_shape             = 18;  // per-step trailing dims
-  optional string ext                       = 19;  // opaque package-owned payload
+  optional string application_data          = 19;  // opaque package-owned payload
   repeated double percentiles               = 20;  // Probabilistic only
+  optional string quantity_kind             = 22;  // QUDT QuantityKind local name
+  optional string unit_system               = 23;  // "natural_units" | "component_base"
 }
 ```
 
@@ -137,7 +139,7 @@ message GetResp {
   string          element_type              = 16;  // canonical element-type string
   // (8 is reserved: the former int32 dtype code)
   bytes           value_bytes               = 9;   // raw little-endian, row-major
-  string          ext              = 10;
+  string          application_data              = 10;
   // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
   string          horizon                   = 11;  // ISO-8601 duration
   string          interval                  = 12;  // ISO-8601 duration
@@ -201,9 +203,9 @@ and `element_type` says both what the elements mean and, through it, their physi
 (`f64`/`f32`/`i64`/…, or a composite kind like `piecewise_linear`), so non-`f64` arrays survive the
 round trip without coercion. One caveat:
 
-- **`ext` is not carried in `GetResp`.** The opaque package-owned payload is returned by
-  `ListTimeSeries` (on `TimeSeriesMetadata`) but left empty by `GetTimeSeries`, so a value fetched
-  directly by key comes back without it.
+- **`application_data` is not carried in `GetResp`.** The opaque package-owned payload is returned
+  by `ListTimeSeries` (on `TimeSeriesMetadata`) but left empty by `GetTimeSeries`, so a value
+  fetched directly by key comes back without it.
 
 ## Authentication
 

@@ -210,7 +210,9 @@ function _decode_metadata(r::AbstractDict)
         Tuple(Int(d) for d in r["element_shape"]),
         Dict{String, Any}(r["features"]),
         r["units"] === nothing ? nothing : String(r["units"]),
-        r["ext"] === nothing ? nothing : String(r["ext"]),
+        r["quantity_kind"] === nothing ? nothing : String(r["quantity_kind"]),
+        _unit_system(r["unit_system"] === nothing ? nothing : String(r["unit_system"])),
+        r["application_data"] === nothing ? nothing : String(r["application_data"]),
     )
 end
 

@@ -61,6 +61,67 @@ impl FromStr for OwnerCategory {
     }
 }
 
+/// Which unit basis a series' values are expressed in.
+///
+/// This is the per-unit declaration power-systems modelers know as the "unit
+/// system" (PowerSystems.jl spells it `UnitSystem`, with `NATURAL_UNITS` and
+/// `DEVICE_BASE`; `ComponentBase` is the same idea named for components rather
+/// than devices). It is a *label*, not a conversion: the store neither holds
+/// the base value nor rescales anything, so converting `ComponentBase` values
+/// back to natural units is the consumer's job, using the base that lives on
+/// the owning component in its own object graph.
+///
+/// `None` on a metadata row means *unspecified*, never `NaturalUnits` — every
+/// row written before this field existed is `None`, and reading those as
+/// natural units would assert a basis nobody declared.
+///
+/// Stored as its [`Self::as_str`] spelling, not an integer code: unlike
+/// [`OwnerCategory`] this column sits in no index, so the readable form costs
+/// nothing worth reclaiming. The column carries no `CHECK` constraint, which
+/// is what lets a third basis (`system_base`, should a consumer need it) land
+/// without a [`crate::DATA_FORMAT_VERSION`] bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UnitSystem {
+    /// Values are in the units named by `units` (e.g. `"MW"`).
+    NaturalUnits,
+    /// Values are per-unit against the owning component's own base.
+    ComponentBase,
+}
+
+impl UnitSystem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UnitSystem::NaturalUnits => "natural_units",
+            UnitSystem::ComponentBase => "component_base",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "natural_units" => UnitSystem::NaturalUnits,
+            "component_base" => UnitSystem::ComponentBase,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for UnitSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for UnitSystem {
+    type Err = TimeSeriesError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| {
+            TimeSeriesError::InvalidParameter(format!(
+                "unknown unit system {s:?}; expected one of natural_units, component_base"
+            ))
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FeatureValue {
     Int(i64),
@@ -130,6 +191,7 @@ pub type Features = BTreeMap<String, FeatureValue>;
 /// Kept sorted so [`is_reserved_feature_name`] can binary-search it, and so a
 /// reader can scan it.
 pub const RESERVED_FEATURE_NAMES: &[&str] = &[
+    "application_data",
     "count",
     "data",
     "data_hash",
@@ -140,6 +202,10 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "dtype",
     "element_shape",
     "element_type",
+    // `ext` no longer names a metadata field -- `application_data` replaced it
+    // -- but it stays reserved for the same reason `dtype` does, and with an
+    // extra one: a consumer still passing the old spelling would otherwise have
+    // it silently accepted as an ordinary feature instead of failing loudly.
     "ext",
     "features",
     "horizon",
@@ -151,10 +217,12 @@ pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "owner_id",
     "owner_type",
     "percentiles",
+    "quantity_kind",
     "resolution",
     "scenario_count",
     "time_series_type",
     "timestamps",
+    "unit_system",
     "units",
 ];
 
@@ -200,6 +268,22 @@ pub struct TimeSeriesMetadata {
 
     pub features: Features,
     pub units: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`,
+    /// `"Energy"`, `"Length"`), or `None`.
+    ///
+    /// Free-form and never interpreted by the store; the recommended vocabulary
+    /// is a [QUDT] `QuantityKind` local name. It sits above `units` rather than
+    /// duplicating it: a quantity kind separates active from reactive power,
+    /// which a units library's dimensional analysis cannot, since both are
+    /// `[M L^2 T^-3]`. It also survives the case that motivates it — when
+    /// [`Self::unit_system`] is [`UnitSystem::ComponentBase`] the values are
+    /// per-unit and dimensionless, so this is the only record of what they
+    /// measure and which base converts them back.
+    ///
+    /// [QUDT]: https://www.qudt.org/pages/QUDToverviewPage.html
+    pub quantity_kind: Option<String>,
+    /// Which basis the values are expressed in, or `None` for unspecified.
+    pub unit_system: Option<UnitSystem>,
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,
 
@@ -210,10 +294,11 @@ pub struct TimeSeriesMetadata {
     pub element_type: ElementType,
     /// Per-step element shape (trailing dims after time); empty = scalar.
     pub element_shape: Vec<usize>,
-    /// Opaque, package-owned extension payload stored verbatim. The store never
-    /// parses or interprets it; end users are not expected to set it. Element
-    /// typing does *not* belong here — that is [`Self::element_type`].
-    pub ext: Option<String>,
+    /// Opaque, package-owned payload stored verbatim for an application to
+    /// reconstruct its own domain objects. The store never parses or interprets
+    /// it; end users are not expected to set it. Element typing does *not*
+    /// belong here — that is [`Self::element_type`].
+    pub application_data: Option<String>,
 }
 
 #[cfg(test)]
@@ -301,10 +386,12 @@ mod tests {
             timestamps: None,
             features: Features::new(),
             units: None,
+            quantity_kind: None,
+            unit_system: None,
             percentiles: None,
             element_type: ElementType::Scalar(single.data.dtype),
             element_shape: vec![],
-            ext: None,
+            application_data: None,
         };
         let identity = KeyIdentity {
             owner_id: 1,

@@ -35,17 +35,24 @@ cohort of `NonSequentialTimeSeries` sharing one timestamp vector (its `resolutio
 the latter). The discovery/maintenance surface (`get_intervals`, `list_names`, `list_owner_types`,
 name-pattern filtering via `ListFilter::name_glob` (SQLite `GLOB`), `remove_by_filter`,
 `remove_time_series_bulk`, `rename_time_series`, time-sliced `bulk_read`, `AddRequest`/`Store::add`
-preserving `ext`, and serde on the core types) is available in the Rust core and threaded through
-the C ABI/Julia and Python bindings. Two **association catalogs** are available in the Rust core, C
-ABI, Julia, Python, and the CLI (read via `attributes` / `links`, write via `attach` / `detach` /
-`link` / `unlink` / `reassign`), but not over gRPC: `supplemental_attribute_associations` (component
-↔ supplemental attribute, the wider surface — counts, counts-by-type, grouped summary) and
-`parent_child_associations` (directed component ↔ component edges, e.g. a generator connected to a
-bus, deliberately narrower until a consumer needs more). Both are independent of time series in both
-directions, and of each other. Metadata getters surface `element_shape` and `features` in every
-binding. Python ships type stubs (`infrastore.pyi` + a pytest drift guard), a full exception
-hierarchy, and keyword-only optional arguments; Julia returns its catalog/metadata/summary query
-results as structs (`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
+preserving `application_data`, and serde on the core types) is available in the Rust core and
+threaded through the C ABI/Julia and Python bindings. Two **association catalogs** are available in
+the Rust core, C ABI, Julia, Python, and the CLI (read via `attributes` / `links`, write via
+`attach` / `detach` / `link` / `unlink` / `reassign`), but not over gRPC:
+`supplemental_attribute_associations` (component ↔ supplemental attribute, the wider surface —
+counts, counts-by-type, grouped summary) and `parent_child_associations` (directed component ↔
+component edges, e.g. a generator connected to a bus, deliberately narrower until a consumer needs
+more). Both are independent of time series in both directions, and of each other. Metadata getters
+surface `element_shape` and `features` in every binding. Alongside `units`, a series carries two
+further unit descriptors in every binding: `quantity_kind` (free-form, QUDT `QuantityKind` local
+names recommended — it separates active from reactive power, which dimensional analysis cannot, and
+is the only record of what per-unit values measure) and `unit_system` (`natural_units` |
+`component_base`, a label the store never acts on; unset means _unspecified_, not natural units).
+Both are descriptive, so they sit outside `TimeSeriesKey` and outside both content hashes, alongside
+`application_data` — the opaque package-owned payload formerly spelled `ext`. Python ships type
+stubs (`infrastore.pyi` + a pytest drift guard), a full exception hierarchy, and keyword-only
+optional arguments; Julia returns its catalog/metadata/summary query results as structs
+(`TimeSeriesMetadata`, `KeyRow`, `StaticGrid`, … — see
 `docs/src/reference/julia-api.md#result-types`), overloads `Base`
 (`==`/`hash`/`show`/`length`/`iterate`), and offers do-block `Store`/`open_store` forms. A stored
 `DeterministicSingleTimeSeries` always reads back as a `Deterministic` (storage-level view, by

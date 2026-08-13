@@ -90,7 +90,9 @@ const LIST_HEADERS_WIDE: &[&str] = &[
     "Horizon",
     "Count",
     "Element Shape",
-    "Ext",
+    "Quantity Kind",
+    "Unit System",
+    "Application Data",
 ];
 
 fn list_headers(wide: bool) -> Vec<String> {
@@ -122,7 +124,13 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
             fields::opt_period(m.horizon),
             fields::opt(m.count),
             format!("{:?}", m.element_shape),
-            m.ext.clone().unwrap_or_else(|| "-".to_string()),
+            m.quantity_kind.clone().unwrap_or_else(|| "-".to_string()),
+            m.unit_system
+                .map(|u| u.as_str().to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            m.application_data
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
         ]);
     }
     row
@@ -159,7 +167,12 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
     obj.insert("count".into(), json!(m.count));
     obj.insert("percentiles".into(), json!(m.percentiles));
     obj.insert("units".into(), json!(m.units));
-    obj.insert("ext".into(), json!(m.ext));
+    obj.insert("quantity_kind".into(), json!(m.quantity_kind));
+    obj.insert(
+        "unit_system".into(),
+        json!(m.unit_system.map(|u| u.as_str())),
+    );
+    obj.insert("application_data".into(), json!(m.application_data));
     Value::Object(obj)
 }
 
@@ -408,8 +421,14 @@ pub fn info(
     if let Some(u) = &meta.units {
         rows.push(("units".into(), json!(u)));
     }
-    if let Some(lt) = &meta.ext {
-        rows.push(("ext".into(), json!(lt)));
+    if let Some(q) = &meta.quantity_kind {
+        rows.push(("quantity_kind".into(), json!(q)));
+    }
+    if let Some(u) = meta.unit_system {
+        rows.push(("unit_system".into(), json!(u.as_str())));
+    }
+    if let Some(lt) = &meta.application_data {
+        rows.push(("application_data".into(), json!(lt)));
     }
     rows.push(("features".into(), fields::features_json(&meta.features)));
 
@@ -845,8 +864,14 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     if let Some(u) = &meta.units {
         obj.insert("units".into(), json!(u));
     }
-    if let Some(lt) = &meta.ext {
-        obj.insert("ext".into(), json!(lt));
+    if let Some(q) = &meta.quantity_kind {
+        obj.insert("quantity_kind".into(), json!(q));
+    }
+    if let Some(u) = meta.unit_system {
+        obj.insert("unit_system".into(), json!(u.as_str()));
+    }
+    if let Some(lt) = &meta.application_data {
+        obj.insert("application_data".into(), json!(lt));
     }
     if let Some(r) = meta.resolution {
         obj.insert("resolution".into(), json!(parse::format_period(r)));

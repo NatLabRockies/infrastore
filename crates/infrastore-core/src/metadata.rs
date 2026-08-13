@@ -19,7 +19,9 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{features_hash, timestamps_hash};
 use crate::types::element_type::ElementType;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
-use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
+use crate::types::metadata::{
+    FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
+};
 use crate::types::time_series::TimeSeriesType;
 
 /// The arrays the catalog references, paired with one diagnostic per row too
@@ -918,10 +920,10 @@ impl MetadataStore {
             "INSERT INTO time_series_associations
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
-              timestamps_hash, units, percentiles_json,
-              element_type, element_shape, ext, features_hash)
+              timestamps_hash, units, quantity_kind, unit_system, percentiles_json,
+              element_type, element_shape, application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19)",
+                     ?16, ?17, ?18, ?19, ?20, ?21)",
         )?;
         let result = insert_stmt.execute(params![
             meta.owner_id,
@@ -938,10 +940,12 @@ impl MetadataStore {
             meta.count.map(|c| c as i64),
             timestamps_hash.map(|h| h.to_vec()),
             meta.units,
+            meta.quantity_kind,
+            meta.unit_system.map(|u| u.as_str()),
             percentiles_json,
             meta.element_type.to_string(),
             element_shape_json,
-            meta.ext,
+            meta.application_data,
             f_hash.as_slice(),
         ]);
 
@@ -1241,8 +1245,8 @@ impl MetadataStore {
         let sql = format!(
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution, length, horizon,
-                    interval, count, timestamps_hash, units, percentiles_json,
-                    element_type, element_shape, ext
+                    interval, count, timestamps_hash, units, quantity_kind, unit_system,
+                    percentiles_json, element_type, element_shape, application_data
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -2615,10 +2619,12 @@ struct MetaRow {
     /// `timestamp_sets` by the caller, which batches that lookup across rows.
     timestamps_hash: Option<[u8; 32]>,
     units: Option<String>,
+    quantity_kind: Option<String>,
+    unit_system: Option<UnitSystem>,
     percentiles: Option<Vec<f64>>,
     element_type: crate::types::element_type::ElementType,
     element_shape: Vec<usize>,
-    ext: Option<String>,
+    application_data: Option<String>,
 }
 
 impl MetaRow {
@@ -2643,10 +2649,12 @@ impl MetaRow {
             timestamps,
             features,
             units: self.units,
+            quantity_kind: self.quantity_kind,
+            unit_system: self.unit_system,
             percentiles: self.percentiles,
             element_type: self.element_type,
             element_shape: self.element_shape,
-            ext: self.ext,
+            application_data: self.application_data,
         }
     }
 }
@@ -2670,10 +2678,32 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let count: Option<i64> = row.get(12)?;
     let timestamps_hash: Option<Vec<u8>> = row.get(13)?;
     let units: Option<String> = row.get(14)?;
-    let percentiles_json: Option<String> = row.get(15)?;
-    let element_type_str: String = row.get(16)?;
-    let element_shape_json: Option<String> = row.get(17)?;
-    let ext: Option<String> = row.get(18)?;
+    let quantity_kind: Option<String> = row.get(15)?;
+    let unit_system_str: Option<String> = row.get(16)?;
+    let percentiles_json: Option<String> = row.get(17)?;
+    let element_type_str: String = row.get(18)?;
+    let element_shape_json: Option<String> = row.get(19)?;
+    let application_data: Option<String> = row.get(20)?;
+
+    // An unrecognized basis is an error, not a silent `None`. The column has no
+    // CHECK precisely so a future basis can be added without a format bump,
+    // which means an older reader *will* meet one; reading it as "unspecified"
+    // would quietly turn per-unit values into values of unknown basis, and the
+    // consumer would have no way to know it had happened.
+    let unit_system = unit_system_str
+        .map(|s| {
+            UnitSystem::parse(&s).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    16,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid unit_system: {s:?}"),
+                    )),
+                )
+            })
+        })
+        .transpose()?;
 
     let owner_category = OwnerCategory::from_code(owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -2803,10 +2833,12 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             count: count.map(|c| c as usize),
             timestamps_hash,
             units,
+            quantity_kind,
+            unit_system,
             percentiles,
             element_type,
             element_shape,
-            ext,
+            application_data,
         },
     ))
 }

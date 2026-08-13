@@ -26,8 +26,8 @@ use crate::types::key::{
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
 use crate::types::time_series::{
-    Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesType, compute_h,
+    Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -124,10 +124,11 @@ impl AddRequest {
     /// Start a request with empty features. Chain [`Self::with_features`] to
     /// set them.
     ///
-    /// A series' descriptive attributes — `element_type`, `units`, and `ext` —
+    /// A series' descriptive attributes — `element_type`, `units`, `quantity_kind`,
+    /// `unit_system`, and `application_data` —
     /// live on the [`TimeSeriesData`] itself, not here: they describe the data,
     /// so they travel with it and come back on a read. Set them with the
-    /// `with_element_type` / `with_units` / `with_ext` builders on the concrete
+    /// `with_element_type` / `with_units` / `with_application_data` builders on the concrete
     /// series type before wrapping it in a request.
     pub fn new(
         owner_id: i64,
@@ -1050,7 +1051,8 @@ impl Store {
 
     /// Add one time series from an [`AddRequest`]. Equivalent to
     /// [`Self::add_time_series`] — both preserve the series' `element_type`,
-    /// `units`, and `ext`, since those travel on the [`TimeSeriesData`] itself.
+    /// `units`, `quantity_kind`, `unit_system`, and `application_data`, since those
+    /// travel on the [`TimeSeriesData`] itself.
     /// Routed through the same per-column path.
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![request])
@@ -1477,7 +1479,8 @@ impl Store {
     /// Like [`Self::get_time_series`], but also returns the association's
     /// catalog row from the same single lookup. Callers that need both the
     /// reconstructed series and row-level detail (the FFI getters read the
-    /// `ext` payload alongside the data) would otherwise pay a second SQLite
+    /// `application_data` payload alongside the data) would otherwise pay a second
+    /// SQLite
     /// key lookup per read — at 100k-series scale that lookup is ~20% of a
     /// full read.
     pub fn get_time_series_with_metadata(
@@ -1497,11 +1500,17 @@ impl Store {
         meta: &TimeSeriesMetadata,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
-        // `element_type`, `units`, and `ext` describe the series but live on the
-        // catalog row, not in the array bytes. Filling them in here — once, for
-        // every variant — is what makes a read round-trip what a write declared.
+        // The descriptors describe the series but live on the catalog row, not
+        // in the array bytes. Filling them in here — once, for every variant —
+        // is what makes a read round-trip what a write declared.
         let mut data = self.materialize_array(meta, time_range)?;
-        data.set_descriptors(meta.element_type, meta.units.clone(), meta.ext.clone());
+        data.set_descriptors(Descriptors {
+            element_type: meta.element_type,
+            units: meta.units.clone(),
+            quantity_kind: meta.quantity_kind.clone(),
+            unit_system: meta.unit_system,
+            application_data: meta.application_data.clone(),
+        });
         Ok(data)
     }
 
@@ -1581,7 +1590,9 @@ impl Store {
                     // value that call resolves to anyway.
                     element_type: meta.element_type,
                     units: None,
-                    ext: None,
+                    quantity_kind: None,
+                    unit_system: None,
+                    application_data: None,
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
@@ -1826,7 +1837,7 @@ impl Store {
     /// List the [`TimeSeriesKey`] of every association matching `filter`. This is
     /// the key-centric counterpart of [`Self::list_time_series`]: each row is
     /// reduced to its identifying + descriptive key, dropping physical storage
-    /// detail (`data_hash`, `dtype`, `ext`, `percentiles`) which is read
+    /// detail (`data_hash`, `dtype`, `application_data`, `percentiles`) which is read
     /// on demand via [`Self::get_metadata`]. The binding-facing listing path.
     pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>> {
         self.metadata
@@ -2090,7 +2101,9 @@ impl Store {
                     // descriptors come straight off the row it already loaded.
                     element_type: meta.element_type,
                     units: meta.units.clone(),
-                    ext: meta.ext.clone(),
+                    quantity_kind: meta.quantity_kind.clone(),
+                    unit_system: meta.unit_system,
+                    application_data: meta.application_data.clone(),
                 }));
             } else {
                 // Materialize from the row already in hand rather than calling
@@ -3699,10 +3712,12 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     timestamps: None,
                     features: item.features.clone(),
                     units: item.data.units().map(str::to_owned),
+                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
+                    unit_system: item.data.unit_system(),
                     percentiles: None,
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
-                    ext: item.data.ext().map(str::to_owned),
+                    application_data: item.data.application_data().map(str::to_owned),
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -3741,10 +3756,12 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     timestamps: Some(non_sequential.timestamps.clone()),
                     features: item.features.clone(),
                     units: item.data.units().map(str::to_owned),
+                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
+                    unit_system: item.data.unit_system(),
                     percentiles: None,
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
-                    ext: item.data.ext().map(str::to_owned),
+                    application_data: item.data.application_data().map(str::to_owned),
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -4029,10 +4046,12 @@ fn forecast_metadata(
         timestamps: None,
         features: item.features.clone(),
         units: item.data.units().map(str::to_owned),
+        quantity_kind: item.data.quantity_kind().map(str::to_owned),
+        unit_system: item.data.unit_system(),
         percentiles,
         element_type,
         element_shape: data.element_shape().to_vec(),
-        ext: item.data.ext().map(str::to_owned),
+        application_data: item.data.application_data().map(str::to_owned),
     }
 }
 

@@ -259,6 +259,21 @@ fn parse_element_type(s: &str) -> PyResult<core_lib::ElementType> {
         .map_err(|e| InvalidParameterError::new_err(e.to_string()))
 }
 
+/// `None` (the argument was omitted) means *unspecified*, which is deliberately
+/// not the same as `"natural_units"`. An unrecognized spelling raises rather
+/// than degrading to unspecified: silently dropping a declared basis would make
+/// per-unit values indistinguishable from values whose basis nobody stated.
+fn parse_unit_system(s: Option<&str>) -> PyResult<Option<core_lib::UnitSystem>> {
+    match s {
+        None => Ok(None),
+        Some(s) => core_lib::UnitSystem::parse(s).map(Some).ok_or_else(|| {
+            InvalidParameterError::new_err(format!(
+                "invalid unit_system {s:?}; expected 'natural_units' or 'component_base'"
+            ))
+        }),
+    }
+}
+
 fn dtype_from_numpy_name(name: &str) -> PyResult<core_lib::Dtype> {
     Ok(match name {
         "float64" => core_lib::Dtype::F64,
@@ -1534,14 +1549,18 @@ impl PyStore {
     ///
     /// `features` is a `dict[str, int|float|bool|str]`. A feature name that
     /// shadows a time-series or key field (`name`, `resolution`, `owner_id`,
-    /// …) is rejected with `InvalidParameterError`. `units` and `ext` are
-    /// optional strings (`ext` is an opaque, package-owned payload — typically
-    /// JSON — stored verbatim on the association).
+    /// …) is rejected with `InvalidParameterError`. `units`, `quantity_kind`,
+    /// and `application_data` are optional strings (`application_data` is an
+    /// opaque, package-owned payload — typically JSON — stored verbatim on the
+    /// association). `quantity_kind` names what the values measure, e.g.
+    /// `"ActivePower"`. `unit_system` is `"natural_units"` or
+    /// `"component_base"`; omitting it leaves the basis unspecified, which is
+    /// not the same as declaring natural units.
     ///
     /// `element_type` declares what the array's elements mean in the store's own
     /// vocabulary (`"tuple(3,f64)"`, `"piecewise_linear"`, …). Omit it for plain
     /// numbers, where it defaults to the array's own dtype spelling.
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, ext=None))]
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -1552,13 +1571,17 @@ impl PyStore {
         features: Option<&Bound<'_, PyDict>>,
         units: Option<String>,
         element_type: Option<String>,
-        ext: Option<String>,
+        application_data: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
         let mut data = extract_time_series_data(time_series)?;
         // These describe the series, so they are set on it, not on the request.
         data.set_units(units);
-        data.set_ext(ext);
+        data.set_application_data(application_data);
+        data.set_quantity_kind(quantity_kind);
+        data.set_unit_system(parse_unit_system(unit_system.as_deref())?);
         // Omitting it keeps whatever the series already carries — a constructor
         // resolved that to plain scalars of the array's dtype.
         if let Some(et) = element_type {
@@ -1579,8 +1602,8 @@ impl PyStore {
     ///
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
     /// parameters: `owner_id`, `owner_type`, `owner_category`,
-    /// `time_series`, and optionally `features`, `units`, `element_type`, and
-    /// `ext`.
+    /// `time_series`, and optionally `features`, `units`, `element_type`,
+    /// `application_data`, `quantity_kind`, and `unit_system`.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
     /// Returns the new keys in input order.
@@ -1609,8 +1632,16 @@ impl PyStore {
                 Some(u) if !u.is_none() => Some(u.extract()?),
                 _ => None,
             };
-            let ext: Option<String> = match item.get_item("ext")? {
+            let application_data: Option<String> = match item.get_item("application_data")? {
                 Some(l) if !l.is_none() => Some(l.extract()?),
+                _ => None,
+            };
+            let quantity_kind: Option<String> = match item.get_item("quantity_kind")? {
+                Some(q) if !q.is_none() => Some(q.extract()?),
+                _ => None,
+            };
+            let unit_system: Option<String> = match item.get_item("unit_system")? {
+                Some(u) if !u.is_none() => Some(u.extract()?),
                 _ => None,
             };
             let element_type = match item.get_item("element_type")? {
@@ -1619,7 +1650,9 @@ impl PyStore {
             };
             let mut data = extract_time_series_data(&time_series)?;
             data.set_units(units);
-            data.set_ext(ext);
+            data.set_application_data(application_data);
+            data.set_quantity_kind(quantity_kind);
+            data.set_unit_system(parse_unit_system(unit_system.as_deref())?);
             // As above: an absent `element_type` leaves the series' own.
             if let Some(et) = element_type {
                 data.set_element_type(et);
@@ -3207,7 +3240,9 @@ fn metadata_to_dict<'py>(
     )?;
     d.set_item("features", features_to_dict(py, &m.features)?)?;
     d.set_item("units", m.units.clone())?;
-    d.set_item("ext", m.ext.clone())?;
+    d.set_item("quantity_kind", m.quantity_kind.clone())?;
+    d.set_item("unit_system", m.unit_system.map(|u| u.as_str()))?;
+    d.set_item("application_data", m.application_data.clone())?;
     Ok(d)
 }
 

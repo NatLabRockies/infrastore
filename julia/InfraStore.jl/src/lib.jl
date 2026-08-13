@@ -69,6 +69,45 @@ const INFRASTORE_ERR_INTERNAL = Int32(99)
     SupplementalAttribute = 1
 end
 
+# ---- Unit system -----------------------------------------------------------
+
+"""
+    UnitSystem
+
+Which basis a series' values are expressed in: `NaturalUnits` (the units named
+by `units`) or `ComponentBase` (per-unit against the owning component's own
+base). A series that declares neither leaves `unit_system === nothing`, which
+means *unspecified* and is deliberately not the same as `NaturalUnits`.
+
+The store records the declaration only — it holds no base value and rescales
+nothing, so converting `ComponentBase` values back to natural units is the
+caller's job.
+
+Unlike [`OwnerCategory`], the integer values here are a Julia-side convenience
+with no ABI meaning: the C boundary carries the `"natural_units"` /
+`"component_base"` spellings, so a basis added later crosses as a name rather
+than as an unrecognized code.
+"""
+@enum UnitSystem begin
+    NaturalUnits = 0
+    ComponentBase = 1
+end
+
+_unit_system_str(::Nothing) = nothing
+_unit_system_str(u::UnitSystem) = u === NaturalUnits ? "natural_units" : "component_base"
+
+_unit_system(::Nothing) = nothing
+_unit_system(u::UnitSystem) = u
+function _unit_system(s::AbstractString)
+    s == "natural_units" && return NaturalUnits
+    s == "component_base" && return ComponentBase
+    return throw(
+        ArgumentError(
+            "invalid unit_system $(repr(String(s))); expected \"natural_units\" or \"component_base\""
+        ),
+    )
+end
+
 # ---- Errors ---------------------------------------------------------------
 
 abstract type TimeSeriesException <: Exception end

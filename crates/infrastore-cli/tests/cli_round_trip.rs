@@ -685,7 +685,7 @@ fn export_to_dir_and_stdout() {
 }
 
 #[test]
-fn ext_round_trips_through_descriptor() {
+fn application_data_round_trips_through_descriptor() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("lt.h5");
     write_csv(dir.path(), "lt.csv", "1.0\n2.0\n");
@@ -698,7 +698,7 @@ fn ext_round_trips_through_descriptor() {
   "name": "load",
   "type": "single",
   "element_type": "f64",
-  "ext": "Profile",
+  "application_data": "Profile",
   "csv": "lt.csv",
   "initial_timestamp": "2024-01-01T00:00:00Z",
   "resolution": "PT1H"
@@ -709,9 +709,15 @@ fn ext_round_trips_through_descriptor() {
         &["add", "--descriptor", descriptor.to_str().unwrap()],
     );
     let info = run(&store, &["-f", "json", "info", "--owner-id", "5"]);
-    assert!(info.contains("\"ext\": \"Profile\""), "info: {info}");
+    assert!(
+        info.contains("\"application_data\": \"Profile\""),
+        "info: {info}"
+    );
     let list = run(&store, &["-f", "json", "list"]);
-    assert!(list.contains("\"ext\": \"Profile\""), "list: {list}");
+    assert!(
+        list.contains("\"application_data\": \"Profile\""),
+        "list: {list}"
+    );
 }
 
 #[test]
