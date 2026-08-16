@@ -212,6 +212,7 @@ function _decode_metadata(r::AbstractDict)
         r["units"] === nothing ? nothing : String(r["units"]),
         r["quantity_kind"] === nothing ? nothing : String(r["quantity_kind"]),
         _unit_system(r["unit_system"] === nothing ? nothing : String(r["unit_system"])),
+        r["component_field"] === nothing ? nothing : String(r["component_field"]),
         r["application_data"] === nothing ? nothing : String(r["application_data"]),
     )
 end
@@ -219,7 +220,8 @@ end
 # Marshal the shared catalog-filter arguments every `infrastore_store_list_*` /
 # `infrastore_store_remove_by_filter` FFI takes, as a tuple in argument order.
 function _filter_args(
-    owner_id, owner_category, time_series_type, name, resolution, interval, features
+    owner_id, owner_category, time_series_type, name, resolution, interval, features,
+    component_field=nothing,
 )
     has_owner = owner_id !== nothing
     has_category = owner_category !== nothing
@@ -235,6 +237,7 @@ function _filter_args(
         _period_to_cstr(resolution),
         _period_to_cstr(interval),
         isempty(features) ? C_NULL : JSON.json(features),
+        component_field === nothing ? C_NULL : String(component_field),
     )
 end
 
@@ -255,10 +258,12 @@ function _filter_list_json(
     resolution=nothing,
     interval=nothing,
     features=Dict{String, Any}(),
+    component_field=nothing,
 )
     fptr = dlsym(dlopen(lib_path()), fname)
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+        owner_id, owner_category, time_series_type, name, resolution, interval, features,
+        component_field,
     )
     return _owned_str(
         (out_json, out_len) -> @ccall $fptr(
@@ -273,6 +278,7 @@ function _filter_list_json(
             resolution_iso::Cstring,
             interval_iso::Cstring,
             features_json::Cstring,
+            component_field_arg::Cstring,
             out_json::Ref{Ptr{Cchar}},
             out_len::Ref{UInt64},
         )::Int32
@@ -296,6 +302,9 @@ filters, as [`KeyRow`](@ref)s. With no filter set the whole store is listed.
 - `interval` — a `Period`; forecasts only (static rows carry no interval and
   never match an interval filter).
 - `features` — match keys whose features include all the given entries (subset).
+- `component_field` — exact, case-sensitive match on the owning component's
+  field (e.g. `"max_active_power"`). A row that declares none matches no value,
+  so this cannot select the rows that left it unset.
 """
 function list_keys(store::Store; kwargs...)
     json = _filter_list_json(:infrastore_store_list_keys, store; kwargs...)
@@ -353,9 +362,11 @@ function remove_by_filter!(
     resolution::Union{Nothing, Period}=nothing,
     interval::Union{Nothing, Period}=nothing,
     features::AbstractDict=Dict{String, Any}(),
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+        owner_id, owner_category, time_series_type, name, resolution, interval, features,
+        component_field,
     )
     out_removed = Ref{UInt64}(0)
     code = @ccall lib_path().infrastore_store_remove_by_filter(
@@ -370,6 +381,7 @@ function remove_by_filter!(
         resolution_iso::Cstring,
         interval_iso::Cstring,
         features_json::Cstring,
+        component_field_arg::Cstring,
         out_removed::Ref{UInt64},
     )::Int32
     _check(code)
@@ -590,9 +602,11 @@ function has_any_time_series(
     resolution=nothing,
     interval=nothing,
     features=Dict{String, Any}(),
+    component_field=nothing,
 )
-    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json) = _filter_args(
-        owner_id, owner_category, time_series_type, name, resolution, interval, features
+    (has_owner, owner_arg, has_category, category_arg, has_type, type_arg, name_arg, resolution_iso, interval_iso, features_json, component_field_arg) = _filter_args(
+        owner_id, owner_category, time_series_type, name, resolution, interval, features,
+        component_field,
     )
     out = Ref{Bool}(false)
     code = @ccall lib_path().infrastore_store_has_any_by_filter(
@@ -607,6 +621,7 @@ function has_any_time_series(
         resolution_iso::Cstring,
         interval_iso::Cstring,
         features_json::Cstring,
+        component_field_arg::Cstring,
         out::Ref{Bool},
     )::Int32
     _check(code)

@@ -32,7 +32,7 @@ do not hand-edit it. The [Julia binding](./julia-api.md) is the primary consumer
   verbatim to the add functions and stored uninterpreted. Element typing does not go here — that is
   `element_type`.
 - **Strings** are null-terminated UTF-8. Optional string arguments (`application_data`,
-  `features_json`, `units`, `quantity_kind`, `unit_system`) accept `NULL`.
+  `features_json`, `units`, `quantity_kind`, `unit_system`, `component_field`) accept `NULL`.
 - **Features** are passed as a JSON object string whose values are int / float / bool / string. An
   add call whose feature names shadow a time-series or key field (`name`, `resolution`, `owner_id`,
   …) fails with `INFRASTORE_ERR_INVALID_PARAMETER`; see
@@ -114,6 +114,7 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                             const char *units,                /* optional */
                             const char *quantity_kind,        /* optional */
                             const char *unit_system,          /* optional: "natural_units" | "component_base" */
+                            const char *component_field,      /* optional: e.g. "max_active_power" */
                             struct InfraStoreKey **out_key);          /* owned; infrastore_key_free */
 
 int32_t infrastore_store_get_single(const struct InfraStore *handle, const struct InfraStoreKey *key,
@@ -126,7 +127,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle, const struc
                             char **out_element_type,   /* optional (NULL skips); owned, same free */
                             char **out_units,          /* optional (NULL skips); owned, same free */
                             char **out_quantity_kind,  /* optional (NULL skips); owned, same free */
-                            char **out_unit_system);   /* optional (NULL skips); owned, same free */
+                            char **out_unit_system,    /* optional (NULL skips); owned, same free */
+                            char **out_component_field); /* optional (NULL skips); owned, same free */
 
 int32_t infrastore_store_remove(struct InfraStore *handle, const struct InfraStoreKey *key);
 /* All-or-nothing batched remove: on any error (including one missing key)
@@ -165,6 +167,7 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                     const char *application_data, const char *features_json,
                                     const char *units,
                                     const char *quantity_kind, const char *unit_system,
+                                    const char *component_field,
                                     struct InfraStoreKey **out_key);
 
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, const struct InfraStoreKey *key,
@@ -176,7 +179,8 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle, con
                                     char **out_element_type,  /* optional (NULL skips); owned, same free */
                                     char **out_units,         /* optional (NULL skips); owned, same free */
                                     char **out_quantity_kind, /* optional (NULL skips); owned, same free */
-                                    char **out_unit_system);  /* optional (NULL skips); owned, same free */
+                                    char **out_unit_system,   /* optional (NULL skips); owned, same free */
+                                    char **out_component_field); /* optional (NULL skips); owned, same free */
 ```
 
 ## Attribute-Based Access
@@ -259,7 +263,8 @@ int32_t infrastore_key_attributes(const struct InfraStoreKey *key,
    infrastore_store_list_time_series element: owner_id, owner_type, owner_category,
    time_series_type, name, data_hash (64-char hex), initial_timestamp_ms, resolution,
    horizon, interval, count, length, percentiles, element_type, element_shape, features,
-   units, quantity_kind, unit_system, application_data — fields that do not apply to the key's
+   units, quantity_kind, unit_system, component_field, application_data — fields that do not apply
+   to the key's
    type are null. One export
    covers every time series type, static and forecast alike. Probe-then-fetch:
    call with buf = NULL, cap = 0 to learn *out_len, then again with an
@@ -717,14 +722,16 @@ int32_t infrastore_store_replace_owner(struct InfraStore *handle,
 /* List keys as a JSON array (identity + per-type descriptive snapshot, no physical
    storage detail). The filters are independent; with none set the whole store is
    listed. `interval` (ISO-8601; NULL = unset) matches forecasts only — static
-   rows carry no interval. Probe-then-fetch: call with buf=NULL, cap=0 to learn
+   rows carry no interval. `component_field` (NULL = unset) matches the owning
+   component's field exactly and case-sensitively; a row that declares none
+   matches no value. Probe-then-fetch: call with buf=NULL, cap=0 to learn
    the length via out_len, then again with len+1 bytes. */
 int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                            bool has_owner, int64_t owner_id,
                            bool has_owner_category, int32_t owner_category,
                            bool has_time_series_type, int32_t time_series_type,
                            const char *name, const char *resolution, const char *interval,
-                           const char *features_json,
+                           const char *features_json, const char *component_field,
                            char *buf, uint64_t cap, uint64_t *out_len);
 /* Like infrastore_store_list_keys, but each row is annotated with the hex content hash of
    the array it resolves to (keys_to_json's shape plus a `data_hash` field); rows
@@ -736,7 +743,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                    bool has_owner_category, int32_t owner_category,
                                    bool has_time_series_type, int32_t time_series_type,
                                    const char *name, const char *resolution, const char *interval,
-                                   const char *features_json,
+                                   const char *features_json, const char *component_field,
                                    char *buf, uint64_t cap, uint64_t *out_len);
 ```
 

@@ -343,6 +343,7 @@ class Store:
         application_data: str | None = None,
         quantity_kind: str | None = None,
         unit_system: str | None = None,
+        component_field: str | None = None,
     ) -> TimeSeriesKey: ...
     def add_time_series_bulk(self, items: list[dict[str, Any]]) -> list[TimeSeriesKey]: ...
     def transform_single_time_series(
@@ -364,6 +365,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
@@ -441,6 +443,7 @@ class Store:
         owner_type: str | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> StaticReader: ...
     def static_read(self, reader: StaticReader, when: datetime) -> None: ...
@@ -454,6 +457,7 @@ class Store:
         owner_type: str | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         features: dict[str, int | float | bool | str] | None = None,
     ) -> ForecastReader: ...
     def forecast_read(self, reader: ForecastReader, when: datetime) -> None: ...
@@ -468,6 +472,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
@@ -481,6 +486,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
@@ -494,6 +500,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
@@ -507,6 +514,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
@@ -520,6 +528,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,
@@ -539,6 +548,7 @@ class Store:
         time_series_type: TimeSeriesType | None = None,
         name: str | None = None,
         name_glob: str | None = None,
+        component_field: str | None = None,
         resolution: Period | None = None,
         interval: Period | None = None,
         features: dict[str, int | float | bool | str] | None = None,

@@ -99,6 +99,8 @@ struct SingleTimeSeries{T, N}
     quantity_kind::Union{Nothing, String}
     "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
     unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -113,6 +115,7 @@ function SingleTimeSeries(
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
         initial,
@@ -124,6 +127,7 @@ function SingleTimeSeries(
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -145,6 +149,8 @@ struct NonSequentialTimeSeries{T, N}
     quantity_kind::Union{Nothing, String}
     "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
     unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -159,6 +165,7 @@ function NonSequentialTimeSeries(
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
@@ -174,6 +181,7 @@ function NonSequentialTimeSeries(
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -207,6 +215,8 @@ struct Deterministic{T, N}
     quantity_kind::Union{Nothing, String}
     "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
     unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 function Deterministic(
@@ -222,6 +232,7 @@ function Deterministic(
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Deterministic{eltype(data), ndims(data)}(
         initial,
@@ -236,6 +247,7 @@ function Deterministic(
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -260,6 +272,8 @@ struct Probabilistic{T, N}
     quantity_kind::Union{Nothing, String}
     "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
     unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 function Probabilistic(
@@ -276,6 +290,7 @@ function Probabilistic(
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Probabilistic{eltype(data), ndims(data)}(
         initial,
@@ -291,6 +306,7 @@ function Probabilistic(
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -315,6 +331,8 @@ struct Scenarios{T, N}
     quantity_kind::Union{Nothing, String}
     "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
     unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -331,6 +349,7 @@ function Scenarios(
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Scenarios{eltype(data), ndims(data)}(
         initial,
@@ -346,6 +365,7 @@ function Scenarios(
         _maybe_string(units),
         _maybe_string(quantity_kind),
         _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 

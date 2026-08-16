@@ -286,6 +286,7 @@ function _get_forecast_raw(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast(
@@ -319,6 +320,7 @@ function _get_forecast_raw(
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
 
@@ -342,6 +344,7 @@ function _get_forecast_raw(
         out_units,
         out_quantity_kind,
         out_unit_system,
+        out_component_field,
     )
 end
 
@@ -368,6 +371,7 @@ function _decode_forecast_outputs(
     out_units,
     out_quantity_kind,
     out_unit_system,
+    out_component_field,
 )
     # Copy everything inside try/finally: every FFI allocation is released
     # exactly once in the `finally`, so an exception mid-decode cannot leak the
@@ -398,6 +402,7 @@ function _decode_forecast_outputs(
             units=_peek_cstr(out_units[]),
             quantity_kind=_peek_cstr(out_quantity_kind[]),
             unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            component_field=_peek_cstr(out_component_field[]),
         )
     finally
         _free_u64(out_dims[], out_ndims[])
@@ -411,6 +416,7 @@ function _decode_forecast_outputs(
         _free_cstr(out_units[])
         _free_cstr(out_quantity_kind[])
         _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
 end
 
@@ -444,6 +450,7 @@ function _get_forecast_raw(
     out_units = Ref{Ptr{Cchar}}(C_NULL)
     out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
     out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast_by_key(
@@ -471,6 +478,7 @@ function _get_forecast_raw(
             out_units::Ref{Ptr{Cchar}},
             out_quantity_kind::Ref{Ptr{Cchar}},
             out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
 
@@ -494,6 +502,7 @@ function _get_forecast_raw(
         out_units,
         out_quantity_kind,
         out_unit_system,
+        out_component_field,
     )
 end
 
@@ -521,6 +530,7 @@ function _forecast_from_raw(::Type{Deterministic}, r, name::AbstractString)
         units=r.units,
         quantity_kind=r.quantity_kind,
         unit_system=r.unit_system,
+        component_field=r.component_field,
     )
 end
 
@@ -539,6 +549,7 @@ function _forecast_from_raw(::Type{Probabilistic}, r, name::AbstractString)
         units=r.units,
         quantity_kind=r.quantity_kind,
         unit_system=r.unit_system,
+        component_field=r.component_field,
     )
 end
 
@@ -557,6 +568,7 @@ function _forecast_from_raw(::Type{Scenarios}, r, name::AbstractString)
         units=r.units,
         quantity_kind=r.quantity_kind,
         unit_system=r.unit_system,
+        component_field=r.component_field,
     )
 end
 

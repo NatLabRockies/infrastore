@@ -1659,7 +1659,7 @@ end
     @test typeof(scen) == Scenarios{Float32, 3}
 end
 
-@testset "quantity_kind and unit_system round-trip on every read path" begin
+@testset "quantity_kind, unit_system, and component_field round-trip on every read path" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
     res = Hour(1)
@@ -1667,6 +1667,7 @@ end
     sts = SingleTimeSeries(
         t0, res, collect(1.0:4.0), "load";
         units="MW", quantity_kind="ActivePower", unit_system=ComponentBase,
+        component_field="max_active_power",
     )
     k = add_time_series!(store, 1, "Generator", Component, sts)
 
@@ -1674,6 +1675,7 @@ end
     md = get_metadata(store, k)
     @test md.quantity_kind == "ActivePower"
     @test md.unit_system === ComponentBase
+    @test md.component_field == "max_active_power"
     @test list_time_series(store; owner_id=1)[1].unit_system === ComponentBase
 
     # ...and the get path puts them back on the struct, as it already does for
@@ -1682,15 +1684,19 @@ end
     got = get_time_series(store, k)
     @test got.quantity_kind == "ActivePower"
     @test got.unit_system === ComponentBase
+    @test got.component_field == "max_active_power"
 
     # The bulk path builds its own struct, so it must agree rather than drop them.
     @test bulk_read(store, [k])[1].unit_system === ComponentBase
+    @test bulk_read(store, [k])[1].component_field == "max_active_power"
 
     # Unset means unspecified, NOT NaturalUnits: nothing declared a basis here.
     bare = SingleTimeSeries(t0, res, collect(1.0:4.0), "bare")
     kb = add_time_series!(store, 2, "Generator", Component, bare)
     @test get_metadata(store, kb).unit_system === nothing
+    @test get_metadata(store, kb).component_field === nothing
     @test get_time_series(store, kb).quantity_kind === nothing
+    @test get_time_series(store, kb).component_field === nothing
 
     # A string spelling is accepted and normalized; an unknown one is rejected
     # rather than degrading to `nothing`.
@@ -1700,6 +1706,45 @@ end
     @test_throws ArgumentError SingleTimeSeries(
         t0, res, collect(1.0:4.0), "s"; unit_system="system_base"
     )
+end
+
+@testset "component_field filter selects across owners on every filter path" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    for (owner, name, field) in [
+        (1, "max_active_power", "max_active_power"),
+        (1, "rating", "rating"),
+        (2, "max_active_power", "max_active_power"),
+        (3, "legacy", nothing),
+    ]
+        ts = SingleTimeSeries(
+            t0, res, collect(1.0:4.0), name; component_field=field
+        )
+        add_time_series!(store, owner, "Generator", Component, ts)
+    end
+
+    # One field, every component that varies it -- and it composes with the
+    # owner scope.
+    @test sort([
+        r.owner_id for r in list_keys(store; component_field="max_active_power")
+    ]) ==
+        [1, 2]
+    @test length(list_keys(store; owner_id=1, component_field="max_active_power")) == 1
+    @test length(list_time_series(store; component_field="rating")) == 1
+
+    # Exact and case-sensitive; no glob semantics.
+    @test isempty(list_keys(store; component_field="max_active"))
+    @test isempty(list_keys(store; component_field="Max_Active_Power"))
+
+    # A row that declares none is unreachable through the filter.
+    @test isempty(list_keys(store; component_field="legacy"))
+
+    # The reader filter takes it too -- the columnar sweep case.
+    reader = build_static_reader(
+        store; resolution=res, component_field="max_active_power"
+    )
+    @test sum(length(g.keys) for g in reader.groups) == 2
 end
 
 @testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin

@@ -46,6 +46,15 @@ pub struct ListFilter {
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
     /// wildcards). Applied in addition to `name` when both are set.
     pub name_glob: Option<String>,
+    /// Exact, case-sensitive match on [`TimeSeriesMetadata::component_field`] —
+    /// "every series that varies this field", across owners or scoped to one.
+    ///
+    /// It is a descriptor, not part of a series' identity, so this narrows a
+    /// listing but never addresses a single row on its own: one component may
+    /// carry several series for one field, distinguished by name or features.
+    /// A row that declares no `component_field` matches no value at all, so
+    /// this cannot be used to find the rows that left it unset.
+    pub component_field: Option<String>,
     pub resolution: Option<Period>,
     pub interval: Option<Period>,
     pub features: Option<Features>,
@@ -79,6 +88,10 @@ impl ListFilter {
         self.name_glob = Some(pattern.into());
         self
     }
+    pub fn component_field(mut self, field: impl Into<String>) -> Self {
+        self.component_field = Some(field.into());
+        self
+    }
     pub fn resolution(mut self, r: impl Into<Period>) -> Self {
         self.resolution = Some(r.into());
         self
@@ -102,6 +115,7 @@ impl From<ListFilter> for MetadataFilter {
             time_series_type: value.time_series_type.map(TypeMatch::Requested),
             name: value.name,
             name_glob: value.name_glob,
+            component_field: value.component_field,
             resolution: value.resolution,
             interval: value.interval,
             features: value.features,
@@ -125,7 +139,7 @@ impl AddRequest {
     /// set them.
     ///
     /// A series' descriptive attributes — `element_type`, `units`, `quantity_kind`,
-    /// `unit_system`, and `application_data` —
+    /// `unit_system`, `component_field`, and `application_data` —
     /// live on the [`TimeSeriesData`] itself, not here: they describe the data,
     /// so they travel with it and come back on a read. Set them with the
     /// `with_element_type` / `with_units` / `with_application_data` builders on the concrete
@@ -1051,8 +1065,8 @@ impl Store {
 
     /// Add one time series from an [`AddRequest`]. Equivalent to
     /// [`Self::add_time_series`] — both preserve the series' `element_type`,
-    /// `units`, `quantity_kind`, `unit_system`, and `application_data`, since those
-    /// travel on the [`TimeSeriesData`] itself.
+    /// `units`, `quantity_kind`, `unit_system`, `component_field`, and
+    /// `application_data`, since those travel on the [`TimeSeriesData`] itself.
     /// Routed through the same per-column path.
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![request])
@@ -1509,6 +1523,7 @@ impl Store {
             units: meta.units.clone(),
             quantity_kind: meta.quantity_kind.clone(),
             unit_system: meta.unit_system,
+            component_field: meta.component_field.clone(),
             application_data: meta.application_data.clone(),
         });
         Ok(data)
@@ -1592,6 +1607,7 @@ impl Store {
                     units: None,
                     quantity_kind: None,
                     unit_system: None,
+                    component_field: None,
                     application_data: None,
                 }))
             }
@@ -2103,6 +2119,7 @@ impl Store {
                     units: meta.units.clone(),
                     quantity_kind: meta.quantity_kind.clone(),
                     unit_system: meta.unit_system,
+                    component_field: meta.component_field.clone(),
                     application_data: meta.application_data.clone(),
                 }));
             } else {
@@ -2533,6 +2550,7 @@ impl Store {
             features_hash: Some(crate::hash::features_hash(&key.features)),
             owner_type: None,
             name_glob: None,
+            component_field: None,
         })
     }
 
@@ -3714,6 +3732,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     units: item.data.units().map(str::to_owned),
                     quantity_kind: item.data.quantity_kind().map(str::to_owned),
                     unit_system: item.data.unit_system(),
+                    component_field: item.data.component_field().map(str::to_owned),
                     percentiles: None,
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
@@ -3758,6 +3777,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     units: item.data.units().map(str::to_owned),
                     quantity_kind: item.data.quantity_kind().map(str::to_owned),
                     unit_system: item.data.unit_system(),
+                    component_field: item.data.component_field().map(str::to_owned),
                     percentiles: None,
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
@@ -4048,6 +4068,7 @@ fn forecast_metadata(
         units: item.data.units().map(str::to_owned),
         quantity_kind: item.data.quantity_kind().map(str::to_owned),
         unit_system: item.data.unit_system(),
+        component_field: item.data.component_field().map(str::to_owned),
         percentiles,
         element_type,
         element_shape: data.element_shape().to_vec(),

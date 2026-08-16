@@ -103,6 +103,7 @@ def add_time_series(
     application_data: str | None = None,
     quantity_kind: str | None = None,
     unit_system: str | None = None,   # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
 ) -> TimeSeriesKey: ...
 # An unrecognized `unit_system` raises InvalidParameterError rather than
 # degrading to unspecified; omitting it leaves the basis unspecified, which is
@@ -115,7 +116,8 @@ def add_time_series(
 def add_time_series_bulk(self, items: list[dict]) -> list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
 # `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
-# `element_type`, `application_data`, `quantity_kind`, `unit_system`.
+# `element_type`, `application_data`, `quantity_kind`, `unit_system`,
+# `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
@@ -163,10 +165,13 @@ def list_time_series(
     time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
+    component_field: str | None = None,  # exact, case-sensitive
     resolution: timedelta | str | None = None,
     interval: timedelta | str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -> list[dict]: ...
+# `component_field` selects every series that varies that field on its owner. A
+# series that declares none matches no value, so it cannot select those rows.
 
 def list_array_groups(self, *, ...) -> list[dict]: ...
 # Same keyword-only filter arguments as list_time_series; so do list_keys,
@@ -241,9 +246,9 @@ with store.transaction():
   `owner_category`, `time_series_type`, `name`, `data_hash` (hex string), `length`, `resolution`
   (ISO 8601 duration string, e.g. `PT1H`, or `None`), `timestamps`, `features`, `units`,
   `quantity_kind`, `unit_system` (`"natural_units"` / `"component_base"` / `None`),
-  `application_data`. `timestamps` is a list of RFC 3339 strings for non-sequential series and
-  `None` otherwise. The `features` filter is a subset match — rows must contain at least the given
-  pairs.
+  `component_field`, `application_data`. `timestamps` is a list of RFC 3339 strings for
+  non-sequential series and `None` otherwise. The `features` filter is a subset match — rows must
+  contain at least the given pairs.
 - **`list_array_groups`** accepts the same filters as `list_time_series` and groups the matching
   series by their underlying stored array. It returns a list of dicts, each with `data_hash` (hex
   string) and `keys` (a list of `TimeSeriesKey`s that resolve to that array). Keys sharing one dict

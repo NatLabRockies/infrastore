@@ -266,6 +266,7 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
         units: m.units.clone(),
         quantity_kind: m.quantity_kind.clone(),
         unit_system: m.unit_system.map(|u| u.as_str().to_owned()),
+        component_field: m.component_field.clone(),
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
         application_data: m.application_data.clone(),
@@ -339,6 +340,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
                 })
             })
             .transpose()?,
+        component_field: m.component_field,
         percentiles: if m.percentiles.is_empty() {
             None
         } else {
@@ -494,6 +496,7 @@ pub fn get_resp_to_time_series_data(
                 units: None,
                 quantity_kind: None,
                 unit_system: None,
+                component_field: None,
                 application_data: None,
             }))
         }
@@ -769,6 +772,7 @@ mod tests {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             element_type: "f64".into(),
             element_shape: Vec::new(),
             application_data: None,
@@ -1099,6 +1103,7 @@ mod convert_coverage_tests {
                 units: None,
                 quantity_kind: None,
                 unit_system: None,
+                component_field: None,
                 percentiles: None,
                 element_type: ElementType::Scalar(dtype),
                 element_shape: vec![],
@@ -1245,6 +1250,7 @@ mod convert_coverage_tests {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
@@ -1287,6 +1293,7 @@ mod convert_coverage_tests {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
@@ -1605,6 +1612,7 @@ mod convert_coverage_tests {
             units: Some("MW".into()),
             quantity_kind: None,
             unit_system: None,
+            component_field: Some("max_active_power".into()),
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
@@ -1622,6 +1630,9 @@ mod convert_coverage_tests {
             pb.application_data.as_deref(),
             Some("QuadraticFunctionData")
         );
+        assert_eq!(pb.component_field.as_deref(), Some("max_active_power"));
+        // Struct equality, so every descriptor -- `component_field` included --
+        // has to survive both directions, not just the ones named above.
         assert_eq!(metadata_from_pb(pb).unwrap(), meta);
     }
 
@@ -1801,6 +1812,7 @@ mod convert_coverage_tests {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],

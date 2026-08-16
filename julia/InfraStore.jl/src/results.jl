@@ -36,7 +36,9 @@ anything but a `Probabilistic`).
   empty tuple for scalar elements; for a forecast, the stored array's trailing
   dims after its first axis).
 - `features` — the feature dictionary (empty when none).
-- `units`, `quantity_kind`, `application_data` — `nothing` when unset.
+- `units`, `quantity_kind`, `component_field`, `application_data` — `nothing`
+  when unset. `component_field` names the field on the owning component whose
+  value these values are the time-varying form of, e.g. `"max_active_power"`.
 - `unit_system` — a [`UnitSystem`](@ref), or `nothing` when unspecified (which
   is not the same as `NaturalUnits`).
 """
@@ -60,6 +62,7 @@ struct TimeSeriesMetadata
     units::Union{Nothing, String}
     quantity_kind::Union{Nothing, String}
     unit_system::Union{Nothing, UnitSystem}
+    component_field::Union{Nothing, String}
     application_data::Union{Nothing, String}
 end
 

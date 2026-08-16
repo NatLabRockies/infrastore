@@ -719,6 +719,7 @@ pub struct SingleTimeSeries {
     pub units: Option<String>,
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
+    pub component_field: Option<String>,
     pub application_data: Option<String>,
 }
 
@@ -731,14 +732,15 @@ impl SingleTimeSeries {
     pub fn with_units(self, units: impl Into<String>) -> Self;
     pub fn with_quantity_kind(self, quantity_kind: impl Into<String>) -> Self;
     pub fn with_unit_system(self, unit_system: UnitSystem) -> Self;
+    pub fn with_component_field(self, component_field: impl Into<String>) -> Self;
     pub fn with_application_data(self, application_data: impl Into<String>) -> Self;
 }
 ```
 
 `length` is derived from the array's first axis (`data.length()`) by `new`.
 
-The three descriptors travel on the series rather than on the write request, so a read returns what
-a write declared. `element_type` is **not** an `Option`: `new` resolves it to `Scalar(data.dtype)` —
+The descriptors travel on the series rather than on the write request, so a read returns what a
+write declared. `element_type` is **not** an `Option`: `new` resolves it to `Scalar(data.dtype)` —
 what an ordinary numeric series is — and `with_element_type` replaces it. There is deliberately no
 "undeclared" spelling, because it would be a second way to say `Scalar(dtype)` and a series written
 that way would not compare equal to the same series read back. The consequence to know: replacing
@@ -1042,9 +1044,10 @@ The full record returned by `list_time_series` and `get_metadata`: owner fields,
 `name`, `data_hash: [u8; 32]`, the optional temporal fields (`initial_timestamp`, `resolution`,
 `length`, `horizon`, `interval`, `count`, `timestamps`), `features`, the descriptors (`units`,
 `quantity_kind: Option<String>`, `unit_system: Option<UnitSystem>`,
-`application_data: Option<String>`), `percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and
-the array typing: `dtype: Dtype`, `element_shape: Vec<usize>`. The span fields (`resolution`,
-`horizon`, `interval`) are `Option<Period>`.
+`component_field: Option<String>`, `application_data: Option<String>`),
+`percentiles: Option<Vec<f64>>` (set for `Probabilistic`), and the array typing: `dtype: Dtype`,
+`element_shape: Vec<usize>`. The span fields (`resolution`, `horizon`, `interval`) are
+`Option<Period>`.
 
 ### `UnitSystem`
 
@@ -1071,6 +1074,7 @@ pub struct Descriptors {
     pub units: Option<String>,
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
+    pub component_field: Option<String>,
     pub application_data: Option<String>,
 }
 
@@ -1079,9 +1083,9 @@ impl Descriptors {
 }
 ```
 
-It is a struct rather than a positional argument list because three of the five fields are
-`Option<String>`: as bare parameters, `units`, `quantity_kind`, and `application_data` would be
-silently interchangeable at every call site.
+It is a struct rather than a positional argument list because four of the six fields are
+`Option<String>`: as bare parameters, `units`, `quantity_kind`, `component_field`, and
+`application_data` would be silently interchangeable at every call site.
 
 ### `ListFilter`
 
@@ -1096,10 +1100,18 @@ ListFilter::new()
     .time_series_type(TimeSeriesType::SingleTimeSeries)
     .name("load")
     .name_glob("load_*")  // SQLite GLOB (case-sensitive, `*`/`?`); ANDed with .name
+    .component_field("max_active_power")  // exact, case-sensitive; see below
     .resolution(Duration::hours(1))   // impl Into<Period>
     .interval(Duration::hours(24))    // impl Into<Period>; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
 ```
+
+`component_field` answers "every series that varies this field", alone or scoped to one owner. It is
+a descriptor, not part of a series' identity, so it narrows a listing but never addresses a single
+row on its own — one component may carry several series for one field, distinguished by name or
+features. A row that declares no `component_field` matches no value (SQL equality is never true
+against NULL), so the filter cannot select the rows that left it unset. It is served by the partial
+index `idx_component_field`, which costs a store that never sets the field nothing.
 
 ### `AddRequest`
 

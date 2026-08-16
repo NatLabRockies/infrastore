@@ -31,4 +31,11 @@
 /// 0.14.0 store re-opened for writing keeps its old column set and every
 /// statement naming the new columns fails. Stores written by 0.14.0 and earlier
 /// are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.15.0";
+///
+/// 0.16.0 added the `component_field` column to `time_series_associations`,
+/// naming the field on the owning component whose value the series varies over
+/// time. Same reasoning as 0.15.0: a new *column* on an existing table is not
+/// the additive case, because `CREATE TABLE IF NOT EXISTS` leaves a 0.15.0
+/// store's column set alone and every statement naming the new column would
+/// then fail. Stores written by 0.15.0 and earlier are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.16.0";

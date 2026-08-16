@@ -120,7 +120,7 @@ end
 """
     build_static_reader(store; resolution=nothing, time_series_type=SingleTimeSeries,
                         owner_id=nothing, owner_category=nothing, name=nothing,
-                        features=Dict())
+                        features=Dict(), component_field=nothing)
 
 Build a [`StaticReader`] over the static series matching the filter.
 
@@ -139,6 +139,7 @@ function build_static_reader(
     owner_category::Union{Nothing, OwnerCategory}=nothing,
     name::Union{Nothing, AbstractString}=nothing,
     features::AbstractDict=Dict{String, Any}(),
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     time_series_type in (SingleTimeSeries, NonSequentialTimeSeries) || throw(
         InvalidParameterError(
@@ -153,6 +154,7 @@ function build_static_reader(
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = resolution === nothing ? C_NULL : _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
+    component_field_arg = component_field === nothing ? C_NULL : String(component_field)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_static_reader(
         store::Ptr{Cvoid},
@@ -164,6 +166,7 @@ function build_static_reader(
         name_arg::Cstring,
         resolution_iso::Cstring,
         features_arg::Cstring,
+        component_field_arg::Cstring,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)
@@ -369,7 +372,8 @@ end
 
 """
     build_forecast_reader(store, time_series_type; resolution, owner_id=nothing,
-                          owner_category=nothing, name=nothing, features=Dict())
+                          owner_category=nothing, name=nothing, features=Dict(),
+                          component_field=nothing)
 
 Build a [`ForecastReader`] over forecasts of `time_series_type` (a Julia type:
 `Deterministic`, `Probabilistic`, `Scenarios`, or `DeterministicSingleTimeSeries`).
@@ -386,6 +390,7 @@ function build_forecast_reader(
     owner_category::Union{Nothing, OwnerCategory}=nothing,
     name::Union{Nothing, AbstractString}=nothing,
     features::AbstractDict=Dict{String, Any}(),
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     type_code = _int_for_type(time_series_type)
     has_owner = owner_id !== nothing
@@ -395,6 +400,7 @@ function build_forecast_reader(
     name_arg = name === nothing ? C_NULL : String(name)
     resolution_iso = _period_to_iso(resolution)
     features_arg = isempty(features) ? C_NULL : JSON.json(features)
+    component_field_arg = component_field === nothing ? C_NULL : String(component_field)
     out = Ref{Ptr{Cvoid}}(C_NULL)
     code = @ccall lib_path().infrastore_store_build_forecast_reader(
         store::Ptr{Cvoid},
@@ -406,6 +412,7 @@ function build_forecast_reader(
         name_arg::Cstring,
         resolution_iso::Cstring,
         features_arg::Cstring,
+        component_field_arg::Cstring,
         out::Ref{Ptr{Cvoid}},
     )::Int32
     _check(code)

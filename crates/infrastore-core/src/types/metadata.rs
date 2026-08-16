@@ -192,6 +192,7 @@ pub type Features = BTreeMap<String, FeatureValue>;
 /// reader can scan it.
 pub const RESERVED_FEATURE_NAMES: &[&str] = &[
     "application_data",
+    "component_field",
     "count",
     "data",
     "data_hash",
@@ -284,6 +285,23 @@ pub struct TimeSeriesMetadata {
     pub quantity_kind: Option<String>,
     /// Which basis the values are expressed in, or `None` for unspecified.
     pub unit_system: Option<UnitSystem>,
+    /// The field on the owning component whose value this series varies over
+    /// time (e.g. `"max_active_power"`, `"rating"`), or `None`.
+    ///
+    /// Free-form and never interpreted by the store: it names a field in the
+    /// consumer's own object model, which this crate has no view of. It records
+    /// what the values are *for*, where [`Self::name`] only says which series
+    /// they are. The two coincide by convention in many models but are not the
+    /// same thing: one component may carry several series for one field — a
+    /// forecast and an actual, a set of weather years — distinguished by name
+    /// or features, and a series' name is part of its identity where this is
+    /// not. Descriptive, so it sits outside [`crate::TimeSeriesKey`] and
+    /// outside both content hashes.
+    ///
+    /// Named for the common case. The owner may also be a supplemental
+    /// attribute ([`OwnerCategory::SupplementalAttribute`]), in which case this
+    /// names a field on that attribute.
+    pub component_field: Option<String>,
     /// Percentiles for a `Probabilistic` forecast; `None` for other types.
     pub percentiles: Option<Vec<f64>>,
 
@@ -388,6 +406,7 @@ mod tests {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::Scalar(single.data.dtype),
             element_shape: vec![],

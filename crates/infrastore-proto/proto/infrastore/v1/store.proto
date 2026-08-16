@@ -118,6 +118,10 @@ message TimeSeriesMetadata {
   // basis added later reaches an older client as a value it can report rather
   // than as UNKNOWN.
   optional string unit_system                    = 23;
+  // The field on the owning component (or supplemental attribute) whose value
+  // these values are the time-varying form of, e.g. "max_active_power".
+  // Free-form and never interpreted by the store.
+  optional string component_field                = 24;
 }
 
 // ---- ListTimeSeries ----
@@ -131,6 +135,10 @@ message ListReq {
   Features                 features          = 6;
   optional OwnerCategory   owner_category    = 7;
   optional string          interval          = 8;       // ISO-8601 duration
+  // Exact, case-sensitive match on the owning component's field. A row that
+  // declares none matches no value, so this cannot select rows that left it
+  // unset.
+  optional string          component_field   = 9;
 }
 message ListResp {
   repeated TimeSeriesMetadata metadata = 1;

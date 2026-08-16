@@ -76,6 +76,9 @@ pub struct Descriptor {
     pub quantity_kind: Option<String>,
     /// `"natural_units"` or `"component_base"`. Absent means unspecified.
     pub unit_system: Option<String>,
+    /// The field on the owning component whose value these values are the
+    /// time-varying form of (e.g. `"max_active_power"`). Free-form.
+    pub component_field: Option<String>,
     /// Opaque, package-owned payload stored verbatim on the metadata row.
     pub application_data: Option<String>,
     /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
@@ -379,6 +382,7 @@ impl Descriptor {
             units: self.units.clone(),
             quantity_kind: self.quantity_kind.clone(),
             unit_system,
+            component_field: self.component_field.clone(),
             application_data: self.application_data.clone(),
         })
     }

@@ -211,6 +211,10 @@ pub struct SingleTimeSeries {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"max_active_power"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -236,6 +240,7 @@ impl SingleTimeSeries {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             application_data: None,
         }
     }
@@ -264,6 +269,13 @@ impl SingleTimeSeries {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Name the component field these values vary over time (e.g.
+    /// `"max_active_power"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
         self
     }
 
@@ -309,6 +321,10 @@ pub struct NonSequentialTimeSeries {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"max_active_power"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -341,6 +357,7 @@ impl NonSequentialTimeSeries {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             application_data: None,
         })
     }
@@ -369,6 +386,13 @@ impl NonSequentialTimeSeries {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Name the component field these values vary over time (e.g.
+    /// `"max_active_power"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
         self
     }
 
@@ -418,6 +442,10 @@ pub struct Deterministic {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"max_active_power"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -473,6 +501,7 @@ impl Deterministic {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             application_data: None,
         })
     }
@@ -517,6 +546,10 @@ pub struct Probabilistic {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"max_active_power"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -546,6 +579,13 @@ impl Deterministic {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Name the component field these values vary over time (e.g.
+    /// `"max_active_power"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
         self
     }
 
@@ -615,6 +655,7 @@ impl Probabilistic {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             application_data: None,
         })
     }
@@ -659,6 +700,10 @@ pub struct Scenarios {
     /// Which basis the values are expressed in, or `None` for unspecified.
     /// See [`UnitSystem`].
     pub unit_system: Option<UnitSystem>,
+    /// The field on the owning component whose value varies over time here
+    /// (e.g. `"max_active_power"`), or `None`.
+    /// See [`crate::TimeSeriesMetadata::component_field`].
+    pub component_field: Option<String>,
     /// Opaque, package-owned payload (typically JSON) stored verbatim for an
     /// application to reconstruct its domain objects; the store never interprets
     /// it. End users are not expected to set it.
@@ -688,6 +733,13 @@ impl Probabilistic {
     /// Declare which unit basis the values are expressed in.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.unit_system = Some(unit_system);
+        self
+    }
+
+    /// Name the component field these values vary over time (e.g.
+    /// `"max_active_power"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
         self
     }
 
@@ -745,6 +797,7 @@ impl Scenarios {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             application_data: None,
         })
     }
@@ -814,6 +867,13 @@ impl Scenarios {
         self
     }
 
+    /// Name the component field these values vary over time (e.g.
+    /// `"max_active_power"`).
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.component_field = Some(component_field.into());
+        self
+    }
+
     /// Set the opaque application payload carried through to the metadata row.
     pub fn with_application_data(mut self, application_data: impl Into<String>) -> Self {
         self.application_data = Some(application_data.into());
@@ -829,16 +889,17 @@ impl Scenarios {
 /// reconstructs a series from its array and then fills these in from the
 /// catalog row via [`TimeSeriesData::set_descriptors`].
 ///
-/// This is a struct rather than a positional argument list because three of the
-/// five fields are `Option<String>`: as bare parameters, `units`,
-/// `quantity_kind`, and `application_data` would be silently interchangeable at
-/// every call site.
+/// This is a struct rather than a positional argument list because four of the
+/// six fields are `Option<String>`: as bare parameters, `units`,
+/// `quantity_kind`, `component_field`, and `application_data` would be silently
+/// interchangeable at every call site.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Descriptors {
     pub element_type: ElementType,
     pub units: Option<String>,
     pub quantity_kind: Option<String>,
     pub unit_system: Option<UnitSystem>,
+    pub component_field: Option<String>,
     pub application_data: Option<String>,
 }
 
@@ -850,6 +911,7 @@ impl Descriptors {
             units: None,
             quantity_kind: None,
             unit_system: None,
+            component_field: None,
             application_data: None,
         }
     }
@@ -934,6 +996,17 @@ impl TimeSeriesData {
         }
     }
 
+    /// The component field these values vary over time, or `None`.
+    pub fn component_field(&self) -> Option<&str> {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.component_field.as_deref(),
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.component_field.as_deref(),
+            TimeSeriesData::Deterministic(d) => d.component_field.as_deref(),
+            TimeSeriesData::Probabilistic(p) => p.component_field.as_deref(),
+            TimeSeriesData::Scenarios(s) => s.component_field.as_deref(),
+        }
+    }
+
     /// The opaque application payload, or `None`.
     pub fn application_data(&self) -> Option<&str> {
         match self {
@@ -966,6 +1039,12 @@ impl TimeSeriesData {
     /// Declare the unit basis on the wrapped series.
     pub fn with_unit_system(mut self, unit_system: UnitSystem) -> Self {
         self.set_unit_system(Some(unit_system));
+        self
+    }
+
+    /// Name the component field on the wrapped series.
+    pub fn with_component_field(mut self, component_field: impl Into<String>) -> Self {
+        self.set_component_field(Some(component_field.into()));
         self
     }
 
@@ -1019,6 +1098,17 @@ impl TimeSeriesData {
         }
     }
 
+    /// Set the component field in place.
+    pub fn set_component_field(&mut self, component_field: Option<String>) {
+        match self {
+            TimeSeriesData::SingleTimeSeries(s) => s.component_field = component_field,
+            TimeSeriesData::NonSequentialTimeSeries(s) => s.component_field = component_field,
+            TimeSeriesData::Deterministic(d) => d.component_field = component_field,
+            TimeSeriesData::Probabilistic(p) => p.component_field = component_field,
+            TimeSeriesData::Scenarios(s) => s.component_field = component_field,
+        }
+    }
+
     /// Set the application payload in place.
     pub fn set_application_data(&mut self, application_data: Option<String>) {
         match self {
@@ -1038,12 +1128,14 @@ impl TimeSeriesData {
             units,
             quantity_kind,
             unit_system,
+            component_field,
             application_data,
         } = descriptors;
         self.set_element_type(element_type);
         self.set_units(units);
         self.set_quantity_kind(quantity_kind);
         self.set_unit_system(unit_system);
+        self.set_component_field(component_field);
         self.set_application_data(application_data);
     }
 

@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries four global attributes:
 
 ```text
-data_format_version = "0.14.0"
+data_format_version = "0.16.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -57,39 +57,39 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.15.0` renamed the metadata column `ext` to `application_data` and added the `quantity_kind` and
-`unit_system` columns; unlike a new _table_, new _columns_ are not picked up by the idempotent
-`CREATE TABLE IF NOT EXISTS` DDL, so a `0.14.0` store is rejected on open; `0.14.0` moved a
-`NonSequentialTimeSeries`'s timestamps out of the association row: the `timestamps_json` TEXT column
-became a `timestamps_hash` BLOB resolving into the new content-addressed
-[`timestamp_sets`](#timestamp_sets) table, and irregular arrays that share a time axis are now
-column-packed into `nsts_…` datasets keyed by that hash instead of one standalone `arr_…` dataset
-each; `0.13.0` replaced the `dtype` column with `element_type`, which names the _logical_ element
-type and derives the physical dtype from it — see [Element types](./element-types.md); `0.12.0`
-changed `owner_category` and `time_series_type` from TEXT names to small INTEGER codes — see
-[Discriminant encoding](#discriminant-encoding) below; `0.11.0` renamed the metadata column
-`logical_type` to `application_data` — an opaque, package-owned extension payload (typically JSON)
-the store stores verbatim and never interprets; `0.10.0` replaced the per-association `features`
-table with the content-addressed `feature_sets` table below, so a feature map is stored once and
-shared by every association that uses it — dropping the `association_id` foreign key and its
-`ON DELETE CASCADE`; `0.9.0` changed the packed-dataset chunking to timestamp-major
-`(1, cols, *element_shape)` and made the column count `cols` per-dataset (sized to the writing
-batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk writes;
-`0.8.0` added the forecast `interval` to the association uniqueness key — so two forecasts of one
-variable that differ only by interval are now distinct series — widening both unique indexes (the
-`NULL`-folding index now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made
-`resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
-now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
-milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
-(`Month`/`Quarter`/`Year`) can be represented distinctly from fixed spans; `0.6.0` added
-`owner_category` to the association uniqueness key (so the owner identity is the pair
-`(owner_id, owner_category)`), widening the unique indexes and `idx_owner`; `0.5.0` changed the
-owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the Rust port of
-InfrastructureSystems.jl shipped with — the version that introduced `DATA_FORMAT_VERSION` itself;
-`0.3.0` switched the time unit from nanoseconds to milliseconds, renaming the SQLite `*_ns` columns
-to `*_ms` and encoding the packed dataset name's `{res}` field in milliseconds instead of whole
-seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode array layout below;
-`0.1.0` stored only 1-D `f64`.)
+(`0.16.0` added the metadata column `component_field`; `0.15.0` renamed the metadata column `ext` to
+`application_data` and added the `quantity_kind` and `unit_system` columns; unlike a new _table_,
+new _columns_ are not picked up by the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one
+version behind is rejected on open; `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of
+the association row: the `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving
+into the new content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that
+share a time axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one
+standalone `arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which
+names the _logical_ element type and derives the physical dtype from it — see
+[Element types](./element-types.md); `0.12.0` changed `owner_category` and `time_series_type` from
+TEXT names to small INTEGER codes — see [Discriminant encoding](#discriminant-encoding) below;
+`0.11.0` renamed the metadata column `logical_type` to `application_data` — an opaque, package-owned
+extension payload (typically JSON) the store stores verbatim and never interprets; `0.10.0` replaced
+the per-association `features` table with the content-addressed `feature_sets` table below, so a
+feature map is stored once and shared by every association that uses it — dropping the
+`association_id` foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset
+chunking to timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset
+(sized to the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp
+and bulk writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two
+forecasts of one variable that differ only by interval are now distinct series — widening both
+unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`);
+`0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
+[periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration strings (e.g.
+`PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
+SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
+fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so the owner identity
+is the pair `(owner_id, owner_category)`), widening the unique indexes and `idx_owner`; `0.5.0`
+changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the
+Rust port of InfrastructureSystems.jl shipped with — the version that introduced
+`DATA_FORMAT_VERSION` itself; `0.3.0` switched the time unit from nanoseconds to milliseconds,
+renaming the SQLite `*_ns` columns to `*_ms` and encoding the packed dataset name's `{res}` field in
+milliseconds instead of whole seconds; `0.2.0` introduced typed, multi-dimensional arrays and the
+two-mode array layout below; `0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -129,7 +129,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.14.0"
+├── attribute  data_format_version = "0.16.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -301,6 +301,7 @@ One row per association between an owner and a stored array.
 | `units`             | TEXT    | Free-form units label                                               |
 | `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset |
 | `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
+| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset         |
 | `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else          |
 | `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)            |
 | `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                         |
@@ -510,7 +511,27 @@ CREATE UNIQUE INDEX uq_ts_assoc_coalesced ON time_series_associations
 CREATE INDEX idx_hash       ON time_series_associations(data_hash);
 CREATE INDEX idx_owner      ON time_series_associations(owner_id, owner_category);
 CREATE INDEX idx_resolution ON time_series_associations(resolution);
+
+-- Secondary indexes for the filter / discovery surface.
+CREATE INDEX idx_ts_type        ON time_series_associations(time_series_type);
+CREATE INDEX idx_name           ON time_series_associations(name);
+CREATE INDEX idx_owner_type     ON time_series_associations(owner_type);
+CREATE INDEX idx_category_owner ON time_series_associations(owner_category, owner_id);
+CREATE INDEX idx_interval       ON time_series_associations(interval);
+CREATE INDEX idx_component_field ON time_series_associations(component_field)
+    WHERE component_field IS NOT NULL;
 ```
+
+`idx_component_field` is the only **partial** index, because `component_field` is the only optional
+column anything filters on: a store that never sets it would otherwise pay index maintenance on
+every insert to record one `NULL` per row and buy nothing, so the `WHERE` clause makes that case
+cost zero entries. SQLite still uses it for the predicate the filter issues — `component_field = ?`
+cannot be true of a `NULL` whatever the parameter binds to — but it can never serve an `IS NULL`
+query, which is the same reason `ListFilter::component_field` cannot select the rows that left the
+field unset.
+
+Every index here is additive: an existing store gains any it lacks on its first writable open, at a
+one-time build cost proportional to catalog size, with no `data_format_version` change.
 
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
 violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the

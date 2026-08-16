@@ -828,6 +828,7 @@ unsafe fn build_single_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -858,6 +859,7 @@ unsafe fn build_single_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let features = unsafe { parse_features_json(features_json) }?;
 
@@ -882,6 +884,7 @@ unsafe fn build_single_request(
         units,
         quantity_kind,
         unit_system,
+        component_field,
         application_data,
     });
     Ok(core_lib::AddRequest {
@@ -896,7 +899,9 @@ unsafe fn build_single_request(
 /// Add a SingleTimeSeries to the store.
 ///
 /// `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
-/// bool, or string. `application_data` and `units` are optional.
+/// bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`, and
+/// `component_field` are optional; `component_field` names the field on the owning component
+/// whose value these values are the time-varying form of.
 ///
 /// # Safety
 ///
@@ -925,6 +930,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
@@ -957,6 +963,7 @@ pub unsafe extern "C" fn infrastore_store_add_single(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(r) => r,
@@ -996,6 +1003,7 @@ unsafe fn build_non_sequential_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if timestamps_unix_ms.is_null() || data_ptr.is_null() {
         set_error("an input pointer is null");
@@ -1037,6 +1045,7 @@ unsafe fn build_non_sequential_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let application_data = unsafe { cstr_to_optional_string(application_data) }?;
     let mut data = core_lib::TimeSeriesData::NonSequentialTimeSeries(series);
     // The descriptors describe the series, so they travel on it rather than
@@ -1046,6 +1055,7 @@ unsafe fn build_non_sequential_request(
         units,
         quantity_kind,
         unit_system,
+        component_field,
         application_data,
     });
     Ok(core_lib::AddRequest {
@@ -1086,6 +1096,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
@@ -1118,6 +1129,7 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(r) => r,
@@ -1166,7 +1178,9 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// `out_quantity_kind`, when non-null, receives the association's quantity kind,
 /// and `out_unit_system` its basis as the `natural_units` / `component_base`
 /// spelling — null when unspecified, which is not the same as natural units.
-/// Both are owned C strings freed with `infrastore_string_free`.
+/// `out_component_field`, when non-null, receives the component field the values
+/// vary over time. All three are owned C strings freed with
+/// `infrastore_string_free`.
 ///
 /// `out_units`, when non-null, receives the association's units label: null when
 /// the series carries none, otherwise an owned C string freed the same way.
@@ -1177,12 +1191,12 @@ pub unsafe extern "C" fn infrastore_store_add_non_sequential(
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`, and
-/// `out_unit_system` must be valid for writing its indicated value;
-/// those three may be null. The returned shape and data buffers must each be released exactly once
+/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+/// `out_unit_system`, and `out_component_field` must be valid for writing its
+/// indicated value; those six may be null. The returned shape and data buffers must each be released exactly once
 /// with the matching free function and returned length, and a non-null `*out_application_data` /
-/// `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` exactly once with
-/// `infrastore_string_free`.
+/// `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
+/// `*out_component_field` exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_single(
@@ -1203,6 +1217,7 @@ pub unsafe extern "C" fn infrastore_store_get_single(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -1286,6 +1301,14 @@ pub unsafe extern "C" fn infrastore_store_get_single(
             Err(code) => return code,
         }
     };
+    let component_field_cstr = if out_component_field.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(meta.component_field.as_deref()) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
     // Infallible: `UnitSystem::as_str` is a fixed identifier, so unlike the
     // user-supplied labels it can never carry an interior NUL.
     let unit_system_cstr = if out_unit_system.is_null() {
@@ -1327,6 +1350,9 @@ pub unsafe extern "C" fn infrastore_store_get_single(
         if !out_quantity_kind.is_null() {
             *out_quantity_kind = into_raw_or_null(quantity_kind_cstr);
         }
+        if !out_component_field.is_null() {
+            *out_component_field = into_raw_or_null(component_field_cstr);
+        }
         if !out_unit_system.is_null() {
             *out_unit_system = unit_system_cstr;
         }
@@ -1356,8 +1382,9 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 ///
 /// `out_quantity_kind`, when non-null, receives the association's quantity kind, and
 /// `out_unit_system` its basis as the `natural_units` / `component_base` spelling — null when
-/// unspecified, which is not the same as natural units. Both are owned C strings freed with
-/// `infrastore_string_free`.
+/// unspecified, which is not the same as natural units. `out_component_field`, when non-null,
+/// receives the component field the values vary over time. All three are owned C strings freed
+/// with `infrastore_string_free`.
 ///
 /// `out_units`, when non-null, receives the association's user-declared units label as an owned C
 /// string freed the same way; it is null when the series carries none. The store never interprets
@@ -1369,12 +1396,12 @@ pub unsafe extern "C" fn infrastore_store_get_single(
 /// # Safety
 ///
 /// `handle` and `key` must be live handles created by this library. Every output pointer except
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`, and
-/// `out_unit_system` must be valid for writing its indicated value;
-/// those three may be null to skip them. Returned buffers must each be released exactly once with
+/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+/// `out_unit_system`, and `out_component_field` must be valid for writing its
+/// indicated value; those six may be null to skip them. Returned buffers must each be released exactly once with
 /// the matching free function and returned length, and a non-null `*out_application_data` /
-/// `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` exactly once with
-/// `infrastore_string_free`.
+/// `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
+/// `*out_component_field` exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_get_non_sequential(
@@ -1395,6 +1422,7 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = deref_handle!(ref handle);
@@ -1464,6 +1492,14 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
             Err(code) => return code,
         }
     };
+    let component_field_cstr = if out_component_field.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(meta.component_field.as_deref()) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
     // Infallible: `UnitSystem::as_str` is a fixed identifier, so unlike the
     // user-supplied labels it can never carry an interior NUL.
     let unit_system_cstr = if out_unit_system.is_null() {
@@ -1510,6 +1546,9 @@ pub unsafe extern "C" fn infrastore_store_get_non_sequential(
         }
         if !out_quantity_kind.is_null() {
             *out_quantity_kind = into_raw_or_null(quantity_kind_cstr);
+        }
+        if !out_component_field.is_null() {
+            *out_component_field = into_raw_or_null(component_field_cstr);
         }
         if !out_unit_system.is_null() {
             *out_unit_system = unit_system_cstr;
@@ -2697,6 +2736,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_present: *mut bool,
 ) -> i32 {
     clear_error();
@@ -2716,6 +2756,7 @@ pub unsafe extern "C" fn infrastore_store_has_any_by_filter(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -2989,6 +3030,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
@@ -3019,6 +3061,7 @@ pub unsafe extern "C" fn infrastore_store_add_forecast(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(r) => r,
@@ -3060,6 +3103,7 @@ unsafe fn build_forecast_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() {
         set_error("data_ptr is null");
@@ -3085,6 +3129,7 @@ unsafe fn build_forecast_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let features = unsafe { parse_features_json(features_json) }?;
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
@@ -3154,6 +3199,7 @@ unsafe fn build_forecast_request(
         units,
         quantity_kind,
         unit_system,
+        component_field,
         application_data,
     });
     Ok(core_lib::AddRequest {
@@ -3200,6 +3246,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
     out_key: *mut *mut InfraStoreKeyHandle,
 ) -> i32 {
     clear_error();
@@ -3231,6 +3278,7 @@ pub unsafe extern "C" fn infrastore_store_add_probabilistic(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(r) => r,
@@ -3273,6 +3321,7 @@ unsafe fn build_probabilistic_request(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> Result<core_lib::AddRequest, i32> {
     if data_ptr.is_null() || percentiles_ptr.is_null() {
         set_error("a required pointer is null");
@@ -3291,6 +3340,7 @@ unsafe fn build_probabilistic_request(
     let units = unsafe { cstr_to_optional_string(units) }?;
     let quantity_kind = unsafe { cstr_to_optional_string(quantity_kind) }?;
     let unit_system = unsafe { cstr_to_optional_unit_system(unit_system) }?;
+    let component_field = unsafe { cstr_to_optional_string(component_field) }?;
     let features = unsafe { parse_features_json(features_json) }?;
     let initial_timestamp = match unix_ms_to_datetime(initial_ts_unix_ms) {
         Some(d) => d,
@@ -3330,6 +3380,7 @@ unsafe fn build_probabilistic_request(
         units,
         quantity_kind,
         unit_system,
+        component_field,
         application_data,
     });
     Ok(core_lib::AddRequest {
@@ -3403,6 +3454,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3430,6 +3482,7 @@ pub unsafe extern "C" fn infrastore_batch_add_single(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(req) => {
@@ -3470,6 +3523,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3497,6 +3551,7 @@ pub unsafe extern "C" fn infrastore_batch_add_non_sequential(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(req) => {
@@ -3541,6 +3596,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3572,6 +3628,7 @@ pub unsafe extern "C" fn infrastore_batch_add_forecast(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(req) => {
@@ -3617,6 +3674,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
     units: *const c_char,
     quantity_kind: *const c_char,
     unit_system: *const c_char,
+    component_field: *const c_char,
 ) -> i32 {
     clear_error();
     let batch = match unsafe { batch.as_mut() } {
@@ -3649,6 +3707,7 @@ pub unsafe extern "C" fn infrastore_batch_add_probabilistic(
             units,
             quantity_kind,
             unit_system,
+            component_field,
         )
     } {
         Ok(req) => {
@@ -3811,7 +3870,8 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
 }
 
 /// Write a series' descriptive attributes (`application_data`, `element_type`,
-/// `units`, `quantity_kind`, `unit_system`) into five optional out-params.
+/// `units`, `quantity_kind`, `unit_system`, `component_field`) into six optional
+/// out-params.
 ///
 /// Each pointer may be null to skip that attribute. A non-null target receives
 /// either null (the attribute is unset on this series) or an owned C string the
@@ -3819,7 +3879,7 @@ pub unsafe extern "C" fn infrastore_store_bulk_read_single(
 /// is emitted as its `natural_units` / `component_base` spelling rather than a
 /// code, so an added basis reaches an older caller as a name it can report.
 ///
-/// All five live on the series itself, so a bulk-read result carries them just
+/// All six live on the series itself, so a bulk-read result carries them just
 /// as a per-key read does — the two paths must not disagree.
 ///
 /// All-or-nothing: every attribute string is built first (an interior NUL in
@@ -3837,11 +3897,13 @@ unsafe fn emit_descriptors(
     units: Option<&str>,
     quantity_kind: Option<&str>,
     unit_system: Option<core_lib::UnitSystem>,
+    component_field: Option<&str>,
     out_application_data: *mut *mut c_char,
     out_element_type: *mut *mut c_char,
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     let application_data_c = if out_application_data.is_null() {
         None
@@ -3863,6 +3925,14 @@ unsafe fn emit_descriptors(
         None
     } else {
         match opt_attr_cstring(quantity_kind) {
+            Ok(c) => c,
+            Err(code) => return code,
+        }
+    };
+    let component_field_c = if out_component_field.is_null() {
+        None
+    } else {
+        match opt_attr_cstring(component_field) {
             Ok(c) => c,
             Err(code) => return code,
         }
@@ -3892,6 +3962,9 @@ unsafe fn emit_descriptors(
         if !out_unit_system.is_null() {
             *out_unit_system = unit_system_c.unwrap_or(std::ptr::null_mut());
         }
+        if !out_component_field.is_null() {
+            *out_component_field = into_raw_or_null(component_field_c);
+        }
     }
     INFRASTORE_OK
 }
@@ -3918,20 +3991,21 @@ pub unsafe extern "C" fn infrastore_bulk_result_len(
 /// `infrastore_string_free`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8`. The handle
 /// is not consumed, so an element may be read more than once.
 ///
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`, and
-/// `out_unit_system` each receive an owned C string
+/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+/// `out_unit_system`, and `out_component_field` each receive an owned C string
 /// (null when that attribute is unset), freed with `infrastore_string_free`. Any
-/// of the three may be null to skip it. They carry the same values a per-key
+/// of the six may be null to skip it. They carry the same values a per-key
 /// read returns: the attributes live on the series, so both paths agree.
 ///
 /// # Safety
 ///
 /// `result` must be a live handle from `infrastore_store_bulk_read_single` and `index`
 /// must be less than its length. Every output pointer except `out_application_data`,
-/// `out_element_type`, `out_units`, `out_quantity_kind`, and `out_unit_system`
-/// must be valid for writing its indicated value; those five may be null, and a
-/// non-null `*out_application_data` / `*out_element_type` / `*out_units` /
-/// `*out_quantity_kind` / `*out_unit_system` must be freed exactly once with
+/// `out_element_type`, `out_units`, `out_quantity_kind`, `out_unit_system`, and
+/// `out_component_field` must be valid for writing its indicated value; those
+/// six may be null, and a non-null `*out_application_data` / `*out_element_type`
+/// / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
+/// `*out_component_field` must be freed exactly once with
 /// `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -3950,6 +4024,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -3993,11 +4068,13 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_single(
             single.units.as_deref(),
             single.quantity_kind.as_deref(),
             single.unit_system,
+            single.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_component_field,
         )
     };
     if code != INFRASTORE_OK {
@@ -4137,8 +4214,8 @@ pub unsafe extern "C" fn infrastore_bulk_result_item_type(
 /// `out_timestamps`, `out_shape`, and `out_data` buffers.
 ///
 ///
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`, and
-/// `out_unit_system` behave as in
+/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+/// `out_unit_system`, and `out_component_field` behave as in
 /// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
 /// them nullable to skip, freed with `infrastore_string_free`.
 /// # Safety
@@ -4163,6 +4240,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -4206,11 +4284,13 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
             series.units.as_deref(),
             series.quantity_kind.as_deref(),
             series.unit_system,
+            series.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_component_field,
         )
     };
     if code != INFRASTORE_OK {
@@ -4245,8 +4325,8 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_non_sequential(
 /// `out_data`, and `out_percentiles` buffers.
 ///
 ///
-/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`, and
-/// `out_unit_system` behave as in
+/// `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+/// `out_unit_system`, and `out_component_field` behave as in
 /// `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
 /// them nullable to skip, freed with `infrastore_string_free`.
 /// # Safety
@@ -4277,6 +4357,7 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let result = match unsafe { result.as_ref() } {
@@ -4332,11 +4413,13 @@ pub unsafe extern "C" fn infrastore_bulk_result_get_forecast(
             data.units(),
             data.quantity_kind(),
             data.unit_system(),
+            data.component_field(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_component_field,
         )
     };
     if code != INFRASTORE_OK {
@@ -4560,6 +4643,8 @@ pub unsafe extern "C" fn infrastore_store_transform_single_time_series(
 /// - `out_quantity_kind` follows the same rules and receives the association's
 ///   quantity kind, and `out_unit_system` its basis as the `natural_units` /
 ///   `component_base` spelling (null when unspecified).
+/// - `out_component_field` follows the same rules and receives the component
+///   field the values vary over time (null when unset).
 /// - `out_units` follows the same rules and receives the association's
 ///   user-declared units label (null when unset). The store never interprets it.
 /// - All returned heap buffers are invalidated after their matching free call
@@ -4610,6 +4695,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -4724,11 +4810,13 @@ pub unsafe extern "C" fn infrastore_store_get_forecast(
             meta.units.as_deref(),
             meta.quantity_kind.as_deref(),
             meta.unit_system,
+            meta.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_component_field,
         )
     };
     if code != INFRASTORE_OK {
@@ -4902,6 +4990,8 @@ unsafe fn emit_forecast_data(
 /// - `out_quantity_kind` follows the same rules and receives the association's
 ///   quantity kind, and `out_unit_system` its basis as the `natural_units` /
 ///   `component_base` spelling (null when unspecified).
+/// - `out_component_field` follows the same rules and receives the component
+///   field the values vary over time (null when unset).
 /// - `out_units` follows the same rules and receives the association's
 ///   user-declared units label (null when unset). The store never interprets it.
 #[unsafe(no_mangle)]
@@ -4940,6 +5030,7 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
     out_units: *mut *mut c_char,
     out_quantity_kind: *mut *mut c_char,
     out_unit_system: *mut *mut c_char,
+    out_component_field: *mut *mut c_char,
 ) -> i32 {
     clear_error();
     let store = match unsafe { handle.as_ref() } {
@@ -5029,11 +5120,13 @@ pub unsafe extern "C" fn infrastore_store_get_forecast_by_key(
             meta.units.as_deref(),
             meta.quantity_kind.as_deref(),
             meta.unit_system,
+            meta.component_field.as_deref(),
             out_application_data,
             out_element_type,
             out_units,
             out_quantity_kind,
             out_unit_system,
+            out_component_field,
         )
     };
     if code != INFRASTORE_OK {
@@ -5372,6 +5465,13 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
             .unwrap_or(Value::Null),
     );
     o.insert(
+        "component_field".into(),
+        m.component_field
+            .clone()
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+    o.insert(
         "application_data".into(),
         m.application_data
             .clone()
@@ -5393,6 +5493,9 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 ///   have no interval and never match an interval filter)
 /// - `features_json` (a JSON object; null or empty = no feature filter; matches as
 ///   a subset, i.e. a key whose features include all the given ones)
+/// - `component_field` (null = no filter; exact, case-sensitive match on the
+///   owning component's field. A row that declares none matches no value, so
+///   this cannot select the rows that left it unset.)
 ///
 /// Returns the JSON through `out_json` as an **owned** allocation the caller
 /// releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -5403,8 +5506,8 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 /// # Safety
 ///
 /// `handle` must be a live store handle. The scalar filter flags/values are plain
-/// scalars. `name` and `features_json` must each be null or a null-terminated
-/// UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
+/// scalars. `name`, `component_field`, and `features_json` must each be null or a
+/// null-terminated UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
 /// `cap` bytes.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
@@ -5420,6 +5523,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5441,6 +5545,7 @@ pub unsafe extern "C" fn infrastore_store_list_keys(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -5476,6 +5581,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5497,6 +5603,7 @@ pub unsafe extern "C" fn infrastore_store_list_time_series(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -5535,6 +5642,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5556,6 +5664,7 @@ pub unsafe extern "C" fn infrastore_store_list_names(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -5590,6 +5699,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5611,6 +5721,7 @@ pub unsafe extern "C" fn infrastore_store_list_owner_types(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -5646,6 +5757,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_removed: *mut u64,
 ) -> i32 {
     clear_error();
@@ -5666,6 +5778,7 @@ pub unsafe extern "C" fn infrastore_store_remove_by_filter(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -5822,9 +5935,9 @@ pub unsafe extern "C" fn infrastore_store_resolve_forecast_key(
 ///
 /// # Safety
 ///
-/// `name` and `features_json` must each be null or a null-terminated UTF-8
-/// string; `resolution` and `interval` must each be null or a null-terminated
-/// ISO-8601 period.
+/// `name`, `component_field`, and `features_json` must each be null or a
+/// null-terminated UTF-8 string; `resolution` and `interval` must each be null or
+/// a null-terminated ISO-8601 period.
 #[allow(clippy::too_many_arguments)]
 unsafe fn build_list_filter(
     has_owner: bool,
@@ -5837,6 +5950,7 @@ unsafe fn build_list_filter(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
 ) -> std::result::Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -5880,6 +5994,14 @@ unsafe fn build_list_filter(
         Ok(None) => {}
         Err(c) => return Err(c),
     }
+    match unsafe { cstr_to_optional_string(component_field) } {
+        Ok(Some(f)) => filter = filter.component_field(f),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("component_field is not valid UTF-8");
+            return Err(c);
+        }
+    }
     let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
         filter = filter.features(features);
@@ -5916,6 +6038,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
     resolution: *const c_char,
     interval: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_json: *mut *mut c_char,
     out_len: *mut u64,
 ) -> i32 {
@@ -5937,6 +6060,7 @@ pub unsafe extern "C" fn infrastore_store_list_array_groups(
             resolution,
             interval,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -7305,8 +7429,9 @@ pub struct InfraStoreForecastReaderHandle {
 }
 
 /// Build a [`core_lib::ListFilter`] from the reader build arguments shared by
-/// both readers (owner / category / name / resolution / features). The
-/// time-series type is set by the caller, not here.
+/// both readers (owner / category / name / resolution / features /
+/// component_field). The time-series type is set by the caller, not here.
+#[allow(clippy::too_many_arguments)]
 unsafe fn reader_filter(
     has_owner: bool,
     owner_id: i64,
@@ -7315,6 +7440,7 @@ unsafe fn reader_filter(
     name: *const c_char,
     resolution: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
 ) -> Result<core_lib::ListFilter, i32> {
     let mut filter = core_lib::ListFilter::new();
     if has_owner {
@@ -7341,6 +7467,14 @@ unsafe fn reader_filter(
     }
     if let Some(p) = unsafe { cstr_to_optional_period(resolution)? } {
         filter = filter.resolution(p);
+    }
+    match unsafe { cstr_to_optional_string(component_field) } {
+        Ok(Some(f)) => filter = filter.component_field(f),
+        Ok(None) => {}
+        Err(c) => {
+            set_error("component_field is not valid UTF-8");
+            return Err(c);
+        }
     }
     let features = unsafe { parse_features_json(features_json) }?;
     if !features.is_empty() {
@@ -7403,6 +7537,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
     name: *const c_char,
     resolution: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_reader: *mut *mut InfraStoreStaticReaderHandle,
 ) -> i32 {
     clear_error();
@@ -7433,6 +7568,7 @@ pub unsafe extern "C" fn infrastore_store_build_static_reader(
             name,
             resolution,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -7771,6 +7907,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
     name: *const c_char,
     resolution: *const c_char,
     features_json: *const c_char,
+    component_field: *const c_char,
     out_reader: *mut *mut InfraStoreForecastReaderHandle,
 ) -> i32 {
     clear_error();
@@ -7801,6 +7938,7 @@ pub unsafe extern "C" fn infrastore_store_build_forecast_reader(
             name,
             resolution,
             features_json,
+            component_field,
         )
     } {
         Ok(f) => f,
@@ -8176,6 +8314,7 @@ mod reader_ffi_tests {
                 ptr::null(),
                 hour.as_ptr(),
                 ptr::null(),
+                ptr::null(),
                 &mut reader,
             )
         };
@@ -8291,6 +8430,7 @@ mod reader_ffi_tests {
                 2, // Deterministic
                 ptr::null(),
                 hour.as_ptr(),
+                ptr::null(),
                 ptr::null(),
                 &mut reader,
             )
@@ -8449,6 +8589,7 @@ mod reader_ffi_tests {
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    ptr::null_mut(),
                 )
             },
             INFRASTORE_OK
@@ -8578,6 +8719,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
                 &mut key,
             )
         };
@@ -8632,6 +8774,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    ptr::null(),
                     &mut key,
                 )
             },
@@ -8665,6 +8808,7 @@ mod abi_tests {
                     &mut application_data_out,
                     ptr::null_mut(), // skip element_type
                     &mut units_out,
+                    ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
@@ -8846,6 +8990,7 @@ mod abi_tests {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_OK, "get_single failed: {}", last_error());
@@ -8988,6 +9133,7 @@ mod abi_tests {
                     ptr::null(),
                     res.as_ptr(),
                     ptr::null(),
+                    ptr::null(),
                     &mut reader,
                 )
             },
@@ -9010,6 +9156,7 @@ mod abi_tests {
                     0,
                     ptr::null(),
                     res.as_ptr(),
+                    ptr::null(),
                     ptr::null(),
                     &mut reader,
                 )
@@ -9098,6 +9245,7 @@ mod abi_tests {
                     0,
                     false,
                     0,
+                    ptr::null(),
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
@@ -9198,6 +9346,7 @@ mod abi_tests {
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
                 &mut key,
             )
         };
@@ -9253,6 +9402,7 @@ mod abi_tests {
                 dims.as_ptr(),
                 bytes.as_ptr(),
                 bytes.len() as u64,
+                ptr::null(),
                 ptr::null(),
                 ptr::null(),
                 ptr::null(),
@@ -9428,6 +9578,7 @@ mod abi_tests {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         assert_eq!(rc, INFRASTORE_ERR_NOT_FOUND);
@@ -9580,6 +9731,7 @@ mod abi_tests {
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),
+                    ptr::null(),
                     &mut key,
                 )
             },
@@ -9598,6 +9750,7 @@ mod abi_tests {
                     0,
                     ptr::null(),
                     res.as_ptr(),
+                    ptr::null(),
                     ptr::null(),
                     &mut reader,
                 )
@@ -9669,6 +9822,7 @@ mod abi_tests {
                     ptr::null(),
                     res.as_ptr(),
                     ptr::null(),
+                    ptr::null(),
                     &mut reader,
                 )
             },
@@ -9734,6 +9888,7 @@ mod abi_tests {
                     2, // Deterministic
                     ptr::null(),
                     res.as_ptr(),
+                    ptr::null(),
                     ptr::null(),
                     &mut freader,
                 )
@@ -9912,6 +10067,7 @@ mod abi_tests {
                     0,
                     false,
                     0,
+                    ptr::null(),
                     ptr::null(),
                     ptr::null(),
                     ptr::null(),

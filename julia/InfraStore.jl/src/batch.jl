@@ -49,6 +49,7 @@ function add_time_series!(
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -73,6 +74,7 @@ function add_time_series!(
         _opt_string_arg(units)::Cstring,
         _opt_string_arg(quantity_kind)::Cstring,
         _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -89,6 +91,7 @@ function add_time_series!(
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -114,6 +117,7 @@ function add_time_series!(
         _opt_string_arg(units)::Cstring,
         _opt_string_arg(quantity_kind)::Cstring,
         _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -130,6 +134,7 @@ function add_time_series!(
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -150,6 +155,7 @@ function add_time_series!(
         units=units,
         quantity_kind=quantity_kind,
         unit_system=unit_system,
+        component_field=component_field,
         application_data=application_data,
         element_type=element_type,
     )
@@ -165,6 +171,7 @@ function add_time_series!(
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -185,6 +192,7 @@ function add_time_series!(
         units=units,
         quantity_kind=quantity_kind,
         unit_system=unit_system,
+        component_field=component_field,
         application_data=application_data,
         element_type=element_type,
     )
@@ -207,6 +215,7 @@ function _batch_add_dense_forecast!(
     units::Union{Nothing, AbstractString}=nothing,
     quantity_kind::Union{Nothing, AbstractString}=nothing,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
     application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
 )
@@ -235,6 +244,7 @@ function _batch_add_dense_forecast!(
         _opt_string_arg(units)::Cstring,
         _opt_string_arg(quantity_kind)::Cstring,
         _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -251,6 +261,7 @@ function add_time_series!(
     units::Union{Nothing, AbstractString}=ts.units,
     quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
     unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
     application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
@@ -280,6 +291,7 @@ function add_time_series!(
         _opt_string_arg(units)::Cstring,
         _opt_string_arg(quantity_kind)::Cstring,
         _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1

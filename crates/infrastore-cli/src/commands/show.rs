@@ -92,6 +92,7 @@ const LIST_HEADERS_WIDE: &[&str] = &[
     "Element Shape",
     "Quantity Kind",
     "Unit System",
+    "Component Field",
     "Application Data",
 ];
 
@@ -128,6 +129,7 @@ fn list_row(m: &TimeSeriesMetadata, wide: bool) -> Vec<String> {
             m.unit_system
                 .map(|u| u.as_str().to_string())
                 .unwrap_or_else(|| "-".to_string()),
+            m.component_field.clone().unwrap_or_else(|| "-".to_string()),
             m.application_data
                 .clone()
                 .unwrap_or_else(|| "-".to_string()),
@@ -172,6 +174,7 @@ fn list_json(m: &TimeSeriesMetadata) -> Value {
         "unit_system".into(),
         json!(m.unit_system.map(|u| u.as_str())),
     );
+    obj.insert("component_field".into(), json!(m.component_field));
     obj.insert("application_data".into(), json!(m.application_data));
     Value::Object(obj)
 }
@@ -426,6 +429,9 @@ pub fn info(
     }
     if let Some(u) = meta.unit_system {
         rows.push(("unit_system".into(), json!(u.as_str())));
+    }
+    if let Some(c) = &meta.component_field {
+        rows.push(("component_field".into(), json!(c)));
     }
     if let Some(lt) = &meta.application_data {
         rows.push(("application_data".into(), json!(lt)));
@@ -869,6 +875,9 @@ fn meta_fields(meta: &TimeSeriesMetadata, arr: &TypedArray, obj: &mut Map<String
     }
     if let Some(u) = meta.unit_system {
         obj.insert("unit_system".into(), json!(u.as_str()));
+    }
+    if let Some(c) = &meta.component_field {
+        obj.insert("component_field".into(), json!(c));
     }
     if let Some(lt) = &meta.application_data {
         obj.insert("application_data".into(), json!(lt));

@@ -222,6 +222,7 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     units             :: Union{Nothing,String}
     quantity_kind     :: Union{Nothing,String}
     unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
+    component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
     application_data  :: Union{Nothing,String}
 end
 ```
@@ -264,7 +265,7 @@ add_time_series!(
     ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
     features::AbstractDict = Dict(), units = nothing,
     quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
-    application_data = ts.application_data,
+    component_field = ts.component_field, application_data = ts.application_data,
 ) -> TimeSeriesKey
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -> SingleTimeSeries
@@ -449,21 +450,21 @@ add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Deterministic;
     features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    application_data=nothing,
+    component_field=nothing, application_data=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Probabilistic;
     features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    application_data=nothing,
+    component_field=nothing, application_data=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Scenarios;
     features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
-    application_data=nothing,
+    component_field=nothing, application_data=nothing,
 ) -> TimeSeriesKey
 ```
 
@@ -747,12 +748,13 @@ close!(store) -> Nothing
 
 ```julia
 list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Vector{KeyRow}
+          name=nothing, resolution=nothing, interval=nothing, features=Dict(),
+          component_field=nothing) -> Vector{KeyRow}
 ```
 
 `list_keys` lists the key of every stored series as `KeyRow` structs (identity plus the per-type
 descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
-`features`; fields that do not apply to a key's type are `nothing`). All seven filters are optional
+`features`; fields that do not apply to a key's type are `nothing`). All eight filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
@@ -765,16 +767,21 @@ and independent, and combine as a conjunction; with none set the whole store is 
 - `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval
   filter).
 - `features` — match keys whose features include all the given entries (subset match).
+- `component_field` — exact, case-sensitive match on the owning component's field (e.g.
+  `"max_active_power"`): every series that varies that field, alone or scoped to one owner. A row
+  that declares no `component_field` matches no value, so this cannot select the rows that left it
+  unset.
 
 Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not on a
 key — read it via `get_metadata` / `list_time_series`.
 
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                    name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Bool
+                    name=nothing, resolution=nothing, interval=nothing, features=Dict(),
+                    component_field=nothing) -> Bool
 ```
 
-`has_any_time_series` is the existence probe over the same seven filters: true iff `list_keys` with
+`has_any_time_series` is the existence probe over the same eight filters: true iff `list_keys` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. `features` is a subset match here,
 unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash —
@@ -782,7 +789,7 @@ and it is the one exception to the index-only guarantee: a non-empty `features` 
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.
 
-`list_array_groups` takes the same seven filters and returns the same row fields as `list_keys`, but
+`list_array_groups` takes the same eight filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves
 to (a `Vector{UInt8}` hashes and compares by content, so it groups directly as a `Dict` key). Rows
 that share a stored array share their `data_hash`: both deduplicated identical arrays and a

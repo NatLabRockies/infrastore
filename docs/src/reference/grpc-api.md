@@ -105,6 +105,9 @@ message TimeSeriesMetadata {
   repeated double percentiles               = 20;  // Probabilistic only
   optional string quantity_kind             = 22;  // QUDT QuantityKind local name
   optional string unit_system               = 23;  // "natural_units" | "component_base"
+  optional string component_field           = 24;  // owning component's field, free-form
+  //   `ListReq.component_field` filters on this. A row that declares none
+  //   matches no value, so it cannot select the rows that left it unset.
 }
 ```
 
@@ -120,6 +123,7 @@ message ListReq {
   Features                features         = 6;   // subset match
   optional OwnerCategory  owner_category   = 7;
   optional string         interval         = 8;   // ISO-8601 duration
+  optional string         component_field  = 9;   // exact, case-sensitive
 }
 message ListResp { repeated TimeSeriesMetadata metadata = 1; }
 

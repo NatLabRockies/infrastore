@@ -1260,7 +1260,8 @@ fn a_read_only_store_rejects_every_write_entry_point() {
 }
 
 /// The descriptive attributes — `element_type`, `units`, `quantity_kind`,
-/// `unit_system`, `application_data` — live on the series, not on the request,
+/// `unit_system`, `component_field`, `application_data` — live on the series,
+/// not on the request,
 /// so a read hands back what a write declared. Exercised against both backends,
 /// so a persist/reopen cycle is covered too.
 #[test]
@@ -1276,6 +1277,7 @@ fn series_descriptors_round_trip_on_the_struct() {
                         .with_units("MW")
                         .with_quantity_kind("ActivePower")
                         .with_unit_system(UnitSystem::ComponentBase)
+                        .with_component_field("max_active_power")
                         .with_application_data("Profile"),
                 ))
                 .unwrap();
@@ -1304,6 +1306,11 @@ fn series_descriptors_round_trip_on_the_struct() {
                 "{backend}"
             );
             assert_eq!(
+                meta.component_field.as_deref(),
+                Some("max_active_power"),
+                "{backend}"
+            );
+            assert_eq!(
                 meta.application_data.as_deref(),
                 Some("Profile"),
                 "{backend}"
@@ -1316,6 +1323,11 @@ fn series_descriptors_round_trip_on_the_struct() {
             assert_eq!(
                 data.unit_system(),
                 Some(UnitSystem::ComponentBase),
+                "{backend}"
+            );
+            assert_eq!(
+                data.component_field(),
+                Some("max_active_power"),
                 "{backend}"
             );
             assert_eq!(data.application_data(), Some("Profile"), "{backend}");
@@ -1332,6 +1344,11 @@ fn series_descriptors_round_trip_on_the_struct() {
                 Some(UnitSystem::ComponentBase),
                 "{backend}"
             );
+            assert_eq!(
+                sliced.component_field(),
+                Some("max_active_power"),
+                "{backend}"
+            );
             assert_eq!(sliced.application_data(), Some("Profile"), "{backend}");
 
             // A bulk read takes the packed fast path, which builds its own
@@ -1345,6 +1362,11 @@ fn series_descriptors_round_trip_on_the_struct() {
                 Some(UnitSystem::ComponentBase),
                 "{backend}"
             );
+            assert_eq!(
+                bulk[0].component_field(),
+                Some("max_active_power"),
+                "{backend}"
+            );
             assert_eq!(bulk[0].application_data(), Some("Profile"), "{backend}");
 
             // Unset stays unset -- the store never invents a label. In
@@ -1356,6 +1378,7 @@ fn series_descriptors_round_trip_on_the_struct() {
             assert_eq!(plain.units(), None, "{backend}");
             assert_eq!(plain.quantity_kind(), None, "{backend}");
             assert_eq!(plain.unit_system(), None, "{backend}");
+            assert_eq!(plain.component_field(), None, "{backend}");
             assert_eq!(plain.application_data(), None, "{backend}");
             assert_eq!(
                 store.get_metadata(bare.identity()).unwrap().unit_system,
@@ -1379,7 +1402,8 @@ fn forecast_descriptors_round_trip_on_the_struct() {
                     TimeSeriesData::Deterministic(det("fc", 1.0))
                         .with_units("MW")
                         .with_quantity_kind("ActivePower")
-                        .with_unit_system(UnitSystem::NaturalUnits),
+                        .with_unit_system(UnitSystem::NaturalUnits)
+                        .with_component_field("rating"),
                 ))
                 .unwrap()
         },
@@ -1392,6 +1416,92 @@ fn forecast_descriptors_round_trip_on_the_struct() {
                 Some(UnitSystem::NaturalUnits),
                 "{backend}"
             );
+            assert_eq!(data.component_field(), Some("rating"), "{backend}");
         },
+    );
+}
+
+/// `component_field` describes the values, so it sits outside the key and
+/// outside both content hashes. Two series that differ only in it are the same
+/// series said twice — and one array shared by owners that call it by different
+/// field names is still stored once.
+#[test]
+fn component_field_is_descriptive_not_identity() {
+    let mut store = create_store(None, true).unwrap();
+
+    let key = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
+                .with_component_field("max_active_power"),
+        ))
+        .unwrap();
+
+    // Same identity, different field name: a duplicate, not a second series.
+    let duplicate = store.add(AddRequest::new(
+        1,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)).with_component_field("rating"),
+    ));
+    assert!(matches!(
+        duplicate,
+        Err(TimeSeriesError::DuplicateTimeSeries)
+    ));
+
+    // A different owner with the same values under a different field name
+    // still content-addresses to the same array.
+    let other = store
+        .add(AddRequest::new(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)).with_component_field("rating"),
+        ))
+        .unwrap();
+    let first = store.get_metadata(key.identity()).unwrap();
+    let second = store.get_metadata(other.identity()).unwrap();
+    assert_eq!(first.data_hash, second.data_hash);
+    assert_eq!(first.component_field.as_deref(), Some("max_active_power"));
+    assert_eq!(second.component_field.as_deref(), Some("rating"));
+}
+
+/// A `DeterministicSingleTimeSeries` is a view of its source, so it inherits the
+/// source's descriptors — including `component_field`, which describes the same
+/// values seen through a forecast window.
+#[test]
+fn transformed_view_inherits_component_field() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 24))
+                .with_component_field("max_active_power"),
+        ))
+        .unwrap();
+
+    store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+
+    let derived = store
+        .list_time_series(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap();
+    assert_eq!(derived.len(), 1);
+    assert_eq!(
+        derived[0].component_field.as_deref(),
+        Some("max_active_power")
     );
 }

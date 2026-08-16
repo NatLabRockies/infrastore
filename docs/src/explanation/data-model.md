@@ -178,8 +178,8 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 time series with one of these names raises `InvalidParameter`:
 
 ```text
-application_data, count, data, data_hash, dtype, element_shape, element_type, ext, features,
-horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
+application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
+features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
 percentiles, quantity_kind, resolution, scenario_count, time_series_type, timestamps, unit_system,
 units
 ```
@@ -258,6 +258,14 @@ Each association can also carry:
   component in its own object graph. Unset means _unspecified_, which is deliberately **not** the
   same as `natural_units` — every association written before this field existed is unset, and
   reading those as natural units would assert a basis nobody declared.
+- **`component_field`** — the field on the owning component whose value these values are the
+  time-varying form of, e.g. `"max_active_power"` or `"rating"`. Free-form and never interpreted: it
+  names a field in the consumer's own object model, which the store has no view of. It records what
+  the values are _for_, where `name` only says which series they are — the two coincide by
+  convention in many models but are not the same thing, since one component may carry several series
+  for one field (a forecast and an actual, a set of weather years) and `name` is part of a series'
+  identity where this is not. Named for the common case; when the owner is a supplemental attribute
+  it names a field on that attribute.
 - **`application_data`** — an opaque, **package-owned** extension payload stored verbatim (typically
   JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
   it, and end users are not expected to set it. Element typing does _not_ live here: that is
@@ -270,9 +278,16 @@ Each association can also carry:
   validates the array's dtype and per-step shape against it. See
   [Element types](../reference/element-types.md).
 
-`units`, `quantity_kind`, `unit_system`, and `application_data` are recorded in metadata and
-returned on read, but they do not affect identity or storage: they are absent from the key and from
-both content hashes, so two series differing only in a descriptor are a duplicate.
+`units`, `quantity_kind`, `unit_system`, `component_field`, and `application_data` are recorded in
+metadata and returned on read, but they do not affect identity or storage: they are absent from the
+key and from both content hashes, so two series differing only in a descriptor are a duplicate.
+
+`component_field` is the one descriptor that is also a **filter** (`ListFilter::component_field`,
+and its equivalent in every binding): "every series that varies this field", alone or scoped to one
+owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single
+row on its own — one component may carry several series for one field, distinguished by name or
+features. It matches exactly and case-sensitively, and a series that declares no `component_field`
+matches no value, so the filter cannot select the rows that left it unset.
 
 ## Associations Between Entities
 

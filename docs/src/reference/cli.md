@@ -398,15 +398,22 @@ catalog.
 flags as filters. Every flag is optional. Only `--feature` may be repeated; the rest take a single
 value:
 
-| Flag                   | Meaning                                                                    |
-| ---------------------- | -------------------------------------------------------------------------- |
-| `--owner-id <I>`       | Owner identifier (`i64` integer).                                          |
-| `--owner-category <C>` | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
-| `--name <N>`           | Series name (exact match).                                                 |
-| `--name-glob <P>`      | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
-| `--type <T>`           | See the type spellings below.                                              |
-| `--resolution <DUR>`   | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
-| `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+| Flag                    | Meaning                                                                    |
+| ----------------------- | -------------------------------------------------------------------------- |
+| `--owner-id <I>`        | Owner identifier (`i64` integer).                                          |
+| `--owner-category <C>`  | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
+| `--name <N>`            | Series name (exact match).                                                 |
+| `--name-glob <P>`       | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
+| `--component-field <F>` | Owning component's field, exact and case-sensitive.                        |
+| `--type <T>`            | See the type spellings below.                                              |
+| `--resolution <DUR>`    | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
+| `--feature key=value`   | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+
+`--component-field` selects every series that varies that field on its owner — the query the
+descriptor exists for. It is descriptive rather than identifying, so it narrows a selector but
+rarely resolves one on its own; and a series that declares no `component_field` matches no value, so
+it cannot select the ones that left it unset. `owners` rejects it (along with `--owner-id`,
+`--name`, `--name-glob`, and `--feature`) rather than silently ignoring it.
 
 If a selector matches more than one series, `infrastore` errors and lists the candidates so the
 query can be narrowed. Each candidate line spells out every field that is part of identity —
@@ -482,6 +489,7 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 | `units`                        | optional                 | Free-form label.                                              |
 | `quantity_kind`                | optional                 | What the values measure, e.g. `ActivePower` (QUDT name).      |
 | `unit_system`                  | optional                 | `natural_units` or `component_base`; unset = unspecified.     |
+| `component_field`              | optional                 | Owning component's field these values vary over time.         |
 | `application_data`             | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
 | `features`                     | optional                 | JSON object; int/float/bool/string values. See below.         |
 | `initial_timestamp`            | all but non-sequential   |                                                               |

@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- left without a CHECK so a third basis can land without bumping
     -- `DATA_FORMAT_VERSION`.
     unit_system       TEXT,
+    -- The field on the owning component (or supplemental attribute) whose value
+    -- these values are the time-varying form of, e.g. 'max_active_power'. Free
+    -- form and never interpreted here: it names a field in the consumer's own
+    -- object model, which this store has no view of. Deliberately separate from
+    -- `name`, which is part of the row's identity and often carries a
+    -- disambiguating suffix; this one records only what the values are for.
+    component_field   TEXT,
     percentiles_json  TEXT,
     -- The logical element type in its canonical string form (`ElementType`):
     -- a dtype spelling for plain scalars, else `tuple(N,dtype)` or one of the
@@ -217,6 +224,28 @@ CREATE INDEX IF NOT EXISTS idx_owner_type     ON time_series_associations(owner_
 CREATE INDEX IF NOT EXISTS idx_category_owner ON time_series_associations(owner_category, owner_id);
 CREATE INDEX IF NOT EXISTS idx_interval       ON time_series_associations(interval);
 
+-- `component_field` filters ("every series that varies max_active_power"), the
+-- same shape of predicate `idx_name` serves for `name`, on the same table and
+-- the same kind of TEXT column — so it earns an index for the same reason, and
+-- is not separately measured.
+--
+-- PARTIAL, unlike every index above, because this column is the only optional
+-- one anything filters on: a store that never sets it (every store written
+-- before the column existed, and every consumer that does not use it) would
+-- otherwise pay index maintenance on every insert to record one NULL per row
+-- and buy nothing. `WHERE component_field IS NOT NULL` makes that case cost
+-- exactly zero entries. SQLite still uses the index for the predicate we
+-- actually issue: `component_field = ?` cannot be true of a NULL whatever the
+-- parameter binds to, so the planner can prove the partial index's condition
+-- (asserted by `component_field_filter_uses_its_partial_index`).
+--
+-- The consequence to know, and the reason `ListFilter::component_field` says
+-- so: this index can never serve "the rows that left it unset". Nothing asks
+-- for that today; a caller that needs it wants an `IS NULL` predicate and a
+-- full index, not this one.
+CREATE INDEX IF NOT EXISTS idx_component_field ON time_series_associations(component_field)
+    WHERE component_field IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
 -- Pairs this catalog with exactly one HDF5 file, whose `catalog_generation`
@@ -340,7 +369,7 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, quantity_kind, unit_system,
+       units, quantity_kind, unit_system, component_field,
        element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
