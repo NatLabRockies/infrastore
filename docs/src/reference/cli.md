@@ -511,9 +511,9 @@ Inside `features`, a name that shadows a time-series or key field (`name`, `reso
 
 Every field above also exists as an `add` flag, for a one-off that does not deserve a file:
 `--owner-id`, `--owner-type`, `--owner-category`, `--name`, `--type`, `--element-type`, `--units`,
-`--quantity-kind`, `--unit-system`, `--application-data`, `--element-shape` (repeatable),
-`--feature` (repeatable), `--initial-timestamp`, `--resolution`, `--horizon`, `--interval`,
-`--count`, `--percentile` (repeatable), `--scenario-count`, `--layout`, `--owner-map`,
+`--quantity-kind`, `--unit-system`, `--component-field`, `--application-data`, `--element-shape`
+(repeatable), `--feature` (repeatable), `--initial-timestamp`, `--resolution`, `--horizon`,
+`--interval`, `--count`, `--percentile` (repeatable), `--scenario-count`, `--layout`, `--owner-map`,
 `--owner-id-from`. The inline form is a shortcut for authoring one descriptor, not a second schema —
 both go down the same code path — so `--descriptor` and the inline flags cannot be combined. Keep
 the descriptor as the repeatable and batch form.
@@ -530,7 +530,8 @@ timestamp,gen_001,gen_002,...,gen_500
 In the default `long` layout every value column is part of _one_ series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. `"layout": "wide"` reads it
 as 500 separate scalar series instead, sharing this descriptor's `name`, `type`, `resolution`,
-`units`, `application_data`, and `features`, and differing only by owner:
+`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`, and `features`, and
+differing only by owner:
 
 ```json
 {

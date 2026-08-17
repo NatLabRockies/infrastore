@@ -68,28 +68,28 @@ standalone `arr_…` dataset each; `0.13.0` replaced the `dtype` column with `el
 names the _logical_ element type and derives the physical dtype from it — see
 [Element types](./element-types.md); `0.12.0` changed `owner_category` and `time_series_type` from
 TEXT names to small INTEGER codes — see [Discriminant encoding](#discriminant-encoding) below;
-`0.11.0` renamed the metadata column `logical_type` to `application_data` — an opaque, package-owned
-extension payload (typically JSON) the store stores verbatim and never interprets; `0.10.0` replaced
-the per-association `features` table with the content-addressed `feature_sets` table below, so a
-feature map is stored once and shared by every association that uses it — dropping the
-`association_id` foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset
-chunking to timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset
-(sized to the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp
-and bulk writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two
-forecasts of one variable that differ only by interval are now distinct series — widening both
-unique indexes (the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`);
-`0.7.0` made `resolution`/`horizon`/`interval` calendar-aware
-[periods](../explanation/data-model.md): they are now encoded as ISO-8601 duration strings (e.g.
-`PT1H`, `P1M`, `P1Y`) rather than integer milliseconds, in both the packed dataset names and the
-SQLite columns, so irregular periods (`Month`/`Quarter`/`Year`) can be represented distinctly from
-fixed spans; `0.6.0` added `owner_category` to the association uniqueness key (so the owner identity
-is the pair `(owner_id, owner_category)`), widening the unique indexes and `idx_owner`; `0.5.0`
-changed the owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the
-Rust port of InfrastructureSystems.jl shipped with — the version that introduced
-`DATA_FORMAT_VERSION` itself; `0.3.0` switched the time unit from nanoseconds to milliseconds,
-renaming the SQLite `*_ns` columns to `*_ms` and encoding the packed dataset name's `{res}` field in
-milliseconds instead of whole seconds; `0.2.0` introduced typed, multi-dimensional arrays and the
-two-mode array layout below; `0.1.0` stored only 1-D `f64`.)
+`0.11.0` renamed the metadata column `logical_type` to `ext` — an opaque, package-owned extension
+payload (typically JSON) the store stores verbatim and never interprets; `0.10.0` replaced the
+per-association `features` table with the content-addressed `feature_sets` table below, so a feature
+map is stored once and shared by every association that uses it — dropping the `association_id`
+foreign key and its `ON DELETE CASCADE`; `0.9.0` changed the packed-dataset chunking to
+timestamp-major `(1, cols, *element_shape)` and made the column count `cols` per-dataset (sized to
+the writing batch) instead of a fixed 1,000, optimizing reads across series by timestamp and bulk
+writes; `0.8.0` added the forecast `interval` to the association uniqueness key — so two forecasts
+of one variable that differ only by interval are now distinct series — widening both unique indexes
+(the `NULL`-folding index now `COALESCE`s `interval` as well as `resolution`); `0.7.0` made
+`resolution`/`horizon`/`interval` calendar-aware [periods](../explanation/data-model.md): they are
+now encoded as ISO-8601 duration strings (e.g. `PT1H`, `P1M`, `P1Y`) rather than integer
+milliseconds, in both the packed dataset names and the SQLite columns, so irregular periods
+(`Month`/`Quarter`/`Year`) can be represented distinctly from fixed spans; `0.6.0` added
+`owner_category` to the association uniqueness key (so the owner identity is the pair
+`(owner_id, owner_category)`), widening the unique indexes and `idx_owner`; `0.5.0` changed the
+owner identifier to a signed 64-bit integer (`owner_id`); `0.4.0` is the baseline the Rust port of
+InfrastructureSystems.jl shipped with — the version that introduced `DATA_FORMAT_VERSION` itself;
+`0.3.0` switched the time unit from nanoseconds to milliseconds, renaming the SQLite `*_ns` columns
+to `*_ms` and encoding the packed dataset name's `{res}` field in milliseconds instead of whole
+seconds; `0.2.0` introduced typed, multi-dimensional arrays and the two-mode array layout below;
+`0.1.0` stored only 1-D `f64`.)
 
 ## Arrays Are Typed and N-Dimensional
 
@@ -564,8 +564,10 @@ SELECT id, owner_id, owner_type,
                              WHEN 4 THEN 'Probabilistic'
                              WHEN 5 THEN 'Scenarios'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
-       name, initial_timestamp, resolution, length, horizon, interval, count,
-       units, element_type, element_shape, application_data,
+       name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, quantity_kind, unit_system, component_field,
+       element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash
