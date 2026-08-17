@@ -5507,8 +5507,9 @@ fn metadata_to_map(m: &core_lib::TimeSeriesMetadata) -> serde_json::Map<String, 
 ///
 /// `handle` must be a live store handle. The scalar filter flags/values are plain
 /// scalars. `name`, `component_field`, and `features_json` must each be null or a
-/// null-terminated UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
-/// `cap` bytes.
+/// null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
+/// and `out_len` for writing one `u64`; on success `*out_json` must be released
+/// exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_keys(
@@ -6022,8 +6023,9 @@ unsafe fn build_list_filter(
 ///
 /// Identical to `infrastore_store_list_keys`: `handle` must be a live store handle;
 /// `name` / `features_json` / `resolution` must each be null or a
-/// null-terminated UTF-8 string; `out_len` must be writable; `buf` must be null
-/// or valid for `cap` bytes.
+/// null-terminated UTF-8 string; `out_json` must be valid for writing one pointer
+/// and `out_len` for writing one `u64`; on success `*out_json` must be released
+/// exactly once with `infrastore_string_free`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn infrastore_store_list_array_groups(

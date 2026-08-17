@@ -1788,8 +1788,9 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  *
  * `handle` must be a live store handle. The scalar filter flags/values are plain
  * scalars. `name`, `component_field`, and `features_json` must each be null or a
- * null-terminated UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
- * `cap` bytes.
+ * null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
+ * and `out_len` for writing one `u64`; on success `*out_json` must be released
+ * exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    bool has_owner,
@@ -1967,8 +1968,9 @@ int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
  *
  * Identical to `infrastore_store_list_keys`: `handle` must be a live store handle;
  * `name` / `features_json` / `resolution` must each be null or a
- * null-terminated UTF-8 string; `out_len` must be writable; `buf` must be null
- * or valid for `cap` bytes.
+ * null-terminated UTF-8 string; `out_json` must be valid for writing one pointer
+ * and `out_len` for writing one `u64`; on success `*out_json` must be released
+ * exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            bool has_owner,
