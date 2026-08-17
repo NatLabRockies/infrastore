@@ -1,0 +1,365 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Benchmarks - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.7.0/docs/src/guides/benchmarks.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h1>
+<p><code>infrastore-bench</code> is a standalone binary (<code>infrastore-bench</code>) for measuring two critical
+performance dimensions: <strong>bulk ingestion</strong> and <strong>simulation-loop reads</strong>.</p>
+<h2 id="build"><a class="header" href="#build">Build</a></h2>
+<pre><code class="language-sh"># Debug build (fast to compile, slower to run)
+cargo build -p infrastore-bench
+
+# Release build (recommended for any real measurement)
+cargo build --release -p infrastore-bench
+</code></pre>
+<p>The binary is placed at <code>target/release/infrastore-bench</code>.</p>
+<h2 id="subcommands"><a class="header" href="#subcommands">Subcommands</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Subcommand</th><th>What it measures</th></tr></thead><tbody>
+<tr><td><code>add</code></td><td><code>add_time_series_bulk</code> throughput — HDF5 packing and SQLite transaction cost</td></tr>
+<tr><td><code>read</code></td><td>Per-timestep simulation I/O — reading all N components at each step t</td></tr>
+<tr><td><code>all</code></td><td>Runs <code>add</code> then <code>read</code> back-to-back</td></tr>
+</tbody></table>
+</div>
+<h2 id="common-flags"><a class="header" href="#common-flags">Common flags</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>--count N</code></td><td>1 000</td><td>Number of components (time series)</td></tr>
+<tr><td><code>--length L</code></td><td>168</td><td>Timesteps per <code>SingleTimeSeries</code>; window count for <code>Deterministic</code></td></tr>
+<tr><td><code>--in-memory</code></td><td>off</td><td>Use an in-memory store — eliminates disk I/O to isolate CPU cost</td></tr>
+<tr><td><code>--path DIR</code></td><td>temp dir</td><td>Directory for on-disk store files</td></tr>
+</tbody></table>
+</div>
+<p>The <code>read</code> and <code>all</code> subcommands also accept <code>--steps T</code> (default: <code>--length</code>) to control how many
+simulation timesteps are benchmarked.</p>
+<h2 id="add-benchmark"><a class="header" href="#add-benchmark">Add benchmark</a></h2>
+<pre><code class="language-sh"># 10 000 components, 1 week hourly, in-memory
+infrastore-bench add --count 10000 --length 168 --in-memory
+
+# 100 000 components, same length, on-disk (tests real I/O + OS page cache)
+infrastore-bench add --count 100000 --length 168
+</code></pre>
+<p>Reports for both <code>SingleTimeSeries</code> and <code>Deterministic</code>:</p>
+<ul>
+<li><strong>Build requests</strong> — time to construct <code>AddRequest</code> objects in memory (array allocation only;
+excluded from the add throughput measurement).</li>
+<li><strong><code>add_time_series_bulk</code></strong> — wall time, items/s, and data MB/s.</li>
+</ul>
+<p><code>SingleTimeSeries</code> arrays are column-packed into HDF5 datasets of up to 1 000 columns each and
+wrapped in a single SQLite transaction; the add benchmark stresses both. <code>Deterministic</code> arrays are
+standalone HDF5 variables; their add cost is dominated by per-variable write overhead and the same
+single-transaction SQLite commit.</p>
+<h2 id="read-benchmark"><a class="header" href="#read-benchmark">Read benchmark</a></h2>
+<pre><code class="language-sh"># 1 000 components, 168 timesteps, in-memory (pure CPU / metadata cost)
+infrastore-bench read --count 1000 --length 168 --in-memory
+
+# Same, but on-disk — store is written, dropped, then reopened read-only
+infrastore-bench read --count 1000 --length 168
+
+# Benchmark only the first 24 simulation steps of a 168-step series
+infrastore-bench read --count 10000 --length 168 --steps 24
+</code></pre>
+<p>The read benchmark simulates the access pattern of an energy-simulation step loop:</p>
+<pre><code>for t in 0..T:
+    for each component key:
+        store.get_time_series(key, time_range=(t₀ + t·Δt, t₀ + (t+1)·Δt))
+</code></pre>
+<p>For on-disk stores the binary flushes, drops, and reopens the store read-only before the timed loop.
+This rebuilds the HDF5 in-memory index and starts the HDF5 chunk cache cold, reflecting real
+simulation startup conditions. The OS page cache may still be warm.</p>
+<p>Reports per-step <strong>min / median / p95 / max</strong> and total <strong>component-reads/s</strong>.</p>
+<blockquote>
+<p><strong>Deterministic note.</strong> The current <code>get_time_series</code> implementation reads the full <code>[H × count]</code>
+array from storage and then slices to the requested window in memory. For large <code>count</code> (e.g. 168
+windows) each single-step read transfers <code>H × count × 8</code> bytes, which is <code>24 × 168 × 8 = 32 KB</code>
+per component. The benchmark output flags this explicitly so the overhead is visible.</p>
+</blockquote>
+<h2 id="interpreting-results"><a class="header" href="#interpreting-results">Interpreting results</a></h2>
+<p>The two metrics to watch:</p>
+<ul>
+<li>
+<p><strong><code>add</code> throughput</strong> drops sharply when the number of items exceeds a SQLite transaction or HDF5
+dataset threshold. If adding 100 000 items is notably slower per-item than adding 10 000, the
+bottleneck is likely the SQLite commit or HDF5 file growth, not array construction.</p>
+</li>
+<li>
+<p><strong>Per-step time</strong> for the read benchmark scales linearly with <code>--count</code>. If the cost per step is
+much higher for on-disk than in-memory, the bottleneck is HDF5 chunk reads or SQLite metadata
+queries rather than Rust overhead. The packed <code>SingleTimeSeries</code> layout chunks <code>(1, cols)</code> — one
+timestamp across every column — so reading one timestamp across many series is a single chunk
+read, while reading one full series touches every chunk band (the slow direction, expected for
+exploration/plotting rather than hot loops).</p>
+</li>
+</ul>
+<h2 id="tracing-spans-for-deeper-diagnosis"><a class="header" href="#tracing-spans-for-deeper-diagnosis">Tracing spans for deeper diagnosis</a></h2>
+<p>When the benchmark numbers show a problem but don't tell you which layer is slow, enable the
+built-in tracing spans with <code>--log-level</code>:</p>
+<pre><code class="language-sh"># Show all debug-level spans from the store core only (least noise)
+infrastore-bench --log-level infrastore_core=debug add --count 100 --in-memory
+
+# Show everything — useful when the bottleneck might be in infrastore-bench itself
+infrastore-bench --log-level debug add --count 100
+</code></pre>
+<p><code>RUST_LOG</code> is also accepted as a fallback when <code>--log-level</code> is not provided.</p>
+<p>The key spans emitted by <code>infrastore-core</code>:</p>
+<div class="table-wrapper"><table><thead><tr><th>Span</th><th>Layer</th><th>Key fields</th></tr></thead><tbody>
+<tr><td><code>add_time_series_bulk</code></td><td><code>Store</code></td><td><code>count</code> — number of items in the bulk request</td></tr>
+<tr><td><code>get_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code>, <code>has_time_range</code></td></tr>
+<tr><td><code>copy_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code> — of the source series</td></tr>
+<tr><td><code>remove_time_series</code></td><td><code>Store</code></td><td><code>owner</code>, <code>name</code></td></tr>
+<tr><td><code>bulk_read</code></td><td><code>Store</code></td><td><code>count</code> — number of keys read in one pass</td></tr>
+<tr><td><code>put_array</code></td><td>HDF5 backend</td><td><code>bytes</code>, <code>packed</code></td></tr>
+<tr><td><code>put_packed</code></td><td>HDF5 backend</td><td><code>bytes</code></td></tr>
+<tr><td><code>put_packed_block</code></td><td>HDF5 backend</td><td><code>n</code> — series written in one batch-sized block</td></tr>
+<tr><td><code>put_standalone</code></td><td>HDF5 backend</td><td><code>bytes</code></td></tr>
+<tr><td><code>get_array</code> / <code>get_slice</code></td><td>HDF5 backend</td><td><code>start</code>, <code>end</code> (slice only)</td></tr>
+<tr><td><code>read_arrays</code></td><td>HDF5 backend</td><td><code>n</code> — arrays fetched in one decompress-once pass</td></tr>
+<tr><td><code>read_index_into</code></td><td>HDF5 backend</td><td><code>n</code>, <code>index</code> — one timestep across <code>n</code> series</td></tr>
+<tr><td><code>read_window_into</code></td><td>HDF5 backend</td><td><code>count_axis</code>, <code>window_index</code></td></tr>
+<tr><td><code>read_locked</code></td><td>HDF5 backend</td><td>—</td></tr>
+<tr><td><code>rebuild_index</code></td><td>HDF5 backend</td><td>— (runs once on <code>Store::open</code>)</td></tr>
+</tbody></table>
+</div>
+<p>Spans nest: a single <code>add_time_series_bulk</code> call groups packed series by shape and emits one
+<code>put_packed_block</code> span per group (filling whole chunks), plus a <code>put_array</code> → <code>put_standalone</code> span
+per standalone item; a single <code>add_time_series</code> call instead emits one <code>put_array</code> → <code>put_packed</code>
+span. This makes it straightforward to see whether time is spent in metadata insertion, HDF5 I/O, or
+the <code>debug_span</code> overhead itself.</p>
+<p>The <code>infrastore</code> CLI supports the same <code>--log-level</code> flag for diagnosing a live store.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/server.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../how-to/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/server.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../how-to/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

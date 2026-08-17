@@ -1,0 +1,653 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Rust - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.7.0/docs/src/guides/rust.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="rust-developer-guide"><a class="header" href="#rust-developer-guide">Rust Developer Guide</a></h1>
+<p>This guide covers using <code>infrastore-core</code> from Rust. For exact signatures see the
+<a href="../reference/rust-api.html">Rust API reference</a>.</p>
+<p>For a runnable end-to-end round-trip, <code>crates/infrastore-core/examples/basic.rs</code> creates an
+in-memory store, adds a <code>SingleTimeSeries</code>, and reads it back:</p>
+<pre><code class="language-sh">cargo run --manifest-path crates/infrastore-core/Cargo.toml --example basic
+</code></pre>
+<h2 id="add-the-dependency"><a class="header" href="#add-the-dependency">Add the Dependency</a></h2>
+<p>The crate is part of this workspace. From another crate in the workspace:</p>
+<pre><code class="language-toml">[dependencies]
+infrastore-core = { path = "../infrastore-core" }
+chrono = "0.4"
+</code></pre>
+<p>You will use <code>chrono::Duration</code>/<code>DateTime&lt;Utc&gt;</code> for time and the crate's
+<a href="../reference/rust-api.html#typedarray-and-dtype"><code>TypedArray</code></a> for values, since those are the types
+the API speaks.</p>
+<h2 id="open-or-create-a-store"><a class="header" href="#open-or-create-a-store">Open or Create a Store</a></h2>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use std::path::Path;
+use infrastore_core::{create_store, open_store};
+
+// In-memory (tests, scratch work): no filesystem I/O.
+let mut store = create_store(None, true)?;
+
+// On disk: writes system.h5 and system.h5.sqlite.
+let mut store = create_store(Some(Path::new("system.h5")), false)?;
+
+// Reopen later, read-only.
+let store = open_store(Path::new("system.h5"), /* read_only */ true)?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="add-a-series"><a class="header" href="#add-a-series">Add a Series</a></h2>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use chrono::{Duration, TimeZone, Utc};
+use infrastore_core::{
+    Features, FeatureValue, OwnerCategory, SingleTimeSeries, TimeSeriesData, TypedArray,
+};
+
+let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+let values: Vec&lt;f64&gt; = (0..24).map(|i| 100.0 + i as f64).collect();
+let data = TypedArray::from_f64(vec![24], &amp;values);   // shape [length]; or [length, k1, ...]
+// The name is part of the series object, not an argument to `add_time_series`.
+let ts = SingleTimeSeries::new(initial, Duration::hours(1), data, "load");
+
+let mut features = Features::new();
+features.insert("model_year".into(), FeatureValue::Int(2030));
+
+let key = store.add_time_series(
+    42,                                     // owner_id
+    "Generator",                            // owner_type
+    OwnerCategory::Component,
+    TimeSeriesData::SingleTimeSeries(ts),
+    features,
+    Some("MW".into()),                      // units
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>add_time_series</code> returns a <a href="../reference/rust-api.html#timeserieskey"><code>TimeSeriesKey</code></a> — keep it to
+re-find the series, or rebuild it from its fields later. Adding a series whose key already exists
+returns <code>TimeSeriesError::DuplicateTimeSeries</code>.</p>
+<h3 id="bulk-inserts"><a class="header" href="#bulk-inserts">Bulk inserts</a></h3>
+<p>For many series at once, <code>add_time_series_bulk</code> takes a <code>Vec&lt;AddRequest&gt;</code> and commits the whole
+batch atomically — any error rolls back every array and association in the call:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::AddRequest;
+
+let keys = store.add_time_series_bulk(vec![
+    AddRequest {
+        owner_id: 42,
+        owner_type: "Generator".into(),
+        owner_category: OwnerCategory::Component,
+        data: TimeSeriesData::SingleTimeSeries(ts_a),   // the series carries its own name
+        features: Features::new(),
+        units: Some("MW".into()),
+        application_data: None,                             // opaque package-owned payload (e.g. JSON)
+    },
+    // ...
+])?;
+<span class="boring">}</span></code></pre></pre>
+<p>A bulk insert is also the <strong>fast write path</strong>: packed <code>SingleTimeSeries</code> are grouped by shape and
+written into batch-sized datasets so the timestamp-major HDF5 chunks are filled whole, rather than a
+slow column-at-a-time write. When you'd rather stream requests instead of building one big <code>Vec</code>,
+use a buffered session — it accumulates in memory and writes the same way on <code>commit</code>, discarding
+the buffer if dropped without committing:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut bulk = store.bulk_add();
+for (owner_id, ts) in many_series {
+    // `add` builds the AddRequest from its parts (application_data = None);
+    // `push` takes a prebuilt AddRequest when you need to set application_data.
+    bulk.add(owner_id, "Generator", OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(ts), Features::new(), Some("MW".into()));
+}
+println!("staging {} series", bulk.len());   // also: bulk.is_empty()
+let keys = bulk.commit()?;                    // consumes the session; keys in push order
+<span class="boring">}</span></code></pre></pre>
+<p><a href="../reference/rust-api.html#bulkadd"><code>BulkAdd</code></a> buffers requests in memory and does no validation or
+I/O until <code>commit</code>, which is all-or-nothing. Dropping the session without committing writes nothing.</p>
+<p>Adding series one at a time with <code>add_time_series</code> instead packs them incrementally into shared
+default-width datasets; that stays space-efficient but writes each column with a read-modify-write,
+so prefer a bulk insert or session when loading in volume.</p>
+<h2 id="read-a-series"><a class="header" href="#read-a-series">Read a Series</a></h2>
+<p>Every lookup method (<code>get_time_series</code>, <code>get_metadata</code>, <code>has_time_series</code>, <code>remove_time_series</code>,
+<code>bulk_read</code>) takes a <code>&amp;KeyIdentity</code> — the identifying tuple inside a key. Call
+<code>TimeSeriesKey::identity()</code> to get it:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let data = store.get_time_series(key.identity(), None)?;
+let single = data.as_single().expect("this key names a SingleTimeSeries");
+println!("{} values starting {}", single.length, single.initial_timestamp);
+<span class="boring">}</span></code></pre></pre>
+<p>Slice on the time axis by passing a range; <code>end</code> is exclusive and the returned series'
+<code>initial_timestamp</code>/<code>length</code> reflect the slice:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let start = Utc.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).unwrap();
+let end   = Utc.with_ymd_and_hms(2024, 1, 1, 12, 0, 0).unwrap();
+let window = store.get_time_series(key.identity(), Some((start, end)))?;
+<span class="boring">}</span></code></pre></pre>
+<p>To read <strong>many whole series at once</strong> — say, loading everything for an interactive plot —
+<code>bulk_read</code> takes a slice of keys and returns a <code>TimeSeriesData</code> per key in order. It reads packed
+<code>SingleTimeSeries</code> in one decompress-once pass per dataset, which is much cheaper than a
+<code>get_time_series</code> per key (a single full-series read otherwise touches every chunk under the
+timestamp-major layout):</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let ids: Vec&lt;_&gt; = keys.iter().map(|k| k.identity()).collect();
+let series = store.bulk_read(&amp;ids)?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="query-metadata"><a class="header" href="#query-metadata">Query Metadata</a></h2>
+<p><code>list_time_series</code> takes a <a href="../reference/rust-api.html#listfilter"><code>ListFilter</code></a> builder; every clause
+is ANDed, and the <code>features</code> clause is a subset match:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{ListFilter, OwnerCategory, TimeSeriesType};
+
+let metas = store.list_time_series(
+    ListFilter::new()
+        .owner_id(42)
+        .owner_category(OwnerCategory::Component)
+        .time_series_type(TimeSeriesType::SingleTimeSeries)
+        .name("load"),
+)?;
+for m in &amp;metas {
+    println!("{} {:?} units={:?}", m.name, m.resolution, m.units);
+}
+
+// All keys for one owner, an existence check, distinct resolutions, counts.
+// The owner is the (owner_id, owner_category) pair.
+let keys = store.get_time_series_keys(42, OwnerCategory::Component)?;
+let present = store.has_time_series(key.identity())?;
+let resolutions = store.get_resolutions(Some(TimeSeriesType::SingleTimeSeries))?;
+let counts = store.get_time_series_counts()?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>list_keys(filter)</code> is the key-centric counterpart of <code>list_time_series</code>, and
+<code>list_keys_with_hash(filter)</code> pairs each key with the 32-byte content hash of the array it resolves
+to, so you can group series that share stored data:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>for (key, hash) in store.list_keys_with_hash(ListFilter::new().owner_id(42))? {
+    println!("{} -&gt; {}", key.identity().name, infrastore_core::hash::hash_hex(&amp;hash));
+}
+<span class="boring">}</span></code></pre></pre>
+<h3 id="the-low-level-read-path"><a class="header" href="#the-low-level-read-path">The low-level read path</a></h3>
+<p>To read values without reconstructing a full <code>SingleTimeSeries</code> — for example when bridging to
+another store that holds its own keys — resolve metadata and fetch the array by hash:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let meta = store.get_metadata(key.identity())?;
+let array = store.get_array_by_hash(&amp;meta.data_hash)?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h2>
+<p>Dense forecasts are written through the generic <code>add_time_series</code> by wrapping a <code>Deterministic</code>,
+<code>Probabilistic</code>, or <code>Scenarios</code> object in <code>TimeSeriesData</code>. Each forecast object holds a
+<code>TypedArray</code> in its native shape (the <a href="../explanation/data-model.html#forecasts">data model</a> lists the
+conventional shapes per type); the store content-addresses it and records the windowing parameters:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{Deterministic, TimeSeriesData, TimeSeriesError, TypedArray};
+
+// A Deterministic forecast: a [H, count, *E] array (here scalar steps, so [H, count]).
+let (horizon_count, count) = (24, 7);
+let values: Vec&lt;f64&gt; = vec![0.0; horizon_count * count];   // row-major, shape (horizon_count, count)
+let data = TypedArray::from_f64(vec![horizon_count, count], &amp;values);
+
+// `new` returns Result&lt;_, String&gt;; map it if your function returns TimeSeriesError.
+let forecast = Deterministic::new(
+    initial, Duration::hours(1),      // initial_timestamp, resolution
+    Duration::hours(24),              // horizon
+    Duration::hours(24),              // interval
+    count,
+    data,
+    "load_forecast",                  // name
+).map_err(TimeSeriesError::InvalidParameter)?;
+
+let key = store.add_time_series(
+    42,                               // owner_id (i64)
+    "Generator",
+    OwnerCategory::Component,
+    TimeSeriesData::Deterministic(forecast),
+    Features::new(),
+    Some("MW".into()),                // units
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>Probabilistic::new</code> additionally takes the <code>percentiles</code> vector, and <code>Scenarios::new</code> takes a
+<code>scenario_count</code>; wrap them in <code>TimeSeriesData::Probabilistic</code> / <code>TimeSeriesData::Scenarios</code> the
+same way.</p>
+<p>A <code>DeterministicSingleTimeSeries</code> is not added directly. Call <code>transform_single_time_series</code> to
+derive one from every stored <code>SingleTimeSeries</code> (it shares the backing array and derives <code>count</code>
+from the series length); it returns the number of series transformed. The trailing <code>owner_category</code>
+and <code>resolution</code> arguments are optional filters that restrict which series are transformed:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let n = store.transform_single_time_series(
+    Duration::hours(24),                 // horizon
+    Duration::hours(24),                 // interval
+    Some(OwnerCategory::Component),      // owner_category filter (None = every category)
+    Some(Duration::hours(1).into()),     // resolution filter (Option&lt;Period&gt;; None = every one)
+)?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>get_time_series</code> reconstructs forecasts too, returning a <code>TimeSeriesData::Deterministic</code>,
+<code>Probabilistic</code>, or <code>Scenarios</code> variant (a <code>DeterministicSingleTimeSeries</code> is synthesized into a
+<code>Deterministic</code>). Match on the variant or use the <code>as_deterministic</code> / <code>as_probabilistic</code> /
+<code>as_scenarios</code> accessors:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>if let Some(d) = store.get_time_series(key.identity(), None)?.as_deterministic() {
+    // d.data is the TypedArray; d.horizon, d.interval, d.count carry the forecast parameters
+}
+<span class="boring">}</span></code></pre></pre>
+<p>The low-level path is still available when you only need the raw array: <code>get_metadata</code> exposes
+<code>horizon</code>, <code>interval</code>, <code>count</code>, and <code>percentiles</code>, and <code>get_array_by_hash</code> returns the <code>TypedArray</code>
+in its stored shape (<code>to_f64_vec</code> returns a <code>Result&lt;_, String&gt;</code>, so map the error if your function
+returns <code>TimeSeriesError</code>):</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let meta = store.get_metadata(key.identity())?;
+let arr = store.get_array_by_hash(&amp;meta.data_hash)?;   // arr.shape == [horizon_count, count]
+let values = arr.to_f64_vec().map_err(TimeSeriesError::InvalidParameter)?;
+<span class="boring">}</span></code></pre></pre>
+<p>When a forecast is addressed by its attributes rather than by a key you already hold, use
+<code>resolve_forecast_key</code>: it resolves
+<code>(owner_id, owner_category, name, resolution, interval, features)</code> plus a requested <code>TimeSeriesType</code>
+to the single matching key, erroring with <code>NotFound</code> if nothing matches and <code>InvalidParameter</code> if
+the request is ambiguous. Requesting <code>TimeSeriesType::Deterministic</code> matches a stored
+<code>Deterministic</code> <em>or</em> a <code>DeterministicSingleTimeSeries</code>, so callers need not know which one is
+stored; the returned key's <code>time_series_type</code> reports the form that matched:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::TimeSeriesType;
+
+let key = store.resolve_forecast_key(
+    42,
+    OwnerCategory::Component,
+    "load_forecast",
+    None,                                  // resolution: Option&lt;Period&gt; (None = any)
+    None,                                  // interval: Option&lt;Period&gt; (None = any)
+    Features::new(),
+    TimeSeriesType::Deterministic,
+)?;
+<span class="boring">}</span></code></pre></pre>
+<h2 id="copy-remove-and-maintain"><a class="header" href="#copy-remove-and-maintain">Copy, Remove, and Maintain</a></h2>
+<p><code>copy_time_series</code> re-points an existing association at another owner, optionally renaming it. It
+writes a metadata row only — arrays are content-addressed, so no data is duplicated — and it
+preserves the source's <code>time_series_type</code> (a <code>DeterministicSingleTimeSeries</code> stays one instead of
+being materialized into a dense <code>Deterministic</code>, which is what a read-then-write copy would
+produce):</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let copied = store.copy_time_series(
+    key.identity(),
+    99,                    // dst_owner_id
+    "Generator",           // dst_owner_type
+    Some("load_copy"),     // new_name; None keeps the source name
+)?;
+<span class="boring">}</span></code></pre></pre>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>store.remove_time_series(key.identity())?;   // one series
+// The owner is the (owner_id, owner_category) pair.
+store.clear_time_series(Some((42, OwnerCategory::Component)))?;  // all series for an owner
+store.clear_time_series(None)?;        // everything
+
+let report = store.compact()?;         // reports reusable slots
+let integrity = store.verify_integrity()?;  // arrays only; catalog not checked
+assert!(integrity.errors.is_empty());
+<span class="boring">}</span></code></pre></pre>
+<p>Removal is <a href="../explanation/content-addressing.html#deletion-is-reference-counted">reference-counted</a>:
+a shared array survives until its last referencing key is gone. <code>count_array_references(&amp;hash)</code>
+returns the <code>(SingleTimeSeries, DeterministicSingleTimeSeries)</code> association counts on one array,
+which is how you tell whether removing a <code>SingleTimeSeries</code> would orphan a forecast derived from it.</p>
+<h2 id="associations"><a class="header" href="#associations">Associations</a></h2>
+<p>Two catalog tables record relationships between entities the store does not otherwise model, wholly
+independently of time series: which supplemental attributes are attached to which components, and
+directed parent/child edges between components. Removing a time series never touches either, and
+vice versa — see
+<a href="../explanation/data-model.html#associations-between-entities">Associations Between Entities</a>.</p>
+<p>Attachments are keyed on the <code>(component_id, attribute_id)</code> pair. The type names ride along for
+filtering and are not part of identity, so re-attaching the same pair under different type names is
+a duplicate and fails with <code>DuplicateAssociation</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{SupplementalAttributeAssociation, SupplementalAttributeFilter};
+
+store.add_supplemental_attribute_association(SupplementalAttributeAssociation {
+    component_id: 42,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+})?;
+
+// Bulk add is one all-or-nothing transaction.
+store.add_supplemental_attribute_associations(vec![SupplementalAttributeAssociation {
+    component_id: 43,
+    component_type: "Generator".into(),
+    attribute_id: 100,
+    attribute_type: "GeographicInfo".into(),
+}])?;
+<span class="boring">}</span></code></pre></pre>
+<p>Filters are all-optional and ANDed; the default matches everything, which is what makes a bulk
+export/import round trip. Queries run in both directions:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// The attributes on one component...
+let attrs =
+    store.list_supplemental_attribute_ids(&amp;SupplementalAttributeFilter::new().component_id(42))?;
+assert_eq!(attrs, vec![100]);
+
+// ...and the components carrying one attribute.
+let owners =
+    store.list_components_with_attributes(&amp;SupplementalAttributeFilter::new().attribute_id(100))?;
+assert_eq!(owners, vec![42, 43]);
+
+// `*_types` filters take CONCRETE type names, rendered as SQL `IN (…)`. Expanding an
+// abstract type into its subtypes is the caller's job — the store has no type hierarchy.
+// An empty list is a deliberate "none of these" and matches nothing.
+let geo = SupplementalAttributeFilter::new().attribute_types(["GeographicInfo"]);
+assert_eq!(store.count_supplemental_attributes(&amp;geo)?, 1);   // distinct attributes
+assert_eq!(store.count_components_with_attributes(&amp;geo)?, 2); // distinct components
+
+for row in store.supplemental_attribute_summary()? {
+    println!("{} on {}: {}", row.attribute_type, row.component_type, row.count);
+}
+
+// Removal returns a count. Matching nothing is `Ok(0)`, not an error: assert on the
+// count yourself if you expected a hit.
+let removed = store
+    .remove_supplemental_attribute_associations(&amp;SupplementalAttributeFilter::new().component_id(43))?;
+assert_eq!(removed, 1);
+<span class="boring">}</span></code></pre></pre>
+<p>Parent/child edges work the same way, except that identity is the <strong>ordered</strong> pair — the reverse of
+an edge is a different edge — and both endpoints are always components, so there is no category:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::{ParentChildAssociation, ParentChildFilter};
+
+store.add_parent_child_association(ParentChildAssociation {
+    parent_id: 42,
+    parent_type: "Generator".into(),
+    child_id: 7,
+    child_type: "Bus".into(),
+})?;
+
+assert_eq!(store.list_children(&amp;ParentChildFilter::new().parent_id(42))?, vec![7]);
+assert_eq!(store.list_parents(&amp;ParentChildFilter::new().child_id(7))?, vec![42]);
+
+// Renumbering a component rewrites both ends of every edge in one statement, so an
+// edge that names it twice is counted once.
+let updated = store.replace_parent_child_component_id(42, 99)?;
+assert_eq!(updated, 1);
+<span class="boring">}</span></code></pre></pre>
+<p>Neither table is reachable over gRPC or the <code>infrastore</code> CLI.</p>
+<h2 id="persist-to-disk"><a class="header" href="#persist-to-disk">Persist to Disk</a></h2>
+<p>The HDF5 backend buffers writes. Call <code>flush</code> before copying the files for backup:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>store.flush()?;   // H5Fflush; afterwards system.h5 + system.h5.sqlite can be copied as a pair
+<span class="boring">}</span></code></pre></pre>
+<p><code>persist_to</code> writes the whole store to a new path — both halves of the artifact, <code>path</code> and
+<code>&lt;path&gt;.sqlite</code>, overwriting anything already there. It works for an on-disk store (it flushes and
+copies the pair) <em>and</em> for an in-memory store, which is how you materialize a scratch store built
+with <code>create_store(None, true)</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let mut store = create_store(None, true)?;   // in-memory
+// ... add series ...
+store.persist_to(Path::new("system.h5"))?;   // writes system.h5 + system.h5.sqlite
+<span class="boring">}</span></code></pre></pre>
+<p>Always keep the <code>.h5</code> and <code>.h5.sqlite</code> files together — neither is usable alone.</p>
+<h2 id="error-handling"><a class="header" href="#error-handling">Error Handling</a></h2>
+<p>Every fallible method returns <code>Result&lt;T, TimeSeriesError&gt;</code>. Match on the variant to react:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::TimeSeriesError;
+
+match store.get_time_series(key.identity(), None) {
+    Ok(data) =&gt; { /* ... */ }
+    Err(TimeSeriesError::NotFound) =&gt; { /* missing */ }
+    Err(TimeSeriesError::ReadOnlyStore) =&gt; unreachable!("this is a read"),
+    Err(e) =&gt; return Err(e.into()),
+}
+<span class="boring">}</span></code></pre></pre>
+<h2 id="threading"><a class="header" href="#threading">Threading</a></h2>
+<p><code>Store</code> is <code>Send</code> but <strong>not</strong> <code>Sync</code>: the SQLite catalog holds a <code>rusqlite::Connection</code>, which is
+not shareable across threads. A store can therefore be <em>moved</em> into another thread, but it cannot be
+shared by reference — not even for concurrent reads.</p>
+<p>To use one store from several threads, wrap it in external synchronization and serialize every
+access, reads included: <code>Arc&lt;Mutex&lt;Store&gt;&gt;</code> (this is exactly what the gRPC server does). The library
+does not coordinate multiple <em>processes</em> writing the same files either.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../guides/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../guides/python.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../guides/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../guides/python.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>

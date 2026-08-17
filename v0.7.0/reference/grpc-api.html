@@ -1,0 +1,480 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>gRPC API - infrastore Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Time-series storage for power-systems and energy simulations, with Rust, Python, and Julia bindings">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="../custom.css">
+        <link rel="stylesheet" href="../pagetoc.css">
+        <link rel="stylesheet" href="../version-selector.css">
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">infrastore Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/NatLabRockies/infrastore/tree/v0.7.0/docs/src/reference/grpc-api.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="grpc-api"><a class="header" href="#grpc-api">gRPC API</a></h1>
+<p>The proto contract lives at <code>proto/infrastore/v1/store.proto</code> and is compiled into
+<code>infrastore-proto</code> with <code>tonic</code>. The service is <strong>read-only</strong> — every write operation (add, remove,
+clear, compact) requires local filesystem access and is intentionally absent.</p>
+<p>The <a href="../explanation/data-model.html#associations-between-entities">association catalogs</a> are absent
+too, reads included: no message or RPC covers <code>supplemental_attribute_associations</code> or
+<code>parent_child_associations</code>. Consumers of those tables work against a local <code>Store</code>.</p>
+<ul>
+<li><strong>Package:</strong> <code>infrastore.v1</code></li>
+<li><strong>Service:</strong> <code>CatalogStore</code></li>
+</ul>
+<h2 id="methods"><a class="header" href="#methods">Methods</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>RPC</th><th>Request</th><th>Response</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>ListTimeSeries</code></td><td><code>ListReq</code></td><td><code>ListResp</code></td><td>List metadata matching a filter</td></tr>
+<tr><td><code>GetTimeSeries</code></td><td><code>GetReq</code></td><td><code>GetResp</code></td><td>Fetch one series' values</td></tr>
+<tr><td><code>GetTimeSeriesKeys</code></td><td><code>KeysReq</code></td><td><code>KeysResp</code></td><td>List keys for an owner</td></tr>
+<tr><td><code>GetResolutions</code></td><td><code>ResolutionsReq</code></td><td><code>ResolutionsResp</code></td><td>Distinct resolutions present</td></tr>
+<tr><td><code>GetCounts</code></td><td><code>CountsReq</code></td><td><code>CountsResp</code></td><td>Aggregate counts</td></tr>
+<tr><td><code>GetForecastParameters</code></td><td><code>ForecastParamsReq</code></td><td><code>ForecastParamsResp</code></td><td>Horizon, interval, count, resolution</td></tr>
+<tr><td><code>HasTimeSeries</code></td><td><code>HasReq</code></td><td><code>HasResp</code></td><td>Existence check</td></tr>
+<tr><td><code>VerifyIntegrity</code></td><td><code>VerifyReq</code></td><td><code>VerifyResp</code></td><td>Recompute and compare stored hashes</td></tr>
+<tr><td><code>ListKeys</code></td><td><code>ListKeysReq</code></td><td><code>ListKeysResp</code></td><td>Full keys (opt. content hash) by filter</td></tr>
+<tr><td><code>GetMetadata</code></td><td><code>KeyReq</code></td><td><code>TimeSeriesMetadata</code></td><td>Metadata for one key</td></tr>
+<tr><td><code>BulkRead</code></td><td><code>BulkReadReq</code></td><td><code>BulkReadResp</code></td><td>Fetch many series at once (opt. range)</td></tr>
+<tr><td><code>GetDetailedCounts</code></td><td><code>EmptyReq</code></td><td><code>DetailedCountsResp</code></td><td>Distinct owners/arrays per kind</td></tr>
+<tr><td><code>GetCountsByType</code></td><td><code>EmptyReq</code></td><td><code>CountsByTypeResp</code></td><td>Association count per type</td></tr>
+<tr><td><code>ListOwnerIds</code></td><td><code>ListOwnerIdsReq</code></td><td><code>ListOwnerIdsResp</code></td><td>Distinct owner ids in a category</td></tr>
+<tr><td><code>GetIntervals</code></td><td><code>IntervalsReq</code></td><td><code>IntervalsResp</code></td><td>Distinct forecast intervals</td></tr>
+<tr><td><code>GetStaticSummary</code></td><td><code>EmptyReq</code></td><td><code>StaticSummaryResp</code></td><td>Grouped static-series summary</td></tr>
+<tr><td><code>GetForecastSummary</code></td><td><code>EmptyReq</code></td><td><code>ForecastSummaryResp</code></td><td>Grouped forecast summary</td></tr>
+<tr><td><code>CheckStaticConsistency</code></td><td><code>ConsistencyReq</code></td><td><code>ConsistencyResp</code></td><td>Per-resolution static-grid check</td></tr>
+<tr><td><code>ResolveForecastKey</code></td><td><code>ResolveForecastKeyReq</code></td><td><code>ResolveForecastKeyResp</code></td><td>Attributes + type → concrete key</td></tr>
+</tbody></table>
+</div>
+<p><code>TimeSeriesKey</code> messages returned by <code>GetTimeSeriesKeys</code>, <code>ListKeys</code>, and <code>ResolveForecastKey</code> now
+carry the per-variant descriptive snapshot (<code>initial_timestamp_rfc3339</code>, <code>length</code>, <code>horizon</code>,
+<code>count</code>) in addition to the identity tuple, so <code>RemoteClient</code> reconstructs the full core
+<code>TimeSeriesKey</code> enum.</p>
+<h2 id="common-messages"><a class="header" href="#common-messages">Common Messages</a></h2>
+<pre><code class="language-proto">enum TimeSeriesType {
+  SINGLE_TIME_SERIES               = 0;
+  NON_SEQUENTIAL_TIME_SERIES       = 1;
+  DETERMINISTIC                    = 2;
+  DETERMINISTIC_SINGLE_TIME_SERIES = 3;
+  PROBABILISTIC                    = 4;
+  SCENARIOS                        = 5;
+}
+
+enum OwnerCategory { COMPONENT = 0; SUPPLEMENTAL_ATTRIBUTE = 1; }
+
+message FeatureValue {
+  oneof value {
+    int64  int_value   = 1;
+    double float_value = 2;
+    bool   bool_value  = 3;
+    string str_value   = 4;
+  }
+}
+
+message Features { map&lt;string, FeatureValue&gt; entries = 1; }
+
+message TimeSeriesKey {
+  int64          owner_id         = 1;
+  TimeSeriesType time_series_type = 2;
+  string         name             = 3;
+  string         resolution       = 4;   // ISO-8601 duration; empty = unset
+  Features       features         = 5;
+  OwnerCategory  owner_category   = 6;   // part of the owner identity / key
+  string         interval         = 7;   // ISO-8601 duration; empty = unset
+  // Descriptive snapshot (NOT part of the identity); variant implied by type.
+  optional string initial_timestamp_rfc3339 = 8;
+  optional uint64 length                     = 9;
+  optional string horizon                    = 10;  // ISO-8601 duration
+  optional uint64 count                      = 11;
+}
+
+message TimeSeriesMetadata {
+  int64           owner_id                  = 1;
+  string          owner_type                = 2;
+  OwnerCategory   owner_category            = 3;
+  TimeSeriesType  time_series_type          = 4;
+  string          name                      = 5;
+  bytes           data_hash                 = 6;   // 32 bytes
+  // Temporal fields are `optional` so genuine values (e.g. length == 0) decode
+  // correctly rather than colliding with a zero/empty sentinel.
+  optional string initial_timestamp_rfc3339 = 7;
+  optional string resolution                = 8;   // ISO-8601 duration
+  optional uint64 length                    = 9;
+  optional string horizon                   = 10;  // ISO-8601 duration
+  optional string interval                  = 11;  // ISO-8601 duration
+  optional uint64 count                     = 12;
+  repeated string timestamps_rfc3339        = 13;
+  Features        features                  = 14;
+  optional string units                     = 16;
+  string          element_type              = 21;  // canonical element-type string
+  // (17 is reserved: the former int32 dtype code)
+  repeated uint64 element_shape             = 18;  // per-step trailing dims
+  optional string application_data          = 19;  // opaque package-owned payload
+  repeated double percentiles               = 20;  // Probabilistic only
+  optional string quantity_kind             = 22;  // QUDT QuantityKind local name
+  optional string unit_system               = 23;  // "natural_units" | "component_base"
+  optional string component_field           = 24;  // owning component's field, free-form
+  //   `ListReq.component_field` filters on this. A row that declares none
+  //   matches no value, so it cannot select the rows that left it unset.
+}
+</code></pre>
+<h2 id="request--response-messages"><a class="header" href="#request--response-messages">Request / Response Messages</a></h2>
+<pre><code class="language-proto">message ListReq {
+  optional int64          owner_id         = 1;
+  optional string         owner_type       = 2;
+  optional TimeSeriesType time_series_type = 3;
+  optional string         name             = 4;
+  optional string         resolution       = 5;   // ISO-8601 duration
+  Features                features         = 6;   // subset match
+  optional OwnerCategory  owner_category   = 7;
+  optional string         interval         = 8;   // ISO-8601 duration
+  optional string         component_field  = 9;   // exact, case-sensitive
+}
+message ListResp { repeated TimeSeriesMetadata metadata = 1; }
+
+message GetReq {
+  TimeSeriesKey   key           = 1;
+  optional string start_rfc3339 = 2;   // optional time-axis slice; all-or-nothing with end
+  optional string end_rfc3339   = 3;
+}
+message GetResp {
+  string          initial_timestamp_rfc3339 = 1;
+  string          resolution                = 2;   // ISO-8601 duration
+  uint64          length                    = 3;
+  repeated uint64 shape                     = 4;   // array dimensions (multi-dim supported)
+  reserved 5;                                      // was: repeated double values
+  TimeSeriesType  time_series_type          = 6;
+  repeated string timestamps_rfc3339        = 7;   // set for NonSequentialTimeSeries
+  string          element_type              = 16;  // canonical element-type string
+  // (8 is reserved: the former int32 dtype code)
+  bytes           value_bytes               = 9;   // raw little-endian, row-major
+  string          application_data              = 10;
+  // Forecast-specific fields (populated for Deterministic / Probabilistic / Scenarios).
+  string          horizon                   = 11;  // ISO-8601 duration
+  string          interval                  = 12;  // ISO-8601 duration
+  uint64          count                     = 13;
+  repeated double percentiles               = 14;  // Probabilistic only
+  uint64          scenario_count            = 15;  // Scenarios only
+}
+
+message KeysReq  { int64 owner_id = 1; OwnerCategory owner_category = 2; }
+message KeysResp { repeated TimeSeriesKey keys = 1; }
+
+message ResolutionsReq  { optional TimeSeriesType time_series_type = 1; }
+message ResolutionsResp { repeated string resolution = 1; }   // ISO-8601 durations
+
+message CountsReq  {}
+message CountsResp {
+  int64 components_with_time_series = 1;
+  int64 static_time_series          = 2;
+  int64 forecasts                   = 3;
+}
+
+message ForecastParamsReq  {
+  optional string resolution = 1;   // ISO-8601 duration filter
+  optional string interval   = 2;   // ISO-8601 duration filter
+}
+message ForecastParamsResp {
+  optional string horizon                   = 1;   // ISO-8601 duration
+  optional string interval                  = 2;   // ISO-8601 duration
+  optional uint64 count                     = 3;
+  optional string resolution                = 4;   // ISO-8601 duration
+  optional string initial_timestamp_rfc3339 = 5;
+}
+
+message HasReq  { TimeSeriesKey key = 1; }
+message HasResp { bool present = 1; }
+
+message VerifyReq  {}
+message VerifyResp { repeated string errors = 1; }
+</code></pre>
+<h3 id="getreq-time-slice"><a class="header" href="#getreq-time-slice"><code>GetReq</code> Time Slice</a></h3>
+<p><code>start_rfc3339</code> and <code>end_rfc3339</code> are <strong>all-or-nothing</strong>: supply both to request a time-axis slice,
+or neither to fetch the whole series. Setting exactly one is rejected with <code>InvalidArgument</code>
+(<code>"start_rfc3339 and end_rfc3339 must be supplied together"</code>). Each value must parse as RFC 3339; a
+malformed timestamp is also <code>InvalidArgument</code>.</p>
+<h2 id="forecasts-over-grpc"><a class="header" href="#forecasts-over-grpc">Forecasts Over gRPC</a></h2>
+<p>The service is read-only, but its read surface covers dense forecasts. Forecast associations created
+through the <a href="./rust-api.html#forecasts">Rust core</a> or <a href="./c-abi.html#forecasts">C ABI</a> appear in
+<code>ListTimeSeries</code> — <code>TimeSeriesMetadata</code> carries <code>horizon</code>, <code>interval</code> (ISO-8601 durations), <code>count</code>,
+and (for <code>Probabilistic</code>) <code>percentiles</code> — and <code>GetCounts</code> includes them in <code>forecasts</code>.</p>
+<p><code>GetTimeSeries</code> returns forecast values too. For a <code>Deterministic</code>, <code>DeterministicSingleTimeSeries</code>
+(synthesized into <code>Deterministic</code>), <code>Probabilistic</code>, or <code>Scenarios</code> key it fills the <code>GetResp</code> array
+fields (<code>value_bytes</code> + <code>element_type</code>), the window parameters (<code>horizon</code>, <code>interval</code>, <code>count</code>), and
+the <code>percentiles</code> (<code>Probabilistic</code>) or <code>scenario_count</code> (<code>Scenarios</code>); the client reconstructs the
+matching type. Arrays are dtype-generic on the wire — <code>value_bytes</code> is the raw little-endian buffer
+and <code>element_type</code> says both what the elements mean and, through it, their physical dtype
+(<code>f64</code>/<code>f32</code>/<code>i64</code>/…, or a composite kind like <code>piecewise_linear</code>), so non-<code>f64</code> arrays survive the
+round trip without coercion. One caveat:</p>
+<ul>
+<li><strong><code>application_data</code> is not carried in <code>GetResp</code>.</strong> The opaque package-owned payload is returned
+by <code>ListTimeSeries</code> (on <code>TimeSeriesMetadata</code>) but left empty by <code>GetTimeSeries</code>, so a value
+fetched directly by key comes back without it.</li>
+</ul>
+<h2 id="authentication"><a class="header" href="#authentication">Authentication</a></h2>
+<p>When the server is configured with <code>method = "api_key"</code>, clients must send the key in the
+<strong><code>x-api-key</code></strong> request metadata (header). The server checks the supplied key against every
+configured key of the same length without early-exit, so a match is not leaked by timing; the
+comparison is not blinded against the supplied key's <em>length</em>, which is treated as non-secret. A
+missing or wrong key is rejected before the RPC runs. With <code>method = "none"</code> no metadata is
+required. See <a href="./server-config.html">Server Configuration</a>.</p>
+<h2 id="rust-client"><a class="header" href="#rust-client">Rust Client</a></h2>
+<p><code>infrastore-server</code> ships an async <code>RemoteClient</code> that mirrors the read methods and returns core
+types, mapping gRPC <code>Status</code> codes back onto the <code>TimeSeriesError</code> taxonomy:</p>
+<div class="table-wrapper"><table><thead><tr><th>gRPC <code>Code</code></th><th><code>TimeSeriesError</code></th></tr></thead><tbody>
+<tr><td><code>NotFound</code></td><td><code>NotFound</code></td></tr>
+<tr><td><code>AlreadyExists</code></td><td><code>DuplicateTimeSeries</code></td></tr>
+<tr><td><code>InvalidArgument</code></td><td><code>InvalidParameter(message)</code></td></tr>
+<tr><td><code>FailedPrecondition</code></td><td><code>InvalidParameter(message)</code></td></tr>
+<tr><td><code>DataLoss</code></td><td><code>IntegrityError(message)</code></td></tr>
+<tr><td>anything else</td><td><code>ConnectionError(code: message)</code></td></tr>
+</tbody></table>
+</div>
+<p><code>ConnectionError</code> is only the fallback arm, so a remote <code>NotFound</code> or a rejected argument surfaces
+with the same variant a local <code>Store</code> would return.</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>use infrastore_core::OwnerCategory;
+use infrastore_server::client::RemoteClient;
+
+let client = RemoteClient::connect("http://127.0.0.1:50051".into()).await?;
+let counts = client.get_counts().await?;
+let keys = client.get_time_series_keys(42, OwnerCategory::Component).await?;
+let data = client.get_time_series(&amp;keys[0], None).await?;
+<span class="boring">}</span></code></pre></pre>
+<p><code>RemoteClient</code> methods: <code>connect</code>, <code>from_channel</code>, <code>list_time_series</code>, <code>list_keys</code>, <code>get_metadata</code>,
+<code>get_time_series</code>, <code>bulk_read</code>, <code>get_time_series_keys</code>, <code>get_resolutions</code>, <code>get_intervals</code>,
+<code>get_counts</code>, <code>counts_by_type</code>, <code>time_series_counts_detailed</code>, <code>get_forecast_parameters</code>,
+<code>static_summary</code>, <code>forecast_summary</code>, <code>list_owner_ids</code>, <code>has_time_series</code>,
+<code>check_static_consistency</code>, <code>resolve_forecast_key</code>, <code>verify_integrity</code> — the full read surface
+described above. See the <a href="../guides/server.html">gRPC Server guide</a> for end-to-end usage and adding an
+API key to client requests.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../reference/c-abi.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../reference/server-config.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../reference/c-abi.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../reference/server-config.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="../mermaid.min.js"></script>
+        <script src="../mermaid-init.js"></script>
+        <script src="../pagetoc.js"></script>
+        <script src="../version-selector.js"></script>
+
+
+
+    </div>
+    </body>
+</html>
