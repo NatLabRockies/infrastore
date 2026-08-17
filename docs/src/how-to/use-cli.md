@@ -11,7 +11,7 @@ Grab a prebuilt archive from the
 statically linked against HDF5, so there is nothing else to install:
 
 ```sh
-VERSION=v0.6.0    # pick a release from the Releases page
+VERSION=v0.7.0    # pick a release from the Releases page
 curl -fsSLO https://github.com/NatLabRockies/infrastore/releases/download/$VERSION/infrastore-aarch64-apple-darwin.tar.gz
 tar xzf infrastore-aarch64-apple-darwin.tar.gz
 ```
