@@ -53,9 +53,18 @@ pub struct InlineArgs {
     /// Units label, e.g. MW.
     #[arg(long, help_heading = "Inline descriptor")]
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload.
+    /// Quantity kind the values measure, e.g. ActivePower.
     #[arg(long, help_heading = "Inline descriptor")]
-    pub ext: Option<String>,
+    pub quantity_kind: Option<String>,
+    /// Unit basis: natural_units or component_base.
+    #[arg(long, help_heading = "Inline descriptor")]
+    pub unit_system: Option<String>,
+    /// Component field these values vary over time, e.g. max_active_power.
+    #[arg(long, help_heading = "Inline descriptor")]
+    pub component_field: Option<String>,
+    /// Opaque, package-owned payload.
+    #[arg(long, help_heading = "Inline descriptor")]
+    pub application_data: Option<String>,
     /// Per-timestep element shape, repeatable: --element-shape 3 --element-shape 2.
     #[arg(long, help_heading = "Inline descriptor")]
     pub element_shape: Vec<usize>,
@@ -113,7 +122,10 @@ impl InlineArgs {
             || self.ts_type.is_some()
             || self.element_type.is_some()
             || self.units.is_some()
-            || self.ext.is_some()
+            || self.quantity_kind.is_some()
+            || self.unit_system.is_some()
+            || self.component_field.is_some()
+            || self.application_data.is_some()
             || !self.element_shape.is_empty()
             || !self.feature.is_empty()
             || self.initial_timestamp.is_some()
@@ -156,7 +168,10 @@ impl InlineArgs {
                 .clone()
                 .ok_or("an inline add requires --element-type (e.g. f64)")?,
             units: self.units.clone(),
-            ext: self.ext.clone(),
+            quantity_kind: self.quantity_kind.clone(),
+            unit_system: self.unit_system.clone(),
+            component_field: self.component_field.clone(),
+            application_data: self.application_data.clone(),
             csv: Some(csv.display().to_string()),
             element_shape: self.element_shape.clone(),
             features,

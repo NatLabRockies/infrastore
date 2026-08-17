@@ -1,5 +1,5 @@
 """Tests for the Phase-3 Python surface: readers, discovery/removal/rename,
-richer metadata rows, transform params, ext, key set semantics."""
+richer metadata rows, transform params, application_data, key set semantics."""
 
 from __future__ import annotations
 
@@ -35,18 +35,101 @@ def _det(name: str) -> Deterministic:
     return Deterministic(_t0(), timedelta(hours=1), timedelta(hours=2), timedelta(hours=1), 3, data, name)
 
 
-def test_add_ext_and_get_metadata():
+def test_add_application_data_and_get_metadata():
     store = Store.create(in_memory=True)
     key = store.add_time_series(
         owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
-        time_series=_sts("load", 10.0), units="MW", ext="Profile",
+        time_series=_sts("load", 10.0), units="MW", application_data="Profile",
     )
     meta = store.get_metadata(key)
     assert meta["units"] == "MW"
-    assert meta["ext"] == "Profile"
+    assert meta["application_data"] == "Profile"
     assert meta["element_type"] == "f64"
     assert meta["element_shape"] == []
     assert meta["initial_timestamp"] is not None
+
+
+def test_unit_descriptors_round_trip():
+    store = Store.create(in_memory=True)
+    key = store.add_time_series(
+        owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+        time_series=_sts("load", 10.0), units="MW",
+        quantity_kind="ActivePower", unit_system="component_base",
+        component_field="max_active_power",
+    )
+    meta = store.get_metadata(key)
+    assert meta["quantity_kind"] == "ActivePower"
+    assert meta["unit_system"] == "component_base"
+    assert meta["component_field"] == "max_active_power"
+    # The list row is the same record, so it must agree with the point lookup.
+    row = store.list_time_series()[0]
+    assert row["unit_system"] == "component_base"
+    assert row["component_field"] == "max_active_power"
+
+
+
+def test_component_field_filter():
+    store = Store.create(in_memory=True)
+    for owner, name, field in [
+        (1, "max_active_power", "max_active_power"),
+        (1, "rating", "rating"),
+        (2, "max_active_power", "max_active_power"),
+        (3, "legacy", None),
+    ]:
+        kwargs = {"component_field": field} if field else {}
+        store.add_time_series(
+            owner_id=owner, owner_type="Generator",
+            owner_category=OwnerCategory.Component,
+            time_series=_sts(name, float(owner)), **kwargs,
+        )
+
+    # One field, every component that varies it.
+    keys = store.list_keys(component_field="max_active_power")
+    assert sorted(k.owner_id for k in keys) == [1, 2]
+
+    # Composes with the owner scope.
+    scoped = store.list_keys(owner_id=1, component_field="max_active_power")
+    assert len(scoped) == 1
+
+    # Exact and case-sensitive; no glob semantics.
+    assert store.list_keys(component_field="max_active") == []
+    assert store.list_keys(component_field="Max_Active_Power") == []
+
+    # A row that declares none is unreachable through this filter.
+    assert store.list_keys(component_field="legacy") == []
+
+    # It reaches the reader filter too, which is the columnar sweep case.
+    reader = store.build_static_reader(
+        timedelta(hours=1), component_field="max_active_power"
+    )
+    assert sum(len(g["keys"]) for g in reader.groups()) == 2
+
+
+def test_unit_system_unset_is_unspecified_not_natural_units():
+    # Omitting the basis records nothing. Reading it back as "natural_units"
+    # would assert a basis the writer never declared -- and would silently
+    # mislabel per-unit values written by an older build.
+    store = Store.create(in_memory=True)
+    key = store.add_time_series(
+        owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+        time_series=_sts("load", 10.0), units="MW",
+    )
+    meta = store.get_metadata(key)
+    assert meta["unit_system"] is None
+    assert meta["quantity_kind"] is None
+    assert meta["component_field"] is None
+
+
+def test_unknown_unit_system_is_rejected():
+    # Raising beats degrading to None: a misspelled basis that silently became
+    # "unspecified" would leave per-unit values indistinguishable from
+    # undeclared ones.
+    store = Store.create(in_memory=True)
+    with pytest.raises(InvalidParameterError):
+        store.add_time_series(
+            owner_id=1, owner_type="Generator", owner_category=OwnerCategory.Component,
+            time_series=_sts("load", 10.0), unit_system="system_base",
+        )
 
 
 def test_bulk_read_time_range():
@@ -251,7 +334,8 @@ def test_list_time_series_new_fields_and_interval_filter():
     assert len(rows) == 1
     row = rows[0]
     for field in ("initial_timestamp", "horizon", "interval", "count",
-                  "percentiles", "element_type", "element_shape", "ext"):
+                  "percentiles", "element_type", "element_shape", "application_data",
+                  "quantity_kind", "unit_system", "component_field"):
         assert field in row
     assert row["interval"] == "PT1H"
     # No forecast at a different interval.

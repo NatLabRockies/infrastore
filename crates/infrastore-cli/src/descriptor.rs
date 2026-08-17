@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use infrastore_core::{
-    AddRequest, Deterministic, Features, NonSequentialTimeSeries, Probabilistic, Scenarios,
-    SingleTimeSeries, TimeSeriesData, TimeSeriesType,
+    AddRequest, Descriptors, Deterministic, ElementType, Features, NonSequentialTimeSeries,
+    Probabilistic, Scenarios, SingleTimeSeries, TimeSeriesData, TimeSeriesType, UnitSystem,
 };
 use serde::Deserialize;
 
@@ -71,8 +71,16 @@ pub struct Descriptor {
     /// physical dtype the CSV cells are parsed as is derived from it.
     pub element_type: String,
     pub units: Option<String>,
-    /// Opaque, package-owned extension payload stored verbatim on the metadata row.
-    pub ext: Option<String>,
+    /// What kind of physical quantity the values measure (e.g. `"ActivePower"`).
+    /// Free-form; QUDT `QuantityKind` local names are the recommended vocabulary.
+    pub quantity_kind: Option<String>,
+    /// `"natural_units"` or `"component_base"`. Absent means unspecified.
+    pub unit_system: Option<String>,
+    /// The field on the owning component whose value these values are the
+    /// time-varying form of (e.g. `"max_active_power"`). Free-form.
+    pub component_field: Option<String>,
+    /// Opaque, package-owned payload stored verbatim on the metadata row.
+    pub application_data: Option<String>,
     /// CSV data path, relative to the descriptor file. May be overridden by `--csv`.
     pub csv: Option<String>,
     #[serde(default)]
@@ -356,6 +364,29 @@ impl Descriptor {
         Ok(out)
     }
 
+    /// The descriptive attributes this descriptor declares, which are set on
+    /// the series rather than on the request.
+    ///
+    /// `unit_system` is validated here rather than by serde so an unknown
+    /// spelling names the valid ones in the error, instead of producing serde's
+    /// "unknown variant" against a field the user cannot see the type of.
+    fn descriptors(&self, element_type: ElementType) -> Result<Descriptors, String> {
+        let unit_system = match self.unit_system.as_deref() {
+            None => None,
+            Some(s) => Some(UnitSystem::parse(s).ok_or_else(|| {
+                format!("invalid unit_system {s:?}; expected natural_units or component_base")
+            })?),
+        };
+        Ok(Descriptors {
+            element_type,
+            units: self.units.clone(),
+            quantity_kind: self.quantity_kind.clone(),
+            unit_system,
+            component_field: self.component_field.clone(),
+            application_data: self.application_data.clone(),
+        })
+    }
+
     /// Build the core [`AddRequest`]s this descriptor describes by reading the
     /// companion CSV and assembling the matching [`TimeSeriesData`] variants.
     ///
@@ -409,9 +440,9 @@ impl Descriptor {
         let csv = csv_io::read_csv(&csv_path, layout.leading_cols())?;
 
         let mut data = self.build_data(ts_type, dtype, per_step, &csv, layout)?;
-        // The descriptor's `element_type`, `units`, and `ext` describe the
+        // The descriptor's `element_type`, `units`, and `application_data` describe the
         // series, so they are set on it rather than on the request.
-        data.set_descriptors(element_type, self.units.clone(), self.ext.clone());
+        data.set_descriptors(self.descriptors(element_type)?);
 
         Ok(AddRequest {
             owner_id,
@@ -538,7 +569,7 @@ impl Descriptor {
                     ))
                 }
             };
-            data.set_descriptors(element_type, self.units.clone(), self.ext.clone());
+            data.set_descriptors(self.descriptors(element_type)?);
             out.push(AddRequest {
                 owner_id,
                 owner_type,

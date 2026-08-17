@@ -90,11 +90,17 @@ struct SingleTimeSeries{T, N}
     "Association name (required; the same array may be stored under different names)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing, String}
+    application_data::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
     "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
     units::Union{Nothing, String}
+    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
+    quantity_kind::Union{Nothing, String}
+    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
+    unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -104,18 +110,24 @@ function SingleTimeSeries(
     resolution,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing, AbstractString}=nothing,
+    application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
     units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return SingleTimeSeries{eltype(data), ndims(data)}(
         initial,
         resolution,
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(ext),
+        _maybe_string(application_data),
         _maybe_string(element_type),
         _maybe_string(units),
+        _maybe_string(quantity_kind),
+        _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -128,11 +140,17 @@ struct NonSequentialTimeSeries{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing, String}
+    application_data::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
     "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
     units::Union{Nothing, String}
+    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
+    quantity_kind::Union{Nothing, String}
+    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
+    unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 # Infer `{T,N}` from the value array; views/ranges are normalized to a concrete
@@ -142,9 +160,12 @@ function NonSequentialTimeSeries(
     timestamps,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing, AbstractString}=nothing,
+    application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
     units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     length(timestamps) == size(data, 1) ||
         throw(InvalidParameterError("timestamp count must match data length"))
@@ -155,9 +176,12 @@ function NonSequentialTimeSeries(
         Vector{DateTime}(timestamps),
         arr,
         String(name),
-        _maybe_string(ext),
+        _maybe_string(application_data),
         _maybe_string(element_type),
         _maybe_string(units),
+        _maybe_string(quantity_kind),
+        _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -182,11 +206,17 @@ struct Deterministic{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing, String}
+    application_data::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
     "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
     units::Union{Nothing, String}
+    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
+    quantity_kind::Union{Nothing, String}
+    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
+    unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 function Deterministic(
@@ -197,9 +227,12 @@ function Deterministic(
     count,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing, AbstractString}=nothing,
+    application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
     units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Deterministic{eltype(data), ndims(data)}(
         initial,
@@ -209,9 +242,12 @@ function Deterministic(
         Int(count),
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(ext),
+        _maybe_string(application_data),
         _maybe_string(element_type),
         _maybe_string(units),
+        _maybe_string(quantity_kind),
+        _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -227,11 +263,17 @@ struct Probabilistic{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing, String}
+    application_data::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
     "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
     units::Union{Nothing, String}
+    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
+    quantity_kind::Union{Nothing, String}
+    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
+    unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 function Probabilistic(
@@ -243,9 +285,12 @@ function Probabilistic(
     percentiles,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing, AbstractString}=nothing,
+    application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
     units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Probabilistic{eltype(data), ndims(data)}(
         initial,
@@ -256,9 +301,12 @@ function Probabilistic(
         Vector{Float64}(percentiles),
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(ext),
+        _maybe_string(application_data),
         _maybe_string(element_type),
         _maybe_string(units),
+        _maybe_string(quantity_kind),
+        _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 
@@ -274,11 +322,17 @@ struct Scenarios{T, N}
     "Association name (required)."
     name::String
     "Opaque, package-owned extension payload (typically JSON) the binding writes and reads to reconstruct domain objects; the store never interprets it."
-    ext::Union{Nothing, String}
+    application_data::Union{Nothing, String}
     "Canonical `element_type` string, or `nothing` for plain scalars of `eltype(data)`."
     element_type::Union{Nothing, String}
     "User-declared units label for the values (e.g. `\"MW\"`), or `nothing`. Set at construction and returned on read; the store never interprets or validates it, and it is never part of a series' identity."
     units::Union{Nothing, String}
+    "What kind of physical quantity the values measure (e.g. `\"ActivePower\"`), or `nothing`. Free-form; QUDT `QuantityKind` local names are the recommended vocabulary. It separates active from reactive power, which dimensional analysis alone cannot, and it is the only record of what per-unit values measure."
+    quantity_kind::Union{Nothing, String}
+    "Which basis the values are expressed in (a `UnitSystem`), or `nothing` for unspecified -- which is not the same as `NaturalUnits`."
+    unit_system::Union{Nothing, UnitSystem}
+    "The field on the owning component whose value these values are the time-varying form of (e.g. `\"max_active_power\"`), or `nothing`. Free-form and never interpreted by the store: it names a field in the consumer's own object model. Descriptive, so it is never part of a series' identity."
+    component_field::Union{Nothing, String}
 end
 
 # `scenario_count` defaults to the leading axis of `data`.
@@ -290,9 +344,12 @@ function Scenarios(
     count,
     data::AbstractArray,
     name::AbstractString;
-    ext::Union{Nothing, AbstractString}=nothing,
+    application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
     units::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
 )
     return Scenarios{eltype(data), ndims(data)}(
         initial,
@@ -303,9 +360,12 @@ function Scenarios(
         size(data, 1),
         data isa Array ? data : Array(data),
         String(name),
-        _maybe_string(ext),
+        _maybe_string(application_data),
         _maybe_string(element_type),
         _maybe_string(units),
+        _maybe_string(quantity_kind),
+        _unit_system(unit_system),
+        _maybe_string(component_field),
     )
 end
 

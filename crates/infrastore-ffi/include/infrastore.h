@@ -275,7 +275,9 @@ void infrastore_store_free(struct InfraStore *handle);
  * Add a SingleTimeSeries to the store.
  *
  * `features_json`, when non-null, is parsed as a JSON object whose values must be int, float,
- * bool, or string. `ext` and `units` are optional.
+ * bool, or string. `application_data`, `units`, `quantity_kind`, `unit_system`, and
+ * `component_field` are optional; `component_field` names the field on the owning component
+ * whose value these values are the time-varying form of.
  *
  * # Safety
  *
@@ -297,9 +299,12 @@ int32_t infrastore_store_add_single(struct InfraStore *handle,
                                     const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr,
                                     uint64_t data_byte_len,
-                                    const char *ext,
+                                    const char *application_data,
                                     const char *features_json,
                                     const char *units,
+                                    const char *quantity_kind,
+                                    const char *unit_system,
+                                    const char *component_field,
                                     struct InfraStoreKey **out_key);
 
 /**
@@ -325,9 +330,12 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
                                             const uint64_t *dims_ptr,
                                             const uint8_t *data_ptr,
                                             uint64_t data_byte_len,
-                                            const char *ext,
+                                            const char *application_data,
                                             const char *features_json,
                                             const char *units,
+                                            const char *quantity_kind,
+                                            const char *unit_system,
+                                            const char *component_field,
                                             struct InfraStoreKey **out_key);
 
 /**
@@ -346,8 +354,8 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * `*out_shape` with `infrastore_buffer_free_i64` and `*out_data` with
  * `infrastore_buffer_free_u8`, each using its returned length.
  *
- * `out_ext`, when non-null, receives the association's opaque extension payload
- * from the metadata row: null when the series carries no `ext`, otherwise an
+ * `out_application_data`, when non-null, receives the association's opaque extension payload
+ * from the metadata row: null when the series carries no `application_data`, otherwise an
  * owned C string the caller must free with `infrastore_string_free`.
  *
  * `out_element_type`, when non-null, receives the canonical `element_type`
@@ -355,6 +363,13 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * string the caller must free the same way. It is what tells a caller how to
  * read the returned bytes as domain values; `out_dtype` is only their physical
  * width.
+ *
+ * `out_quantity_kind`, when non-null, receives the association's quantity kind,
+ * and `out_unit_system` its basis as the `natural_units` / `component_base`
+ * spelling — null when unspecified, which is not the same as natural units.
+ * `out_component_field`, when non-null, receives the component field the values
+ * vary over time. All three are owned C strings freed with
+ * `infrastore_string_free`.
  *
  * `out_units`, when non-null, receives the association's units label: null when
  * the series carries none, otherwise an owned C string freed the same way.
@@ -365,10 +380,12 @@ int32_t infrastore_store_add_non_sequential(struct InfraStore *handle,
  * # Safety
  *
  * `handle` and `key` must be live handles created by this library. Every output pointer except
- * `out_ext`, `out_element_type`, and `out_units` must be valid for writing its indicated value;
- * those three may be null. The returned shape and data buffers must each be released exactly once
- * with the matching free function and returned length, and a non-null `*out_ext` /
- * `*out_element_type` / `*out_units` exactly once with `infrastore_string_free`.
+ * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+ * `out_unit_system`, and `out_component_field` must be valid for writing its
+ * indicated value; those six may be null. The returned shape and data buffers must each be released exactly once
+ * with the matching free function and returned length, and a non-null `*out_application_data` /
+ * `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
+ * `*out_component_field` exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     const struct InfraStoreKey *key,
@@ -382,9 +399,12 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
                                     uint64_t *out_shape_len,
                                     uint8_t **out_data,
                                     uint64_t *out_data_byte_len,
-                                    char **out_ext,
+                                    char **out_application_data,
                                     char **out_element_type,
-                                    char **out_units);
+                                    char **out_units,
+                                    char **out_quantity_kind,
+                                    char **out_unit_system,
+                                    char **out_component_field);
 
 /**
  * Fetch a NonSequentialTimeSeries by key.
@@ -397,8 +417,8 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
  * N-dimensional per-step element shape, e.g. a `(length, k)` FunctionData encoding); `out_dtype`
  * and `out_data` carry the row-major element bytes.
  *
- * `out_ext`, when non-null, receives the association's opaque extension payload
- * from the metadata row: null when the series carries no `ext`, otherwise an
+ * `out_application_data`, when non-null, receives the association's opaque extension payload
+ * from the metadata row: null when the series carries no `application_data`, otherwise an
  * owned C string the caller must free with `infrastore_string_free` — the same
  * convention as `infrastore_store_get_single`. (Earlier revisions copied it into a
  * caller-sized buffer, which invited silent truncation.)
@@ -406,6 +426,12 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
  * `out_element_type`, when non-null, receives the canonical `element_type` string as an owned C
  * string the caller must free with `infrastore_string_free`. It is what says how to read the
  * bytes as domain values.
+ *
+ * `out_quantity_kind`, when non-null, receives the association's quantity kind, and
+ * `out_unit_system` its basis as the `natural_units` / `component_base` spelling — null when
+ * unspecified, which is not the same as natural units. `out_component_field`, when non-null,
+ * receives the component field the values vary over time. All three are owned C strings freed
+ * with `infrastore_string_free`.
  *
  * `out_units`, when non-null, receives the association's user-declared units label as an owned C
  * string freed the same way; it is null when the series carries none. The store never interprets
@@ -417,10 +443,12 @@ int32_t infrastore_store_get_single(const struct InfraStore *handle,
  * # Safety
  *
  * `handle` and `key` must be live handles created by this library. Every output pointer except
- * `out_ext`, `out_element_type`, and `out_units` must be valid for writing its indicated value;
- * those three may be null to skip them. Returned buffers must each be released exactly once with
- * the matching free function and returned length, and a non-null `*out_ext` /
- * `*out_element_type` / `*out_units` exactly once with `infrastore_string_free`.
+ * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+ * `out_unit_system`, and `out_component_field` must be valid for writing its
+ * indicated value; those six may be null to skip them. Returned buffers must each be released exactly once with
+ * the matching free function and returned length, and a non-null `*out_application_data` /
+ * `*out_element_type` / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
+ * `*out_component_field` exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
                                             const struct InfraStoreKey *key,
@@ -434,9 +462,12 @@ int32_t infrastore_store_get_non_sequential(const struct InfraStore *handle,
                                             uint64_t *out_shape_len,
                                             uint8_t **out_data,
                                             uint64_t *out_data_byte_len,
-                                            char **out_ext,
+                                            char **out_application_data,
                                             char **out_element_type,
-                                            char **out_units);
+                                            char **out_units,
+                                            char **out_quantity_kind,
+                                            char **out_unit_system,
+                                            char **out_component_field);
 
 /**
  * Remove the time series identified by `key`.
@@ -869,7 +900,7 @@ int32_t infrastore_store_persist_catalog(struct InfraStore *handle);
  * `owner_category`, `time_series_type`, `name`, `data_hash` (64-character hex),
  * `initial_timestamp_ms`, `resolution`, `horizon`, `interval`, `count`,
  * `length`, `percentiles`, `dtype`, `element_shape`, `features`, `units`, and
- * `ext`, with the fields that do not apply to the key's type set to `null`.
+ * `application_data`, with the fields that do not apply to the key's type set to `null`.
  * That is the whole `TimeSeriesMetadata` the core holds for the association, so
  * this one export serves every time series type — static and forecast alike.
  * Returns `INFRASTORE_ERR_NOT_FOUND` when the key names no stored association.
@@ -955,6 +986,7 @@ int32_t infrastore_store_has_any_by_filter(const struct InfraStore *handle,
                                            const char *resolution,
                                            const char *interval,
                                            const char *features_json,
+                                           const char *component_field,
                                            bool *out_present);
 
 /**
@@ -1040,9 +1072,12 @@ int32_t infrastore_store_add_forecast(struct InfraStore *handle,
                                       const uint64_t *dims_ptr,
                                       const uint8_t *data_ptr,
                                       uint64_t data_byte_len,
-                                      const char *ext,
+                                      const char *application_data,
                                       const char *features_json,
                                       const char *units,
+                                      const char *quantity_kind,
+                                      const char *unit_system,
+                                      const char *component_field,
                                       struct InfraStoreKey **out_key);
 
 /**
@@ -1074,9 +1109,12 @@ int32_t infrastore_store_add_probabilistic(struct InfraStore *handle,
                                            const uint64_t *dims_ptr,
                                            const uint8_t *data_ptr,
                                            uint64_t data_byte_len,
-                                           const char *ext,
+                                           const char *application_data,
                                            const char *features_json,
                                            const char *units,
+                                           const char *quantity_kind,
+                                           const char *unit_system,
+                                           const char *component_field,
                                            struct InfraStoreKey **out_key);
 
 /**
@@ -1124,9 +1162,12 @@ int32_t infrastore_batch_add_single(struct InfraStoreBatch *batch,
                                     const uint64_t *dims_ptr,
                                     const uint8_t *data_ptr,
                                     uint64_t data_byte_len,
-                                    const char *ext,
+                                    const char *application_data,
                                     const char *features_json,
-                                    const char *units);
+                                    const char *units,
+                                    const char *quantity_kind,
+                                    const char *unit_system,
+                                    const char *component_field);
 
 /**
  * Append a NonSequentialTimeSeries to a batch. Arguments match
@@ -1152,9 +1193,12 @@ int32_t infrastore_batch_add_non_sequential(struct InfraStoreBatch *batch,
                                             const uint64_t *dims_ptr,
                                             const uint8_t *data_ptr,
                                             uint64_t data_byte_len,
-                                            const char *ext,
+                                            const char *application_data,
                                             const char *features_json,
-                                            const char *units);
+                                            const char *units,
+                                            const char *quantity_kind,
+                                            const char *unit_system,
+                                            const char *component_field);
 
 /**
  * Append a dense forecast (`ts_type` 2=Deterministic or 5=Scenarios) to a
@@ -1184,9 +1228,12 @@ int32_t infrastore_batch_add_forecast(struct InfraStoreBatch *batch,
                                       const uint64_t *dims_ptr,
                                       const uint8_t *data_ptr,
                                       uint64_t data_byte_len,
-                                      const char *ext,
+                                      const char *application_data,
                                       const char *features_json,
-                                      const char *units);
+                                      const char *units,
+                                      const char *quantity_kind,
+                                      const char *unit_system,
+                                      const char *component_field);
 
 /**
  * Append a `Probabilistic` forecast to a batch. Arguments match
@@ -1217,9 +1264,12 @@ int32_t infrastore_batch_add_probabilistic(struct InfraStoreBatch *batch,
                                            const uint64_t *dims_ptr,
                                            const uint8_t *data_ptr,
                                            uint64_t data_byte_len,
-                                           const char *ext,
+                                           const char *application_data,
                                            const char *features_json,
-                                           const char *units);
+                                           const char *units,
+                                           const char *quantity_kind,
+                                           const char *unit_system,
+                                           const char *component_field);
 
 /**
  * Submit every request in `batch` through one all-or-nothing bulk add. On
@@ -1282,18 +1332,21 @@ int64_t infrastore_bulk_result_len(const struct InfraStoreBulkReadHandle *result
  * `infrastore_string_free`, `infrastore_buffer_free_i64`, and `infrastore_buffer_free_u8`. The handle
  * is not consumed, so an element may be read more than once.
  *
- * `out_ext`, `out_element_type`, and `out_units` each receive an owned C string
+ * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+ * `out_unit_system`, and `out_component_field` each receive an owned C string
  * (null when that attribute is unset), freed with `infrastore_string_free`. Any
- * of the three may be null to skip it. They carry the same values a per-key
+ * of the six may be null to skip it. They carry the same values a per-key
  * read returns: the attributes live on the series, so both paths agree.
  *
  * # Safety
  *
  * `result` must be a live handle from `infrastore_store_bulk_read_single` and `index`
- * must be less than its length. Every output pointer except `out_ext`,
- * `out_element_type`, and `out_units` must be valid for writing its indicated
- * value; those three may be null, and a non-null `*out_ext` /
- * `*out_element_type` / `*out_units` must be freed exactly once with
+ * must be less than its length. Every output pointer except `out_application_data`,
+ * `out_element_type`, `out_units`, `out_quantity_kind`, `out_unit_system`, and
+ * `out_component_field` must be valid for writing its indicated value; those
+ * six may be null, and a non-null `*out_application_data` / `*out_element_type`
+ * / `*out_units` / `*out_quantity_kind` / `*out_unit_system` /
+ * `*out_component_field` must be freed exactly once with
  * `infrastore_string_free`.
  */
 int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle *result,
@@ -1305,9 +1358,12 @@ int32_t infrastore_bulk_result_get_single(const struct InfraStoreBulkReadHandle 
                                           uint64_t *out_shape_len,
                                           uint8_t **out_data,
                                           uint64_t *out_data_byte_len,
-                                          char **out_ext,
+                                          char **out_application_data,
                                           char **out_element_type,
-                                          char **out_units);
+                                          char **out_units,
+                                          char **out_quantity_kind,
+                                          char **out_unit_system,
+                                          char **out_component_field);
 
 /**
  * Read many series of *any* variant at once, optionally sliced to a time range.
@@ -1352,12 +1408,13 @@ int32_t infrastore_bulk_result_item_type(const struct InfraStoreBulkReadHandle *
 /**
  * Read a `NonSequentialTimeSeries` element out of a bulk-read result. The
  * out-params mirror `infrastore_store_get_non_sequential` except there is no
- * `ext` (a bulk read carries the array data, not the metadata row;
+ * `application_data` (a bulk read carries the array data, not the metadata row;
  * fetch it per-key with `infrastore_store_get_metadata` if needed). The caller owns the
  * `out_timestamps`, `out_shape`, and `out_data` buffers.
  *
  *
- * `out_ext`, `out_element_type`, and `out_units` behave as in
+ * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+ * `out_unit_system`, and `out_component_field` behave as in
  * `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
  * them nullable to skip, freed with `infrastore_string_free`.
  * # Safety
@@ -1375,9 +1432,12 @@ int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkRea
                                                   uint64_t *out_shape_len,
                                                   uint8_t **out_data,
                                                   uint64_t *out_data_byte_len,
-                                                  char **out_ext,
+                                                  char **out_application_data,
                                                   char **out_element_type,
-                                                  char **out_units);
+                                                  char **out_units,
+                                                  char **out_quantity_kind,
+                                                  char **out_unit_system,
+                                                  char **out_component_field);
 
 /**
  * Read a forecast element (`Deterministic`, `Probabilistic`, or `Scenarios`)
@@ -1387,7 +1447,8 @@ int32_t infrastore_bulk_result_get_non_sequential(const struct InfraStoreBulkRea
  * `out_data`, and `out_percentiles` buffers.
  *
  *
- * `out_ext`, `out_element_type`, and `out_units` behave as in
+ * `out_application_data`, `out_element_type`, `out_units`, `out_quantity_kind`,
+ * `out_unit_system`, and `out_component_field` behave as in
  * `infrastore_bulk_result_get_single`: owned C strings (null when unset), any of
  * them nullable to skip, freed with `infrastore_string_free`.
  * # Safety
@@ -1411,9 +1472,12 @@ int32_t infrastore_bulk_result_get_forecast(const struct InfraStoreBulkReadHandl
                                             uint64_t *out_data_byte_len,
                                             double **out_percentiles,
                                             uint64_t *out_percentiles_len,
-                                            char **out_ext,
+                                            char **out_application_data,
                                             char **out_element_type,
-                                            char **out_units);
+                                            char **out_units,
+                                            char **out_quantity_kind,
+                                            char **out_unit_system,
+                                            char **out_component_field);
 
 /**
  * Free a bulk-read result handle created by `infrastore_store_bulk_read_single` or
@@ -1501,9 +1565,9 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *   non-NULL only for `Probabilistic`; free with
  *   `infrastore_buffer_free_f64(*out_percentiles, *out_percentiles_len)`.
  *
- * `out_ext`, when non-null, receives the association's opaque `ext` payload
+ * `out_application_data`, when non-null, receives the association's opaque `application_data` payload
  * from the metadata row: null when unset, otherwise an owned C string the
- * caller must free with `infrastore_string_free`. Pass a null `out_ext` to
+ * caller must free with `infrastore_string_free`. Pass a null `out_application_data` to
  * skip the metadata lookup entirely.
  *
  * **Optional time-range / window selection:** when `time_range_present` is
@@ -1533,12 +1597,17 @@ int32_t infrastore_store_transform_single_time_series(struct InfraStore *handle,
  *   is not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
  *   to 0, so no free is needed. When non-null it must be freed exactly once
  *   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
- * - `out_ext` may be null (the metadata lookup is skipped); when non-null it
- *   must be valid for writing one pointer, and a non-null `*out_ext` must be
+ * - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
+ *   must be valid for writing one pointer, and a non-null `*out_application_data` must be
  *   freed exactly once with `infrastore_string_free`.
  * - `out_element_type` follows the same rules and receives the canonical
  *   `element_type` string, which is how a caller reads the returned bytes as
  *   domain values (`out_dtype` gives only their physical width).
+ * - `out_quantity_kind` follows the same rules and receives the association's
+ *   quantity kind, and `out_unit_system` its basis as the `natural_units` /
+ *   `component_base` spelling (null when unspecified).
+ * - `out_component_field` follows the same rules and receives the component
+ *   field the values vary over time (null when unset).
  * - `out_units` follows the same rules and receives the association's
  *   user-declared units label (null when unset). The store never interprets it.
  * - All returned heap buffers are invalidated after their matching free call
@@ -1569,9 +1638,12 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
                                       double **out_percentiles,
                                       uint64_t *out_percentiles_len,
                                       int32_t *out_matched_type,
-                                      char **out_ext,
+                                      char **out_application_data,
                                       char **out_element_type,
-                                      char **out_units);
+                                      char **out_units,
+                                      char **out_quantity_kind,
+                                      char **out_unit_system,
+                                      char **out_component_field);
 
 /**
  * Fetch a forecast (`Deterministic` / `Probabilistic` / `Scenarios`, or a
@@ -1597,12 +1669,17 @@ int32_t infrastore_store_get_forecast(const struct InfraStore *handle,
  *   not `Probabilistic` the pointer is set to null and `*out_percentiles_len`
  *   to 0, so no free is needed. When non-null it must be freed exactly once
  *   with `infrastore_buffer_free_f64` using `*out_percentiles_len`.
- * - `out_ext` may be null (the metadata lookup is skipped); when non-null it
- *   must be valid for writing one pointer, and a non-null `*out_ext` must be
+ * - `out_application_data` may be null (the metadata lookup is skipped); when non-null it
+ *   must be valid for writing one pointer, and a non-null `*out_application_data` must be
  *   freed exactly once with `infrastore_string_free`.
  * - `out_element_type` follows the same rules and receives the canonical
  *   `element_type` string, which is how a caller reads the returned bytes as
  *   domain values (`out_dtype` gives only their physical width).
+ * - `out_quantity_kind` follows the same rules and receives the association's
+ *   quantity kind, and `out_unit_system` its basis as the `natural_units` /
+ *   `component_base` spelling (null when unspecified).
+ * - `out_component_field` follows the same rules and receives the component
+ *   field the values vary over time (null when unset).
  * - `out_units` follows the same rules and receives the association's
  *   user-declared units label (null when unset). The store never interprets it.
  */
@@ -1625,9 +1702,12 @@ int32_t infrastore_store_get_forecast_by_key(const struct InfraStore *handle,
                                              double **out_percentiles,
                                              uint64_t *out_percentiles_len,
                                              int32_t *out_matched_type,
-                                             char **out_ext,
+                                             char **out_application_data,
                                              char **out_element_type,
-                                             char **out_units);
+                                             char **out_units,
+                                             char **out_quantity_kind,
+                                             char **out_unit_system,
+                                             char **out_component_field);
 
 /**
  * Construct a `TimeSeriesKey` handle from attributes `(owner_id, name,
@@ -1694,6 +1774,9 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  *   have no interval and never match an interval filter)
  * - `features_json` (a JSON object; null or empty = no feature filter; matches as
  *   a subset, i.e. a key whose features include all the given ones)
+ * - `component_field` (null = no filter; exact, case-sensitive match on the
+ *   owning component's field. A row that declares none matches no value, so
+ *   this cannot select the rows that left it unset.)
  *
  * Returns the JSON through `out_json` as an **owned** allocation the caller
  * releases with `infrastore_string_free`; `out_len` is its byte length. A
@@ -1704,9 +1787,10 @@ int32_t infrastore_store_get_time_series_keys(const struct InfraStore *handle,
  * # Safety
  *
  * `handle` must be a live store handle. The scalar filter flags/values are plain
- * scalars. `name` and `features_json` must each be null or a null-terminated
- * UTF-8 string. `out_len` must be writable; `buf` must be null or valid for
- * `cap` bytes.
+ * scalars. `name`, `component_field`, and `features_json` must each be null or a
+ * null-terminated UTF-8 string. `out_json` must be valid for writing one pointer
+ * and `out_len` for writing one `u64`; on success `*out_json` must be released
+ * exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    bool has_owner,
@@ -1719,13 +1803,14 @@ int32_t infrastore_store_list_keys(const struct InfraStore *handle,
                                    const char *resolution,
                                    const char *interval,
                                    const char *features_json,
+                                   const char *component_field,
                                    char **out_json,
                                    uint64_t *out_len);
 
 /**
  * List full time-series metadata rows as a JSON array (see `metadata_to_map`
  * for the per-row shape: the key fields plus `data_hash`, `dtype`,
- * `element_shape`, `percentiles`, `units`, and `ext`). Filters and the
+ * `element_shape`, `percentiles`, `units`, and `application_data`). Filters and the
  * owned-string return (freed with `infrastore_string_free`) match `infrastore_store_list_keys`.
  *
  * # Safety
@@ -1743,6 +1828,7 @@ int32_t infrastore_store_list_time_series(const struct InfraStore *handle,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
+                                          const char *component_field,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1766,6 +1852,7 @@ int32_t infrastore_store_list_names(const struct InfraStore *handle,
                                     const char *resolution,
                                     const char *interval,
                                     const char *features_json,
+                                    const char *component_field,
                                     char **out_json,
                                     uint64_t *out_len);
 
@@ -1789,6 +1876,7 @@ int32_t infrastore_store_list_owner_types(const struct InfraStore *handle,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
+                                          const char *component_field,
                                           char **out_json,
                                           uint64_t *out_len);
 
@@ -1813,6 +1901,7 @@ int32_t infrastore_store_remove_by_filter(struct InfraStore *handle,
                                           const char *resolution,
                                           const char *interval,
                                           const char *features_json,
+                                          const char *component_field,
                                           uint64_t *out_removed);
 
 /**
@@ -1879,8 +1968,9 @@ int32_t infrastore_store_resolve_forecast_key(const struct InfraStore *handle,
  *
  * Identical to `infrastore_store_list_keys`: `handle` must be a live store handle;
  * `name` / `features_json` / `resolution` must each be null or a
- * null-terminated UTF-8 string; `out_len` must be writable; `buf` must be null
- * or valid for `cap` bytes.
+ * null-terminated UTF-8 string; `out_json` must be valid for writing one pointer
+ * and `out_len` for writing one `u64`; on success `*out_json` must be released
+ * exactly once with `infrastore_string_free`.
  */
 int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            bool has_owner,
@@ -1893,6 +1983,7 @@ int32_t infrastore_store_list_array_groups(const struct InfraStore *handle,
                                            const char *resolution,
                                            const char *interval,
                                            const char *features_json,
+                                           const char *component_field,
                                            char **out_json,
                                            uint64_t *out_len);
 
@@ -2469,6 +2560,7 @@ int32_t infrastore_store_build_static_reader(const struct InfraStore *handle,
                                              const char *name,
                                              const char *resolution,
                                              const char *features_json,
+                                             const char *component_field,
                                              struct InfraStoreStaticReaderHandle **out_reader);
 
 /**
@@ -2618,6 +2710,7 @@ int32_t infrastore_store_build_forecast_reader(const struct InfraStore *handle,
                                                const char *name,
                                                const char *resolution,
                                                const char *features_json,
+                                               const char *component_field,
                                                struct InfraStoreForecastReaderHandle **out_reader);
 
 /**

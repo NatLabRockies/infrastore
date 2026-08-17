@@ -103,13 +103,25 @@ message TimeSeriesMetadata {
   // Element typing.
   reserved 17;  // was: int32 dtype (Dtype code), superseded by element_type
   repeated uint64 element_shape                  = 18;       // per-step trailing dims
-  optional string ext                   = 19;       // opaque package-owned payload
-  repeated double percentiles                    = 20;        // Probabilistic only
+  optional string application_data               = 19;       // opaque package-owned payload
+  repeated double percentiles                    = 20;       // Probabilistic only
   // Canonical ElementType string: a dtype spelling ("f64", "i64", ...) for
   // plain scalars, else "tuple(N,dtype)" or a function-data kind
   // ("linear_function", "quadratic_function", "piecewise_linear",
   // "piecewise_step"). The physical dtype of the bytes is derived from it.
   string          element_type                   = 21;
+  // What kind of physical quantity the values measure, free-form, with QUDT
+  // `QuantityKind` local names as the recommended vocabulary.
+  optional string quantity_kind                  = 22;
+  // `UnitSystem::as_str`: "natural_units" or "component_base". Absent means
+  // unspecified, NOT natural units. Sent as a string rather than an enum so a
+  // basis added later reaches an older client as a value it can report rather
+  // than as UNKNOWN.
+  optional string unit_system                    = 23;
+  // The field on the owning component (or supplemental attribute) whose value
+  // these values are the time-varying form of, e.g. "max_active_power".
+  // Free-form and never interpreted by the store.
+  optional string component_field                = 24;
 }
 
 // ---- ListTimeSeries ----
@@ -123,6 +135,10 @@ message ListReq {
   Features                 features          = 6;
   optional OwnerCategory   owner_category    = 7;
   optional string          interval          = 8;       // ISO-8601 duration
+  // Exact, case-sensitive match on the owning component's field. A row that
+  // declares none matches no value, so this cannot select rows that left it
+  // unset.
+  optional string          component_field   = 9;
 }
 message ListResp {
   repeated TimeSeriesMetadata metadata = 1;
@@ -146,14 +162,14 @@ message GetResp {
   repeated string    timestamps_rfc3339          = 7;
   reserved 8;  // was: int32 dtype (Dtype code), superseded by element_type
   bytes              value_bytes                 = 9;        // raw little-endian, row-major
-  // Unused: always the empty string. `ext` is a property of the association
+  // Unused: always the empty string. `application_data` is a property of the association
   // row, not of the time-series values, so the read path has no value to put
-  // here — the server builds this message from the data alone. Read `ext` from
-  // GetMetadata or ListTimeSeries instead (TimeSeriesMetadata.ext, field 19).
+  // here — the server builds this message from the data alone. Read `application_data` from
+  // GetMetadata or ListTimeSeries instead (TimeSeriesMetadata.application_data, field 19).
   // Kept rather than reserved so the field numbering stays stable for existing
   // consumers; do not start populating it without deciding what a client is
   // meant to do with a value that has no home in the data types.
-  string             ext                = 10;
+  string             application_data                = 10;
   // Forecast-specific fields (fields 1–10 are backward-compatible).
   string             horizon                     = 11;       // ISO-8601 duration
   string             interval                    = 12;       // ISO-8601 duration

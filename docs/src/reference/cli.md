@@ -398,15 +398,22 @@ catalog.
 flags as filters. Every flag is optional. Only `--feature` may be repeated; the rest take a single
 value:
 
-| Flag                   | Meaning                                                                    |
-| ---------------------- | -------------------------------------------------------------------------- |
-| `--owner-id <I>`       | Owner identifier (`i64` integer).                                          |
-| `--owner-category <C>` | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
-| `--name <N>`           | Series name (exact match).                                                 |
-| `--name-glob <P>`      | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
-| `--type <T>`           | See the type spellings below.                                              |
-| `--resolution <DUR>`   | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
-| `--feature key=value`  | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+| Flag                    | Meaning                                                                    |
+| ----------------------- | -------------------------------------------------------------------------- |
+| `--owner-id <I>`        | Owner identifier (`i64` integer).                                          |
+| `--owner-category <C>`  | Restrict to `Component` or `SupplementalAttribute`; omit to match either.  |
+| `--name <N>`            | Series name (exact match).                                                 |
+| `--name-glob <P>`       | Name pattern (SQLite `GLOB`: case-sensitive `*`/`?`). ANDed with `--name`. |
+| `--component-field <F>` | Owning component's field, exact and case-sensitive.                        |
+| `--type <T>`            | See the type spellings below.                                              |
+| `--resolution <DUR>`    | Resolution as an ISO-8601 duration, e.g. `PT1H`, `PT15M`, `P1M`.           |
+| `--feature key=value`   | Feature filter; repeatable. Values are inferred as int/float/bool/string.  |
+
+`--component-field` selects every series that varies that field on its owner — the query the
+descriptor exists for. It is descriptive rather than identifying, so it narrows a selector but
+rarely resolves one on its own; and a series that declares no `component_field` matches no value, so
+it cannot select the ones that left it unset. `owners` rejects it (along with `--owner-id`,
+`--name`, `--name-glob`, and `--feature`) rather than silently ignoring it.
 
 If a selector matches more than one series, `infrastore` errors and lists the candidates so the
 query can be narrowed. Each candidate line spells out every field that is part of identity —
@@ -480,7 +487,10 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 | `csv`                          | unless `--csv` is passed | Path relative to the descriptor; `--csv` overrides it.        |
 | `element_shape`                | optional                 | Trailing per-step dims; default scalar (`[]`).                |
 | `units`                        | optional                 | Free-form label.                                              |
-| `ext`                          | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
+| `quantity_kind`                | optional                 | What the values measure, e.g. `ActivePower` (QUDT name).      |
+| `unit_system`                  | optional                 | `natural_units` or `component_base`; unset = unspecified.     |
+| `component_field`              | optional                 | Owning component's field these values vary over time.         |
+| `application_data`             | optional                 | Opaque package-owned payload (e.g. JSON), stored verbatim.    |
 | `features`                     | optional                 | JSON object; int/float/bool/string values. See below.         |
 | `initial_timestamp`            | all but non-sequential   |                                                               |
 | `resolution`                   | all but non-sequential   | ISO-8601 duration, e.g. `PT1H`.                               |
@@ -501,11 +511,12 @@ Inside `features`, a name that shadows a time-series or key field (`name`, `reso
 
 Every field above also exists as an `add` flag, for a one-off that does not deserve a file:
 `--owner-id`, `--owner-type`, `--owner-category`, `--name`, `--type`, `--element-type`, `--units`,
-`--ext`, `--element-shape` (repeatable), `--feature` (repeatable), `--initial-timestamp`,
-`--resolution`, `--horizon`, `--interval`, `--count`, `--percentile` (repeatable),
-`--scenario-count`, `--layout`, `--owner-map`, `--owner-id-from`. The inline form is a shortcut for
-authoring one descriptor, not a second schema — both go down the same code path — so `--descriptor`
-and the inline flags cannot be combined. Keep the descriptor as the repeatable and batch form.
+`--quantity-kind`, `--unit-system`, `--component-field`, `--application-data`, `--element-shape`
+(repeatable), `--feature` (repeatable), `--initial-timestamp`, `--resolution`, `--horizon`,
+`--interval`, `--count`, `--percentile` (repeatable), `--scenario-count`, `--layout`, `--owner-map`,
+`--owner-id-from`. The inline form is a shortcut for authoring one descriptor, not a second schema —
+both go down the same code path — so `--descriptor` and the inline flags cannot be combined. Keep
+the descriptor as the repeatable and batch form.
 
 ### Wide layout
 
@@ -519,7 +530,8 @@ timestamp,gen_001,gen_002,...,gen_500
 In the default `long` layout every value column is part of _one_ series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. `"layout": "wide"` reads it
 as 500 separate scalar series instead, sharing this descriptor's `name`, `type`, `resolution`,
-`units`, `ext`, and `features`, and differing only by owner:
+`units`, `quantity_kind`, `unit_system`, `component_field`, `application_data`, and `features`, and
+differing only by owner:
 
 ```json
 {

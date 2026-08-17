@@ -21,7 +21,7 @@ carries netcdf-c's `_NCProperties` attribute, and `Store::open` accepts only fil
 The HDF5 root carries four global attributes:
 
 ```text
-data_format_version = "0.14.0"
+data_format_version = "0.16.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -57,12 +57,15 @@ Opening a store whose recorded version differs from the version this build reads
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.
 
-(`0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of the association row: the
-`timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving into the new
-content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that share a time
-axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one standalone
-`arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which names the
-_logical_ element type and derives the physical dtype from it — see
+(`0.16.0` added the metadata column `component_field`; `0.15.0` renamed the metadata column `ext` to
+`application_data` and added the `quantity_kind` and `unit_system` columns; unlike a new _table_,
+new _columns_ are not picked up by the idempotent `CREATE TABLE IF NOT EXISTS` DDL, so a store one
+version behind is rejected on open; `0.14.0` moved a `NonSequentialTimeSeries`'s timestamps out of
+the association row: the `timestamps_json` TEXT column became a `timestamps_hash` BLOB resolving
+into the new content-addressed [`timestamp_sets`](#timestamp_sets) table, and irregular arrays that
+share a time axis are now column-packed into `nsts_…` datasets keyed by that hash instead of one
+standalone `arr_…` dataset each; `0.13.0` replaced the `dtype` column with `element_type`, which
+names the _logical_ element type and derives the physical dtype from it — see
 [Element types](./element-types.md); `0.12.0` changed `owner_category` and `time_series_type` from
 TEXT names to small INTEGER codes — see [Discriminant encoding](#discriminant-encoding) below;
 `0.11.0` renamed the metadata column `logical_type` to `ext` — an opaque, package-owned extension
@@ -126,7 +129,7 @@ Arrays live under a two-level group hierarchy, in one of **two storage modes**:
 
 ```text
 <name>.h5
-├── attribute  data_format_version = "0.14.0"
+├── attribute  data_format_version = "0.16.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -280,28 +283,31 @@ The catalog database is created with `PRAGMA foreign_keys = ON` and the followin
 
 One row per association between an owner and a stored array.
 
-| Column              | Type    | Notes                                                                    |
-| ------------------- | ------- | ------------------------------------------------------------------------ |
-| `id`                | INTEGER | Primary key                                                              |
-| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)           |
-| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                       |
-| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                         |
-| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below                   |
-| `name`              | TEXT    | Series name                                                              |
-| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`                    |
-| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential          |
-| `length`            | INTEGER | Number of timesteps                                                      |
-| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                      |
-| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                     |
-| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                          |
-| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`)      |
-| `units`             | TEXT    | Free-form units label                                                    |
-| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else               |
-| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)                 |
-| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                              |
-| `ext`               | TEXT    | Opaque package-owned extension payload (JSON), verbatim; `NULL` if unset |
-| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable           |
-| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                       |
+| Column              | Type    | Notes                                                               |
+| ------------------- | ------- | ------------------------------------------------------------------- |
+| `id`                | INTEGER | Primary key                                                         |
+| `owner_id`          | INTEGER | Owner identity; signed 64-bit integer identifier (part of key)      |
+| `owner_type`        | TEXT    | Owner's concrete type, descriptive                                  |
+| `owner_category`    | INTEGER | Code, `CHECK` in (0, 1); part of key — see below                    |
+| `time_series_type`  | INTEGER | Code, `CHECK` between 0 and 5; part of key — see below              |
+| `name`              | TEXT    | Series name                                                         |
+| `initial_timestamp` | TEXT    | RFC 3339 string; `NULL` for `NonSequentialTimeSeries`               |
+| `resolution`        | TEXT    | ISO-8601 duration (`PT1H`, `P1M`, …); `NULL` for non-sequential     |
+| `length`            | INTEGER | Number of timesteps                                                 |
+| `horizon`           | TEXT    | ISO-8601 forecast horizon; `NULL` for non-forecasts                 |
+| `interval`          | TEXT    | ISO-8601 forecast interval; `NULL` for non-forecasts                |
+| `count`             | INTEGER | Forecast window count; `NULL` for non-forecasts                     |
+| `timestamps_hash`   | BLOB    | 32-byte SHA-256 of the timestamp vector (`NonSequentialTimeSeries`) |
+| `units`             | TEXT    | Free-form units label                                               |
+| `quantity_kind`     | TEXT    | What the values measure (QUDT `QuantityKind` name); `NULL` if unset |
+| `unit_system`       | TEXT    | `natural_units` or `component_base`; `NULL` means _unspecified_     |
+| `component_field`   | TEXT    | Owning component's field these values vary; `NULL` if unset         |
+| `percentiles_json`  | TEXT    | JSON array of percentiles for `Probabilistic`; `NULL` else          |
+| `element_type`      | TEXT    | Canonical element-type string (`NOT NULL DEFAULT 'f64'`)            |
+| `element_shape`     | TEXT    | JSON array of per-step dims (`[]` = scalar)                         |
+| `application_data`  | TEXT    | Opaque package-owned payload (JSON), verbatim; `NULL` if unset      |
+| `data_hash`         | BLOB    | 32-byte SHA-256 of the array; links to an HDF5 column/variable      |
+| `features_hash`     | BLOB    | 32-byte SHA-256 of the feature map                                  |
 
 The two content-address hashes are the last two columns. Column order is not load-bearing — every
 statement names its columns — so the layout is chosen for readability.
@@ -505,7 +511,30 @@ CREATE UNIQUE INDEX uq_ts_assoc_coalesced ON time_series_associations
 CREATE INDEX idx_hash       ON time_series_associations(data_hash);
 CREATE INDEX idx_owner      ON time_series_associations(owner_id, owner_category);
 CREATE INDEX idx_resolution ON time_series_associations(resolution);
+
+-- Secondary indexes for the filter / discovery surface.
+CREATE INDEX idx_ts_type        ON time_series_associations(time_series_type);
+CREATE INDEX idx_name           ON time_series_associations(name);
+CREATE INDEX idx_owner_type     ON time_series_associations(owner_type);
+CREATE INDEX idx_category_owner ON time_series_associations(owner_category, owner_id);
+CREATE INDEX idx_interval       ON time_series_associations(interval);
+CREATE INDEX idx_component_field ON time_series_associations(component_field)
+    WHERE component_field IS NOT NULL;
 ```
+
+`idx_component_field` is the only **partial** index, because `component_field` is the only optional
+column anything filters on: a store that never sets it would otherwise pay index maintenance on
+every insert to record one `NULL` per row and buy nothing, so the `WHERE` clause makes that case
+cost zero entries. SQLite still uses it for the predicate the filter issues — `component_field = ?`
+cannot be true of a `NULL` whatever the parameter binds to — but it can never serve an `IS NULL`
+query, which is the same reason `ListFilter::component_field` cannot select the rows that left the
+field unset.
+
+An index over a column that already exists is additive: a store gains any it lacks on its first
+writable open, at a one-time build cost proportional to catalog size, with no `data_format_version`
+change. `idx_component_field` is the exception, because it names a column introduced by a bump — it
+applies only to a catalog already carrying `component_field`, and an older store never reaches the
+DDL, being rejected by the version check first.
 
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
 violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the
@@ -538,8 +567,10 @@ SELECT id, owner_id, owner_type,
                              WHEN 4 THEN 'Probabilistic'
                              WHEN 5 THEN 'Scenarios'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
-       name, initial_timestamp, resolution, length, horizon, interval, count,
-       units, element_type, element_shape, ext,
+       name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, quantity_kind, unit_system, component_field,
+       element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash

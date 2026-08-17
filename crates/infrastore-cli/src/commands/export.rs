@@ -33,7 +33,7 @@ pub fn run(
         Format::Table => Format::Csv,
         other => other,
     };
-    let ext = match format {
+    let file_ext = match format {
         Format::Csv => "csv",
         Format::Jsonl => "jsonl",
         _ => "json",
@@ -86,7 +86,7 @@ pub fn run(
             let stems = unique_file_stems(&metas);
             let mut written = Vec::with_capacity(metas.len());
             for ((meta, data), stem) in metas.iter().zip(&datas).zip(&stems) {
-                let path = dir.join(format!("{stem}.{ext}"));
+                let path = dir.join(format!("{stem}.{file_ext}"));
                 let content = render(meta, data, format)?;
                 std::fs::write(&path, content)
                     .map_err(|e| format!("writing {}: {e}", path.display()))?;
@@ -301,7 +301,13 @@ fn render_json(
     obj.insert("type".into(), json!(meta.time_series_type.as_str()));
     obj.insert("name".into(), json!(meta.name));
     obj.insert("units".into(), json!(meta.units));
-    obj.insert("ext".into(), json!(meta.ext));
+    obj.insert("quantity_kind".into(), json!(meta.quantity_kind));
+    obj.insert(
+        "unit_system".into(),
+        json!(meta.unit_system.map(|u| u.as_str())),
+    );
+    obj.insert("component_field".into(), json!(meta.component_field));
+    obj.insert("application_data".into(), json!(meta.application_data));
     obj.insert("element_type".into(), json!(meta.element_type.to_string()));
     // Features are part of identity: an export that drops them cannot describe
     // which of several same-named series it holds, and cannot be turned back

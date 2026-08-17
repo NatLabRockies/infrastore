@@ -108,9 +108,10 @@ between catalog entities and have nothing to do with time series at all.
 - **`time_series_associations`** — one row per
   `(owner_id, owner_category, time_series_type, name, resolution, interval, features)` association,
   including the `data_hash` that links it to a packed column or standalone variable, the array
-  typing (`dtype`, `element_shape`), the opaque package-owned `ext` payload, plus temporal fields,
-  forecast parameters (`horizon`, `interval`, `count`, `percentiles`), units, and the
-  `features_hash`.
+  typing (`dtype`, `element_shape`), the opaque package-owned `application_data` payload, plus
+  temporal fields, forecast parameters (`horizon`, `interval`, `count`, `percentiles`), the unit
+  descriptors (`units`, `quantity_kind`, `unit_system`), the `component_field` the values vary over
+  time, and the `features_hash`.
 - **`feature_sets`** — the expanded key/value pairs of a feature map, one row per key, typed by a
   `value_kind` discriminator. The table is **content-addressed**, exactly as arrays are: its primary
   key is `(features_hash, key)` — the same hash the association row already carries, so no join

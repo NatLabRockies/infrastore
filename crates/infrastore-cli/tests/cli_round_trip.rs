@@ -685,7 +685,7 @@ fn export_to_dir_and_stdout() {
 }
 
 #[test]
-fn ext_round_trips_through_descriptor() {
+fn application_data_round_trips_through_descriptor() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("lt.h5");
     write_csv(dir.path(), "lt.csv", "1.0\n2.0\n");
@@ -698,7 +698,7 @@ fn ext_round_trips_through_descriptor() {
   "name": "load",
   "type": "single",
   "element_type": "f64",
-  "ext": "Profile",
+  "application_data": "Profile",
   "csv": "lt.csv",
   "initial_timestamp": "2024-01-01T00:00:00Z",
   "resolution": "PT1H"
@@ -709,9 +709,15 @@ fn ext_round_trips_through_descriptor() {
         &["add", "--descriptor", descriptor.to_str().unwrap()],
     );
     let info = run(&store, &["-f", "json", "info", "--owner-id", "5"]);
-    assert!(info.contains("\"ext\": \"Profile\""), "info: {info}");
+    assert!(
+        info.contains("\"application_data\": \"Profile\""),
+        "info: {info}"
+    );
     let list = run(&store, &["-f", "json", "list"]);
-    assert!(list.contains("\"ext\": \"Profile\""), "list: {list}");
+    assert!(
+        list.contains("\"application_data\": \"Profile\""),
+        "list: {list}"
+    );
 }
 
 #[test]
@@ -766,4 +772,120 @@ fn completions_generate() {
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("_infrastore"), "zsh completion body: {text}");
+}
+
+/// `component_field` survives the CLI loop: descriptor -> store -> `info`,
+/// `list`, and the JSON `export`. An export that dropped it would silently lose
+/// what the values are for.
+#[test]
+fn component_field_round_trips_through_descriptor_and_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("cf.h5");
+    write_csv(dir.path(), "cf.csv", "1.0\n2.0\n3.0\n");
+    let descriptor = write(
+        dir.path(),
+        "cf.json",
+        r#"{
+  "owner_id": 7,
+  "owner_type": "ThermalStandard",
+  "name": "max_active_power_ts",
+  "type": "single",
+  "element_type": "f64",
+  "units": "MW",
+  "component_field": "max_active_power",
+  "csv": "cf.csv",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H"
+}"#,
+    );
+    run(
+        &store,
+        &["add", "--descriptor", descriptor.to_str().unwrap()],
+    );
+
+    let info = run(&store, &["-f", "json", "info", "--owner-id", "7"]);
+    assert!(
+        info.contains("\"component_field\": \"max_active_power\""),
+        "info: {info}"
+    );
+    let list = run(&store, &["-f", "json", "list"]);
+    assert!(
+        list.contains("\"component_field\": \"max_active_power\""),
+        "list: {list}"
+    );
+    let exported = run(&store, &["-f", "json", "export", "--owner-id", "7"]);
+    assert!(
+        exported.contains("\"component_field\": \"max_active_power\""),
+        "export: {exported}"
+    );
+}
+
+/// `--component-field` narrows `list` and the destructive commands, and is
+/// rejected by `owners`, which cannot honour it.
+#[test]
+fn component_field_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("cfsel.h5");
+    write_csv(dir.path(), "cf.csv", "1.0\n2.0\n3.0\n");
+    for (owner, name, field) in [
+        (1, "max_active_power", "max_active_power"),
+        (1, "rating", "rating"),
+        (2, "max_active_power", "max_active_power"),
+    ] {
+        let descriptor = write(
+            dir.path(),
+            &format!("{owner}_{name}.json"),
+            &format!(
+                r#"{{
+  "owner_id": {owner},
+  "owner_type": "ThermalStandard",
+  "name": "{name}",
+  "type": "single",
+  "element_type": "f64",
+  "component_field": "{field}",
+  "csv": "cf.csv",
+  "initial_timestamp": "2024-01-01T00:00:00Z",
+  "resolution": "PT1H"
+}}"#
+            ),
+        );
+        run(
+            &store,
+            &["add", "--descriptor", descriptor.to_str().unwrap()],
+        );
+    }
+
+    let list = run(
+        &store,
+        &[
+            "-f",
+            "json",
+            "list",
+            "--component-field",
+            "max_active_power",
+        ],
+    );
+    assert_eq!(list.matches("\"name\"").count(), 2, "list: {list}");
+    assert!(!list.contains("\"rating\""), "list: {list}");
+
+    // `owners` reads only the owner-shaped filters, so it must reject this
+    // rather than silently ignore it.
+    let err = run_err(&store, &["owners", "--component-field", "rating"]);
+    assert!(err.contains("--component-field"), "owners error: {err}");
+
+    run(
+        &store,
+        &[
+            "remove",
+            "--all",
+            "--force",
+            "--component-field",
+            "max_active_power",
+        ],
+    );
+    let after = run(&store, &["-f", "json", "list"]);
+    assert!(
+        after.contains("rating") && !after.contains("max_active_power"),
+        "after remove: {after}"
+    );
 }

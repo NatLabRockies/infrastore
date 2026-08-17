@@ -52,6 +52,7 @@ pub fn owners(store_path: &Path, selector: &SelectorArgs, format: Format) -> Res
         ("--owner-id", selector.owner_id.is_some()),
         ("--name", selector.name.is_some()),
         ("--name-glob", selector.name_glob.is_some()),
+        ("--component-field", selector.component_field.is_some()),
         ("--feature", !selector.feature.is_empty()),
     ] {
         if set {

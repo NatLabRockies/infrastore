@@ -140,7 +140,7 @@ const _AddableTimeSeries = Union{
 """
     add_time_series!(store, owner_id, owner_type, owner_category, ts;
                      features=Dict(), element_type=ts.element_type,
-                     units=ts.units, ext=ts.ext) -> TimeSeriesKey
+                     units=ts.units, application_data=ts.application_data) -> TimeSeriesKey
 
 Add a time series (`SingleTimeSeries`, `NonSequentialTimeSeries`,
 `Deterministic`, `Probabilistic`, or `Scenarios`) and return its
@@ -501,9 +501,12 @@ function get_time_series(
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_single(
         store::Ptr{Cvoid},
@@ -518,9 +521,12 @@ function get_time_series(
         out_shape_len::Ref{UInt64},
         out_data::Ref{Ptr{UInt8}},
         out_data_len::Ref{UInt64},
-        out_ext::Ref{Ptr{Cchar}},
+        out_application_data::Ref{Ptr{Cchar}},
         out_element_type::Ref{Ptr{Cchar}},
         out_units::Ref{Ptr{Cchar}},
+        out_quantity_kind::Ref{Ptr{Cchar}},
+        out_unit_system::Ref{Ptr{Cchar}},
+        out_component_field::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
@@ -536,22 +542,28 @@ function get_time_series(
             _peek_period(out_resolution[]),
             data,
             _key_name(key);
-            ext=_peek_cstr(out_ext[]),
+            application_data=_peek_cstr(out_application_data[]),
             element_type=_peek_cstr(out_element_type[]),
             units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            component_field=_peek_cstr(out_component_field[]),
         )
     finally
         _free_i64(out_shape[], out_shape_len[])
         _free_u8(out_data[], out_data_len[])
         _free_cstr(out_resolution[])
-        _free_cstr(out_ext[])
+        _free_cstr(out_application_data[])
         _free_cstr(out_element_type[])
         _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
 end
 
 # Reconstruct one SingleTimeSeries from a bulk-read result slot. Like the other
-# bulk reconstructors it carries `ext`, `element_type`, and `units`: those live on
+# bulk reconstructors it carries `application_data`, `element_type`, and `units`: those live on
 # the series, and the bulk-result getters return them, so a series read in bulk
 # and the same series read individually produce equal structs.
 function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
@@ -562,9 +574,12 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL);
     out_data_len = Ref{UInt64}(0)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_single(
             result::Ptr{Cvoid},
@@ -576,9 +591,12 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
             out_shape_len::Ref{UInt64},
             out_data::Ref{Ptr{UInt8}},
             out_data_len::Ref{UInt64},
-            out_ext::Ref{Ptr{Cchar}},
+            out_application_data::Ref{Ptr{Cchar}},
             out_element_type::Ref{Ptr{Cchar}},
             out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
     try
@@ -587,22 +605,28 @@ function _bulk_single(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
         data = _decode_array(bytes, out_dtype[], dims)
         return SingleTimeSeries(
             _from_unix_ms(out_initial[]), _peek_period(out_resolution[]), data, name;
-            ext=_peek_cstr(out_ext[]),
+            application_data=_peek_cstr(out_application_data[]),
             element_type=_peek_cstr(out_element_type[]),
             units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            component_field=_peek_cstr(out_component_field[]),
         )
     finally
         _free_i64(out_shape[], out_shape_len[])
         _free_u8(out_data[], out_data_len[])
         _free_cstr(out_resolution[])
-        _free_cstr(out_ext[])
+        _free_cstr(out_application_data[])
         _free_cstr(out_element_type[])
         _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
 end
 
 # Reconstruct one NonSequentialTimeSeries from a bulk-read result slot (carrying
-# `ext` / `element_type` / `units`, as `_bulk_single` does).
+# `application_data` / `element_type` / `units`, as `_bulk_single` does).
 function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractString)
     out_ts = Ref{Ptr{Int64}}(C_NULL);
     out_ts_len = Ref{UInt64}(0)
@@ -611,9 +635,12 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL);
     out_data_len = Ref{UInt64}(0)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_non_sequential(
             result::Ptr{Cvoid},
@@ -625,9 +652,12 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
             out_shape_len::Ref{UInt64},
             out_data::Ref{Ptr{UInt8}},
             out_data_len::Ref{UInt64},
-            out_ext::Ref{Ptr{Cchar}},
+            out_application_data::Ref{Ptr{Cchar}},
             out_element_type::Ref{Ptr{Cchar}},
             out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
     try
@@ -637,17 +667,23 @@ function _bulk_non_sequential(result::Ptr{Cvoid}, idx::Integer, name::AbstractSt
         data = _decode_array(bytes, out_dtype[], dims)
         return NonSequentialTimeSeries(
             _from_unix_ms.(ts_ms), data, name;
-            ext=_peek_cstr(out_ext[]),
+            application_data=_peek_cstr(out_application_data[]),
             element_type=_peek_cstr(out_element_type[]),
             units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            component_field=_peek_cstr(out_component_field[]),
         )
     finally
         _free_i64(out_ts[], out_ts_len[])
         _free_i64(out_shape[], out_shape_len[])
         _free_u8(out_data[], out_data_len[])
-        _free_cstr(out_ext[])
+        _free_cstr(out_application_data[])
         _free_cstr(out_element_type[])
         _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
 end
 
@@ -670,9 +706,12 @@ function _bulk_forecast(
     out_byte_len = Ref{UInt64}(0)
     out_pct = Ref{Ptr{Float64}}(C_NULL);
     out_pct_len = Ref{UInt64}(0)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     _check(
         @ccall lib_path().infrastore_bulk_result_get_forecast(
             result::Ptr{Cvoid},
@@ -690,13 +729,17 @@ function _bulk_forecast(
             out_byte_len::Ref{UInt64},
             out_pct::Ref{Ptr{Float64}},
             out_pct_len::Ref{UInt64},
-            out_ext::Ref{Ptr{Cchar}},
+            out_application_data::Ref{Ptr{Cchar}},
             out_element_type::Ref{Ptr{Cchar}},
             out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
     local data, initial, resolution, horizon, interval, count, percentiles
-    local ext, element_type, units
+    local application_data, element_type, units, quantity_kind, unit_system
+    local component_field
     try
         dims = Int.(unsafe_wrap(Array, out_dims[], Int(out_ndims[]); own=false))
         bytes = copy(unsafe_wrap(Array, out_data[], Int(out_byte_len[]); own=false))
@@ -711,9 +754,12 @@ function _bulk_forecast(
         horizon = _peek_period(out_horizon[])
         interval = _peek_period(out_interval[])
         count = Int(out_count[])
-        ext = _peek_cstr(out_ext[])
+        application_data = _peek_cstr(out_application_data[])
         element_type = _peek_cstr(out_element_type[])
         units = _peek_cstr(out_units[])
+        quantity_kind = _peek_cstr(out_quantity_kind[])
+        unit_system = _unit_system(_peek_cstr(out_unit_system[]))
+        component_field = _peek_cstr(out_component_field[])
     finally
         _free_u64(out_dims[], out_ndims[])
         _free_u8(out_data[], out_byte_len[])
@@ -721,24 +767,33 @@ function _bulk_forecast(
         _free_cstr(out_res[])
         _free_cstr(out_horizon[])
         _free_cstr(out_interval[])
-        _free_cstr(out_ext[])
+        _free_cstr(out_application_data[])
         _free_cstr(out_element_type[])
         _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
     if type_code == INFRASTORE_TYPE_PROBABILISTIC
         return Probabilistic(
             initial, resolution, horizon, interval, count, percentiles, data, name;
-            ext=ext, element_type=element_type, units=units,
+            application_data=application_data, element_type=element_type, units=units,
+            quantity_kind=quantity_kind, unit_system=unit_system,
+            component_field=component_field,
         )
     elseif type_code == INFRASTORE_TYPE_SCENARIOS
         return Scenarios(
             initial, resolution, horizon, interval, count, data, name;
-            ext=ext, element_type=element_type, units=units,
+            application_data=application_data, element_type=element_type, units=units,
+            quantity_kind=quantity_kind, unit_system=unit_system,
+            component_field=component_field,
         )
     else
         return Deterministic(
             initial, resolution, horizon, interval, count, data, name;
-            ext=ext, element_type=element_type, units=units,
+            application_data=application_data, element_type=element_type, units=units,
+            quantity_kind=quantity_kind, unit_system=unit_system,
+            component_field=component_field,
         )
     end
 end
@@ -812,12 +867,15 @@ function get_time_series(
     out_shape_len = Ref{UInt64}(0)
     out_data = Ref{Ptr{UInt8}}(C_NULL)
     out_data_len = Ref{UInt64}(0)
-    # `ext` comes back as an owned C string of its full length, like every other
+    # `application_data` comes back as an owned C string of its full length, like every other
     # getter. (An earlier revision copied it into a fixed 256-byte buffer, which
     # silently truncated any longer payload.)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
     tr_present, tr_start, tr_end = _time_range_args(time_range)
     code = @ccall lib_path().infrastore_store_get_non_sequential(
         store::Ptr{Cvoid},
@@ -832,9 +890,12 @@ function get_time_series(
         out_shape_len::Ref{UInt64},
         out_data::Ref{Ptr{UInt8}},
         out_data_len::Ref{UInt64},
-        out_ext::Ref{Ptr{Cchar}},
+        out_application_data::Ref{Ptr{Cchar}},
         out_element_type::Ref{Ptr{Cchar}},
         out_units::Ref{Ptr{Cchar}},
+        out_quantity_kind::Ref{Ptr{Cchar}},
+        out_unit_system::Ref{Ptr{Cchar}},
+        out_component_field::Ref{Ptr{Cchar}},
     )::Int32
     _check(code)
 
@@ -848,16 +909,22 @@ function get_time_series(
         data = _decode_array(bytes, out_dtype[], dims)
         return NonSequentialTimeSeries(
             _from_unix_ms.(timestamp_ms), data, _key_name(key);
-            ext=_peek_cstr(out_ext[]),
+            application_data=_peek_cstr(out_application_data[]),
             element_type=_peek_cstr(out_element_type[]),
             units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            component_field=_peek_cstr(out_component_field[]),
         )
     finally
         _free_i64(out_timestamps[], out_timestamps_len[])
         _free_i64(out_shape[], out_shape_len[])
         _free_u8(out_data[], out_data_len[])
-        _free_cstr(out_ext[])
+        _free_cstr(out_application_data[])
         _free_cstr(out_element_type[])
         _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
 end

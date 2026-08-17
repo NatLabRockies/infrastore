@@ -735,7 +735,7 @@ const SINGLE: &str = r#"{
   "type": "SingleTimeSeries",
   "element_type": "f64",
   "units": "MW",
-  "ext": "Profile",
+  "application_data": "Profile",
   "csv": "load.csv",
   "initial_timestamp": "2024-01-01T00:00:00Z",
   "resolution": "PT1H",

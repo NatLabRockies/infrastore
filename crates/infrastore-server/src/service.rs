@@ -37,6 +37,9 @@ fn filter_from_list_req(req: ListReq) -> Result<ListFilter, Status> {
     if let Some(name) = req.name {
         filter = filter.name(name);
     }
+    if let Some(field) = req.component_field {
+        filter = filter.component_field(field);
+    }
     if let Some(iso) = req.resolution {
         filter = filter.resolution(parse_period(&iso)?);
     }

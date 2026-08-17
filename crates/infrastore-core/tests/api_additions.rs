@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use infrastore_core::{
     AddRequest, Deterministic, FeatureValue, Features, KeyIdentity, ListFilter, OwnerCategory,
     Period, SingleTimeSeries, TimeSeriesData, TimeSeriesError, TimeSeriesKey, TimeSeriesMetadata,
-    TimeSeriesType, TypedArray, create_store,
+    TimeSeriesType, TypedArray, UnitSystem, create_store,
 };
 
 mod common;
@@ -46,7 +46,7 @@ fn det(name: &str, base: f64) -> Deterministic {
 // ---- 1.1 AddRequest builder + Store::add ----------------------------------
 
 #[test]
-fn store_add_preserves_ext() {
+fn store_add_preserves_application_data() {
     let mut store = create_store(None, true).unwrap();
     let mut features: Features = BTreeMap::new();
     features.insert("scenario".into(), FeatureValue::Str("base".into()));
@@ -59,20 +59,23 @@ fn store_add_preserves_ext() {
                 OwnerCategory::Component,
                 TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
                     .with_units("MW")
-                    .with_ext("QuadraticFunctionData"),
+                    .with_application_data("QuadraticFunctionData"),
             )
             .with_features(features.clone()),
         )
         .unwrap();
 
     let meta = store.get_metadata(key.identity()).unwrap();
-    assert_eq!(meta.ext.as_deref(), Some("QuadraticFunctionData"));
+    assert_eq!(
+        meta.application_data.as_deref(),
+        Some("QuadraticFunctionData")
+    );
     assert_eq!(meta.units.as_deref(), Some("MW"));
     assert_eq!(meta.features, features);
 }
 
 #[test]
-fn bulk_push_preserves_ext() {
+fn bulk_push_preserves_application_data() {
     let mut store = create_store(None, true).unwrap();
     let keys = {
         let mut bulk = store.bulk_add();
@@ -80,13 +83,13 @@ fn bulk_push_preserves_ext() {
             1,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(sts("a", 1.0, 4)).with_ext("TypeA"),
+            TimeSeriesData::SingleTimeSeries(sts("a", 1.0, 4)).with_application_data("TypeA"),
         ));
         bulk.push(AddRequest::new(
             2,
             "Generator",
             OwnerCategory::Component,
-            TimeSeriesData::SingleTimeSeries(sts("b", 2.0, 4)).with_ext("TypeB"),
+            TimeSeriesData::SingleTimeSeries(sts("b", 2.0, 4)).with_application_data("TypeB"),
         ));
         bulk.commit().unwrap()
     };
@@ -95,7 +98,7 @@ fn bulk_push_preserves_ext() {
         store
             .get_metadata(keys[0].identity())
             .unwrap()
-            .ext
+            .application_data
             .as_deref(),
         Some("TypeA")
     );
@@ -103,7 +106,7 @@ fn bulk_push_preserves_ext() {
         store
             .get_metadata(keys[1].identity())
             .unwrap()
-            .ext
+            .application_data
             .as_deref(),
         Some("TypeB")
     );
@@ -141,7 +144,13 @@ fn write_paths_reject_reserved_feature_names() {
         .with_features(reserved_features(name))
     };
 
-    for name in ["name", "resolution", "initial_timestamp", "owner_id", "ext"] {
+    for name in [
+        "name",
+        "resolution",
+        "initial_timestamp",
+        "owner_id",
+        "application_data",
+    ] {
         let mut store = create_store(None, true).unwrap();
 
         assert_reserved_err(store.add(request(name, "load")).unwrap_err(), name);
@@ -339,7 +348,7 @@ fn metadata_and_data_json_round_trip() {
             OwnerCategory::Component,
             TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
                 .with_units("MW")
-                .with_ext("QuadraticFunctionData"),
+                .with_application_data("QuadraticFunctionData"),
         ))
         .unwrap();
 
@@ -360,6 +369,29 @@ fn metadata_and_data_json_round_trip() {
         forecast,
         serde_json::from_str::<TimeSeriesData>(&f_json).unwrap()
     );
+}
+
+/// serde must spell `UnitSystem` exactly as `as_str` does.
+///
+/// A serde→serde round trip cannot see a divergence here, but every *other*
+/// surface can: the SQLite column, the proto, the C ABI, Python, Julia, and the
+/// CLI descriptor all carry the `as_str` spelling and parse it back with
+/// `UnitSystem::parse`. If the derive emitted the variant names instead, a value
+/// serialized out of the core and handed to any of them would be rejected as an
+/// unknown unit system. Both directions are pinned, since only deserialization
+/// is what a foreign string actually hits.
+#[test]
+fn unit_system_serde_matches_its_as_str_spelling() {
+    for variant in [UnitSystem::NaturalUnits, UnitSystem::ComponentBase] {
+        let json = serde_json::to_string(&variant).unwrap();
+        assert_eq!(json, format!("\"{}\"", variant.as_str()));
+        assert_eq!(
+            serde_json::from_str::<UnitSystem>(&json).unwrap(),
+            variant,
+            "the as_str spelling must deserialize back"
+        );
+        assert_eq!(UnitSystem::parse(variant.as_str()), Some(variant));
+    }
 }
 
 // ===========================================================================
@@ -1250,9 +1282,11 @@ fn a_read_only_store_rejects_every_write_entry_point() {
     assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
 }
 
-/// The descriptive attributes — `element_type`, `units`, `ext` — live on the
-/// series, not on the request, so a read hands back what a write declared.
-/// Exercised against both backends, so a persist/reopen cycle is covered too.
+/// The descriptive attributes — `element_type`, `units`, `quantity_kind`,
+/// `unit_system`, `component_field`, `application_data` — live on the series,
+/// not on the request,
+/// so a read hands back what a write declared. Exercised against both backends,
+/// so a persist/reopen cycle is covered too.
 #[test]
 fn series_descriptors_round_trip_on_the_struct() {
     for_each_backend_mut(
@@ -1264,7 +1298,10 @@ fn series_descriptors_round_trip_on_the_struct() {
                     OwnerCategory::Component,
                     TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
                         .with_units("MW")
-                        .with_ext("Profile"),
+                        .with_quantity_kind("ActivePower")
+                        .with_unit_system(UnitSystem::ComponentBase)
+                        .with_component_field("max_active_power")
+                        .with_application_data("Profile"),
                 ))
                 .unwrap();
             let bare = store
@@ -1281,12 +1318,42 @@ fn series_descriptors_round_trip_on_the_struct() {
             // The catalog row records them...
             let meta = store.get_metadata(labeled.identity()).unwrap();
             assert_eq!(meta.units.as_deref(), Some("MW"), "{backend}");
-            assert_eq!(meta.ext.as_deref(), Some("Profile"), "{backend}");
+            assert_eq!(
+                meta.quantity_kind.as_deref(),
+                Some("ActivePower"),
+                "{backend}"
+            );
+            assert_eq!(
+                meta.unit_system,
+                Some(UnitSystem::ComponentBase),
+                "{backend}"
+            );
+            assert_eq!(
+                meta.component_field.as_deref(),
+                Some("max_active_power"),
+                "{backend}"
+            );
+            assert_eq!(
+                meta.application_data.as_deref(),
+                Some("Profile"),
+                "{backend}"
+            );
 
             // ...and a read puts them back on the series itself.
             let data = store.get_time_series(labeled.identity(), None).unwrap();
             assert_eq!(data.units(), Some("MW"), "{backend}");
-            assert_eq!(data.ext(), Some("Profile"), "{backend}");
+            assert_eq!(data.quantity_kind(), Some("ActivePower"), "{backend}");
+            assert_eq!(
+                data.unit_system(),
+                Some(UnitSystem::ComponentBase),
+                "{backend}"
+            );
+            assert_eq!(
+                data.component_field(),
+                Some("max_active_power"),
+                "{backend}"
+            );
+            assert_eq!(data.application_data(), Some("Profile"), "{backend}");
             assert_eq!(data.element_type(), meta.element_type, "{backend}");
 
             // A slice is the same values over a shorter window, so it keeps them.
@@ -1294,19 +1361,53 @@ fn series_descriptors_round_trip_on_the_struct() {
                 .get_time_series(labeled.identity(), Some((t0(), t0() + Duration::hours(2))))
                 .unwrap();
             assert_eq!(sliced.units(), Some("MW"), "{backend}");
-            assert_eq!(sliced.ext(), Some("Profile"), "{backend}");
+            assert_eq!(sliced.quantity_kind(), Some("ActivePower"), "{backend}");
+            assert_eq!(
+                sliced.unit_system(),
+                Some(UnitSystem::ComponentBase),
+                "{backend}"
+            );
+            assert_eq!(
+                sliced.component_field(),
+                Some("max_active_power"),
+                "{backend}"
+            );
+            assert_eq!(sliced.application_data(), Some("Profile"), "{backend}");
 
             // A bulk read takes the packed fast path, which builds its own
             // struct; it must agree with the per-key read rather than drop them.
             let ids = [labeled.identity()];
             let bulk = store.bulk_read(&ids).unwrap();
             assert_eq!(bulk[0].units(), Some("MW"), "{backend}");
-            assert_eq!(bulk[0].ext(), Some("Profile"), "{backend}");
+            assert_eq!(bulk[0].quantity_kind(), Some("ActivePower"), "{backend}");
+            assert_eq!(
+                bulk[0].unit_system(),
+                Some(UnitSystem::ComponentBase),
+                "{backend}"
+            );
+            assert_eq!(
+                bulk[0].component_field(),
+                Some("max_active_power"),
+                "{backend}"
+            );
+            assert_eq!(bulk[0].application_data(), Some("Profile"), "{backend}");
 
-            // Unset stays unset -- the store never invents a label.
+            // Unset stays unset -- the store never invents a label. In
+            // particular an undeclared `unit_system` reads back as `None`, not
+            // as `NaturalUnits`: nobody said these values were in natural
+            // units, and pretending otherwise would be a claim the writer
+            // never made.
             let plain = store.get_time_series(bare.identity(), None).unwrap();
             assert_eq!(plain.units(), None, "{backend}");
-            assert_eq!(plain.ext(), None, "{backend}");
+            assert_eq!(plain.quantity_kind(), None, "{backend}");
+            assert_eq!(plain.unit_system(), None, "{backend}");
+            assert_eq!(plain.component_field(), None, "{backend}");
+            assert_eq!(plain.application_data(), None, "{backend}");
+            assert_eq!(
+                store.get_metadata(bare.identity()).unwrap().unit_system,
+                None,
+                "{backend}"
+            );
         },
     );
 }
@@ -1321,13 +1422,109 @@ fn forecast_descriptors_round_trip_on_the_struct() {
                     1,
                     "Generator",
                     OwnerCategory::Component,
-                    TimeSeriesData::Deterministic(det("fc", 1.0)).with_units("MW"),
+                    TimeSeriesData::Deterministic(det("fc", 1.0))
+                        .with_units("MW")
+                        .with_quantity_kind("ActivePower")
+                        .with_unit_system(UnitSystem::NaturalUnits)
+                        .with_component_field("rating"),
                 ))
                 .unwrap()
         },
         |store, key, backend| {
             let data = store.get_time_series(key.identity(), None).unwrap();
             assert_eq!(data.units(), Some("MW"), "{backend}");
+            assert_eq!(data.quantity_kind(), Some("ActivePower"), "{backend}");
+            assert_eq!(
+                data.unit_system(),
+                Some(UnitSystem::NaturalUnits),
+                "{backend}"
+            );
+            assert_eq!(data.component_field(), Some("rating"), "{backend}");
         },
+    );
+}
+
+/// `component_field` describes the values, so it sits outside the key and
+/// outside both content hashes. Two series that differ only in it are the same
+/// series said twice — and one array shared by owners that call it by different
+/// field names is still stored once.
+#[test]
+fn component_field_is_descriptive_not_identity() {
+    let mut store = create_store(None, true).unwrap();
+
+    let key = store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4))
+                .with_component_field("max_active_power"),
+        ))
+        .unwrap();
+
+    // Same identity, different field name: a duplicate, not a second series.
+    let duplicate = store.add(AddRequest::new(
+        1,
+        "Generator",
+        OwnerCategory::Component,
+        TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)).with_component_field("rating"),
+    ));
+    assert!(matches!(
+        duplicate,
+        Err(TimeSeriesError::DuplicateTimeSeries)
+    ));
+
+    // A different owner with the same values under a different field name
+    // still content-addresses to the same array.
+    let other = store
+        .add(AddRequest::new(
+            2,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 4)).with_component_field("rating"),
+        ))
+        .unwrap();
+    let first = store.get_metadata(key.identity()).unwrap();
+    let second = store.get_metadata(other.identity()).unwrap();
+    assert_eq!(first.data_hash, second.data_hash);
+    assert_eq!(first.component_field.as_deref(), Some("max_active_power"));
+    assert_eq!(second.component_field.as_deref(), Some("rating"));
+}
+
+/// A `DeterministicSingleTimeSeries` is a view of its source, so it inherits the
+/// source's descriptors — including `component_field`, which describes the same
+/// values seen through a forecast window.
+#[test]
+fn transformed_view_inherits_component_field() {
+    let mut store = create_store(None, true).unwrap();
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(sts("load", 10.0, 24))
+                .with_component_field("max_active_power"),
+        ))
+        .unwrap();
+
+    store
+        .transform_single_time_series(
+            Duration::hours(4),
+            Duration::hours(1),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+
+    let derived = store
+        .list_time_series(
+            ListFilter::new().time_series_type(TimeSeriesType::DeterministicSingleTimeSeries),
+        )
+        .unwrap();
+    assert_eq!(derived.len(), 1);
+    assert_eq!(
+        derived[0].component_field.as_deref(),
+        Some("max_active_power")
     );
 }

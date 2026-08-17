@@ -1,8 +1,9 @@
-//! Tests for `ListFilter::name_glob` (round-2 plan item 1.1): SQLite `GLOB`
-//! pattern matching on the series name, threaded through every
-//! `ListFilter`-taking query path.
+//! Tests for the descriptive `ListFilter` predicates, threaded through every
+//! `ListFilter`-taking query path: `name_glob` (round-2 plan item 1.1), SQLite
+//! `GLOB` pattern matching on the series name, and `component_field`, an exact
+//! match on the owning component's field.
 //!
-//! Every case runs against both backends. Glob matching itself is pure SQLite
+//! Every case runs against both backends. Matching itself is pure SQLite
 //! and so cannot differ, but the filter feeds `build_static_reader` and
 //! `remove_by_filter`, whose array-side work does differ between the in-memory
 //! and HDF5 backends — and the persisted variant additionally proves the
@@ -178,5 +179,127 @@ fn remove_by_filter_with_a_no_match_glob_removes_nothing() {
             "{backend}"
         );
         assert_eq!(store.num_distinct_arrays().unwrap(), 4, "{backend}");
+    });
+}
+
+// ---- ListFilter::component_field -------------------------------------------
+
+/// Two owners each carrying a `max_active_power` series and a `rating` series,
+/// plus one series that declares no `component_field` at all.
+fn populate_fields(store: &mut Store) {
+    for (owner, name, field, base) in [
+        (1, "max_active_power", Some("max_active_power"), 1.0),
+        (1, "rating", Some("rating"), 2.0),
+        (2, "max_active_power", Some("max_active_power"), 3.0),
+        (2, "rating", Some("rating"), 4.0),
+        (3, "legacy", None, 5.0),
+    ] {
+        let mut data = TimeSeriesData::SingleTimeSeries(sts(name, base, 4));
+        if let Some(field) = field {
+            data = data.with_component_field(field);
+        }
+        store
+            .add(AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                data,
+            ))
+            .unwrap();
+    }
+}
+
+#[test]
+fn component_field_selects_across_owners() {
+    for_each_backend(populate_fields, |store, (), backend| {
+        // The point of the filter: one field, every component that varies it.
+        let keys = store
+            .list_keys(ListFilter::new().component_field("max_active_power"))
+            .unwrap();
+        let mut owners: Vec<i64> = keys.iter().map(|k| k.owner_id()).collect();
+        owners.sort();
+        assert_eq!(owners, vec![1, 2], "{backend}");
+
+        // ...and it composes with the owner scope, which is the other half of
+        // "the series for this field on this component".
+        let scoped = store
+            .list_keys(
+                ListFilter::new()
+                    .owner_id(1)
+                    .component_field("max_active_power"),
+            )
+            .unwrap();
+        assert_eq!(scoped.len(), 1, "{backend}");
+        assert_eq!(scoped[0].name(), "max_active_power", "{backend}");
+    });
+}
+
+#[test]
+fn component_field_matching_is_exact_and_case_sensitive() {
+    for_each_backend(populate_fields, |store, (), backend| {
+        // No prefix or glob semantics: this is an equality predicate, matching
+        // every other identifier filter in the catalog.
+        for pattern in ["max_active", "max_active_power*", "Max_Active_Power"] {
+            assert!(
+                store
+                    .list_keys(ListFilter::new().component_field(pattern))
+                    .unwrap()
+                    .is_empty(),
+                "{pattern} should not match ({backend})"
+            );
+        }
+    });
+}
+
+#[test]
+fn component_field_never_matches_a_row_that_declares_none() {
+    for_each_backend(populate_fields, |store, (), backend| {
+        // SQL equality is never true against NULL, so the `legacy` row -- and
+        // every row written before the column existed -- is unreachable through
+        // this filter. Documented on `ListFilter::component_field`, and pinned
+        // here because the partial index that serves the filter depends on it.
+        let names = store
+            .list_names(ListFilter::new().component_field("legacy"))
+            .unwrap();
+        assert!(names.is_empty(), "{backend}");
+        assert_eq!(
+            store.list_names(ListFilter::new()).unwrap().len(),
+            3,
+            "{backend}"
+        );
+    });
+}
+
+#[test]
+fn component_field_selects_the_same_series_for_a_static_reader() {
+    for_each_backend(populate_fields, |store, (), backend| {
+        // The columnar sweep is the motivating case: one grid of every
+        // component's max_active_power.
+        let reader = store
+            .build_static_reader(
+                ListFilter::new()
+                    .component_field("max_active_power")
+                    .resolution(Duration::hours(1)),
+            )
+            .unwrap();
+        let mut owners: Vec<i64> = reader
+            .groups()
+            .iter()
+            .flat_map(|g| g.keys().iter().map(|k| k.owner_id()))
+            .collect();
+        owners.sort();
+        assert_eq!(owners, vec![1, 2], "{backend}");
+    });
+}
+
+#[test]
+fn remove_by_filter_with_component_field() {
+    for_each_backend_mut(populate_fields, |store, (), backend| {
+        let removed = store
+            .remove_by_filter(ListFilter::new().component_field("rating"))
+            .unwrap();
+        assert_eq!(removed, 2, "{backend}");
+        let names = store.list_names(ListFilter::new()).unwrap();
+        assert_eq!(names, vec!["legacy", "max_active_power"], "{backend}");
     });
 }

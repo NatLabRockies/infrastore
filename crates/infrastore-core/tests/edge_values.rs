@@ -716,21 +716,23 @@ fn hostile_owner_type_units_and_ext_round_trip() {
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
     let owner_type = "Générateur[1]*'\"";
     let units = "MW·h⁻¹ (‰)";
-    let ext = "{\"kind\": \"负荷\", \"q\": \"it's\"}";
+    let application_data = "{\"kind\": \"负荷\", \"q\": \"it's\"}";
 
     let key = store
         .add(AddRequest::new(
             1,
             owner_type,
             OwnerCategory::Component,
-            sts("load", data.clone()).with_units(units).with_ext(ext),
+            sts("load", data.clone())
+                .with_units(units)
+                .with_application_data(application_data),
         ))
         .unwrap();
 
     let meta = store.get_metadata(key.identity()).unwrap();
     assert_eq!(meta.owner_type, owner_type);
     assert_eq!(meta.units.as_deref(), Some(units));
-    assert_eq!(meta.ext.as_deref(), Some(ext));
+    assert_eq!(meta.application_data.as_deref(), Some(application_data));
     // The exact owner-type filter matches it literally despite the
     // metacharacters.
     assert_eq!(
@@ -747,8 +749,8 @@ fn hostile_owner_type_units_and_ext_round_trip() {
 }
 
 #[test]
-fn ext_is_stored_verbatim_even_when_not_valid_json() {
-    // PIN: `ext` is an opaque TEXT blob. The core never parses it, so
+fn application_data_is_stored_verbatim_even_when_not_valid_json() {
+    // PIN: `application_data` is an opaque TEXT blob. The core never parses it, so
     // syntactically invalid JSON is stored and returned unchanged.
     let mut store = create_store(None, true).unwrap();
     let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
@@ -759,13 +761,17 @@ fn ext_is_stored_verbatim_even_when_not_valid_json() {
             1,
             "Generator",
             OwnerCategory::Component,
-            sts("load", data).with_ext(garbage),
+            sts("load", data).with_application_data(garbage),
         ))
         .unwrap();
     assert_eq!(
-        store.get_metadata(key.identity()).unwrap().ext.as_deref(),
+        store
+            .get_metadata(key.identity())
+            .unwrap()
+            .application_data
+            .as_deref(),
         Some(garbage),
-        "ext must be opaque, not validated or normalized"
+        "application_data must be opaque, not validated or normalized"
     );
 }
 
@@ -783,7 +789,7 @@ fn one_megabyte_ext_round_trips_through_disk() {
                 1,
                 "Generator",
                 OwnerCategory::Component,
-                sts("load", data).with_ext(payload.clone()),
+                sts("load", data).with_application_data(payload.clone()),
             ))
             .unwrap();
         store.flush().unwrap();
@@ -791,7 +797,7 @@ fn one_megabyte_ext_round_trips_through_disk() {
     };
     let store = open_store(path.as_path(), true).unwrap();
     assert_eq!(
-        store.get_metadata(key.identity()).unwrap().ext,
+        store.get_metadata(key.identity()).unwrap().application_data,
         Some(payload)
     );
 }

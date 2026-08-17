@@ -95,38 +95,45 @@ end
     @test got_attr.name == "events"
 end
 
-@testset "non-sequential N-D + ext round-trip" begin
+@testset "non-sequential N-D + application_data round-trip" begin
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 1, 4), DateTime(2024, 1, 3)]
     # A (length, k) per-step element array tagged with an opaque extension payload, as a
     # FunctionData encoding would produce on the InfrastructureSystems.jl side.
     data = Float64[1 2; 3 4; 5 6]
-    series = NonSequentialTimeSeries(timestamps, data, "curves"; ext="LinearFunctionData")
+    series = NonSequentialTimeSeries(
+        timestamps, data, "curves"; application_data="LinearFunctionData"
+    )
     key = add_time_series!(store, 9, "Generator", Component, series)
     got = get_time_series(NonSequentialTimeSeries, store, key)
     @test got.timestamps == timestamps
     @test got.data == data
     @test got.data isa Array{Float64, 2}
-    @test got.ext == "LinearFunctionData"
+    @test got.application_data == "LinearFunctionData"
     @test got.name == "curves"
 
     got_attr = get_time_series(NonSequentialTimeSeries, store, 9, Component, "curves")
     @test got_attr.data == data
-    @test got_attr.ext == "LinearFunctionData"
+    @test got_attr.application_data == "LinearFunctionData"
 end
 
-@testset "non-sequential ext round-trips untruncated at any length" begin
-    # Regression: the reader once copied `ext` into a fixed 256-byte buffer,
+@testset "non-sequential application_data round-trips untruncated at any length" begin
+    # Regression: the reader once copied `application_data` into a fixed 256-byte buffer,
     # silently truncating longer payloads (and appending a stray NUL). A JSON
-    # ext payload comfortably exceeds that.
+    # application_data payload comfortably exceeds that.
     store = Store(in_memory=true)
     timestamps = [DateTime(2024, 1, 1), DateTime(2024, 1, 2)]
-    long_ext = "{\"payload\":\"" * "x"^4096 * "\"}"
-    series = NonSequentialTimeSeries(timestamps, Float64[1.0, 2.0], "big-ext"; ext=long_ext)
+    long_application_data = "{\"payload\":\"" * "x"^4096 * "\"}"
+    series = NonSequentialTimeSeries(
+        timestamps,
+        Float64[1.0, 2.0],
+        "big-application_data";
+        application_data=long_application_data,
+    )
     key = add_time_series!(store, 11, "Generator", Component, series)
     got = get_time_series(NonSequentialTimeSeries, store, key)
-    @test got.ext == long_ext
-    @test length(got.ext) == length(long_ext)
+    @test got.application_data == long_application_data
+    @test length(got.application_data) == length(long_application_data)
 end
 
 @testset "attribute-based metadata + hash access" begin
@@ -1201,7 +1208,7 @@ end
     store = Store(in_memory=true)
     ts = SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), collect(1.0:24.0), "load")
 
-    for name in ("name", "resolution", "owner_id", "ext")
+    for name in ("name", "resolution", "owner_id", "application_data")
         @test_throws InfraStore.InvalidParameterError add_time_series!(
             store, 900, "Generator", Component, ts;
             features=Dict("model_year" => 2030, name => "shadowed"),
@@ -1652,6 +1659,94 @@ end
     @test typeof(scen) == Scenarios{Float32, 3}
 end
 
+@testset "quantity_kind, unit_system, and component_field round-trip on every read path" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    sts = SingleTimeSeries(
+        t0, res, collect(1.0:4.0), "load";
+        units="MW", quantity_kind="ActivePower", unit_system=ComponentBase,
+        component_field="max_active_power",
+    )
+    k = add_time_series!(store, 1, "Generator", Component, sts)
+
+    # The catalog row records both...
+    md = get_metadata(store, k)
+    @test md.quantity_kind == "ActivePower"
+    @test md.unit_system === ComponentBase
+    @test md.component_field == "max_active_power"
+    @test list_time_series(store; owner_id=1)[1].unit_system === ComponentBase
+
+    # ...and the get path puts them back on the struct, as it already does for
+    # `units` -- a descriptor that survived the write but not the read would be
+    # worse than one that was never stored.
+    got = get_time_series(store, k)
+    @test got.quantity_kind == "ActivePower"
+    @test got.unit_system === ComponentBase
+    @test got.component_field == "max_active_power"
+
+    # The bulk path builds its own struct, so it must agree rather than drop them.
+    @test bulk_read(store, [k])[1].unit_system === ComponentBase
+    @test bulk_read(store, [k])[1].component_field == "max_active_power"
+
+    # Unset means unspecified, NOT NaturalUnits: nothing declared a basis here.
+    bare = SingleTimeSeries(t0, res, collect(1.0:4.0), "bare")
+    kb = add_time_series!(store, 2, "Generator", Component, bare)
+    @test get_metadata(store, kb).unit_system === nothing
+    @test get_metadata(store, kb).component_field === nothing
+    @test get_time_series(store, kb).quantity_kind === nothing
+    @test get_time_series(store, kb).component_field === nothing
+
+    # A string spelling is accepted and normalized; an unknown one is rejected
+    # rather than degrading to `nothing`.
+    @test SingleTimeSeries(
+        t0, res, collect(1.0:4.0), "s"; unit_system="natural_units"
+    ).unit_system === NaturalUnits
+    @test_throws ArgumentError SingleTimeSeries(
+        t0, res, collect(1.0:4.0), "s"; unit_system="system_base"
+    )
+end
+
+@testset "component_field filter selects across owners on every filter path" begin
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+    for (owner, name, field) in [
+        (1, "max_active_power", "max_active_power"),
+        (1, "rating", "rating"),
+        (2, "max_active_power", "max_active_power"),
+        (3, "legacy", nothing),
+    ]
+        ts = SingleTimeSeries(
+            t0, res, collect(1.0:4.0), name; component_field=field
+        )
+        add_time_series!(store, owner, "Generator", Component, ts)
+    end
+
+    # One field, every component that varies it -- and it composes with the
+    # owner scope.
+    @test sort([
+        r.owner_id for r in list_keys(store; component_field="max_active_power")
+    ]) ==
+        [1, 2]
+    @test length(list_keys(store; owner_id=1, component_field="max_active_power")) == 1
+    @test length(list_time_series(store; component_field="rating")) == 1
+
+    # Exact and case-sensitive; no glob semantics.
+    @test isempty(list_keys(store; component_field="max_active"))
+    @test isempty(list_keys(store; component_field="Max_Active_Power"))
+
+    # A row that declares none is unreachable through the filter.
+    @test isempty(list_keys(store; component_field="legacy"))
+
+    # The reader filter takes it too -- the columnar sweep case.
+    reader = build_static_reader(
+        store; resolution=res, component_field="max_active_power"
+    )
+    @test sum(length(g.keys) for g in reader.groups) == 2
+end
+
 @testset "Phase 2 additions: units, time_range, discovery, rename, bulk dispatch" begin
     store = Store(in_memory=true)
     t0 = DateTime(2024, 1, 1)
@@ -1659,10 +1754,12 @@ end
 
     # units round-trips through get_metadata (previously write-only).
     sts = SingleTimeSeries(t0, res, collect(1.0:8.0), "load")
-    k = add_time_series!(store, 1, "Generator", Component, sts; units="MW", ext="Profile")
+    k = add_time_series!(
+        store, 1, "Generator", Component, sts; units="MW", application_data="Profile"
+    )
     md = get_metadata(store, 1, Component, "load"; resolution=res)
     @test md.units == "MW"
-    @test md.ext == "Profile"
+    @test md.application_data == "Profile"
 
     # time_range slicing on the SingleTimeSeries get path matches a full read.
     full = get_time_series(store, k)
@@ -1685,11 +1782,11 @@ end
     @test list_names(store; owner_id=1) == ["load"]
     @test sort(list_owner_types(store)) == ["Bus", "Generator"]
 
-    # Full metadata rows include units + ext.
+    # Full metadata rows include units + application_data.
     rows = list_time_series(store; owner_id=1)
     @test length(rows) == 1
     @test rows[1].units == "MW"
-    @test rows[1].ext == "Profile"
+    @test rows[1].application_data == "Profile"
     @test rows[1].element_type == "f64"
 
     # Probabilistic metadata exposes percentiles + units without a data fetch.
@@ -2892,7 +2989,9 @@ end
         1,
         "Generator",
         Component,
-        SingleTimeSeries(t0, Hour(1), Float64[1, 2, 3, 4], "load"; ext="Profile");
+        SingleTimeSeries(
+            t0, Hour(1), Float64[1, 2, 3, 4], "load"; application_data="Profile"
+        );
         units="MW",
         features=Dict("scenario" => "high"),
     )
@@ -2924,7 +3023,7 @@ end
     @test md.horizon === nothing && md.count === nothing && md.percentiles === nothing
     @test md.element_type == "f64"
     @test md.element_shape == ()
-    @test md.ext == "Profile"
+    @test md.application_data == "Profile"
     @test md.units == "MW"
     @test md.features == feats
     # Value equality (a NamedTuple had it; a plain struct with a Vector and a
@@ -2977,7 +3076,7 @@ end
     @test mrow.element_shape == ()
     @test mrow.percentiles === nothing
     @test mrow.units == "MW"
-    @test mrow.ext == "Profile"
+    @test mrow.application_data == "Profile"
     @test mrow.data_hash == md.data_hash
     # list_time_series and get_metadata are two paths to the same record.
     @test mrow == md
@@ -3038,16 +3137,16 @@ end
             [0.1, 0.9],
             reshape(1.0:8.0, 2, 2, 2),
             "pf";
-            ext="percentile-ext",
+            application_data="percentile-application_data",
         ),
     )
     pmd = get_metadata(Probabilistic, store, 1, Component, "pf")
     @test pmd isa TimeSeriesMetadata
     @test pmd.percentiles == [0.1, 0.9]
     @test pmd == get_metadata(Probabilistic, store, 1, Component, "pf")
-    # `ext` reaches a Probabilistic: the metadata surface no longer drops fields
+    # `application_data` reaches a Probabilistic: the metadata surface no longer drops fields
     # depending on which getter was called.
-    @test pmd.ext == "percentile-ext"
+    @test pmd.application_data == "percentile-application_data"
     @test pmd.element_type == "f64"
     @test pmd == only(list_time_series(store))
 
@@ -3435,20 +3534,23 @@ end
     push!(
         ks,
         add_time_series!(store, 1, "Generator", Component,
-            SingleTimeSeries(t0, res, collect(1.0:8.0), "load"; units="MW", ext="Profile"),
+            SingleTimeSeries(
+                t0, res, collect(1.0:8.0), "load"; units="MW", application_data="Profile"
+            ),
         ),
     )
     push!(
         ks,
         add_time_series!(store, 2, "Generator", Component,
             NonSequentialTimeSeries([t0, t0 + Hour(1), t0 + Hour(4)], Float64[1, 2, 3],
-                "events"; units="MWh", ext="Events")),
+                "events"; units="MWh", application_data="Events")),
     )
     push!(
         ks,
         add_time_series!(store, 3, "Generator", Component,
             Deterministic(t0, res, hor, ivl, count,
-                Float64[h * 10 + c for h in 1:2, c in 1:3], "fc"; units="MW", ext="Fc")),
+                Float64[h * 10 + c for h in 1:2, c in 1:3], "fc"; units="MW",
+                application_data="Fc")),
     )
 
     # A bulk read and a per-key read of the same series must agree on every
@@ -3457,19 +3559,19 @@ end
     for (k, b) in zip(ks, bulk)
         single = get_time_series(key_info(k).time_series_type, store, k)
         @test b.units == single.units
-        @test b.ext == single.ext
+        @test b.application_data == single.application_data
         @test b.element_type == single.element_type
     end
-    @test bulk[1].units == "MW" && bulk[1].ext == "Profile"
-    @test bulk[2].units == "MWh" && bulk[2].ext == "Events"
-    @test bulk[3].units == "MW" && bulk[3].ext == "Fc"
+    @test bulk[1].units == "MW" && bulk[1].application_data == "Profile"
+    @test bulk[2].units == "MWh" && bulk[2].application_data == "Events"
+    @test bulk[3].units == "MW" && bulk[3].application_data == "Fc"
 
     # Unset stays unset through the bulk path too.
     kp = add_time_series!(store, 4, "Generator", Component,
         SingleTimeSeries(t0, res, collect(1.0:8.0), "bare"))
     b = only(bulk_read(store, [kp]))
     @test b.units === nothing
-    @test b.ext === nothing
+    @test b.application_data === nothing
 end
 
 @testset "transform_single_time_series! reports its full outcome" begin

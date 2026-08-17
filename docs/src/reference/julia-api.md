@@ -89,9 +89,9 @@ The store registers a finalizer; close it eagerly with `close!(store)`.
 
 ## Types
 
-Each struct carries the association `name` (required) and an optional `ext`. Every constructor takes
-`name` as the positional after `data` and `ext=` as a keyword — e.g.
-`SingleTimeSeries(initial, resolution, data, name; ext=nothing)`.
+Each struct carries the association `name` (required) and an optional `application_data`. Every
+constructor takes `name` as the positional after `data` and `application_data=` as a keyword — e.g.
+`SingleTimeSeries(initial, resolution, data, name; application_data=nothing)`.
 
 Every data-carrying struct is parameterized `{T,N}` on the element type and dimensionality of its
 value array; `{T,N}` is inferred from `data` by the constructor (an `AbstractArray` argument — a
@@ -103,17 +103,17 @@ struct SingleTimeSeries{T,N}
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
-SingleTimeSeries(initial_timestamp, resolution, data, name; ext=nothing)
+SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
     data         :: Array{T,N}
     name         :: String
-    ext :: Union{Nothing,String}
+    application_data :: Union{Nothing,String}
 end
-NonSequentialTimeSeries(timestamps, data, name; ext=nothing)
+NonSequentialTimeSeries(timestamps, data, name; application_data=nothing)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -123,10 +123,10 @@ struct Deterministic{T,N}
     count             :: Int
     data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
-              ext=nothing)
+              application_data=nothing)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -137,10 +137,10 @@ struct Probabilistic{T,N}
     percentiles       :: Vector{Float64}
     data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
-              ext=nothing)
+              application_data=nothing)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -151,10 +151,10 @@ struct Scenarios{T,N}
     scenario_count    :: Int             # set from size(data, 1) by the constructor
     data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
-          ext=nothing)         # note: scenario_count is NOT a constructor argument
+          application_data=nothing)         # note: scenario_count is NOT a constructor argument
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. You normally
@@ -177,14 +177,15 @@ end
 end
 ```
 
-`ext` is an opaque, package-owned payload (typically JSON) the binding can use to reconstruct a
-domain object on read; the store stores it verbatim and never interprets it. `add_time_series!`
-reads `name` off the object (it is not a call argument), so the same array can be stored under
-different names; its `ext=` keyword defaults to the object's `ext`. `data` keeps its Julia element
-type: the binding maps `T` to a stored dtype (`Float64`, `Float32`, the signed and unsigned integer
-widths, `Bool`) and converts to row-major bytes on the way down. An `element_type=` keyword declares
-what the elements _mean_ when they are not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, …
-— see [Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
+`application_data` is an opaque, package-owned payload (typically JSON) the binding can use to
+reconstruct a domain object on read; the store stores it verbatim and never interprets it.
+`add_time_series!` reads `name` off the object (it is not a call argument), so the same array can be
+stored under different names; its `application_data=` keyword defaults to the object's
+`application_data`. `data` keeps its Julia element type: the binding maps `T` to a stored dtype
+(`Float64`, `Float32`, the signed and unsigned integer widths, `Bool`) and converts to row-major
+bytes on the way down. An `element_type=` keyword declares what the elements _mean_ when they are
+not plain numbers (`"tuple(3,f64)"`, `"piecewise_linear"`, … — see
+[Element types](./element-types.md)); it defaults to the object's own `element_type`, which is
 `nothing` for plain scalars.
 
 ## Result Types
@@ -219,7 +220,10 @@ struct TimeSeriesMetadata                    # get_metadata / list_time_series
     element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
     features          :: Dict{String,Any}
     units             :: Union{Nothing,String}
-    ext               :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
+    component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
+    application_data  :: Union{Nothing,String}
 end
 ```
 
@@ -260,7 +264,8 @@ add_time_series!(
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
     features::AbstractDict = Dict(), units = nothing,
-    ext = ts.ext,
+    quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
+    component_field = ts.component_field, application_data = ts.application_data,
 ) -> TimeSeriesKey
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -> SingleTimeSeries
@@ -276,8 +281,8 @@ get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name;
 ```
 
 `time_range = (start::DateTime, stop::DateTime)` (exclusive end) slices the read on every form.
-Every read populates the returned struct's `ext` field from the stored association, so a binding's
-reconstruction tag comes back with the data — no separate `get_metadata` call is needed.
+Every read populates the returned struct's `application_data` field from the stored association, so
+a binding's reconstruction tag comes back with the data — no separate `get_metadata` call is needed.
 
 `owner_id` is an integer identifier (`Int64`) and `owner_category` (`Component` /
 `SupplementalAttribute`) completes the owner identity — the owner is the pair
@@ -357,10 +362,10 @@ as its first argument exactly like `get_time_series`: `SingleTimeSeries`, `NonSe
 `Deterministic` resolves a stored `DeterministicSingleTimeSeries` too, and the returned record's
 `time_series_type` reports which form was found. `interval` is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a `SingleTimeSeries`, the same shorthand
-`has_time_series` and `remove_time_series!` use. Since every form returns the same struct, `ext`,
-`element_type`, `owner_type`, and `percentiles` are available whichever type was asked for and
-whichever way the record was reached (for a forecast, `element_shape` is the stored array's trailing
-dims after its first axis).
+`has_time_series` and `remove_time_series!` use. Since every form returns the same struct,
+`application_data`, `element_type`, `owner_type`, and `percentiles` are available whichever type was
+asked for and whichever way the record was reached (for a forecast, `element_shape` is the stored
+array's trailing dims after its first axis).
 
 ```julia
 get_metadata(store, 42, Component, "load"; resolution = Hour(1))
@@ -444,19 +449,22 @@ The forecast `name` comes from the struct, e.g.
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Deterministic;
-    features=Dict(), units=nothing, ext=nothing,
+    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
+    component_field=nothing, application_data=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Probabilistic;
-    features=Dict(), units=nothing, ext=nothing,
+    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
+    component_field=nothing, application_data=nothing,
 ) -> TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Scenarios;
-    features=Dict(), units=nothing, ext=nothing,
+    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
+    component_field=nothing, application_data=nothing,
 ) -> TimeSeriesKey
 ```
 
@@ -740,12 +748,13 @@ close!(store) -> Nothing
 
 ```julia
 list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Vector{KeyRow}
+          name=nothing, resolution=nothing, interval=nothing, features=Dict(),
+          component_field=nothing) -> Vector{KeyRow}
 ```
 
 `list_keys` lists the key of every stored series as `KeyRow` structs (identity plus the per-type
 descriptive snapshot: `initial_timestamp`, `resolution`, `length`, `horizon`, `interval`, `count`,
-`features`; fields that do not apply to a key's type are `nothing`). All seven filters are optional
+`features`; fields that do not apply to a key's type are `nothing`). All eight filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:
 
 - `owner_id`, `owner_category` — scope to one owner.
@@ -758,16 +767,21 @@ and independent, and combine as a conjunction; with none set the whole store is 
 - `interval` — a `Period`; forecasts only (static rows carry no interval and never match an interval
   filter).
 - `features` — match keys whose features include all the given entries (subset match).
+- `component_field` — exact, case-sensitive match on the owning component's field (e.g.
+  `"max_active_power"`): every series that varies that field, alone or scoped to one owner. A row
+  that declares no `component_field` matches no value, so this cannot select the rows that left it
+  unset.
 
-Physical storage detail (`data_hash`, `element_type`, `ext`, `percentiles`) is not on a key — read
-it via `get_metadata` / `list_time_series`.
+Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not on a
+key — read it via `get_metadata` / `list_time_series`.
 
 ```julia
 has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                    name=nothing, resolution=nothing, interval=nothing, features=Dict()) -> Bool
+                    name=nothing, resolution=nothing, interval=nothing, features=Dict(),
+                    component_field=nothing) -> Bool
 ```
 
-`has_any_time_series` is the existence probe over the same seven filters: true iff `list_keys` with
+`has_any_time_series` is the existence probe over the same eight filters: true iff `list_keys` with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. `features` is a subset match here,
 unlike the exact-key `has_time_series` forms, which compare the whole feature set by content hash —
@@ -775,7 +789,7 @@ and it is the one exception to the index-only guarantee: a non-empty `features` 
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.
 
-`list_array_groups` takes the same seven filters and returns the same row fields as `list_keys`, but
+`list_array_groups` takes the same eight filters and returns the same row fields as `list_keys`, but
 each row additionally carries `data_hash` — the 32-byte content hash of the array the row resolves
 to (a `Vector{UInt8}` hashes and compares by content, so it groups directly as a `Dict` key). Rows
 that share a stored array share their `data_hash`: both deduplicated identical arrays and a

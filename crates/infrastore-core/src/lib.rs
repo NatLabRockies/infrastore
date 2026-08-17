@@ -47,12 +47,12 @@ pub use types::{
     },
     metadata::{
         FeatureValue, Features, OwnerCategory, RESERVED_FEATURE_NAMES, TimeSeriesMetadata,
-        is_reserved_feature_name, validate_features,
+        UnitSystem, is_reserved_feature_name, validate_features,
     },
     period::Period,
     time_series::{
-        Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
-        TimeSeriesData, TimeSeriesType,
+        Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
+        SingleTimeSeries, TimeSeriesData, TimeSeriesType,
     },
 };
 pub use version::DATA_FORMAT_VERSION;

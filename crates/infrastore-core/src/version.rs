@@ -24,4 +24,18 @@
 /// irregular series are now column-packed into `nsts_…` datasets keyed by that
 /// same hash, instead of one standalone `arr_…` dataset each. Both halves of a
 /// 0.13.0 store are rejected on open.
-pub const DATA_FORMAT_VERSION: &str = "0.14.0";
+/// 0.15.0 renamed the `ext` column to `application_data` and added the
+/// `quantity_kind` and `unit_system` columns, all on
+/// `time_series_associations`. New *columns* on an existing table are not the
+/// additive case described above: the DDL is `CREATE TABLE IF NOT EXISTS`, so a
+/// 0.14.0 store re-opened for writing keeps its old column set and every
+/// statement naming the new columns fails. Stores written by 0.14.0 and earlier
+/// are rejected on open.
+///
+/// 0.16.0 added the `component_field` column to `time_series_associations`,
+/// naming the field on the owning component whose value the series varies over
+/// time. Same reasoning as 0.15.0: a new *column* on an existing table is not
+/// the additive case, because `CREATE TABLE IF NOT EXISTS` leaves a 0.15.0
+/// store's column set alone and every statement naming the new column would
+/// then fail. Stores written by 0.15.0 and earlier are rejected on open.
+pub const DATA_FORMAT_VERSION: &str = "0.16.0";

@@ -26,8 +26,8 @@ use crate::types::key::{
 use crate::types::metadata::{Features, OwnerCategory, TimeSeriesMetadata, validate_features};
 use crate::types::period::Period;
 use crate::types::time_series::{
-    Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios, SingleTimeSeries,
-    TimeSeriesData, TimeSeriesType, compute_h,
+    Descriptors, Deterministic, NonSequentialTimeSeries, Probabilistic, Scenarios,
+    SingleTimeSeries, TimeSeriesData, TimeSeriesType, compute_h,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +46,15 @@ pub struct ListFilter {
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*` and `?`
     /// wildcards). Applied in addition to `name` when both are set.
     pub name_glob: Option<String>,
+    /// Exact, case-sensitive match on [`TimeSeriesMetadata::component_field`] —
+    /// "every series that varies this field", across owners or scoped to one.
+    ///
+    /// It is a descriptor, not part of a series' identity, so this narrows a
+    /// listing but never addresses a single row on its own: one component may
+    /// carry several series for one field, distinguished by name or features.
+    /// A row that declares no `component_field` matches no value at all, so
+    /// this cannot be used to find the rows that left it unset.
+    pub component_field: Option<String>,
     pub resolution: Option<Period>,
     pub interval: Option<Period>,
     pub features: Option<Features>,
@@ -79,6 +88,10 @@ impl ListFilter {
         self.name_glob = Some(pattern.into());
         self
     }
+    pub fn component_field(mut self, field: impl Into<String>) -> Self {
+        self.component_field = Some(field.into());
+        self
+    }
     pub fn resolution(mut self, r: impl Into<Period>) -> Self {
         self.resolution = Some(r.into());
         self
@@ -102,6 +115,7 @@ impl From<ListFilter> for MetadataFilter {
             time_series_type: value.time_series_type.map(TypeMatch::Requested),
             name: value.name,
             name_glob: value.name_glob,
+            component_field: value.component_field,
             resolution: value.resolution,
             interval: value.interval,
             features: value.features,
@@ -124,10 +138,11 @@ impl AddRequest {
     /// Start a request with empty features. Chain [`Self::with_features`] to
     /// set them.
     ///
-    /// A series' descriptive attributes — `element_type`, `units`, and `ext` —
+    /// A series' descriptive attributes — `element_type`, `units`, `quantity_kind`,
+    /// `unit_system`, `component_field`, and `application_data` —
     /// live on the [`TimeSeriesData`] itself, not here: they describe the data,
     /// so they travel with it and come back on a read. Set them with the
-    /// `with_element_type` / `with_units` / `with_ext` builders on the concrete
+    /// `with_element_type` / `with_units` / `with_application_data` builders on the concrete
     /// series type before wrapping it in a request.
     pub fn new(
         owner_id: i64,
@@ -798,15 +813,26 @@ impl Store {
     /// onto a destination that predates stamping.
     pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
-        let metadata = match catalog {
-            CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
-            CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
-        };
+        // The HDF5 half opens FIRST, and the order is load-bearing: `open_backend`
+        // is where `data_format_version` is checked, and opening the catalog
+        // writable runs `schema::DDL`, which can only be applied to a catalog of
+        // the current format. The DDL is idempotent but not version-agnostic —
+        // `idx_component_field` names a column added in 0.16.0, so applying it to
+        // an older catalog fails with a raw `no such column`, pre-empting the
+        // `IncompatibleFormat` the version stamp exists to produce. Checking the
+        // version before touching the catalog keeps that error the one a caller
+        // sees, and as a bonus stops a bad path from leaving a freshly created
+        // empty `.sqlite` behind.
+        //
         // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
         // `Store::add_*` / `remove_*` guards.
         let backend = open_backend(path, read_only)?;
+        let metadata = match catalog {
+            CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
+            CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
+        };
         // Stamps that disagree mean these files came from different saves — most
         // likely a `persist_to` interrupted between its two renames. Comparing
         // the `Option`s directly makes a lone stamp a mismatch too, which is the
@@ -1050,7 +1076,8 @@ impl Store {
 
     /// Add one time series from an [`AddRequest`]. Equivalent to
     /// [`Self::add_time_series`] — both preserve the series' `element_type`,
-    /// `units`, and `ext`, since those travel on the [`TimeSeriesData`] itself.
+    /// `units`, `quantity_kind`, `unit_system`, `component_field`, and
+    /// `application_data`, since those travel on the [`TimeSeriesData`] itself.
     /// Routed through the same per-column path.
     pub fn add(&mut self, request: AddRequest) -> Result<TimeSeriesKey> {
         self.add_per_column(vec![request])
@@ -1477,7 +1504,8 @@ impl Store {
     /// Like [`Self::get_time_series`], but also returns the association's
     /// catalog row from the same single lookup. Callers that need both the
     /// reconstructed series and row-level detail (the FFI getters read the
-    /// `ext` payload alongside the data) would otherwise pay a second SQLite
+    /// `application_data` payload alongside the data) would otherwise pay a second
+    /// SQLite
     /// key lookup per read — at 100k-series scale that lookup is ~20% of a
     /// full read.
     pub fn get_time_series_with_metadata(
@@ -1497,11 +1525,18 @@ impl Store {
         meta: &TimeSeriesMetadata,
         time_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<TimeSeriesData> {
-        // `element_type`, `units`, and `ext` describe the series but live on the
-        // catalog row, not in the array bytes. Filling them in here — once, for
-        // every variant — is what makes a read round-trip what a write declared.
+        // The descriptors describe the series but live on the catalog row, not
+        // in the array bytes. Filling them in here — once, for every variant —
+        // is what makes a read round-trip what a write declared.
         let mut data = self.materialize_array(meta, time_range)?;
-        data.set_descriptors(meta.element_type, meta.units.clone(), meta.ext.clone());
+        data.set_descriptors(Descriptors {
+            element_type: meta.element_type,
+            units: meta.units.clone(),
+            quantity_kind: meta.quantity_kind.clone(),
+            unit_system: meta.unit_system,
+            component_field: meta.component_field.clone(),
+            application_data: meta.application_data.clone(),
+        });
         Ok(data)
     }
 
@@ -1581,7 +1616,10 @@ impl Store {
                     // value that call resolves to anyway.
                     element_type: meta.element_type,
                     units: None,
-                    ext: None,
+                    quantity_kind: None,
+                    unit_system: None,
+                    component_field: None,
+                    application_data: None,
                 }))
             }
             TimeSeriesType::NonSequentialTimeSeries => {
@@ -1826,7 +1864,7 @@ impl Store {
     /// List the [`TimeSeriesKey`] of every association matching `filter`. This is
     /// the key-centric counterpart of [`Self::list_time_series`]: each row is
     /// reduced to its identifying + descriptive key, dropping physical storage
-    /// detail (`data_hash`, `dtype`, `ext`, `percentiles`) which is read
+    /// detail (`data_hash`, `dtype`, `application_data`, `percentiles`) which is read
     /// on demand via [`Self::get_metadata`]. The binding-facing listing path.
     pub fn list_keys(&self, filter: ListFilter) -> Result<Vec<TimeSeriesKey>> {
         self.metadata
@@ -2090,7 +2128,10 @@ impl Store {
                     // descriptors come straight off the row it already loaded.
                     element_type: meta.element_type,
                     units: meta.units.clone(),
-                    ext: meta.ext.clone(),
+                    quantity_kind: meta.quantity_kind.clone(),
+                    unit_system: meta.unit_system,
+                    component_field: meta.component_field.clone(),
+                    application_data: meta.application_data.clone(),
                 }));
             } else {
                 // Materialize from the row already in hand rather than calling
@@ -2520,6 +2561,7 @@ impl Store {
             features_hash: Some(crate::hash::features_hash(&key.features)),
             owner_type: None,
             name_glob: None,
+            component_field: None,
         })
     }
 
@@ -3699,10 +3741,13 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     timestamps: None,
                     features: item.features.clone(),
                     units: item.data.units().map(str::to_owned),
+                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
+                    unit_system: item.data.unit_system(),
+                    component_field: item.data.component_field().map(str::to_owned),
                     percentiles: None,
                     element_type,
                     element_shape: single.data.element_shape().to_vec(),
-                    ext: item.data.ext().map(str::to_owned),
+                    application_data: item.data.application_data().map(str::to_owned),
                 },
                 TimeSeriesKey::Single(SingleTimeSeriesKey::new(
                     item.owner_id,
@@ -3741,10 +3786,13 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
                     timestamps: Some(non_sequential.timestamps.clone()),
                     features: item.features.clone(),
                     units: item.data.units().map(str::to_owned),
+                    quantity_kind: item.data.quantity_kind().map(str::to_owned),
+                    unit_system: item.data.unit_system(),
+                    component_field: item.data.component_field().map(str::to_owned),
                     percentiles: None,
                     element_type,
                     element_shape: non_sequential.data.element_shape().to_vec(),
-                    ext: item.data.ext().map(str::to_owned),
+                    application_data: item.data.application_data().map(str::to_owned),
                 },
                 TimeSeriesKey::NonSequential(NonSequentialTimeSeriesKey::new(
                     item.owner_id,
@@ -4029,10 +4077,13 @@ fn forecast_metadata(
         timestamps: None,
         features: item.features.clone(),
         units: item.data.units().map(str::to_owned),
+        quantity_kind: item.data.quantity_kind().map(str::to_owned),
+        unit_system: item.data.unit_system(),
+        component_field: item.data.component_field().map(str::to_owned),
         percentiles,
         element_type,
         element_shape: data.element_shape().to_vec(),
-        ext: item.data.ext().map(str::to_owned),
+        application_data: item.data.application_data().map(str::to_owned),
     }
 }
 
@@ -4084,7 +4135,21 @@ fn forecast_key(
 /// root attribute identifies files written by [`Hdf5Backend`]; files without it
 /// (including stores written by the removed netcdf backend) are rejected with
 /// an actionable error instead of being misread.
+///
+/// Reachability is checked first, and separately. `is_hdf5_backend_file` cannot
+/// tell "this file is not an infrastore store" from "there is no file here" —
+/// it answers `false` either way — so without this a typo'd path or an
+/// unreadable directory would be reported as a netcdf-era store needing
+/// migration, which is advice about a file that does not exist. The `io::Error`
+/// kind is carried through, so a missing path and a permission-denied one stay
+/// distinguishable.
 fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
+    if let Err(e) = std::fs::metadata(path) {
+        return Err(TimeSeriesError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot open store {}: {e}", path.display()),
+        )));
+    }
     if !crate::storage::hdf5::is_hdf5_backend_file(path) {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "{} is not an infrastore hdf5 store (stores written by the removed \

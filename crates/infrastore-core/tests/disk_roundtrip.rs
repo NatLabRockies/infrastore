@@ -964,6 +964,64 @@ fn opening_a_store_from_an_older_format_is_rejected() {
     }
 }
 
+/// The same rejection, opening for *writing* — the case the read-only test above
+/// cannot cover.
+///
+/// A writable open is the one that applies `schema::DDL` to the catalog, and the
+/// DDL is idempotent but not version-agnostic: statements may name columns that
+/// a format bump introduced (`idx_component_field` names `component_field`, new
+/// in 0.16.0). Applied to an older catalog it fails with a raw SQLite
+/// `no such column`, which is exactly the confusing diagnostic the version stamp
+/// exists to replace. So `open_with_catalog` checks the HDF5 version before it
+/// opens the catalog, and this test pins that ordering.
+#[test]
+fn opening_an_older_format_store_for_writing_is_rejected_before_the_catalog_ddl_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.h5");
+    {
+        let mut store = create_store(Some(path.as_path()), false).unwrap();
+        store
+            .add_time_series(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(series(2024, 8, 1.0)),
+                Features::new(),
+            )
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    // Backdate both halves: the recorded format version, and the catalog itself
+    // to the shape an older build left behind. Dropping `component_field` is what
+    // makes this a real older catalog rather than a current one wearing an old
+    // label — re-applying today's DDL to it is the failure being guarded against.
+    // SQLite refuses DROP COLUMN while an index or a view still names the column,
+    // so the partial index and the readable view go first; the DDL re-creates
+    // both on any open that gets that far.
+    set_format_attr(&path, "0.9.0");
+    {
+        let conn = rusqlite::Connection::open(sqlite_path_of(&path)).unwrap();
+        conn.execute_batch(
+            "DROP VIEW time_series_readable;
+             DROP INDEX idx_component_field;
+             ALTER TABLE time_series_associations DROP COLUMN component_field;",
+        )
+        .unwrap();
+    }
+
+    let Err(err) = open_store(path.as_path(), false) else {
+        panic!("expected an older-format store to be rejected for writing");
+    };
+    match err {
+        TimeSeriesError::IncompatibleFormat { found, expected } => {
+            assert_eq!(found, "0.9.0");
+            assert_eq!(expected, infrastore_core::DATA_FORMAT_VERSION);
+        }
+        other => panic!("expected IncompatibleFormat, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Failure-side persistence: a failing integrity report, torn artifacts, and
 // version mismatches other than "older".
@@ -1208,10 +1266,35 @@ fn opening_a_directory_as_a_store_is_rejected() {
 }
 
 #[test]
-fn opening_a_nonexistent_path_is_rejected() {
+fn opening_a_nonexistent_path_is_rejected_as_a_missing_file() {
+    // Not merely "is_err": the *kind* of error is the point. Reachability is
+    // checked before the `storage_backend` attribute, because
+    // `is_hdf5_backend_file` answers `false` both for a file that is not a
+    // store and for a path where there is no file at all. Reported through the
+    // latter, a typo'd path came back as a netcdf-era store needing migration —
+    // advice about a file that does not exist.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does_not_exist.h5");
-    assert!(open_store(missing.as_path(), true).is_err());
+
+    for read_only in [true, false] {
+        let Err(err) = open_store(missing.as_path(), read_only) else {
+            panic!("expected a missing path to be rejected (read_only={read_only})");
+        };
+        match err {
+            TimeSeriesError::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+                assert!(
+                    e.to_string().contains("does_not_exist.h5"),
+                    "the diagnostic must name the path; got {e}"
+                );
+            }
+            other => panic!("expected Io(NotFound), got {other:?}"),
+        }
+    }
+
+    // A read-write open of a missing path must not leave a catalog behind for
+    // the file it never opened.
+    assert!(!sqlite_path_of(&missing).exists());
 }
 
 #[test]
@@ -1254,9 +1337,10 @@ fn opening_a_store_with_no_format_attribute_is_rejected_as_unspecified() {
             .unwrap();
     }
 
-    // Opened read-write so the companion catalog is created; a read-only open
-    // would fail on the absent catalog first (see
-    // `the_catalog_half_is_opened_before_the_format_check`).
+    // The absent companion catalog never comes into it: the format check runs
+    // against the HDF5 half first (see
+    // `the_format_check_runs_before_the_catalog_half_is_opened`), so this
+    // reports the missing attribute either way.
     let Err(err) = open_store(path.as_path(), false) else {
         panic!("expected a store with no format attribute to be rejected");
     };
@@ -1270,29 +1354,32 @@ fn opening_a_store_with_no_format_attribute_is_rejected_as_unspecified() {
 }
 
 #[test]
-fn the_catalog_half_is_opened_before_the_format_check() {
-    // PIN the ordering inside `Store::open`: the SQLite catalog is opened
-    // first, so when *both* halves are wrong the caller sees the catalog error,
-    // not the more informative format-version error. Worth knowing when reading
-    // a bug report: a `Sqlite(CannotOpen)` does not rule out a version
-    // mismatch underneath it.
+fn the_format_check_runs_before_the_catalog_half_is_opened() {
+    // PIN the ordering inside `Store::open`: the HDF5 half opens first, so when
+    // *both* halves are wrong the caller sees the format-version error, which is
+    // the one that explains the situation. The ordering is required rather than
+    // merely nicer — opening the catalog writable applies `schema::DDL`, which
+    // can only be applied to a catalog of the current format (see
+    // `opening_an_older_format_store_for_writing_is_rejected_before_the_catalog_ddl_runs`).
     let (_dir, path, _key) = store_on_disk();
     set_format_attr(&path, "99.0.0");
     std::fs::remove_file(sqlite_path_of(&path)).unwrap();
 
-    let Err(err) = open_store(path.as_path(), true) else {
-        panic!("expected an error");
-    };
-    assert!(
-        matches!(err, TimeSeriesError::Sqlite(_)),
-        "PIN: the catalog error wins over the format error; got {err:?}"
-    );
+    for read_only in [true, false] {
+        let Err(err) = open_store(path.as_path(), read_only) else {
+            panic!("expected an error");
+        };
+        assert!(
+            matches!(err, TimeSeriesError::IncompatibleFormat { .. }),
+            "PIN: the format error wins over the missing-catalog error \
+             (read_only={read_only}); got {err:?}"
+        );
+    }
 
-    // Opened read-write the catalog is created, and the format check then fires.
-    assert!(matches!(
-        open_store(path.as_path(), false),
-        Err(TimeSeriesError::IncompatibleFormat { .. })
-    ));
+    // And the rejected open left no catalog behind: bailing before the catalog
+    // is touched means a bad path no longer creates an empty `.sqlite` beside
+    // the file it refused to open.
+    assert!(!sqlite_path_of(&path).exists());
 }
 
 /// The discriminant columns must be stored as SQLite INTEGERs carrying the

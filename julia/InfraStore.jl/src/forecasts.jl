@@ -281,9 +281,12 @@ function _get_forecast_raw(
     out_pct = Ref{Ptr{Float64}}(C_NULL)
     out_pct_len = Ref{UInt64}(0)
     out_matched = Ref{Int32}(0)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast(
@@ -312,9 +315,12 @@ function _get_forecast_raw(
             out_pct::Ref{Ptr{Float64}},
             out_pct_len::Ref{UInt64},
             out_matched::Ref{Int32},
-            out_ext::Ref{Ptr{Cchar}},
+            out_application_data::Ref{Ptr{Cchar}},
             out_element_type::Ref{Ptr{Cchar}},
             out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
 
@@ -333,9 +339,12 @@ function _get_forecast_raw(
         out_pct,
         out_pct_len,
         out_matched,
-        out_ext,
+        out_application_data,
         out_element_type,
         out_units,
+        out_quantity_kind,
+        out_unit_system,
+        out_component_field,
     )
 end
 
@@ -357,9 +366,12 @@ function _decode_forecast_outputs(
     out_pct,
     out_pct_len,
     out_matched,
-    out_ext,
+    out_application_data,
     out_element_type,
     out_units,
+    out_quantity_kind,
+    out_unit_system,
+    out_component_field,
 )
     # Copy everything inside try/finally: every FFI allocation is released
     # exactly once in the `finally`, so an exception mid-decode cannot leak the
@@ -385,9 +397,12 @@ function _decode_forecast_outputs(
             dtype_code=out_dtype[],
             percentiles=percentiles,
             matched_type=Int(out_matched[]),
-            ext=_peek_cstr(out_ext[]),
+            application_data=_peek_cstr(out_application_data[]),
             element_type=_peek_cstr(out_element_type[]),
             units=_peek_cstr(out_units[]),
+            quantity_kind=_peek_cstr(out_quantity_kind[]),
+            unit_system=_unit_system(_peek_cstr(out_unit_system[])),
+            component_field=_peek_cstr(out_component_field[]),
         )
     finally
         _free_u64(out_dims[], out_ndims[])
@@ -396,9 +411,12 @@ function _decode_forecast_outputs(
         _free_cstr(out_res[])
         _free_cstr(out_horizon[])
         _free_cstr(out_interval[])
-        _free_cstr(out_ext[])
+        _free_cstr(out_application_data[])
         _free_cstr(out_element_type[])
         _free_cstr(out_units[])
+        _free_cstr(out_quantity_kind[])
+        _free_cstr(out_unit_system[])
+        _free_cstr(out_component_field[])
     end
 end
 
@@ -427,9 +445,12 @@ function _get_forecast_raw(
     out_pct = Ref{Ptr{Float64}}(C_NULL)
     out_pct_len = Ref{UInt64}(0)
     out_matched = Ref{Int32}(0)
-    out_ext = Ref{Ptr{Cchar}}(C_NULL)
+    out_application_data = Ref{Ptr{Cchar}}(C_NULL)
     out_element_type = Ref{Ptr{Cchar}}(C_NULL)
     out_units = Ref{Ptr{Cchar}}(C_NULL)
+    out_quantity_kind = Ref{Ptr{Cchar}}(C_NULL)
+    out_unit_system = Ref{Ptr{Cchar}}(C_NULL)
+    out_component_field = Ref{Ptr{Cchar}}(C_NULL)
 
     _check(
         @ccall lib_path().infrastore_store_get_forecast_by_key(
@@ -452,9 +473,12 @@ function _get_forecast_raw(
             out_pct::Ref{Ptr{Float64}},
             out_pct_len::Ref{UInt64},
             out_matched::Ref{Int32},
-            out_ext::Ref{Ptr{Cchar}},
+            out_application_data::Ref{Ptr{Cchar}},
             out_element_type::Ref{Ptr{Cchar}},
             out_units::Ref{Ptr{Cchar}},
+            out_quantity_kind::Ref{Ptr{Cchar}},
+            out_unit_system::Ref{Ptr{Cchar}},
+            out_component_field::Ref{Ptr{Cchar}},
         )::Int32
     )
 
@@ -473,9 +497,12 @@ function _get_forecast_raw(
         out_pct,
         out_pct_len,
         out_matched,
-        out_ext,
+        out_application_data,
         out_element_type,
         out_units,
+        out_quantity_kind,
+        out_unit_system,
+        out_component_field,
     )
 end
 
@@ -498,9 +525,12 @@ function _forecast_from_raw(::Type{Deterministic}, r, name::AbstractString)
         r.count,
         _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
-        ext=r.ext,
+        application_data=r.application_data,
         element_type=r.element_type,
         units=r.units,
+        quantity_kind=r.quantity_kind,
+        unit_system=r.unit_system,
+        component_field=r.component_field,
     )
 end
 
@@ -514,9 +544,12 @@ function _forecast_from_raw(::Type{Probabilistic}, r, name::AbstractString)
         r.percentiles,
         _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
-        ext=r.ext,
+        application_data=r.application_data,
         element_type=r.element_type,
         units=r.units,
+        quantity_kind=r.quantity_kind,
+        unit_system=r.unit_system,
+        component_field=r.component_field,
     )
 end
 
@@ -530,9 +563,12 @@ function _forecast_from_raw(::Type{Scenarios}, r, name::AbstractString)
         r.count,
         _decode_array(r.bytes, r.dtype_code, r.dims),
         name;
-        ext=r.ext,
+        application_data=r.application_data,
         element_type=r.element_type,
         units=r.units,
+        quantity_kind=r.quantity_kind,
+        unit_system=r.unit_system,
+        component_field=r.component_field,
     )
 end
 

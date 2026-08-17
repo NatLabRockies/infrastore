@@ -51,11 +51,15 @@ class TestExceptions:
         with pytest.raises(TypeError):
             SingleTimeSeries(T0, 12345, np.zeros(4), "x")
 
-    def test_storage_error_on_unopenable_path(self):
-        # A missing parent directory fails in the catalog layer, staying
-        # inside the library's exception hierarchy.
-        with pytest.raises(infrastore.StorageError):
+    def test_io_error_on_unopenable_path(self):
+        # A missing parent directory is reported as what it is -- an unreachable
+        # path -- and stays inside the library's exception hierarchy.
+        with pytest.raises(infrastore.IoError) as excinfo:
             Store.open("/nonexistent/dir/x.h5")
+        assert "/nonexistent/dir/x.h5" in str(excinfo.value)
+        # And IoError is a TimeSeriesError, so a caller catching only the base
+        # class still catches this.
+        assert issubclass(infrastore.IoError, infrastore.TimeSeriesError)
 
 
 class TestDunders:
@@ -114,7 +118,7 @@ class TestNameGlob:
 class TestReservedFeatureNames:
     def test_reserved_feature_name_raises_invalid_parameter(self):
         store = Store.create(in_memory=True)
-        for name in ("name", "resolution", "owner_id", "ext"):
+        for name in ("name", "resolution", "owner_id", "application_data"):
             with pytest.raises(infrastore.InvalidParameterError, match=name):
                 store.add_time_series(
                     1,

@@ -47,7 +47,10 @@ function add_time_series!(
     ts::SingleTimeSeries;
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=ts.units,
-    ext::Union{Nothing, AbstractString}=ts.ext,
+    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
+    application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     element_type_arg = _element_type_arg(element_type, ts.data)
@@ -66,9 +69,12 @@ function add_time_series!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(ext)::Cstring,
+        _opt_string_arg(application_data)::Cstring,
         _features_arg(features)::Cstring,
         _opt_string_arg(units)::Cstring,
+        _opt_string_arg(quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -83,7 +89,10 @@ function add_time_series!(
     ts::NonSequentialTimeSeries;
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=ts.units,
-    ext::Union{Nothing, AbstractString}=ts.ext,
+    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
+    application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     timestamps = Int64[_to_unix_ms(timestamp) for timestamp in ts.timestamps]
@@ -103,9 +112,12 @@ function add_time_series!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(ext)::Cstring,
+        _opt_string_arg(application_data)::Cstring,
         _features_arg(features)::Cstring,
         _opt_string_arg(units)::Cstring,
+        _opt_string_arg(quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -120,7 +132,10 @@ function add_time_series!(
     ts::Deterministic;
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=ts.units,
-    ext::Union{Nothing, AbstractString}=ts.ext,
+    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
+    application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     return _batch_add_dense_forecast!(
@@ -138,7 +153,10 @@ function add_time_series!(
         ts.data;
         features=features,
         units=units,
-        ext=ext,
+        quantity_kind=quantity_kind,
+        unit_system=unit_system,
+        component_field=component_field,
+        application_data=application_data,
         element_type=element_type,
     )
 end
@@ -151,7 +169,10 @@ function add_time_series!(
     ts::Scenarios;
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=ts.units,
-    ext::Union{Nothing, AbstractString}=ts.ext,
+    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
+    application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     return _batch_add_dense_forecast!(
@@ -169,7 +190,10 @@ function add_time_series!(
         ts.data;
         features=features,
         units=units,
-        ext=ext,
+        quantity_kind=quantity_kind,
+        unit_system=unit_system,
+        component_field=component_field,
+        application_data=application_data,
         element_type=element_type,
     )
 end
@@ -189,7 +213,10 @@ function _batch_add_dense_forecast!(
     data::AbstractArray;
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=nothing,
-    ext::Union{Nothing, AbstractString}=nothing,
+    quantity_kind::Union{Nothing, AbstractString}=nothing,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=nothing,
+    component_field::Union{Nothing, AbstractString}=nothing,
+    application_data::Union{Nothing, AbstractString}=nothing,
     element_type::Union{Nothing, AbstractString}=nothing,
 )
     element_type_arg = _element_type_arg(element_type, data)
@@ -212,9 +239,12 @@ function _batch_add_dense_forecast!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(ext)::Cstring,
+        _opt_string_arg(application_data)::Cstring,
         _features_arg(features)::Cstring,
         _opt_string_arg(units)::Cstring,
+        _opt_string_arg(quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1
@@ -229,7 +259,10 @@ function add_time_series!(
     ts::Probabilistic;
     features::AbstractDict=Dict{String, Any}(),
     units::Union{Nothing, AbstractString}=ts.units,
-    ext::Union{Nothing, AbstractString}=ts.ext,
+    quantity_kind::Union{Nothing, AbstractString}=ts.quantity_kind,
+    unit_system::Union{Nothing, UnitSystem, AbstractString}=ts.unit_system,
+    component_field::Union{Nothing, AbstractString}=ts.component_field,
+    application_data::Union{Nothing, AbstractString}=ts.application_data,
     element_type::Union{Nothing, AbstractString}=ts.element_type,
 )
     element_type_arg = _element_type_arg(element_type, ts.data)
@@ -253,9 +286,12 @@ function add_time_series!(
         dims::Ptr{UInt64},
         bytes::Ptr{UInt8},
         UInt64(length(bytes))::UInt64,
-        _opt_string_arg(ext)::Cstring,
+        _opt_string_arg(application_data)::Cstring,
         _features_arg(features)::Cstring,
         _opt_string_arg(units)::Cstring,
+        _opt_string_arg(quantity_kind)::Cstring,
+        _opt_string_arg(_unit_system_str(_unit_system(unit_system)))::Cstring,
+        _opt_string_arg(component_field)::Cstring,
     )::Int32
     _check(code)
     batch.count += 1

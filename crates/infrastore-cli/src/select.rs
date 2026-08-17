@@ -26,6 +26,11 @@ pub struct SelectorArgs {
     /// with --name when both are given.
     #[arg(long)]
     pub name_glob: Option<String>,
+    /// Owning component's field the values vary over time, e.g.
+    /// max_active_power. Exact and case-sensitive; a series that declares no
+    /// component_field matches no value.
+    #[arg(long)]
+    pub component_field: Option<String>,
     /// Time series type. `deterministic` also matches the
     /// DeterministicSingleTimeSeries rows that `transform` produces.
     #[arg(
@@ -64,6 +69,9 @@ impl SelectorArgs {
         }
         if let Some(g) = &self.name_glob {
             filter = filter.name_glob(g.clone());
+        }
+        if let Some(f) = &self.component_field {
+            filter = filter.component_field(f.clone());
         }
         if let Some(t) = &self.ts_type {
             filter = filter.time_series_type(parse::parse_ts_type(t)?);

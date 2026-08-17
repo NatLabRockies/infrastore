@@ -19,7 +19,9 @@ use crate::error::{Result, TimeSeriesError};
 use crate::hash::{features_hash, timestamps_hash};
 use crate::types::element_type::ElementType;
 use crate::types::key::{KeyIdentity, TimeSeriesKey};
-use crate::types::metadata::{FeatureValue, Features, OwnerCategory, TimeSeriesMetadata};
+use crate::types::metadata::{
+    FeatureValue, Features, OwnerCategory, TimeSeriesMetadata, UnitSystem,
+};
 use crate::types::time_series::TimeSeriesType;
 
 /// The arrays the catalog references, paired with one diagnostic per row too
@@ -439,6 +441,11 @@ pub struct MetadataFilter {
     /// SQLite `GLOB` pattern on the name (case-sensitive; `*`/`?` wildcards).
     /// Combined with `name` as AND when both are set.
     pub name_glob: Option<String>,
+    /// Exact match on the owning component's field (e.g. `"max_active_power"`).
+    /// Case-sensitive, like every other identifier predicate here. A row that
+    /// declares no `component_field` matches no value, since SQL equality is
+    /// never true against NULL.
+    pub component_field: Option<String>,
     pub resolution: Option<Period>,
     /// Forecast window interval. When set, restricts to rows with exactly this
     /// interval (part of the identity); `None` does not filter on interval.
@@ -645,6 +652,10 @@ impl MetadataFilter {
         if let Some(ref pattern) = self.name_glob {
             sql.push_str(" AND name GLOB ?");
             params_vec.push(Box::new(pattern.clone()));
+        }
+        if let Some(ref component_field) = self.component_field {
+            sql.push_str(" AND component_field = ?");
+            params_vec.push(Box::new(component_field.clone()));
         }
         if let Some(resolution) = self.resolution {
             sql.push_str(" AND resolution = ?");
@@ -918,10 +929,10 @@ impl MetadataStore {
             "INSERT INTO time_series_associations
              (owner_id, owner_type, owner_category, time_series_type, name, data_hash,
               initial_timestamp, resolution, length, horizon, interval, count,
-              timestamps_hash, units, percentiles_json,
-              element_type, element_shape, ext, features_hash)
+              timestamps_hash, units, quantity_kind, unit_system, component_field,
+              percentiles_json, element_type, element_shape, application_data, features_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                     ?16, ?17, ?18, ?19)",
+                     ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         )?;
         let result = insert_stmt.execute(params![
             meta.owner_id,
@@ -938,10 +949,13 @@ impl MetadataStore {
             meta.count.map(|c| c as i64),
             timestamps_hash.map(|h| h.to_vec()),
             meta.units,
+            meta.quantity_kind,
+            meta.unit_system.map(|u| u.as_str()),
+            meta.component_field,
             percentiles_json,
             meta.element_type.to_string(),
             element_shape_json,
-            meta.ext,
+            meta.application_data,
             f_hash.as_slice(),
         ]);
 
@@ -1241,8 +1255,9 @@ impl MetadataStore {
         let sql = format!(
             "SELECT features_hash, owner_id, owner_type, owner_category, time_series_type, name,
                     data_hash, initial_timestamp, resolution, length, horizon,
-                    interval, count, timestamps_hash, units, percentiles_json,
-                    element_type, element_shape, ext
+                    interval, count, timestamps_hash, units, quantity_kind, unit_system,
+                    component_field, percentiles_json, element_type, element_shape,
+                    application_data
              FROM time_series_associations {where_clause}"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
@@ -1576,6 +1591,7 @@ impl MetadataStore {
             features_hash: Some(features_hash(&key.features)),
             owner_type: None,
             name_glob: None,
+            component_field: None,
         })?;
         matches.retain(|m| m.features == key.features);
         match matches.len() {
@@ -2615,10 +2631,13 @@ struct MetaRow {
     /// `timestamp_sets` by the caller, which batches that lookup across rows.
     timestamps_hash: Option<[u8; 32]>,
     units: Option<String>,
+    quantity_kind: Option<String>,
+    unit_system: Option<UnitSystem>,
+    component_field: Option<String>,
     percentiles: Option<Vec<f64>>,
     element_type: crate::types::element_type::ElementType,
     element_shape: Vec<usize>,
-    ext: Option<String>,
+    application_data: Option<String>,
 }
 
 impl MetaRow {
@@ -2643,10 +2662,13 @@ impl MetaRow {
             timestamps,
             features,
             units: self.units,
+            quantity_kind: self.quantity_kind,
+            unit_system: self.unit_system,
+            component_field: self.component_field,
             percentiles: self.percentiles,
             element_type: self.element_type,
             element_shape: self.element_shape,
-            ext: self.ext,
+            application_data: self.application_data,
         }
     }
 }
@@ -2670,10 +2692,33 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
     let count: Option<i64> = row.get(12)?;
     let timestamps_hash: Option<Vec<u8>> = row.get(13)?;
     let units: Option<String> = row.get(14)?;
-    let percentiles_json: Option<String> = row.get(15)?;
-    let element_type_str: String = row.get(16)?;
-    let element_shape_json: Option<String> = row.get(17)?;
-    let ext: Option<String> = row.get(18)?;
+    let quantity_kind: Option<String> = row.get(15)?;
+    let unit_system_str: Option<String> = row.get(16)?;
+    let component_field: Option<String> = row.get(17)?;
+    let percentiles_json: Option<String> = row.get(18)?;
+    let element_type_str: String = row.get(19)?;
+    let element_shape_json: Option<String> = row.get(20)?;
+    let application_data: Option<String> = row.get(21)?;
+
+    // An unrecognized basis is an error, not a silent `None`. The column has no
+    // CHECK precisely so a future basis can be added without a format bump,
+    // which means an older reader *will* meet one; reading it as "unspecified"
+    // would quietly turn per-unit values into values of unknown basis, and the
+    // consumer would have no way to know it had happened.
+    let unit_system = unit_system_str
+        .map(|s| {
+            UnitSystem::parse(&s).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    16,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid unit_system: {s:?}"),
+                    )),
+                )
+            })
+        })
+        .transpose()?;
 
     let owner_category = OwnerCategory::from_code(owner_category).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -2734,13 +2779,13 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
         .map(|s| serde_json::from_str::<Vec<f64>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let element_type = crate::types::element_type::ElementType::parse(&element_type_str)
         .ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                16,
+                19,
                 rusqlite::types::Type::Text,
                 Box::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -2752,7 +2797,7 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
         .map(|s| serde_json::from_str::<Vec<usize>>(&s))
         .transpose()
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(20, rusqlite::types::Type::Text, Box::new(e))
         })?
         .unwrap_or_default();
 
@@ -2803,10 +2848,13 @@ fn parse_meta_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<([u8; 32], MetaRo
             count: count.map(|c| c as usize),
             timestamps_hash,
             units,
+            quantity_kind,
+            unit_system,
+            component_field,
             percentiles,
             element_type,
             element_shape,
-            ext,
+            application_data,
         },
     ))
 }
@@ -3033,6 +3081,21 @@ mod index_plan_tests {
         assert_uses_index(
             "SELECT * FROM time_series_associations WHERE name GLOB 'wind_*'",
             "idx_name",
+        );
+    }
+
+    #[test]
+    fn component_field_filter_uses_its_partial_index() {
+        // `idx_component_field` is partial (`WHERE component_field IS NOT
+        // NULL`), which the planner may only use when it can prove the
+        // condition holds. It can here, and for a *bound parameter* rather than
+        // a literal: `component_field = ?` is false against NULL no matter what
+        // the parameter binds to. If SQLite ever stopped drawing that
+        // inference, the filter would silently degrade to a full scan of the
+        // widest table in the catalog -- which is exactly what this pins.
+        assert_uses_index(
+            "SELECT * FROM time_series_associations WHERE component_field = ?",
+            "idx_component_field",
         );
     }
 

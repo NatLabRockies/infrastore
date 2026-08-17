@@ -259,6 +259,21 @@ fn parse_element_type(s: &str) -> PyResult<core_lib::ElementType> {
         .map_err(|e| InvalidParameterError::new_err(e.to_string()))
 }
 
+/// `None` (the argument was omitted) means *unspecified*, which is deliberately
+/// not the same as `"natural_units"`. An unrecognized spelling raises rather
+/// than degrading to unspecified: silently dropping a declared basis would make
+/// per-unit values indistinguishable from values whose basis nobody stated.
+fn parse_unit_system(s: Option<&str>) -> PyResult<Option<core_lib::UnitSystem>> {
+    match s {
+        None => Ok(None),
+        Some(s) => core_lib::UnitSystem::parse(s).map(Some).ok_or_else(|| {
+            InvalidParameterError::new_err(format!(
+                "invalid unit_system {s:?}; expected 'natural_units' or 'component_base'"
+            ))
+        }),
+    }
+}
+
 fn dtype_from_numpy_name(name: &str) -> PyResult<core_lib::Dtype> {
     Ok(match name {
         "float64" => core_lib::Dtype::F64,
@@ -1534,14 +1549,21 @@ impl PyStore {
     ///
     /// `features` is a `dict[str, int|float|bool|str]`. A feature name that
     /// shadows a time-series or key field (`name`, `resolution`, `owner_id`,
-    /// …) is rejected with `InvalidParameterError`. `units` and `ext` are
-    /// optional strings (`ext` is an opaque, package-owned payload — typically
-    /// JSON — stored verbatim on the association).
+    /// …) is rejected with `InvalidParameterError`. `units`, `quantity_kind`,
+    /// `component_field`, and `application_data` are optional strings
+    /// (`application_data` is an opaque, package-owned payload — typically JSON
+    /// — stored verbatim on the association). `quantity_kind` names what the
+    /// values measure, e.g. `"ActivePower"`. `unit_system` is `"natural_units"`
+    /// or `"component_base"`; omitting it leaves the basis unspecified, which is
+    /// not the same as declaring natural units. `component_field` names the
+    /// field on the owning component whose value these values are the
+    /// time-varying form of, e.g. `"max_active_power"`; it is free-form and
+    /// never interpreted by the store.
     ///
     /// `element_type` declares what the array's elements mean in the store's own
     /// vocabulary (`"tuple(3,f64)"`, `"piecewise_linear"`, …). Omit it for plain
     /// numbers, where it defaults to the array's own dtype spelling.
-    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, ext=None))]
+    #[pyo3(signature = (owner_id, owner_type, owner_category, time_series, *, features=None, units=None, element_type=None, application_data=None, quantity_kind=None, unit_system=None, component_field=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_time_series(
         &mut self,
@@ -1552,13 +1574,19 @@ impl PyStore {
         features: Option<&Bound<'_, PyDict>>,
         units: Option<String>,
         element_type: Option<String>,
-        ext: Option<String>,
+        application_data: Option<String>,
+        quantity_kind: Option<String>,
+        unit_system: Option<String>,
+        component_field: Option<String>,
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
         let mut data = extract_time_series_data(time_series)?;
         // These describe the series, so they are set on it, not on the request.
         data.set_units(units);
-        data.set_ext(ext);
+        data.set_application_data(application_data);
+        data.set_quantity_kind(quantity_kind);
+        data.set_unit_system(parse_unit_system(unit_system.as_deref())?);
+        data.set_component_field(component_field);
         // Omitting it keeps whatever the series already carries — a constructor
         // resolved that to plain scalars of the array's dtype.
         if let Some(et) = element_type {
@@ -1579,8 +1607,9 @@ impl PyStore {
     ///
     /// `items` is a list of dicts whose keys mirror `add_time_series`'s
     /// parameters: `owner_id`, `owner_type`, `owner_category`,
-    /// `time_series`, and optionally `features`, `units`, `element_type`, and
-    /// `ext`.
+    /// `time_series`, and optionally `features`, `units`, `element_type`,
+    /// `application_data`, `quantity_kind`, `unit_system`, and
+    /// `component_field`.
     ///
     /// All-or-nothing: if any item fails, the entire batch is rolled back.
     /// Returns the new keys in input order.
@@ -1609,8 +1638,20 @@ impl PyStore {
                 Some(u) if !u.is_none() => Some(u.extract()?),
                 _ => None,
             };
-            let ext: Option<String> = match item.get_item("ext")? {
+            let application_data: Option<String> = match item.get_item("application_data")? {
                 Some(l) if !l.is_none() => Some(l.extract()?),
+                _ => None,
+            };
+            let quantity_kind: Option<String> = match item.get_item("quantity_kind")? {
+                Some(q) if !q.is_none() => Some(q.extract()?),
+                _ => None,
+            };
+            let unit_system: Option<String> = match item.get_item("unit_system")? {
+                Some(u) if !u.is_none() => Some(u.extract()?),
+                _ => None,
+            };
+            let component_field: Option<String> = match item.get_item("component_field")? {
+                Some(c) if !c.is_none() => Some(c.extract()?),
                 _ => None,
             };
             let element_type = match item.get_item("element_type")? {
@@ -1619,7 +1660,10 @@ impl PyStore {
             };
             let mut data = extract_time_series_data(&time_series)?;
             data.set_units(units);
-            data.set_ext(ext);
+            data.set_application_data(application_data);
+            data.set_quantity_kind(quantity_kind);
+            data.set_unit_system(parse_unit_system(unit_system.as_deref())?);
+            data.set_component_field(component_field);
             // As above: an absent `element_type` leaves the series' own.
             if let Some(et) = element_type {
                 data.set_element_type(et);
@@ -1788,7 +1832,10 @@ impl PyStore {
     ///
     /// `name_glob` filters names by a SQLite `GLOB` pattern (case-sensitive,
     /// `*`/`?` wildcards); when both `name` and `name_glob` are given, both
-    /// must match. All filter arguments are keyword-only.
+    /// must match. `component_field` matches the owning component's field
+    /// exactly and case-sensitively — "every series that varies this field";
+    /// a row that declares none matches no value, so it cannot select the rows
+    /// that left it unset. All filter arguments are keyword-only.
     ///
     /// `time_series_type` is a `TimeSeriesType`. `TimeSeriesType.Deterministic`
     /// also matches the `DeterministicSingleTimeSeries` rows that
@@ -1798,7 +1845,7 @@ impl PyStore {
     /// method taking these filter kwargs reads the type the same way.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_time_series<'py>(
@@ -1810,6 +1857,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1821,6 +1869,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -1840,7 +1889,7 @@ impl PyStore {
     /// `list_time_series`. Wraps the core `list_keys_with_hash`.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_array_groups<'py>(
@@ -1852,6 +1901,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1863,6 +1913,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -1915,7 +1966,7 @@ impl PyStore {
     /// included — so it is safe to call in hot loops.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn has_any_time_series(
@@ -1926,6 +1977,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -1937,6 +1989,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -2134,7 +2187,7 @@ impl PyStore {
     /// irregular series has none): all matched series must instead lie on one
     /// timestamp vector, which is also what pools their arrays on disk. Drive it
     /// with `static_read`.
-    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
+    #[pyo3(signature = (resolution=None, *, time_series_type=None, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_static_reader(
         &self,
@@ -2145,6 +2198,7 @@ impl PyStore {
         owner_type: Option<String>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStaticReader> {
         let filter = build_list_filter(
@@ -2154,6 +2208,7 @@ impl PyStore {
             time_series_type,
             name,
             name_glob,
+            component_field,
             resolution,
             None,
             features,
@@ -2174,7 +2229,7 @@ impl PyStore {
     /// the filter. A `resolution` is required; a `Deterministic` reader also
     /// includes `DeterministicSingleTimeSeries`, matching the read request rule.
     /// Drive it with `forecast_read`.
-    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, features=None))]
+    #[pyo3(signature = (time_series_type, resolution, *, owner_id=None, owner_category=None, owner_type=None, name=None, name_glob=None, component_field=None, features=None))]
     #[allow(clippy::too_many_arguments)]
     fn build_forecast_reader(
         &self,
@@ -2185,6 +2240,7 @@ impl PyStore {
         owner_type: Option<String>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         features: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyForecastReader> {
         let filter = build_list_filter(
@@ -2194,6 +2250,7 @@ impl PyStore {
             Some(time_series_type),
             name,
             name_glob,
+            component_field,
             Some(resolution),
             None,
             features,
@@ -2228,7 +2285,7 @@ impl PyStore {
     /// List the `TimeSeriesKey`s matching the filter.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_keys(
@@ -2239,6 +2296,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2250,6 +2308,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -2282,7 +2341,7 @@ impl PyStore {
     /// Distinct series names matching the filter, sorted.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_names(
@@ -2293,6 +2352,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2304,6 +2364,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -2314,7 +2375,7 @@ impl PyStore {
     /// Distinct owner types matching the filter, sorted.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn list_owner_types(
@@ -2325,6 +2386,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2336,6 +2398,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -2347,7 +2410,7 @@ impl PyStore {
     /// transaction. Returns the number of associations removed.
     #[pyo3(signature = (
         *, owner_id=None, owner_category=None, owner_type=None, time_series_type=None,
-        name=None, name_glob=None, resolution=None, interval=None, features=None
+        name=None, name_glob=None, component_field=None, resolution=None, interval=None, features=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn remove_by_filter(
@@ -2358,6 +2421,7 @@ impl PyStore {
         time_series_type: Option<Bound<'_, PyAny>>,
         name: Option<String>,
         name_glob: Option<String>,
+        component_field: Option<String>,
         resolution: Option<Bound<'_, PyAny>>,
         interval: Option<Bound<'_, PyAny>>,
         features: Option<&Bound<'_, PyDict>>,
@@ -2369,6 +2433,7 @@ impl PyStore {
             time_series_type.as_ref(),
             name,
             name_glob,
+            component_field,
             resolution,
             interval,
             features,
@@ -3087,6 +3152,7 @@ fn build_list_filter(
     time_series_type: Option<&Bound<'_, PyAny>>,
     name: Option<String>,
     name_glob: Option<String>,
+    component_field: Option<String>,
     resolution: Option<Bound<'_, PyAny>>,
     interval: Option<Bound<'_, PyAny>>,
     features: Option<&Bound<'_, PyDict>>,
@@ -3109,6 +3175,9 @@ fn build_list_filter(
     }
     if let Some(g) = name_glob {
         filter = filter.name_glob(g);
+    }
+    if let Some(f) = component_field {
+        filter = filter.component_field(f);
     }
     if let Some(r) = resolution {
         filter = filter.resolution(pyany_to_period(&r)?);
@@ -3207,7 +3276,10 @@ fn metadata_to_dict<'py>(
     )?;
     d.set_item("features", features_to_dict(py, &m.features)?)?;
     d.set_item("units", m.units.clone())?;
-    d.set_item("ext", m.ext.clone())?;
+    d.set_item("quantity_kind", m.quantity_kind.clone())?;
+    d.set_item("unit_system", m.unit_system.map(|u| u.as_str()))?;
+    d.set_item("component_field", m.component_field.clone())?;
+    d.set_item("application_data", m.application_data.clone())?;
     Ok(d)
 }
 

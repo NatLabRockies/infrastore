@@ -73,7 +73,7 @@ async fn list_and_get_round_trip() {
     let client = RemoteClient::connect(addr).await.unwrap();
 
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None, None)
+        .list_time_series(None, None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 2);
@@ -124,7 +124,17 @@ async fn list_filter_by_features_subset() {
     let mut filter: Features = BTreeMap::new();
     filter.insert("model_year".into(), FeatureValue::Int(2030));
     let metas = client
-        .list_time_series(None, None, None, None, None, None, None, Some(&filter))
+        .list_time_series(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&filter),
+        )
         .await
         .unwrap();
     assert_eq!(metas.len(), 1);
@@ -348,13 +358,13 @@ async fn additive_read_rpcs() {
 
     // ListKeys with and without hash.
     let rows = client
-        .list_keys(None, None, None, None, None, None, None, None, false)
+        .list_keys(None, None, None, None, None, None, None, None, None, false)
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|(_, h)| h.is_none()));
     let with_hash = client
-        .list_keys(None, None, None, None, None, None, None, None, true)
+        .list_keys(None, None, None, None, None, None, None, None, None, true)
         .await
         .unwrap();
     assert!(with_hash.iter().all(|(_, h)| h.is_some()));
@@ -365,7 +375,7 @@ async fn additive_read_rpcs() {
 
     // BulkRead the two series.
     let all_keys = client
-        .list_keys(None, None, None, None, None, None, None, None, false)
+        .list_keys(None, None, None, None, None, None, None, None, None, false)
         .await
         .unwrap();
     let ids: Vec<_> = all_keys.iter().map(|(k, _)| k.identity().clone()).collect();
@@ -402,4 +412,98 @@ async fn additive_read_rpcs() {
     assert_eq!(cc.len(), 1);
     assert_eq!(cc[0].length, 24);
     assert_eq!(cc[0].resolution, Period::Fixed(Duration::hours(1)));
+}
+
+/// `component_field` reaches the server as a filter and comes back on the
+/// metadata row, so a remote reader can both select by it and read it.
+#[tokio::test]
+async fn component_field_filters_and_round_trips_over_the_wire() {
+    let mut store = create_store(None, true).unwrap();
+    for (owner, field) in [
+        (1i64, Some("max_active_power")),
+        (2, Some("rating")),
+        (3, None),
+    ] {
+        let mut data = TimeSeriesData::SingleTimeSeries(series(2024, 24, owner as f64));
+        if let Some(field) = field {
+            data = data.with_component_field(field);
+        }
+        store
+            .add_time_series(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                data,
+                Features::new(),
+            )
+            .unwrap();
+    }
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+
+    let metas = client
+        .list_time_series(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("max_active_power".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].owner_id, 1);
+    assert_eq!(
+        metas[0].component_field.as_deref(),
+        Some("max_active_power")
+    );
+
+    // The same predicate on the key-listing RPC, which shares `ListReq`.
+    let keys = client
+        .list_keys(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("rating".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].0.identity().owner_id, 2);
+
+    // The row that declares none is unreachable through the filter, and
+    // reports it as absent rather than as an empty string.
+    assert!(
+        client
+            .list_time_series(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("nothing".into()),
+                None,
+                None,
+                None
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let all = client
+        .list_time_series(Some(3), None, None, None, None, None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].component_field, None);
 }

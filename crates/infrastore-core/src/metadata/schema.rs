@@ -4,6 +4,14 @@
 /// an older store picks the new table up the first time it is opened for
 /// writing. Read-only opens skip the DDL entirely, so any table added this way
 /// must be optional on the read path.
+///
+/// Idempotent is not the same as version-agnostic. `IF NOT EXISTS` suppresses
+/// "already exists"; it does not stop SQLite from resolving the statement's
+/// column references, so a statement naming a column that a format bump
+/// introduced (`idx_component_field`, below) fails outright against an older
+/// catalog. That is why `Store::open_with_catalog` checks the HDF5 half's
+/// `data_format_version` *before* opening the catalog writable: the version
+/// mismatch is the error worth reporting, and it must get there first.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
@@ -29,6 +37,26 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- NonSequentialTimeSeries, which is the only one that carries one.
     timestamps_hash   BLOB,
     units             TEXT,
+    -- What kind of physical quantity the values measure, free-form, with QUDT
+    -- `QuantityKind` local names as the recommended vocabulary. Deliberately
+    -- unconstrained: composite economic quantities an energy modeler needs
+    -- ($/MWh, MMBtu/MWh) are exactly where QUDT's coverage thins out, so a
+    -- CHECK here would turn a fuel-price series into a schema migration.
+    quantity_kind     TEXT,
+    -- `UnitSystem::as_str`: 'natural_units' or 'component_base'. NULL means
+    -- unspecified, NOT natural units -- every row written before this column
+    -- existed is NULL. Stored as text rather than an integer code because,
+    -- unlike `owner_category` and `time_series_type`, it sits in no index, and
+    -- left without a CHECK so a third basis can land without bumping
+    -- `DATA_FORMAT_VERSION`.
+    unit_system       TEXT,
+    -- The field on the owning component (or supplemental attribute) whose value
+    -- these values are the time-varying form of, e.g. 'max_active_power'. Free
+    -- form and never interpreted here: it names a field in the consumer's own
+    -- object model, which this store has no view of. Deliberately separate from
+    -- `name`, which is part of the row's identity and often carries a
+    -- disambiguating suffix; this one records only what the values are for.
+    component_field   TEXT,
     percentiles_json  TEXT,
     -- The logical element type in its canonical string form (`ElementType`):
     -- a dtype spelling for plain scalars, else `tuple(N,dtype)` or one of the
@@ -36,7 +64,7 @@ CREATE TABLE IF NOT EXISTS time_series_associations (
     -- of the stored bytes is derived from it.
     element_type      TEXT    NOT NULL DEFAULT 'f64',
     element_shape     TEXT,
-    ext      TEXT,
+    application_data  TEXT,
     -- Content-address hashes are grouped at the end of the row. Column order is
     -- cosmetic: every INSERT/SELECT in metadata.rs names its columns explicitly,
     -- so nothing depends on ordinal position.
@@ -159,7 +187,8 @@ CREATE INDEX IF NOT EXISTS idx_resolution ON time_series_associations(resolution
 
 -- Secondary indexes for the filter/discovery surface. Without these, every
 -- predicate below is a full-table scan, and the table's rows are wide enough
--- (ext) that scans get expensive well before row counts get large. Measured on
+-- (application_data) that scans get expensive well before row counts get
+-- large. Measured on
 -- a 405k-row catalog (100k owners):
 --
 --   * idx_ts_type       count_by_type / counts_by_type / list() with a type
@@ -202,6 +231,35 @@ CREATE INDEX IF NOT EXISTS idx_name           ON time_series_associations(name);
 CREATE INDEX IF NOT EXISTS idx_owner_type     ON time_series_associations(owner_type);
 CREATE INDEX IF NOT EXISTS idx_category_owner ON time_series_associations(owner_category, owner_id);
 CREATE INDEX IF NOT EXISTS idx_interval       ON time_series_associations(interval);
+
+-- `component_field` filters ("every series that varies max_active_power"), the
+-- same shape of predicate `idx_name` serves for `name`, on the same table and
+-- the same kind of TEXT column — so it earns an index for the same reason, and
+-- is not separately measured.
+--
+-- PARTIAL, unlike every index above, because this column is the only optional
+-- one anything filters on: a store that never sets it (every store written
+-- before the column existed, and every consumer that does not use it) would
+-- otherwise pay index maintenance on every insert to record one NULL per row
+-- and buy nothing. `WHERE component_field IS NOT NULL` makes that case cost
+-- exactly zero entries. SQLite still uses the index for the predicate we
+-- actually issue: `component_field = ?` cannot be true of a NULL whatever the
+-- parameter binds to, so the planner can prove the partial index's condition
+-- (asserted by `component_field_filter_uses_its_partial_index`).
+--
+-- The consequence to know, and the reason `ListFilter::component_field` says
+-- so: this index can never serve "the rows that left it unset". Nothing asks
+-- for that today; a caller that needs it wants an `IS NULL` predicate and a
+-- full index, not this one.
+--
+-- Unlike the indexes above, this one is NOT additive to an arbitrary existing
+-- store: it names a column introduced by the same `DATA_FORMAT_VERSION` bump,
+-- so it can only be applied to a catalog already carrying that column. Nothing
+-- special is needed to make that hold -- an older store is rejected by the
+-- version check before this DDL runs (see the `DDL` doc comment) -- but an
+-- index over a newly added column must never be assumed version-free.
+CREATE INDEX IF NOT EXISTS idx_component_field ON time_series_associations(component_field)
+    WHERE component_field IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
@@ -326,7 +384,8 @@ SELECT id, owner_id, owner_type,
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
        name,
        initial_timestamp, resolution, length, horizon, interval, count,
-       units, element_type, element_shape, ext,
+       units, quantity_kind, unit_system, component_field,
+       element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash

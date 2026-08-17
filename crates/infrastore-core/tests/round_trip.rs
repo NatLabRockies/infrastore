@@ -140,7 +140,7 @@ fn a_series_reads_back_equal_to_the_one_written() {
     // And with every descriptor set, since those travel on the series too.
     let described = TimeSeriesData::SingleTimeSeries(series(2024, 24, 7.0))
         .with_units("MW")
-        .with_ext(r#"{"source":"test"}"#);
+        .with_application_data(r#"{"source":"test"}"#);
     let key = store
         .add_time_series(
             2,

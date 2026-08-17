@@ -387,14 +387,14 @@ async fn listing_an_empty_store_returns_empty_messages_not_errors() {
 
     assert!(
         client
-            .list_time_series(None, None, None, None, None, None, None, None)
+            .list_time_series(None, None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
         client
-            .list_keys(None, None, None, None, None, None, None, None, false)
+            .list_keys(None, None, None, None, None, None, None, None, None, false)
             .await
             .unwrap()
             .is_empty()
@@ -441,7 +441,7 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
 
     assert!(
         client
-            .list_time_series(Some(999), None, None, None, None, None, None, None)
+            .list_time_series(Some(999), None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .is_empty()
@@ -454,6 +454,7 @@ async fn a_filter_matching_nothing_returns_an_empty_list() {
                 None,
                 None,
                 Some("no_such_name".into()),
+                None,
                 None,
                 None,
                 None
@@ -763,7 +764,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
 
     // Metadata rows carry it.
     let metas = client
-        .list_time_series(Some(7), None, None, None, None, None, None, None)
+        .list_time_series(Some(7), None, None, None, None, None, None, None, None)
         .await
         .unwrap();
     assert_eq!(metas.len(), 1);
@@ -811,6 +812,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
                 None,
                 None,
                 None,
+                None,
                 Some(Period::Months(1)),
                 None,
                 None
@@ -823,6 +825,7 @@ async fn a_monthly_series_survives_the_wire_as_a_calendar_period() {
     assert!(
         client
             .list_time_series(
+                None,
                 None,
                 None,
                 None,
@@ -992,7 +995,7 @@ async fn every_read_rpc_answers_on_a_populated_store() {
 
     assert_eq!(
         client
-            .list_time_series(None, None, None, None, None, None, None, None)
+            .list_time_series(None, None, None, None, None, None, None, None, None)
             .await
             .unwrap()
             .len(),
@@ -1000,7 +1003,7 @@ async fn every_read_rpc_answers_on_a_populated_store() {
     );
     assert_eq!(
         client
-            .list_keys(None, None, None, None, None, None, None, None, true)
+            .list_keys(None, None, None, None, None, None, None, None, None, true)
             .await
             .unwrap()
             .len(),

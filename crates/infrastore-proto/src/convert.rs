@@ -7,7 +7,7 @@ use infrastore_core::{
     Deterministic, ElementType, FeatureValue, Features, ForecastSummaryRow, ForecastTimeSeriesKey,
     KeyIdentity, NonSequentialTimeSeries, NonSequentialTimeSeriesKey, OwnerCategory, Period,
     Probabilistic, Scenarios, SingleTimeSeries, SingleTimeSeriesKey, StaticSummaryRow,
-    TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray,
+    TimeSeriesData, TimeSeriesKey, TimeSeriesMetadata, TimeSeriesType, TypedArray, UnitSystem,
 };
 
 use crate::pb;
@@ -264,9 +264,12 @@ pub fn metadata_to_pb(m: &TimeSeriesMetadata) -> pb::TimeSeriesMetadata {
             .unwrap_or_default(),
         features: Some(features_to_pb(&m.features)),
         units: m.units.clone(),
+        quantity_kind: m.quantity_kind.clone(),
+        unit_system: m.unit_system.map(|u| u.as_str().to_owned()),
+        component_field: m.component_field.clone(),
         element_type: m.element_type.to_string(),
         element_shape: m.element_shape.iter().map(|d| *d as u64).collect(),
-        ext: m.ext.clone(),
+        application_data: m.application_data.clone(),
         percentiles: m.percentiles.clone().unwrap_or_default(),
     }
 }
@@ -324,6 +327,20 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
         timestamps,
         features,
         units: m.units,
+        quantity_kind: m.quantity_kind,
+        // An unrecognized basis is an error rather than a silent `None`, for
+        // the same reason the catalog read path errors on one: "unspecified"
+        // and "a basis this build does not know" must not look alike.
+        unit_system: m
+            .unit_system
+            .map(|s| {
+                UnitSystem::parse(&s).ok_or(ConvertError::InvalidValue {
+                    field: "unit_system",
+                    message: format!("unknown unit_system {s:?}"),
+                })
+            })
+            .transpose()?,
+        component_field: m.component_field,
         percentiles: if m.percentiles.is_empty() {
             None
         } else {
@@ -336,7 +353,7 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
             message: format!("unknown element_type {:?}", m.element_type),
         })?,
         element_shape: m.element_shape.iter().map(|d| *d as usize).collect(),
-        ext: m.ext,
+        application_data: m.application_data,
     })
 }
 
@@ -348,11 +365,11 @@ pub fn metadata_from_pb(m: pb::TimeSeriesMetadata) -> Result<TimeSeriesMetadata,
 /// association row, so the caller needs no second catalog lookup to describe
 /// what the bytes mean.
 ///
-/// `GetResp.ext` is left empty on every variant, and that is not an omission:
-/// `ext` belongs to the association row ([`TimeSeriesMetadata::ext`], which
+/// `GetResp.application_data` is left empty on every variant, and that is not an omission:
+/// `application_data` belongs to the association row ([`TimeSeriesMetadata::application_data`], which
 /// [`metadata_to_pb`] does carry), so a gRPC caller reads it from `GetMetadata`
 /// or `ListTimeSeries` rather than from the values. Pinned by
-/// `ext_is_always_empty_in_get_resp`; see the proto comment on field 10.
+/// `application_data_is_always_empty_in_get_resp`; see the proto comment on field 10.
 pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
     let element_type = data.element_type();
     match data {
@@ -365,7 +382,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::SingleTimeSeries as i32,
             timestamps_rfc3339: Vec::new(),
-            ext: String::new(),
+            application_data: String::new(),
             horizon: String::new(),
             interval: String::new(),
             count: 0,
@@ -381,7 +398,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::NonSequentialTimeSeries as i32,
             timestamps_rfc3339: s.timestamps.iter().map(|t| t.to_rfc3339()).collect(),
-            ext: String::new(),
+            application_data: String::new(),
             horizon: String::new(),
             interval: String::new(),
             count: 0,
@@ -397,7 +414,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: d.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Deterministic as i32,
             timestamps_rfc3339: Vec::new(),
-            ext: String::new(),
+            application_data: String::new(),
             horizon: d.horizon.to_iso8601(),
             interval: d.interval.to_iso8601(),
             count: d.count as u64,
@@ -413,7 +430,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: p.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Probabilistic as i32,
             timestamps_rfc3339: Vec::new(),
-            ext: String::new(),
+            application_data: String::new(),
             horizon: p.horizon.to_iso8601(),
             interval: p.interval.to_iso8601(),
             count: p.count as u64,
@@ -429,7 +446,7 @@ pub fn time_series_data_to_get_resp(data: &TimeSeriesData) -> pb::GetResp {
             value_bytes: s.data.bytes.clone(),
             time_series_type: pb::TimeSeriesType::Scenarios as i32,
             timestamps_rfc3339: Vec::new(),
-            ext: String::new(),
+            application_data: String::new(),
             horizon: s.horizon.to_iso8601(),
             interval: s.interval.to_iso8601(),
             count: s.count as u64,
@@ -474,10 +491,13 @@ pub fn get_resp_to_time_series_data(
                 name,
                 // Overwritten below, along with every other variant's.
                 element_type,
-                // The response carries no units or ext field, so those stay
+                // The response carries no descriptor fields, so those stay
                 // unset rather than being invented here.
                 units: None,
-                ext: None,
+                quantity_kind: None,
+                unit_system: None,
+                component_field: None,
+                application_data: None,
             }))
         }
         pb::TimeSeriesType::NonSequentialTimeSeries => {
@@ -750,9 +770,12 @@ mod tests {
             timestamps_rfc3339: Vec::new(),
             features: Some(pb::Features::default()),
             units: None,
+            quantity_kind: None,
+            unit_system: None,
+            component_field: None,
             element_type: "f64".into(),
             element_shape: Vec::new(),
-            ext: None,
+            application_data: None,
             percentiles: Vec::new(),
         }
     }
@@ -1078,10 +1101,13 @@ mod convert_coverage_tests {
                 timestamps: None,
                 features: Features::new(),
                 units: None,
+                quantity_kind: None,
+                unit_system: None,
+                component_field: None,
                 percentiles: None,
                 element_type: ElementType::Scalar(dtype),
                 element_shape: vec![],
-                ext: None,
+                application_data: None,
             };
             let pb = metadata_to_pb(&meta);
             assert_eq!(pb.element_type, dtype.as_str(), "{dtype:?}");
@@ -1222,10 +1248,13 @@ mod convert_coverage_tests {
             timestamps: None,
             features: Features::new(),
             units: None,
+            quantity_kind: None,
+            unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
-            ext: None,
+            application_data: None,
         };
 
         let pb = metadata_to_pb(&meta);
@@ -1262,10 +1291,13 @@ mod convert_coverage_tests {
             timestamps: None,
             features: Features::new(),
             units: None,
+            quantity_kind: None,
+            unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
-            ext: None,
+            application_data: None,
         };
         let pb = metadata_to_pb(&meta);
         assert_eq!(pb.resolution.as_deref(), Some("P1Y"));
@@ -1578,10 +1610,13 @@ mod convert_coverage_tests {
             timestamps: None,
             features: Features::new(),
             units: Some("MW".into()),
+            quantity_kind: None,
+            unit_system: None,
+            component_field: Some("max_active_power".into()),
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
-            ext: Some("QuadraticFunctionData".into()),
+            application_data: Some("QuadraticFunctionData".into()),
         };
 
         let pb = metadata_to_pb(&meta);
@@ -1589,9 +1624,15 @@ mod convert_coverage_tests {
             pb.time_series_type,
             pb::TimeSeriesType::DeterministicSingleTimeSeries as i32
         );
-        // The metadata path *does* carry `ext` (unlike GetResp — see
-        // `ext_is_always_empty_in_get_resp`).
-        assert_eq!(pb.ext.as_deref(), Some("QuadraticFunctionData"));
+        // The metadata path *does* carry `application_data` (unlike GetResp — see
+        // `application_data_is_always_empty_in_get_resp`).
+        assert_eq!(
+            pb.application_data.as_deref(),
+            Some("QuadraticFunctionData")
+        );
+        assert_eq!(pb.component_field.as_deref(), Some("max_active_power"));
+        // Struct equality, so every descriptor -- `component_field` included --
+        // has to survive both directions, not just the ones named above.
         assert_eq!(metadata_from_pb(pb).unwrap(), meta);
     }
 
@@ -1647,18 +1688,18 @@ mod convert_coverage_tests {
         ));
     }
 
-    // ---- 3.2: `ext` on the GetResp path ----------------------------------
+    // ---- 3.2: `application_data` on the GetResp path ----------------------------------
 
     #[test]
-    fn ext_is_always_empty_in_get_resp() {
+    fn application_data_is_always_empty_in_get_resp() {
         // FINDING F1 (TEST_COVERAGE_PLAN.md §9), resolved as documented
-        // behavior: `GetResp.ext` is always the empty string, and this test is
+        // behavior: `GetResp.application_data` is always the empty string, and this test is
         // the tripwire that keeps it that way.
         //
-        // It is not a value being dropped. `ext` belongs to the association row
+        // It is not a value being dropped. `application_data` belongs to the association row
         // — `metadata_to_pb` carries it, and a gRPC caller reads it from
         // `GetMetadata` / `ListTimeSeries` — whereas the core `TimeSeriesData`
-        // variants have no `ext` field at all, so this function has nothing to
+        // variants have no `application_data` field at all, so this function has nothing to
         // forward. Populating it would mean a second catalog lookup in the
         // server handler (multiplied across `BulkRead`, which reuses `GetResp`),
         // to serve a value the typed Rust client still could not surface.
@@ -1723,9 +1764,9 @@ mod convert_coverage_tests {
         ] {
             let resp = time_series_data_to_get_resp(&original);
             assert_eq!(
-                resp.ext,
+                resp.application_data,
                 "",
-                "GetResp.ext must stay empty for {:?}",
+                "GetResp.application_data must stay empty for {:?}",
                 original.time_series_type()
             );
         }
@@ -1769,10 +1810,13 @@ mod convert_coverage_tests {
             timestamps: None,
             features: Features::new(),
             units: None,
+            quantity_kind: None,
+            unit_system: None,
+            component_field: None,
             percentiles: None,
             element_type: ElementType::default(),
             element_shape: vec![],
-            ext: None,
+            application_data: None,
         });
         pb.data_hash = vec![0u8; 31];
         assert!(matches!(

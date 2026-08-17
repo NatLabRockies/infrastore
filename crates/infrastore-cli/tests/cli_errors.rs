@@ -1228,7 +1228,7 @@ fn a_template_descriptor_and_the_row_it_creates_agree_word_for_word() {
         "owner_id",
         "element_type",
         "units",
-        "ext",
+        "application_data",
         "features",
     ] {
         assert_eq!(

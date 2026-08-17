@@ -36,7 +36,11 @@ anything but a `Probabilistic`).
   empty tuple for scalar elements; for a forecast, the stored array's trailing
   dims after its first axis).
 - `features` — the feature dictionary (empty when none).
-- `units`, `ext` — `nothing` when unset.
+- `units`, `quantity_kind`, `component_field`, `application_data` — `nothing`
+  when unset. `component_field` names the field on the owning component whose
+  value these values are the time-varying form of, e.g. `"max_active_power"`.
+- `unit_system` — a [`UnitSystem`](@ref), or `nothing` when unspecified (which
+  is not the same as `NaturalUnits`).
 """
 struct TimeSeriesMetadata
     owner_id::Int64
@@ -56,7 +60,10 @@ struct TimeSeriesMetadata
     element_shape::Tuple{Vararg{Int}}
     features::Dict{String, Any}
     units::Union{Nothing, String}
-    ext::Union{Nothing, String}
+    quantity_kind::Union{Nothing, String}
+    unit_system::Union{Nothing, UnitSystem}
+    component_field::Union{Nothing, String}
+    application_data::Union{Nothing, String}
 end
 
 """
@@ -83,7 +90,7 @@ recorded for it. `length` applies to static series, `horizon` / `interval` /
 `count` to forecasts; the fields that do not apply to a row's
 `time_series_type` are `nothing`.
 
-Physical storage detail (`data_hash`, `element_type`, `ext`, `percentiles`) is not part
+Physical storage detail (`data_hash`, `element_type`, `application_data`, `percentiles`) is not part
 of a key — read it with [`list_time_series`](@ref), [`list_array_groups`](@ref),
 or the `get_*_metadata` functions.
 """
