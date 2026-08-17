@@ -4135,7 +4135,21 @@ fn forecast_key(
 /// root attribute identifies files written by [`Hdf5Backend`]; files without it
 /// (including stores written by the removed netcdf backend) are rejected with
 /// an actionable error instead of being misread.
+///
+/// Reachability is checked first, and separately. `is_hdf5_backend_file` cannot
+/// tell "this file is not an infrastore store" from "there is no file here" —
+/// it answers `false` either way — so without this a typo'd path or an
+/// unreadable directory would be reported as a netcdf-era store needing
+/// migration, which is advice about a file that does not exist. The `io::Error`
+/// kind is carried through, so a missing path and a permission-denied one stay
+/// distinguishable.
 fn open_backend(path: &Path, read_only: bool) -> Result<Box<dyn StorageBackend>> {
+    if let Err(e) = std::fs::metadata(path) {
+        return Err(TimeSeriesError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot open store {}: {e}", path.display()),
+        )));
+    }
     if !crate::storage::hdf5::is_hdf5_backend_file(path) {
         return Err(TimeSeriesError::InvalidParameter(format!(
             "{} is not an infrastore hdf5 store (stores written by the removed \

@@ -1266,10 +1266,35 @@ fn opening_a_directory_as_a_store_is_rejected() {
 }
 
 #[test]
-fn opening_a_nonexistent_path_is_rejected() {
+fn opening_a_nonexistent_path_is_rejected_as_a_missing_file() {
+    // Not merely "is_err": the *kind* of error is the point. Reachability is
+    // checked before the `storage_backend` attribute, because
+    // `is_hdf5_backend_file` answers `false` both for a file that is not a
+    // store and for a path where there is no file at all. Reported through the
+    // latter, a typo'd path came back as a netcdf-era store needing migration —
+    // advice about a file that does not exist.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("does_not_exist.h5");
-    assert!(open_store(missing.as_path(), true).is_err());
+
+    for read_only in [true, false] {
+        let Err(err) = open_store(missing.as_path(), read_only) else {
+            panic!("expected a missing path to be rejected (read_only={read_only})");
+        };
+        match err {
+            TimeSeriesError::Io(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+                assert!(
+                    e.to_string().contains("does_not_exist.h5"),
+                    "the diagnostic must name the path; got {e}"
+                );
+            }
+            other => panic!("expected Io(NotFound), got {other:?}"),
+        }
+    }
+
+    // A read-write open of a missing path must not leave a catalog behind for
+    // the file it never opened.
+    assert!(!sqlite_path_of(&missing).exists());
 }
 
 #[test]
