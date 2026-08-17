@@ -286,7 +286,7 @@ or <code>bool</code>) and a shape <code>[length, k1, k2, …]</code>. The first 
 example the 3 coefficients of a quadratic cost curve (element shape <code>[3]</code>). The association's
 <code>element_type</code> says what those elements mean and how a ragged value (a piecewise curve, say) is
 packed into a fixed-width row — see <a href="../reference/element-types.html">Element types</a>. The optional
-<code>ext</code> payload travels alongside for a binding's own use; the store never interprets it.</p>
+<code>application_data</code> payload travels alongside for a binding's own use; the store never interprets it.</p>
 <h3 id="forecasts"><a class="header" href="#forecasts">Forecasts</a></h3>
 <p>The four forecast types store their values as a content-addressed <code>TypedArray</code> in its <strong>native
 shape</strong> (the dense types as standalone HDF5 variables; a <code>DeterministicSingleTimeSeries</code> reuses its
@@ -330,10 +330,15 @@ one. Consumers routinely spread a feature map into a keyword-argument query — 
 <code>get_time_series(...; name = "load", model_year = 2030)</code> — and a feature called <code>name</code> or
 <code>resolution</code> would shadow the real field there and silently change what the query means. Adding a
 time series with one of these names raises <code>InvalidParameter</code>:</p>
-<pre><code class="language-text">count, data, data_hash, dtype, element_shape, ext, features, horizon, initial_timestamp,
-interval, length, name, owner_category, owner_id, owner_type, percentiles, resolution,
-scenario_count, time_series_type, timestamps, units
+<pre><code class="language-text">application_data, component_field, count, data, data_hash, dtype, element_shape, element_type, ext,
+features, horizon, initial_timestamp, interval, length, name, owner_category, owner_id, owner_type,
+percentiles, quantity_kind, resolution, scenario_count, time_series_type, timestamps, unit_system,
+units
 </code></pre>
+<p><code>dtype</code> and <code>ext</code> no longer name metadata fields — <code>element_type</code> and <code>application_data</code> replaced
+them — but both stay reserved. <code>dtype</code> is still how every binding spells a <code>TypedArray</code>'s physical
+type, and a consumer still passing the retired <code>ext=</code> should fail loudly rather than have it
+silently accepted as an ordinary feature.</p>
 <p>The match is exact and case-sensitive, like every other identifier in the catalog: <code>resolution</code> is
 rejected, while <code>Resolution</code> and <code>resolution_hours</code> are ordinary feature names. The rule applies to
 writes only, so a store written before it existed stays readable and its series can still be listed
@@ -375,19 +380,53 @@ is a metadata concept; the array is shared by <a href="./content-addressing.html
 <ul>
 <li><strong><code>units</code></strong> — a free-form, end-user-facing label such as <code>"MW"</code>. No dimensional analysis is
 performed.</li>
-<li><strong><code>ext</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically JSON) that a
-binding writes and reads for its own purposes. The store never parses or interprets it, and end
-users are not expected to set it. Element typing does <em>not</em> live here: that is <code>element_type</code>
-below, a first-class column the store owns and validates.</li>
+<li><strong><code>quantity_kind</code></strong> — what kind of physical quantity the values measure, e.g. <code>"ActivePower"</code>,
+<code>"Energy"</code>, <code>"Length"</code>. Free-form; the recommended vocabulary is a
+<a href="https://www.qudt.org/pages/QUDToverviewPage.html">QUDT</a> <code>QuantityKind</code> local name. It sits
+<em>above</em> <code>units</code> rather than duplicating it, for two reasons. A units library's dimensional
+analysis cannot separate active from reactive power — both are <code>[M L^2 T^-3]</code> — but a quantity
+kind can. And when <code>unit_system</code> is <code>component_base</code> the values are per-unit and therefore
+dimensionless, so this is the only surviving record of what they measure and which base converts
+them back. The column is deliberately unconstrained: the composite economic quantities an energy
+modeler needs (<code>$/MWh</code>, <code>MMBtu/MWh</code>) are exactly where QUDT's coverage thins out.</li>
+<li><strong><code>unit_system</code></strong> — which basis the values are expressed in: <code>natural_units</code> (the units named by
+<code>units</code>) or <code>component_base</code> (per-unit against the owning component's own base). This is the
+per-unit declaration power-systems modelers know as the <em>unit system</em>; PowerSystems.jl spells the
+same idea <code>UnitSystem</code>, with <code>NATURAL_UNITS</code> and <code>DEVICE_BASE</code>. It is a <strong>label, not a
+conversion</strong>: the store holds no base value and rescales nothing, so converting <code>component_base</code>
+values back to natural units is the consumer's job, using the base that lives on the owning
+component in its own object graph. Unset means <em>unspecified</em>, which is deliberately <strong>not</strong> the
+same as <code>natural_units</code> — every association written before this field existed is unset, and
+reading those as natural units would assert a basis nobody declared.</li>
+<li><strong><code>component_field</code></strong> — the field on the owning component whose value these values are the
+time-varying form of, e.g. <code>"max_active_power"</code> or <code>"rating"</code>. Free-form and never interpreted: it
+names a field in the consumer's own object model, which the store has no view of. It records what
+the values are <em>for</em>, where <code>name</code> only says which series they are — the two coincide by
+convention in many models but are not the same thing, since one component may carry several series
+for one field (a forecast and an actual, a set of weather years) and <code>name</code> is part of a series'
+identity where this is not. Named for the common case; when the owner is a supplemental attribute
+it names a field on that attribute.</li>
+<li><strong><code>application_data</code></strong> — an opaque, <strong>package-owned</strong> extension payload stored verbatim (typically
+JSON) that a binding writes and reads for its own purposes. The store never parses or interprets
+it, and end users are not expected to set it. Element typing does <em>not</em> live here: that is
+<code>element_type</code> below, a first-class column the store owns and validates.</li>
 <li><strong><code>element_type</code></strong> — what the array's elements <em>mean</em>, in the store's own language-neutral
 vocabulary: a dtype spelling (<code>f64</code>, <code>i64</code>, …) for plain numbers, else <code>tuple(N,dtype)</code> or one of
 the function-data kinds (<code>linear_function</code>, <code>quadratic_function</code>, <code>piecewise_linear</code>,
 <code>piecewise_step</code>). It supersedes a separate physical <code>dtype</code>: the dtype of the stored bytes is
-derived from it. Unlike <code>units</code> and <code>ext</code> it is <em>not</em> inert — the write path validates the array's
-dtype and per-step shape against it. See <a href="../reference/element-types.html">Element types</a>.</li>
+derived from it. Unlike <code>units</code> and <code>application_data</code> it is <em>not</em> inert — the write path
+validates the array's dtype and per-step shape against it. See
+<a href="../reference/element-types.html">Element types</a>.</li>
 </ul>
-<p><code>units</code> and <code>ext</code> are recorded in metadata and returned on read, but they do not affect identity or
-storage.</p>
+<p><code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, and <code>application_data</code> are recorded in
+metadata and returned on read, but they do not affect identity or storage: they are absent from the
+key and from both content hashes, so two series differing only in a descriptor are a duplicate.</p>
+<p><code>component_field</code> is the one descriptor that is also a <strong>filter</strong> (<code>ListFilter::component_field</code>,
+and its equivalent in every binding): "every series that varies this field", alone or scoped to one
+owner. Being descriptive rather than identifying, it narrows a listing but never addresses a single
+row on its own — one component may carry several series for one field, distinguished by name or
+features. It matches exactly and case-sensitively, and a series that declares no <code>component_field</code>
+matches no value, so the filter cannot select the rows that left it unset.</p>
 <h2 id="associations-between-entities"><a class="header" href="#associations-between-entities">Associations Between Entities</a></h2>
 <p>Beyond owning time series, catalog entities can be related to each other. The catalog records two
 such relationships, in two separate tables, because they are not the same kind of thing: attaching

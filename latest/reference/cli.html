@@ -517,11 +517,17 @@ value:</p>
 <tr><td><code>--owner-category &lt;C&gt;</code></td><td>Restrict to <code>Component</code> or <code>SupplementalAttribute</code>; omit to match either.</td></tr>
 <tr><td><code>--name &lt;N&gt;</code></td><td>Series name (exact match).</td></tr>
 <tr><td><code>--name-glob &lt;P&gt;</code></td><td>Name pattern (SQLite <code>GLOB</code>: case-sensitive <code>*</code>/<code>?</code>). ANDed with <code>--name</code>.</td></tr>
+<tr><td><code>--component-field &lt;F&gt;</code></td><td>Owning component's field, exact and case-sensitive.</td></tr>
 <tr><td><code>--type &lt;T&gt;</code></td><td>See the type spellings below.</td></tr>
 <tr><td><code>--resolution &lt;DUR&gt;</code></td><td>Resolution as an ISO-8601 duration, e.g. <code>PT1H</code>, <code>PT15M</code>, <code>P1M</code>.</td></tr>
 <tr><td><code>--feature key=value</code></td><td>Feature filter; repeatable. Values are inferred as int/float/bool/string.</td></tr>
 </tbody></table>
 </div>
+<p><code>--component-field</code> selects every series that varies that field on its owner — the query the
+descriptor exists for. It is descriptive rather than identifying, so it narrows a selector but
+rarely resolves one on its own; and a series that declares no <code>component_field</code> matches no value, so
+it cannot select the ones that left it unset. <code>owners</code> rejects it (along with <code>--owner-id</code>,
+<code>--name</code>, <code>--name-glob</code>, and <code>--feature</code>) rather than silently ignoring it.</p>
 <p>If a selector matches more than one series, <code>infrastore</code> errors and lists the candidates so the
 query can be narrowed. Each candidate line spells out every field that is part of identity —
 including <code>features</code> and a short <code>data_hash</code> — so the flag that separates them is always visible.
@@ -590,7 +596,10 @@ The CSV holds only numbers, preceded by a mandatory header row (plus a leading t
 <tr><td><code>csv</code></td><td>unless <code>--csv</code> is passed</td><td>Path relative to the descriptor; <code>--csv</code> overrides it.</td></tr>
 <tr><td><code>element_shape</code></td><td>optional</td><td>Trailing per-step dims; default scalar (<code>[]</code>).</td></tr>
 <tr><td><code>units</code></td><td>optional</td><td>Free-form label.</td></tr>
-<tr><td><code>ext</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
+<tr><td><code>quantity_kind</code></td><td>optional</td><td>What the values measure, e.g. <code>ActivePower</code> (QUDT name).</td></tr>
+<tr><td><code>unit_system</code></td><td>optional</td><td><code>natural_units</code> or <code>component_base</code>; unset = unspecified.</td></tr>
+<tr><td><code>component_field</code></td><td>optional</td><td>Owning component's field these values vary over time.</td></tr>
+<tr><td><code>application_data</code></td><td>optional</td><td>Opaque package-owned payload (e.g. JSON), stored verbatim.</td></tr>
 <tr><td><code>features</code></td><td>optional</td><td>JSON object; int/float/bool/string values. See below.</td></tr>
 <tr><td><code>initial_timestamp</code></td><td>all but non-sequential</td><td></td></tr>
 <tr><td><code>resolution</code></td><td>all but non-sequential</td><td>ISO-8601 duration, e.g. <code>PT1H</code>.</td></tr>
@@ -610,11 +619,12 @@ silently dropping a setting.</p>
 <a href="../explanation/data-model.html#reserved-feature-names">reserved feature names</a>.</p>
 <p>Every field above also exists as an <code>add</code> flag, for a one-off that does not deserve a file:
 <code>--owner-id</code>, <code>--owner-type</code>, <code>--owner-category</code>, <code>--name</code>, <code>--type</code>, <code>--element-type</code>, <code>--units</code>,
-<code>--ext</code>, <code>--element-shape</code> (repeatable), <code>--feature</code> (repeatable), <code>--initial-timestamp</code>,
-<code>--resolution</code>, <code>--horizon</code>, <code>--interval</code>, <code>--count</code>, <code>--percentile</code> (repeatable),
-<code>--scenario-count</code>, <code>--layout</code>, <code>--owner-map</code>, <code>--owner-id-from</code>. The inline form is a shortcut for
-authoring one descriptor, not a second schema — both go down the same code path — so <code>--descriptor</code>
-and the inline flags cannot be combined. Keep the descriptor as the repeatable and batch form.</p>
+<code>--quantity-kind</code>, <code>--unit-system</code>, <code>--component-field</code>, <code>--application-data</code>, <code>--element-shape</code>
+(repeatable), <code>--feature</code> (repeatable), <code>--initial-timestamp</code>, <code>--resolution</code>, <code>--horizon</code>,
+<code>--interval</code>, <code>--count</code>, <code>--percentile</code> (repeatable), <code>--scenario-count</code>, <code>--layout</code>, <code>--owner-map</code>,
+<code>--owner-id-from</code>. The inline form is a shortcut for authoring one descriptor, not a second schema —
+both go down the same code path — so <code>--descriptor</code> and the inline flags cannot be combined. Keep
+the descriptor as the repeatable and batch form.</p>
 <h3 id="wide-layout"><a class="header" href="#wide-layout">Wide layout</a></h3>
 <p>The canonical power-systems file is one column per component:</p>
 <pre><code class="language-text">timestamp,gen_001,gen_002,...,gen_500
@@ -623,7 +633,8 @@ and the inline flags cannot be combined. Keep the descriptor as the repeatable a
 <p>In the default <code>long</code> layout every value column is part of <em>one</em> series' per-timestep element, so
 loading that file would need 500 descriptors and 500 single-column CSVs. <code>"layout": "wide"</code> reads it
 as 500 separate scalar series instead, sharing this descriptor's <code>name</code>, <code>type</code>, <code>resolution</code>,
-<code>units</code>, <code>ext</code>, and <code>features</code>, and differing only by owner:</p>
+<code>units</code>, <code>quantity_kind</code>, <code>unit_system</code>, <code>component_field</code>, <code>application_data</code>, and <code>features</code>, and
+differing only by owner:</p>
 <pre><code class="language-json">{
   "csv": "gen_profiles.csv",
   "layout": "wide",

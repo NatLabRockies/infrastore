@@ -265,9 +265,9 @@ do-block form.</li>
 </ul>
 <p>The store registers a finalizer; close it eagerly with <code>close!(store)</code>.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
-<p>Each struct carries the association <code>name</code> (required) and an optional <code>ext</code>. Every constructor takes
-<code>name</code> as the positional after <code>data</code> and <code>ext=</code> as a keyword — e.g.
-<code>SingleTimeSeries(initial, resolution, data, name; ext=nothing)</code>.</p>
+<p>Each struct carries the association <code>name</code> (required) and an optional <code>application_data</code>. Every
+constructor takes <code>name</code> as the positional after <code>data</code> and <code>application_data=</code> as a keyword — e.g.
+<code>SingleTimeSeries(initial, resolution, data, name; application_data=nothing)</code>.</p>
 <p>Every data-carrying struct is parameterized <code>{T,N}</code> on the element type and dimensionality of its
 value array; <code>{T,N}</code> is inferred from <code>data</code> by the constructor (an <code>AbstractArray</code> argument — a
 view or a range — is normalized to a concrete <code>Array{T,N}</code>).</p>
@@ -276,17 +276,17 @@ view or a range — is normalized to a concrete <code>Array{T,N}</code>).</p>
     resolution        :: Period          # e.g. Hour(1), Millisecond(500)
     data              :: Array{T,N}      # any element type; dim 1 = time
     name              :: String          # required association name
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
-SingleTimeSeries(initial_timestamp, resolution, data, name; ext=nothing)
+SingleTimeSeries(initial_timestamp, resolution, data, name; application_data=nothing)
 
 struct NonSequentialTimeSeries{T,N}
     timestamps   :: Vector{DateTime}     # strictly increasing; one per row of dim 1
     data         :: Array{T,N}
     name         :: String
-    ext :: Union{Nothing,String}
+    application_data :: Union{Nothing,String}
 end
-NonSequentialTimeSeries(timestamps, data, name; ext=nothing)
+NonSequentialTimeSeries(timestamps, data, name; application_data=nothing)
 
 struct Deterministic{T,N}
     initial_timestamp :: DateTime
@@ -296,10 +296,10 @@ struct Deterministic{T,N}
     count             :: Int
     data              :: Array{T,N}      # (H, count, element_dims...)
     name              :: String
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
 Deterministic(initial_timestamp, resolution, horizon, interval, count, data, name;
-              ext=nothing)
+              application_data=nothing)
 
 struct Probabilistic{T,N}
     initial_timestamp :: DateTime
@@ -310,10 +310,10 @@ struct Probabilistic{T,N}
     percentiles       :: Vector{Float64}
     data              :: Array{T,N}      # (num_percentiles, H, count, element_dims...)
     name              :: String
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
 Probabilistic(initial_timestamp, resolution, horizon, interval, count, percentiles, data, name;
-              ext=nothing)
+              application_data=nothing)
 
 struct Scenarios{T,N}
     initial_timestamp :: DateTime
@@ -324,10 +324,10 @@ struct Scenarios{T,N}
     scenario_count    :: Int             # set from size(data, 1) by the constructor
     data              :: Array{T,N}      # (scenario_count, H, count, element_dims...)
     name              :: String
-    ext      :: Union{Nothing,String}
+    application_data      :: Union{Nothing,String}
 end
 Scenarios(initial_timestamp, resolution, horizon, interval, count, data, name;
-          ext=nothing)         # note: scenario_count is NOT a constructor argument
+          application_data=nothing)         # note: scenario_count is NOT a constructor argument
 
 # Marker type; never constructed and with no materialized struct. Derived via
 # transform_single_time_series! and read back as a Deterministic. You normally
@@ -349,14 +349,15 @@ end
     SupplementalAttribute = 1
 end
 </code></pre>
-<p><code>ext</code> is an opaque, package-owned payload (typically JSON) the binding can use to reconstruct a
-domain object on read; the store stores it verbatim and never interprets it. <code>add_time_series!</code>
-reads <code>name</code> off the object (it is not a call argument), so the same array can be stored under
-different names; its <code>ext=</code> keyword defaults to the object's <code>ext</code>. <code>data</code> keeps its Julia element
-type: the binding maps <code>T</code> to a stored dtype (<code>Float64</code>, <code>Float32</code>, the signed and unsigned integer
-widths, <code>Bool</code>) and converts to row-major bytes on the way down. An <code>element_type=</code> keyword declares
-what the elements <em>mean</em> when they are not plain numbers (<code>"tuple(3,f64)"</code>, <code>"piecewise_linear"</code>, …
-— see <a href="./element-types.html">Element types</a>); it defaults to the object's own <code>element_type</code>, which is
+<p><code>application_data</code> is an opaque, package-owned payload (typically JSON) the binding can use to
+reconstruct a domain object on read; the store stores it verbatim and never interprets it.
+<code>add_time_series!</code> reads <code>name</code> off the object (it is not a call argument), so the same array can be
+stored under different names; its <code>application_data=</code> keyword defaults to the object's
+<code>application_data</code>. <code>data</code> keeps its Julia element type: the binding maps <code>T</code> to a stored dtype
+(<code>Float64</code>, <code>Float32</code>, the signed and unsigned integer widths, <code>Bool</code>) and converts to row-major
+bytes on the way down. An <code>element_type=</code> keyword declares what the elements <em>mean</em> when they are
+not plain numbers (<code>"tuple(3,f64)"</code>, <code>"piecewise_linear"</code>, … — see
+<a href="./element-types.html">Element types</a>); it defaults to the object's own <code>element_type</code>, which is
 <code>nothing</code> for plain scalars.</p>
 <h2 id="result-types"><a class="header" href="#result-types">Result Types</a></h2>
 <p>The catalog, metadata, and summary queries return <strong>structs</strong>, not <code>NamedTuple</code>s or <code>Dict</code>s. Each is
@@ -386,7 +387,10 @@ dtype. An <code>owner_category</code> field is an <code>OwnerCategory</code>, ne
     element_shape     :: Tuple{Vararg{Int}}  # per-timestep shape; () for scalars
     features          :: Dict{String,Any}
     units             :: Union{Nothing,String}
-    ext               :: Union{Nothing,String}
+    quantity_kind     :: Union{Nothing,String}
+    unit_system       :: Union{Nothing,UnitSystem}   # NaturalUnits | ComponentBase
+    component_field   :: Union{Nothing,String}       # e.g. "max_active_power"
+    application_data  :: Union{Nothing,String}
 end
 </code></pre>
 <p><code>TimeSeriesMetadata</code> is the Julia mirror of the Rust core's type of the same name, and the package's
@@ -422,7 +426,8 @@ grid; enumerate it with <code>static_timestamps</code>.</p>
     store::Store, owner_id, owner_type, owner_category::OwnerCategory,
     ts;   # SingleTimeSeries, NonSequentialTimeSeries, or any dense forecast struct
     features::AbstractDict = Dict(), units = nothing,
-    ext = ts.ext,
+    quantity_kind = ts.quantity_kind, unit_system = ts.unit_system,
+    component_field = ts.component_field, application_data = ts.application_data,
 ) -&gt; TimeSeriesKey
 
 get_time_series(store::Store, key::TimeSeriesKey; time_range=nothing) -&gt; SingleTimeSeries
@@ -437,8 +442,8 @@ get_time_series(NonSequentialTimeSeries, store, owner_id, owner_category, name;
                resolution=nothing, features=Dict(), time_range=nothing) -&gt; NonSequentialTimeSeries
 </code></pre>
 <p><code>time_range = (start::DateTime, stop::DateTime)</code> (exclusive end) slices the read on every form.
-Every read populates the returned struct's <code>ext</code> field from the stored association, so a binding's
-reconstruction tag comes back with the data — no separate <code>get_metadata</code> call is needed.</p>
+Every read populates the returned struct's <code>application_data</code> field from the stored association, so
+a binding's reconstruction tag comes back with the data — no separate <code>get_metadata</code> call is needed.</p>
 <p><code>owner_id</code> is an integer identifier (<code>Int64</code>) and <code>owner_category</code> (<code>Component</code> /
 <code>SupplementalAttribute</code>) completes the owner identity — the owner is the pair
 <code>(owner_id, owner_category)</code>. <code>features</code> is serialized to JSON and must contain only JSON-scalar
@@ -499,10 +504,10 @@ as its first argument exactly like <code>get_time_series</code>: <code>SingleTim
 <code>Deterministic</code> resolves a stored <code>DeterministicSingleTimeSeries</code> too, and the returned record's
 <code>time_series_type</code> reports which form was found. <code>interval</code> is only needed to disambiguate forecasts
 that differ solely by interval. Omitting the type reads a <code>SingleTimeSeries</code>, the same shorthand
-<code>has_time_series</code> and <code>remove_time_series!</code> use. Since every form returns the same struct, <code>ext</code>,
-<code>element_type</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was asked for and
-whichever way the record was reached (for a forecast, <code>element_shape</code> is the stored array's trailing
-dims after its first axis).</p>
+<code>has_time_series</code> and <code>remove_time_series!</code> use. Since every form returns the same struct,
+<code>application_data</code>, <code>element_type</code>, <code>owner_type</code>, and <code>percentiles</code> are available whichever type was
+asked for and whichever way the record was reached (for a forecast, <code>element_shape</code> is the stored
+array's trailing dims after its first axis).</p>
 <pre><code class="language-julia">get_metadata(store, 42, Component, "load"; resolution = Hour(1))
 get_metadata(Scenarios, store, 42, Component, "wind"; resolution = Hour(1))
 </code></pre>
@@ -563,19 +568,22 @@ dtype and dims and converts to row-major bytes, just like the static <code>add_t
 <pre><code class="language-julia">add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Deterministic;
-    features=Dict(), units=nothing, ext=nothing,
+    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
+    component_field=nothing, application_data=nothing,
 ) -&gt; TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Probabilistic;
-    features=Dict(), units=nothing, ext=nothing,
+    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
+    component_field=nothing, application_data=nothing,
 ) -&gt; TimeSeriesKey
 
 add_time_series!(
     store, owner_id, owner_type, owner_category::OwnerCategory,
     ts::Scenarios;
-    features=Dict(), units=nothing, ext=nothing,
+    features=Dict(), units=nothing, quantity_kind=nothing, unit_system=nothing,
+    component_field=nothing, application_data=nothing,
 ) -&gt; TimeSeriesKey
 </code></pre>
 <p>A <code>DeterministicSingleTimeSeries</code> is not added directly. Derive one from every stored
@@ -800,11 +808,12 @@ replace_owner!(store, old_owner_id, new_owner_id, owner_category::OwnerCategory)
 close!(store) -&gt; Nothing
 </code></pre>
 <pre><code class="language-julia">list_keys(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-          name=nothing, resolution=nothing, interval=nothing, features=Dict()) -&gt; Vector{KeyRow}
+          name=nothing, resolution=nothing, interval=nothing, features=Dict(),
+          component_field=nothing) -&gt; Vector{KeyRow}
 </code></pre>
 <p><code>list_keys</code> lists the key of every stored series as <code>KeyRow</code> structs (identity plus the per-type
 descriptive snapshot: <code>initial_timestamp</code>, <code>resolution</code>, <code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>,
-<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All seven filters are optional
+<code>features</code>; fields that do not apply to a key's type are <code>nothing</code>). All eight filters are optional
 and independent, and combine as a conjunction; with none set the whole store is listed:</p>
 <ul>
 <li><code>owner_id</code>, <code>owner_category</code> — scope to one owner.</li>
@@ -817,20 +826,25 @@ and independent, and combine as a conjunction; with none set the whole store is 
 <li><code>interval</code> — a <code>Period</code>; forecasts only (static rows carry no interval and never match an interval
 filter).</li>
 <li><code>features</code> — match keys whose features include all the given entries (subset match).</li>
+<li><code>component_field</code> — exact, case-sensitive match on the owning component's field (e.g.
+<code>"max_active_power"</code>): every series that varies that field, alone or scoped to one owner. A row
+that declares no <code>component_field</code> matches no value, so this cannot select the rows that left it
+unset.</li>
 </ul>
-<p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>ext</code>, <code>percentiles</code>) is not on a key — read
-it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
+<p>Physical storage detail (<code>data_hash</code>, <code>element_type</code>, <code>application_data</code>, <code>percentiles</code>) is not on a
+key — read it via <code>get_metadata</code> / <code>list_time_series</code>.</p>
 <pre><code class="language-julia">has_any_time_series(store; owner_id=nothing, owner_category=nothing, time_series_type=nothing,
-                    name=nothing, resolution=nothing, interval=nothing, features=Dict()) -&gt; Bool
+                    name=nothing, resolution=nothing, interval=nothing, features=Dict(),
+                    component_field=nothing) -&gt; Bool
 </code></pre>
-<p><code>has_any_time_series</code> is the existence probe over the same seven filters: true iff <code>list_keys</code> with
+<p><code>has_any_time_series</code> is the existence probe over the same eight filters: true iff <code>list_keys</code> with
 that filter would return at least one row, answered off the catalog indexes without hydrating or
 marshaling any rows, so it is safe for hot per-component loops. <code>features</code> is a subset match here,
 unlike the exact-key <code>has_time_series</code> forms, which compare the whole feature set by content hash —
 and it is the one exception to the index-only guarantee: a non-empty <code>features</code> filter cannot be
 answered from an index and falls back to a full listing internally, so prefer the exact-key forms in
 hot loops when the whole feature set is known.</p>
-<p><code>list_array_groups</code> takes the same seven filters and returns the same row fields as <code>list_keys</code>, but
+<p><code>list_array_groups</code> takes the same eight filters and returns the same row fields as <code>list_keys</code>, but
 each row additionally carries <code>data_hash</code> — the 32-byte content hash of the array the row resolves
 to (a <code>Vector{UInt8}</code> hashes and compares by content, so it groups directly as a <code>Dict</code> key). Rows
 that share a stored array share their <code>data_hash</code>: both deduplicated identical arrays and a

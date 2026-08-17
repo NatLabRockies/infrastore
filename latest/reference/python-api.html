@@ -272,7 +272,15 @@ flag, and <code>closed</code> once closed.</p>
         | Deterministic | Probabilistic | Scenarios,
     features: dict[str, int | float | bool | str] | None = None,
     units: str | None = None,
+    element_type: str | None = None,
+    application_data: str | None = None,
+    quantity_kind: str | None = None,
+    unit_system: str | None = None,   # "natural_units" | "component_base"
+    component_field: str | None = None,  # e.g. "max_active_power"
 ) -&gt; TimeSeriesKey: ...
+# An unrecognized `unit_system` raises InvalidParameterError rather than
+# degrading to unspecified; omitting it leaves the basis unspecified, which is
+# not the same as declaring natural units.
 # `name` comes from the time_series object
 # (e.g. SingleTimeSeries(..., name=...)), not from this call.
 # A `features` key that shadows a time-series or key field (`name`, `resolution`,
@@ -280,7 +288,9 @@ flag, and <code>closed</code> once closed.</p>
 
 def add_time_series_bulk(self, items: list[dict]) -&gt; list[TimeSeriesKey]: ...
 # Each item dict mirrors add_time_series's parameters: required `owner_id`,
-# `owner_type`, `owner_category`, `time_series`; optional `features`, `units`.
+# `owner_type`, `owner_category`, `time_series`; optional `features`, `units`,
+# `element_type`, `application_data`, `quantity_kind`, `unit_system`,
+# `component_field`.
 # All items commit in ONE metadata transaction (all-or-nothing), which is much
 # faster than looping over add_time_series. Keys are returned in input order.
 
@@ -328,10 +338,13 @@ def list_time_series(
     time_series_type: TimeSeriesType | None = None,
     name: str | None = None,
     name_glob: str | None = None,   # SQLite GLOB pattern; ANDed with `name`
+    component_field: str | None = None,  # exact, case-sensitive
     resolution: timedelta | str | None = None,
     interval: timedelta | str | None = None,
     features: dict[str, int | float | bool | str] | None = None,
 ) -&gt; list[dict]: ...
+# `component_field` selects every series that varies that field on its owner. A
+# series that declares none matches no value, so it cannot select those rows.
 
 def list_array_groups(self, *, ...) -&gt; list[dict]: ...
 # Same keyword-only filter arguments as list_time_series; so do list_keys,
@@ -384,9 +397,9 @@ in_transaction: bool                        # property
 </code></pre>
 <blockquote>
 <p><strong>Keyword-only arguments.</strong> Every optional argument in the binding is keyword-only (the <code>*</code>
-marker): filter kwargs, <code>features=</code>/<code>units=</code>/<code>ext=</code> on the add paths, <code>time_range=</code> on the read
-paths, and so on. Positional use raises <code>TypeError</code>. The wheel ships a <code>infrastore.pyi</code> stub, so
-IDEs and type checkers see the full signatures.</p>
+marker): filter kwargs, <code>features=</code>/<code>units=</code>/<code>application_data=</code> on the add paths, <code>time_range=</code>
+on the read paths, and so on. Positional use raises <code>TypeError</code>. The wheel ships a
+<code>infrastore.pyi</code> stub, so IDEs and type checkers see the full signatures.</p>
 </blockquote>
 <h4 id="return-shapes"><a class="header" href="#return-shapes">Return shapes</a></h4>
 <ul>
@@ -402,9 +415,11 @@ keyword-only <code>time_range=(start, end)</code> to apply the same window to ev
 series comes back in full.</li>
 <li><strong><code>list_time_series</code></strong> returns a list of dicts, each with the keys: <code>owner_id</code>, <code>owner_type</code>,
 <code>owner_category</code>, <code>time_series_type</code>, <code>name</code>, <code>data_hash</code> (hex string), <code>length</code>, <code>resolution</code>
-(ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>, <code>features</code>, <code>units</code>.
-<code>timestamps</code> is a list of RFC 3339 strings for non-sequential series and <code>None</code> otherwise. The
-<code>features</code> filter is a subset match — rows must contain at least the given pairs.</li>
+(ISO 8601 duration string, e.g. <code>PT1H</code>, or <code>None</code>), <code>timestamps</code>, <code>features</code>, <code>units</code>,
+<code>quantity_kind</code>, <code>unit_system</code> (<code>"natural_units"</code> / <code>"component_base"</code> / <code>None</code>),
+<code>component_field</code>, <code>application_data</code>. <code>timestamps</code> is a list of RFC 3339 strings for
+non-sequential series and <code>None</code> otherwise. The <code>features</code> filter is a subset match — rows must
+contain at least the given pairs.</li>
 <li><strong><code>list_array_groups</code></strong> accepts the same filters as <code>list_time_series</code> and groups the matching
 series by their underlying stored array. It returns a list of dicts, each with <code>data_hash</code> (hex
 string) and <code>keys</code> (a list of <code>TimeSeriesKey</code>s that resolve to that array). Keys sharing one dict

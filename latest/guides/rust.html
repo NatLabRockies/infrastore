@@ -259,7 +259,7 @@ let keys = store.add_time_series_bulk(vec![
         data: TimeSeriesData::SingleTimeSeries(ts_a),   // the series carries its own name
         features: Features::new(),
         units: Some("MW".into()),
-        ext: None,                             // opaque package-owned payload (e.g. JSON)
+        application_data: None,                             // opaque package-owned payload (e.g. JSON)
     },
     // ...
 ])?;
@@ -273,8 +273,8 @@ the buffer if dropped without committing:</p>
 </span><span class="boring">fn main() {
 </span>let mut bulk = store.bulk_add();
 for (owner_id, ts) in many_series {
-    // `add` builds the AddRequest from its parts (ext = None);
-    // `push` takes a prebuilt AddRequest when you need to set ext.
+    // `add` builds the AddRequest from its parts (application_data = None);
+    // `push` takes a prebuilt AddRequest when you need to set application_data.
     bulk.add(owner_id, "Generator", OwnerCategory::Component,
         TimeSeriesData::SingleTimeSeries(ts), Features::new(), Some("MW".into()));
 }

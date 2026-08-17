@@ -198,7 +198,7 @@ carries netcdf-c's <code>_NCProperties</code> attribute, and <code>Store::open</
 (see <code>storage_backend</code> below). The <code>.h5</code> extension is a convention — the store never inspects it.</p>
 <h2 id="format-version"><a class="header" href="#format-version">Format Version</a></h2>
 <p>The HDF5 root carries four global attributes:</p>
-<pre><code class="language-text">data_format_version = "0.14.0"
+<pre><code class="language-text">data_format_version = "0.16.0"
 compression         = "deflate:3:shuffle"
 storage_backend     = "hdf5"
 catalog_generation  = "9f2c1ab4e70d5836c41b9e2af0d7c358"
@@ -228,12 +228,15 @@ existing value rather than minting a new one, since it rewrites only the HDF5 ha
 <code>IncompatibleFormat</code>, naming both versions. Every bump is backward-incompatible by definition, so
 the check is exact equality and there is no in-place upgrade path: regenerate the store with the
 matching build.</p>
-<p>(<code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of the association row: the
-<code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving into the new
-content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that share a time
-axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one standalone
-<code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which names the
-<em>logical</em> element type and derives the physical dtype from it — see
+<p>(<code>0.16.0</code> added the metadata column <code>component_field</code>; <code>0.15.0</code> renamed the metadata column <code>ext</code> to
+<code>application_data</code> and added the <code>quantity_kind</code> and <code>unit_system</code> columns; unlike a new <em>table</em>,
+new <em>columns</em> are not picked up by the idempotent <code>CREATE TABLE IF NOT EXISTS</code> DDL, so a store one
+version behind is rejected on open; <code>0.14.0</code> moved a <code>NonSequentialTimeSeries</code>'s timestamps out of
+the association row: the <code>timestamps_json</code> TEXT column became a <code>timestamps_hash</code> BLOB resolving
+into the new content-addressed <a href="#timestamp_sets"><code>timestamp_sets</code></a> table, and irregular arrays that
+share a time axis are now column-packed into <code>nsts_…</code> datasets keyed by that hash instead of one
+standalone <code>arr_…</code> dataset each; <code>0.13.0</code> replaced the <code>dtype</code> column with <code>element_type</code>, which
+names the <em>logical</em> element type and derives the physical dtype from it — see
 <a href="./element-types.html">Element types</a>; <code>0.12.0</code> changed <code>owner_category</code> and <code>time_series_type</code> from
 TEXT names to small INTEGER codes — see <a href="#discriminant-encoding">Discriminant encoding</a> below;
 <code>0.11.0</code> renamed the metadata column <code>logical_type</code> to <code>ext</code> — an opaque, package-owned extension
@@ -288,7 +291,7 @@ against it and a mismatch is an integrity error.</p>
 <h2 id="hdf5-layout"><a class="header" href="#hdf5-layout">HDF5 Layout</a></h2>
 <p>Arrays live under a two-level group hierarchy, in one of <strong>two storage modes</strong>:</p>
 <pre><code class="language-text">&lt;name&gt;.h5
-├── attribute  data_format_version = "0.14.0"
+├── attribute  data_format_version = "0.16.0"
 ├── attribute  compression         = "deflate:3:shuffle"
 ├── attribute  storage_backend     = "hdf5"
 └── group      time_series/
@@ -441,10 +444,13 @@ the error surfaces with the compacting store still open on the original file.</p
 <tr><td><code>count</code></td><td>INTEGER</td><td>Forecast window count; <code>NULL</code> for non-forecasts</td></tr>
 <tr><td><code>timestamps_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the timestamp vector (<code>NonSequentialTimeSeries</code>)</td></tr>
 <tr><td><code>units</code></td><td>TEXT</td><td>Free-form units label</td></tr>
+<tr><td><code>quantity_kind</code></td><td>TEXT</td><td>What the values measure (QUDT <code>QuantityKind</code> name); <code>NULL</code> if unset</td></tr>
+<tr><td><code>unit_system</code></td><td>TEXT</td><td><code>natural_units</code> or <code>component_base</code>; <code>NULL</code> means <em>unspecified</em></td></tr>
+<tr><td><code>component_field</code></td><td>TEXT</td><td>Owning component's field these values vary; <code>NULL</code> if unset</td></tr>
 <tr><td><code>percentiles_json</code></td><td>TEXT</td><td>JSON array of percentiles for <code>Probabilistic</code>; <code>NULL</code> else</td></tr>
 <tr><td><code>element_type</code></td><td>TEXT</td><td>Canonical element-type string (<code>NOT NULL DEFAULT 'f64'</code>)</td></tr>
 <tr><td><code>element_shape</code></td><td>TEXT</td><td>JSON array of per-step dims (<code>[]</code> = scalar)</td></tr>
-<tr><td><code>ext</code></td><td>TEXT</td><td>Opaque package-owned extension payload (JSON), verbatim; <code>NULL</code> if unset</td></tr>
+<tr><td><code>application_data</code></td><td>TEXT</td><td>Opaque package-owned payload (JSON), verbatim; <code>NULL</code> if unset</td></tr>
 <tr><td><code>data_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the array; links to an HDF5 column/variable</td></tr>
 <tr><td><code>features_hash</code></td><td>BLOB</td><td>32-byte SHA-256 of the feature map</td></tr>
 </tbody></table>
@@ -611,7 +617,28 @@ CREATE UNIQUE INDEX uq_ts_assoc_coalesced ON time_series_associations
 CREATE INDEX idx_hash       ON time_series_associations(data_hash);
 CREATE INDEX idx_owner      ON time_series_associations(owner_id, owner_category);
 CREATE INDEX idx_resolution ON time_series_associations(resolution);
+
+-- Secondary indexes for the filter / discovery surface.
+CREATE INDEX idx_ts_type        ON time_series_associations(time_series_type);
+CREATE INDEX idx_name           ON time_series_associations(name);
+CREATE INDEX idx_owner_type     ON time_series_associations(owner_type);
+CREATE INDEX idx_category_owner ON time_series_associations(owner_category, owner_id);
+CREATE INDEX idx_interval       ON time_series_associations(interval);
+CREATE INDEX idx_component_field ON time_series_associations(component_field)
+    WHERE component_field IS NOT NULL;
 </code></pre>
+<p><code>idx_component_field</code> is the only <strong>partial</strong> index, because <code>component_field</code> is the only optional
+column anything filters on: a store that never sets it would otherwise pay index maintenance on
+every insert to record one <code>NULL</code> per row and buy nothing, so the <code>WHERE</code> clause makes that case
+cost zero entries. SQLite still uses it for the predicate the filter issues — <code>component_field = ?</code>
+cannot be true of a <code>NULL</code> whatever the parameter binds to — but it can never serve an <code>IS NULL</code>
+query, which is the same reason <code>ListFilter::component_field</code> cannot select the rows that left the
+field unset.</p>
+<p>An index over a column that already exists is additive: a store gains any it lacks on its first
+writable open, at a one-time build cost proportional to catalog size, with no <code>data_format_version</code>
+change. <code>idx_component_field</code> is the exception, because it names a column introduced by a bump — it
+applies only to a catalog already carrying <code>component_field</code>, and an older store never reaches the
+DDL, being rejected by the version check first.</p>
 <p>Together the two unique indexes enforce <a href="../explanation/data-model.html#keys">key uniqueness</a>; a
 violation surfaces as <code>DuplicateTimeSeries</code>. Both <code>owner_id</code> and <code>owner_category</code> are part of the
 key, so a component and a supplemental attribute that share an <code>owner_id</code> are independent owners.
@@ -639,8 +666,10 @@ SELECT id, owner_id, owner_type,
                              WHEN 4 THEN 'Probabilistic'
                              WHEN 5 THEN 'Scenarios'
                              ELSE 'unknown(' || time_series_type || ')' END AS time_series_type,
-       name, initial_timestamp, resolution, length, horizon, interval, count,
-       units, element_type, element_shape, ext,
+       name,
+       initial_timestamp, resolution, length, horizon, interval, count,
+       units, quantity_kind, unit_system, component_field,
+       element_type, element_shape, application_data,
        lower(hex(data_hash))       AS data_hash,
        lower(hex(features_hash))   AS features_hash,
        lower(hex(timestamps_hash)) AS timestamps_hash

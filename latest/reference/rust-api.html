@@ -328,7 +328,7 @@ changes how data is read back — see the <a href="../explanation/storage-model.
 
     pub fn list_time_series(&amp;self, filter: ListFilter) -&gt; Result&lt;Vec&lt;TimeSeriesMetadata&gt;&gt;;
     // Key-centric listing: the same rows reduced to their keys, dropping storage
-    // detail (`data_hash`, `dtype`, `ext`, `percentiles`).
+    // detail (`data_hash`, `dtype`, `application_data`, `percentiles`).
     pub fn list_keys(&amp;self, filter: ListFilter) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;
     // …and with each key's array content hash, so callers can group series that
     // share stored data (dedup'd arrays; an STS and any DST derived from it).
@@ -873,7 +873,10 @@ forecast type, <code>None</code> for the static types); <code>resolution</code> 
     pub name: String,
     pub element_type: ElementType,   // never optional; see below
     pub units: Option&lt;String&gt;,
-    pub ext: Option&lt;String&gt;,
+    pub quantity_kind: Option&lt;String&gt;,
+    pub unit_system: Option&lt;UnitSystem&gt;,
+    pub component_field: Option&lt;String&gt;,
+    pub application_data: Option&lt;String&gt;,
 }
 
 impl SingleTimeSeries {
@@ -883,12 +886,15 @@ impl SingleTimeSeries {
     ) -&gt; Self;
     pub fn with_element_type(self, element_type: ElementType) -&gt; Self;
     pub fn with_units(self, units: impl Into&lt;String&gt;) -&gt; Self;
-    pub fn with_ext(self, ext: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_quantity_kind(self, quantity_kind: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_unit_system(self, unit_system: UnitSystem) -&gt; Self;
+    pub fn with_component_field(self, component_field: impl Into&lt;String&gt;) -&gt; Self;
+    pub fn with_application_data(self, application_data: impl Into&lt;String&gt;) -&gt; Self;
 }
 <span class="boring">}</span></code></pre></pre>
 <p><code>length</code> is derived from the array's first axis (<code>data.length()</code>) by <code>new</code>.</p>
-<p>The three descriptors travel on the series rather than on the write request, so a read returns what
-a write declared. <code>element_type</code> is <strong>not</strong> an <code>Option</code>: <code>new</code> resolves it to <code>Scalar(data.dtype)</code> —
+<p>The descriptors travel on the series rather than on the write request, so a read returns what a
+write declared. <code>element_type</code> is <strong>not</strong> an <code>Option</code>: <code>new</code> resolves it to <code>Scalar(data.dtype)</code> —
 what an ordinary numeric series is — and <code>with_element_type</code> replaces it. There is deliberately no
 "undeclared" spelling, because it would be a second way to say <code>Scalar(dtype)</code> and a series written
 that way would not compare equal to the same series read back. The consequence to know: replacing
@@ -1162,10 +1168,45 @@ pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
 <h3 id="timeseriesmetadata"><a class="header" href="#timeseriesmetadata"><code>TimeSeriesMetadata</code></a></h3>
 <p>The full record returned by <code>list_time_series</code> and <code>get_metadata</code>: owner fields, <code>time_series_type</code>,
 <code>name</code>, <code>data_hash: [u8; 32]</code>, the optional temporal fields (<code>initial_timestamp</code>, <code>resolution</code>,
-<code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>), <code>features</code>, <code>units</code>,
+<code>length</code>, <code>horizon</code>, <code>interval</code>, <code>count</code>, <code>timestamps</code>), <code>features</code>, the descriptors (<code>units</code>,
+<code>quantity_kind: Option&lt;String&gt;</code>, <code>unit_system: Option&lt;UnitSystem&gt;</code>,
+<code>component_field: Option&lt;String&gt;</code>, <code>application_data: Option&lt;String&gt;</code>),
 <code>percentiles: Option&lt;Vec&lt;f64&gt;&gt;</code> (set for <code>Probabilistic</code>), and the array typing: <code>dtype: Dtype</code>,
-<code>element_shape: Vec&lt;usize&gt;</code>, and <code>ext: Option&lt;String&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>,
-<code>interval</code>) are <code>Option&lt;Period&gt;</code>.</p>
+<code>element_shape: Vec&lt;usize&gt;</code>. The span fields (<code>resolution</code>, <code>horizon</code>, <code>interval</code>) are
+<code>Option&lt;Period&gt;</code>.</p>
+<h3 id="unitsystem"><a class="header" href="#unitsystem"><code>UnitSystem</code></a></h3>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub enum UnitSystem { NaturalUnits, ComponentBase }
+
+impl UnitSystem {
+    pub fn as_str(&amp;self) -&gt; &amp;'static str;      // "natural_units" / "component_base"
+    pub fn parse(s: &amp;str) -&gt; Option&lt;Self&gt;;
+}
+<span class="boring">}</span></code></pre></pre>
+<p><code>None</code> on a metadata row means <em>unspecified</em>, not <code>NaturalUnits</code>. See
+<a href="../explanation/data-model.html#optional-descriptors">Optional descriptors</a>.</p>
+<h3 id="descriptors"><a class="header" href="#descriptors"><code>Descriptors</code></a></h3>
+<p>The descriptive attributes a series carries alongside its array, applied to a reconstructed series
+by <code>TimeSeriesData::set_descriptors</code>:</p>
+<pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub struct Descriptors {
+    pub element_type: ElementType,
+    pub units: Option&lt;String&gt;,
+    pub quantity_kind: Option&lt;String&gt;,
+    pub unit_system: Option&lt;UnitSystem&gt;,
+    pub component_field: Option&lt;String&gt;,
+    pub application_data: Option&lt;String&gt;,
+}
+
+impl Descriptors {
+    pub fn new(element_type: ElementType) -&gt; Self;   // everything else unset
+}
+<span class="boring">}</span></code></pre></pre>
+<p>It is a struct rather than a positional argument list because four of the six fields are
+<code>Option&lt;String&gt;</code>: as bare parameters, <code>units</code>, <code>quantity_kind</code>, <code>component_field</code>, and
+<code>application_data</code> would be silently interchangeable at every call site.</p>
 <h3 id="listfilter"><a class="header" href="#listfilter"><code>ListFilter</code></a></h3>
 <p>A builder; every field is an optional filter, combined with AND. <code>ListFilter::new()</code> and
 <code>ListFilter::default()</code> are the same empty filter (matches everything).</p>
@@ -1178,14 +1219,21 @@ pub fn validate_features(features: &amp;Features) -&gt; Result&lt;()&gt;;
     .time_series_type(TimeSeriesType::SingleTimeSeries)
     .name("load")
     .name_glob("load_*")  // SQLite GLOB (case-sensitive, `*`/`?`); ANDed with .name
+    .component_field("max_active_power")  // exact, case-sensitive; see below
     .resolution(Duration::hours(1))   // impl Into&lt;Period&gt;
     .interval(Duration::hours(24))    // impl Into&lt;Period&gt;; forecasts only
     .features(features)   // subset match: rows must contain at least these pairs
 <span class="boring">}</span></code></pre></pre>
+<p><code>component_field</code> answers "every series that varies this field", alone or scoped to one owner. It is
+a descriptor, not part of a series' identity, so it narrows a listing but never addresses a single
+row on its own — one component may carry several series for one field, distinguished by name or
+features. A row that declares no <code>component_field</code> matches no value (SQL equality is never true
+against NULL), so the filter cannot select the rows that left it unset. It is served by the partial
+index <code>idx_component_field</code>, which costs a store that never sets the field nothing.</p>
 <h3 id="addrequest"><a class="header" href="#addrequest"><code>AddRequest</code></a></h3>
 <p>The element type of <code>add_time_series_bulk</code> (and of <code>BulkAdd::push</code>), mirroring the <code>add_time_series</code>
-arguments plus an optional <code>ext</code> — an opaque, package-owned payload (typically JSON) stored
-verbatim. The series name lives on the <code>TimeSeriesData</code> object, not here.</p>
+arguments plus an optional <code>application_data</code> — an opaque, package-owned payload (typically JSON)
+stored verbatim. The series name lives on the <code>TimeSeriesData</code> object, not here.</p>
 <pre><pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
 </span><span class="boring">fn main() {
 </span>pub struct AddRequest {
@@ -1195,7 +1243,7 @@ verbatim. The series name lives on the <code>TimeSeriesData</code> object, not h
     pub data: TimeSeriesData,
     pub features: Features,
     pub units: Option&lt;String&gt;,
-    pub ext: Option&lt;String&gt;,
+    pub application_data: Option&lt;String&gt;,
 }
 <span class="boring">}</span></code></pre></pre>
 <h3 id="bulkadd"><a class="header" href="#bulkadd"><code>BulkAdd</code></a></h3>
@@ -1215,7 +1263,7 @@ committing discards the buffer and writes nothing.</p>
         data: TimeSeriesData,
         features: Features,
         units: Option&lt;String&gt;,
-    ) -&gt; &amp;mut Self;                                             // ext = None
+    ) -&gt; &amp;mut Self;                                             // application_data = None
     pub fn len(&amp;self) -&gt; usize;          // requests buffered so far
     pub fn is_empty(&amp;self) -&gt; bool;
     pub fn commit(self) -&gt; Result&lt;Vec&lt;TimeSeriesKey&gt;&gt;;          // keys in push order
