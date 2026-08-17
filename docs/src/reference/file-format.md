@@ -530,8 +530,11 @@ cannot be true of a `NULL` whatever the parameter binds to — but it can never 
 query, which is the same reason `ListFilter::component_field` cannot select the rows that left the
 field unset.
 
-Every index here is additive: an existing store gains any it lacks on its first writable open, at a
-one-time build cost proportional to catalog size, with no `data_format_version` change.
+An index over a column that already exists is additive: a store gains any it lacks on its first
+writable open, at a one-time build cost proportional to catalog size, with no `data_format_version`
+change. `idx_component_field` is the exception, because it names a column introduced by a bump — it
+applies only to a catalog already carrying `component_field`, and an older store never reaches the
+DDL, being rejected by the version check first.
 
 Together the two unique indexes enforce [key uniqueness](../explanation/data-model.md#keys); a
 violation surfaces as `DuplicateTimeSeries`. Both `owner_id` and `owner_category` are part of the

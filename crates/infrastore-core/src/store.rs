@@ -813,15 +813,26 @@ impl Store {
     /// onto a destination that predates stamping.
     pub fn open_with_catalog(path: &Path, read_only: bool, catalog: CatalogMode) -> Result<Self> {
         let sqlite_path = catalog_sqlite_path(path);
-        let metadata = match catalog {
-            CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
-            CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
-        };
+        // The HDF5 half opens FIRST, and the order is load-bearing: `open_backend`
+        // is where `data_format_version` is checked, and opening the catalog
+        // writable runs `schema::DDL`, which can only be applied to a catalog of
+        // the current format. The DDL is idempotent but not version-agnostic —
+        // `idx_component_field` names a column added in 0.16.0, so applying it to
+        // an older catalog fails with a raw `no such column`, pre-empting the
+        // `IncompatibleFormat` the version stamp exists to produce. Checking the
+        // version before touching the catalog keeps that error the one a caller
+        // sees, and as a bonus stops a bad path from leaving a freshly created
+        // empty `.sqlite` behind.
+        //
         // A read-only store opens both halves read-only: the HDF5 side needs
         // no write permission (works on read-only media, shared HDF5 lock) and
         // its write paths error with `ReadOnlyStore` as a backstop behind the
         // `Store::add_*` / `remove_*` guards.
         let backend = open_backend(path, read_only)?;
+        let metadata = match catalog {
+            CatalogMode::Attached => MetadataStore::open_path(&sqlite_path, read_only)?,
+            CatalogMode::InMemory => MetadataStore::open_path_into_memory(&sqlite_path, read_only)?,
+        };
         // Stamps that disagree mean these files came from different saves — most
         // likely a `persist_to` interrupted between its two renames. Comparing
         // the `Option`s directly makes a lone stamp a mismatch too, which is the

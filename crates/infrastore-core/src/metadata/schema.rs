@@ -4,6 +4,14 @@
 /// an older store picks the new table up the first time it is opened for
 /// writing. Read-only opens skip the DDL entirely, so any table added this way
 /// must be optional on the read path.
+///
+/// Idempotent is not the same as version-agnostic. `IF NOT EXISTS` suppresses
+/// "already exists"; it does not stop SQLite from resolving the statement's
+/// column references, so a statement naming a column that a format bump
+/// introduced (`idx_component_field`, below) fails outright against an older
+/// catalog. That is why `Store::open_with_catalog` checks the HDF5 half's
+/// `data_format_version` *before* opening the catalog writable: the version
+/// mismatch is the error worth reporting, and it must get there first.
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS time_series_associations (
     id                INTEGER PRIMARY KEY,
@@ -243,6 +251,13 @@ CREATE INDEX IF NOT EXISTS idx_interval       ON time_series_associations(interv
 -- so: this index can never serve "the rows that left it unset". Nothing asks
 -- for that today; a caller that needs it wants an `IS NULL` predicate and a
 -- full index, not this one.
+--
+-- Unlike the indexes above, this one is NOT additive to an arbitrary existing
+-- store: it names a column introduced by the same `DATA_FORMAT_VERSION` bump,
+-- so it can only be applied to a catalog already carrying that column. Nothing
+-- special is needed to make that hold -- an older store is rejected by the
+-- version check before this DDL runs (see the `DDL` doc comment) -- but an
+-- index over a newly added column must never be assumed version-free.
 CREATE INDEX IF NOT EXISTS idx_component_field ON time_series_associations(component_field)
     WHERE component_field IS NOT NULL;
 
