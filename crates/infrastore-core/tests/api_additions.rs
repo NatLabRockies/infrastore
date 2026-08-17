@@ -371,6 +371,29 @@ fn metadata_and_data_json_round_trip() {
     );
 }
 
+/// serde must spell `UnitSystem` exactly as `as_str` does.
+///
+/// A serde→serde round trip cannot see a divergence here, but every *other*
+/// surface can: the SQLite column, the proto, the C ABI, Python, Julia, and the
+/// CLI descriptor all carry the `as_str` spelling and parse it back with
+/// `UnitSystem::parse`. If the derive emitted the variant names instead, a value
+/// serialized out of the core and handed to any of them would be rejected as an
+/// unknown unit system. Both directions are pinned, since only deserialization
+/// is what a foreign string actually hits.
+#[test]
+fn unit_system_serde_matches_its_as_str_spelling() {
+    for variant in [UnitSystem::NaturalUnits, UnitSystem::ComponentBase] {
+        let json = serde_json::to_string(&variant).unwrap();
+        assert_eq!(json, format!("\"{}\"", variant.as_str()));
+        assert_eq!(
+            serde_json::from_str::<UnitSystem>(&json).unwrap(),
+            variant,
+            "the as_str spelling must deserialize back"
+        );
+        assert_eq!(UnitSystem::parse(variant.as_str()), Some(variant));
+    }
+}
+
 // ===========================================================================
 // Backend parity
 //

@@ -80,7 +80,15 @@ impl FromStr for OwnerCategory {
 /// nothing worth reclaiming. The column carries no `CHECK` constraint, which
 /// is what lets a third basis (`system_base`, should a consumer need it) land
 /// without a [`crate::DATA_FORMAT_VERSION`] bump.
+/// The `rename_all` keeps serde on the [`Self::as_str`] spelling, which every
+/// other surface — SQLite, the proto, the C ABI, Python, Julia, the CLI
+/// descriptor — uses, and which [`Self::parse`] is the inverse of. Without it
+/// the derive would emit `"NaturalUnits"`, so a value round-tripped through
+/// serde and back into any of those surfaces would be rejected. The other enums
+/// here need no attribute only because their variant names already match their
+/// `as_str`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UnitSystem {
     /// Values are in the units named by `units` (e.g. `"MW"`).
     NaturalUnits,
