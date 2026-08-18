@@ -48,6 +48,23 @@ async fn spawn(store: Store) -> String {
     format!("http://{local_addr}")
 }
 
+/// Like [`spawn`], but with an explicit `BulkRead` key ceiling.
+async fn spawn_with_bulk_limit(store: Store, max_keys: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let service = CatalogStoreService::new(store).with_max_bulk_read_keys(max_keys);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(service.into_server())
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(StdDuration::from_millis(50)).await;
+    format!("http://{local_addr}")
+}
+
 async fn raw_client(addr: &str) -> CatalogStoreClient<Channel> {
     let channel = Channel::from_shared(addr.to_string())
         .unwrap()
@@ -1053,4 +1070,79 @@ async fn every_read_rpc_answers_on_a_populated_store() {
             .horizon
             .is_none()
     );
+}
+
+/// `BulkRead` is the one RPC whose cost the caller picks, so it has a ceiling.
+///
+/// It returns a full copy of a series per key and deliberately does not collapse
+/// duplicates (see `bulk_read_returns_duplicate_keys_once_each`), while a key
+/// encodes in well under 70 bytes. A request inside tonic's 4 MiB decode limit
+/// could therefore name a couple of hundred thousand keys, and the handler
+/// materialized every one before writing any response -- a 900 KB request
+/// measured an 822 MB response off a 16 KB store, unauthenticated under the
+/// default `auth = "none"`.
+#[tokio::test]
+async fn bulk_read_refuses_more_keys_than_the_server_allows() {
+    let addr = spawn_with_bulk_limit(populated_store(), 3).await;
+    let mut raw = raw_client(&addr).await;
+
+    // At the limit: still served.
+    let resp = raw
+        .bulk_read(BulkReadReq {
+            keys: vec![good_key(), good_key(), good_key()],
+            start_rfc3339: None,
+            end_rfc3339: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.items.len(), 3);
+
+    // One over: refused, and refused as a resource limit rather than as bad
+    // input, so a client can tell "split the request" from "this key is wrong".
+    let err = raw
+        .bulk_read(BulkReadReq {
+            keys: vec![good_key(), good_key(), good_key(), good_key()],
+            start_rfc3339: None,
+            end_rfc3339: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::ResourceExhausted, "{err:?}");
+    assert!(err.message().contains("split the request"), "{err:?}");
+
+    // The keys are never even decoded, so a request that is both oversized and
+    // malformed reports the size -- the cheap check runs first.
+    let err = raw
+        .bulk_read(BulkReadReq {
+            keys: vec![
+                good_key(),
+                good_key(),
+                good_key(),
+                pb::TimeSeriesKey::default(),
+            ],
+            start_rfc3339: None,
+            end_rfc3339: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::ResourceExhausted, "{err:?}");
+}
+
+/// The shipped default is high enough not to get in the way of real batching.
+#[tokio::test]
+async fn the_default_bulk_read_limit_admits_an_ordinary_batch() {
+    let addr = spawn(populated_store()).await;
+    let mut raw = raw_client(&addr).await;
+    let keys = vec![good_key(); 512];
+    let resp = raw
+        .bulk_read(BulkReadReq {
+            keys,
+            start_rfc3339: None,
+            end_rfc3339: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.items.len(), 512);
 }

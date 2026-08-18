@@ -96,18 +96,44 @@ use tonic::{Request, Response, Status};
 /// Trait service backed by a `Store`. Read-only RPCs only.
 pub struct CatalogStoreService {
     store: Arc<Mutex<Store>>,
+    /// See [`DEFAULT_MAX_BULK_READ_KEYS`].
+    max_bulk_read_keys: usize,
 }
+
+/// Default ceiling on the number of keys one `BulkRead` may name.
+///
+/// `BulkRead` is the one RPC whose response size the *caller* chooses: every
+/// other read is bounded by what the store holds, but this one returns a full
+/// copy of a series per key and does not collapse duplicates (pinned by
+/// `bulk_read_returns_duplicate_keys_once_each` — items correspond positionally
+/// to the keys asked for). A key encodes in well under 70 bytes, so a request
+/// inside tonic's 4 MiB decode limit could name a couple of hundred thousand of
+/// them, and the handler materialized every one before writing any response: a
+/// 900 KB request measured an 822 MB response off a 16 KB store. With
+/// `auth = "none"`, the default, that is unauthenticated.
+///
+/// Generous enough for real batching and small enough that the amplification
+/// factor is no longer the caller's to choose. Operators serving very large
+/// stores can raise it; see `[server] max_bulk_read_keys`.
+pub const DEFAULT_MAX_BULK_READ_KEYS: usize = 4096;
 
 impl CatalogStoreService {
     pub fn new(store: Store) -> Self {
         Self {
             store: Arc::new(Mutex::new(store)),
+            max_bulk_read_keys: DEFAULT_MAX_BULK_READ_KEYS,
         }
     }
 
     pub fn from_path(path: &Path) -> Result<Self, TimeSeriesError> {
         let store = Store::open(path, true)?;
         Ok(Self::new(store))
+    }
+
+    /// Override the `BulkRead` key ceiling. See [`DEFAULT_MAX_BULK_READ_KEYS`].
+    pub fn with_max_bulk_read_keys(mut self, max: usize) -> Self {
+        self.max_bulk_read_keys = max;
+        self
     }
 
     pub fn into_server(self) -> CatalogStoreServer<Self> {
@@ -317,6 +343,16 @@ impl CatalogStoreSvc for CatalogStoreService {
         request: Request<BulkReadReq>,
     ) -> Result<Response<BulkReadResp>, Status> {
         let req = request.into_inner();
+        // Checked before anything is decoded or read: the cost of this call is
+        // the caller's to choose, so the ceiling has to apply before the work
+        // starts, not after.
+        if req.keys.len() > self.max_bulk_read_keys {
+            return Err(Status::resource_exhausted(format!(
+                "bulk_read requested {} keys, more than this server's limit of {};                  split the request",
+                req.keys.len(),
+                self.max_bulk_read_keys
+            )));
+        }
         let time_range = parse_time_range(req.start_rfc3339, req.end_rfc3339)?;
         let keys = req
             .keys
