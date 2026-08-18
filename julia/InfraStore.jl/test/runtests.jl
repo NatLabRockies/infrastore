@@ -3854,3 +3854,34 @@ end
     )
     @test get_time_series(store, kn).data == Int64[7, 8]
 end
+
+@testset "timestamps convert exactly, not through a float" begin
+    # `_to_unix_ms` used to be `Int64(datetime2unix(dt) * 1000)`, routing an
+    # integer millisecond count through Float64 seconds. Outside one accidentally
+    # exact window (roughly 2004-2038) the product is not integral for a
+    # millisecond-precision instant, and `Int64` threw `InexactError` on an
+    # ordinary timestamp. A `DateTime` is already integer milliseconds, so the
+    # conversion needs no float at all.
+    for dt in [
+        DateTime(1900, 1, 1),
+        DateTime(1969, 12, 31, 23, 59, 59, 999),
+        DateTime(1970, 1, 1),
+        DateTime(2024, 1, 1, 0, 0, 0, 123),
+        DateTime(2038, 3, 19, 21, 10, 26, 23),   # threw before the fix
+        DateTime(2200, 6, 15, 12, 34, 56, 789),
+        DateTime(9999, 12, 31, 23, 59, 59, 999),
+    ]
+        @test InfraStore._from_unix_ms(InfraStore._to_unix_ms(dt)) == dt
+    end
+    @test InfraStore._to_unix_ms(DateTime(1970, 1, 1)) == 0
+    @test InfraStore._to_unix_ms(DateTime(1969, 12, 31, 23, 59, 59, 999)) == -1
+
+    # And it reaches the store: a far-future millisecond timestamp round-trips.
+    store = Store(in_memory=true)
+    t = DateTime(2038, 3, 19, 21, 10, 26, 23)
+    k = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t, Hour(1), Float64[1, 2, 3], "load"),
+    )
+    @test get_time_series(store, k).initial_timestamp == t
+end

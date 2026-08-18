@@ -4053,6 +4053,29 @@ fn validate_single(series: &SingleTimeSeries) -> Result<()> {
             series.data.length()
         )));
     }
+    // The resolution has to be a period the store can actually represent, which
+    // `Period::is_positive` defines as a whole number of milliseconds greater
+    // than zero. `SingleTimeSeries::new` is infallible, so until this check
+    // every forecast constructor rejected such a period while the static path
+    // waved it through, and the result was a series nothing could read back:
+    //
+    //   * a negative resolution built a `StaticReader` whose timeline ran
+    //     *backwards*, and whose every `index_at` then failed on its own
+    //     timestamps;
+    //   * zero repeated one instant `length` times;
+    //   * a sub-millisecond resolution encoded as `PT0S` and read back as zero,
+    //     so a sliced read failed on a zero-length step.
+    //
+    // All three were writable and none was usable, which is the worst place to
+    // draw the line. Callers wanting a finer grid should scale their unit — a
+    // 500 µs series is a 500-unit series with the unit recorded in `units`.
+    if !series.resolution.is_positive() {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "SingleTimeSeries resolution {} is not a positive whole number of milliseconds; \
+             the store cannot represent it",
+            series.resolution.to_iso8601()
+        )));
+    }
     Ok(())
 }
 

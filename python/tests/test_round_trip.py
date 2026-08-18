@@ -300,6 +300,57 @@ def test_non_contiguous_big_endian_array_round_trips():
     assert got.shape == expected.shape
 
 
+def test_bad_data_hash_raises_a_catchable_error():
+    """A malformed hash is an ordinary bad argument, not an uncatchable panic.
+
+    The length guard counted bytes while the loop sliced character boundaries,
+    so a 64-*byte* string of multi-byte characters sliced through a character and
+    panicked. PyO3 surfaces a panic as `PanicException`, which inherits from
+    `BaseException` -- escaping both `except Exception` and this package's own
+    exception hierarchy.
+    """
+    store = Store.create(in_memory=True)
+    for bad in [
+        "\U0001F600" * 16,  # 64 bytes, 16 characters
+        "\u00e9" * 32,  # 64 bytes, 32 characters
+        "z" * 64,  # right length, not hex
+        "ab",  # too short
+        "",
+    ]:
+        with pytest.raises(InvalidParameterError):
+            store.get_array_by_hash(bad)
+        with pytest.raises(InvalidParameterError):
+            store.count_array_references(bad)
+
+
+def test_resolution_must_be_a_whole_positive_millisecond():
+    """The store cannot represent a finer or non-positive grid, so it says so.
+
+    Periods are stored as an integer count of milliseconds. A sub-millisecond
+    resolution encodes as PT0S and used to read back as zero; zero repeated one
+    instant; a negative one built a reader whose timeline ran backwards. All
+    three were writable and none was readable.
+    """
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    values = np.arange(4, dtype=np.float64)
+
+    for bad in [
+        timedelta(microseconds=1),
+        timedelta(microseconds=999),
+        timedelta(0),
+        timedelta(hours=-1),
+    ]:
+        series = SingleTimeSeries(initial, bad, values, "load")
+        with pytest.raises(InvalidParameterError, match="resolution"):
+            store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+
+    # One whole millisecond is the finest grid there is, and it works.
+    series = SingleTimeSeries(initial, timedelta(milliseconds=1), values, "load")
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    assert len(np.asarray(store.get_time_series(key).data)) == 4
+
+
 def test_non_sequential_round_trip_and_slice():
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)

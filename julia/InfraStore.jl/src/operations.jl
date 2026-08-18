@@ -1,13 +1,20 @@
 # ---- Operations -----------------------------------------------------------
 
 # Convert a DateTime to Unix milliseconds.
+#
+# Integer arithmetic throughout. `datetime2unix` returns Float64 *seconds*, and
+# multiplying that back up by 1000 does not land on an integer for most
+# millisecond-precision instants outside roughly 2004-2038 -- `Int64` then threw
+# `InexactError` on a perfectly ordinary timestamp. A `DateTime` is already an
+# integer millisecond count internally, so no float need be involved.
 function _to_unix_ms(dt::DateTime)
-    return Int64(Dates.datetime2unix(dt) * 1000)
+    return Dates.value(dt) - Dates.UNIXEPOCH
 end
 
-# Convert milliseconds since epoch back into a DateTime.
+# Convert milliseconds since epoch back into a DateTime. The exact inverse of
+# `_to_unix_ms`, and likewise float-free.
 function _from_unix_ms(ms::Int64)
-    return Dates.unix2datetime(ms / 1000)
+    return DateTime(Dates.UTM(ms + Dates.UNIXEPOCH))
 end
 
 # Lower an optional `(start, end)` DateTime range to the FFI's

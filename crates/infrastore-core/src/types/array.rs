@@ -144,11 +144,39 @@ pub struct TypedArray {
     pub bytes: Vec<u8>,
 }
 
+/// The number of elements a shape describes, or an error if the product does
+/// not fit a `usize`.
+///
+/// Checked because these are the crate's only validating array constructors, and
+/// an unchecked `product()` defeats the validation it feeds: in a release build,
+/// where the workspace profile leaves `overflow-checks` off, `[2^61, 8]` wraps to
+/// an element count of 0, so an empty byte buffer "matches" and the array reports
+/// a length of 2^61 with nothing behind it. In a debug build it panics, which the
+/// documented `Result<_, String>` contract says it should not.
+fn element_count(shape: &[usize]) -> Result<usize, String> {
+    shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| format!("TypedArray: shape {shape:?} has more elements than usize can hold"))
+}
+
+/// The byte length a `dtype` + `shape` describes, checked the same way.
+fn expected_bytes(dtype: Dtype, shape: &[usize]) -> Result<usize, String> {
+    element_count(shape)?
+        .checked_mul(dtype.size())
+        .ok_or_else(|| {
+            format!(
+                "TypedArray: shape {:?} of {} needs more bytes than usize can hold",
+                shape,
+                dtype.as_str()
+            )
+        })
+}
+
 impl TypedArray {
     /// Construct, validating that `bytes` matches `dtype` and `shape`.
     pub fn new(dtype: Dtype, shape: Vec<usize>, bytes: Vec<u8>) -> Result<Self, String> {
-        let n: usize = shape.iter().product();
-        let expected = n * dtype.size();
+        let expected = expected_bytes(dtype, &shape)?;
         if bytes.len() != expected {
             return Err(format!(
                 "TypedArray: {} bytes does not match shape {:?} dtype {} ({} expected)",
@@ -188,7 +216,7 @@ impl TypedArray {
     /// `T`'s dtype ([`Element::DTYPE`]). Values are encoded little-endian in
     /// row-major order, matching the on-disk layout.
     pub fn from_slice<T: Element>(shape: Vec<usize>, values: &[T]) -> Result<Self, String> {
-        let n: usize = shape.iter().product();
+        let n = element_count(&shape)?;
         if values.len() != n {
             return Err(format!(
                 "TypedArray::from_slice: {} values does not match shape {:?} ({} expected)",

@@ -3150,14 +3150,23 @@ fn pyany_to_requested_type_opt(
 
 /// Decode a 64-character lowercase-or-uppercase hex string into a 32-byte hash.
 fn hash_from_hex(s: &str) -> PyResult<[u8; 32]> {
-    if s.len() != 64 {
+    // Over bytes, not `&str` slices: the length guard counts bytes, so a
+    // 64-*byte* string of multi-byte characters passed it and then sliced
+    // through a character boundary. That panics, and PyO3 surfaces a panic as
+    // `PanicException`, which inherits from `BaseException` and so escapes both
+    // `except Exception` and this module's own exception hierarchy — an
+    // uncatchable error from an ordinary bad argument.
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 || !s.is_ascii() {
         return Err(InvalidParameterError::new_err(
             "data_hash must be a 64-character hex string",
         ));
     }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+        let pair = std::str::from_utf8(&bytes[i * 2..i * 2 + 2])
+            .map_err(|_| InvalidParameterError::new_err("data_hash is not valid hex"))?;
+        *byte = u8::from_str_radix(pair, 16)
             .map_err(|_| InvalidParameterError::new_err("data_hash is not valid hex"))?;
     }
     Ok(out)

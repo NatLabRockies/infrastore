@@ -219,15 +219,28 @@ impl ElementType {
                 )));
             }
             let n = raw as usize;
+            // Checked, because `n` comes out of the array's own data and so is
+            // caller-controlled up to `usize::MAX`. Unchecked, `1 + 2 * n`
+            // panicked in a debug build and — worse — wrapped in a release one,
+            // where the workspace profile leaves `overflow-checks` off: a
+            // wrapped `needed` of 0 satisfies the width test, so the row is
+            // *accepted*, and `codec::decode` then indexes it unchecked on this
+            // function's promise that every count was validated.
             let needed = match self {
-                ElementType::PiecewiseLinear => 1 + 2 * n,
+                ElementType::PiecewiseLinear => n.checked_mul(2).and_then(|k| k.checked_add(1)),
                 // `n` x-coords and `n - 1` y-values, plus the count itself.
-                _ if n == 0 => 1,
-                _ => 2 * n,
+                _ if n == 0 => Some(1),
+                _ => n.checked_mul(2),
             };
-            if needed > width {
+            // `None` is a count too large to represent, which no row can hold
+            // either — the same answer as "too wide", reported the same way.
+            if needed.is_none_or(|needed| needed > width) {
+                let slots = needed.map_or_else(
+                    || "more than usize::MAX".to_string(),
+                    |needed| needed.to_string(),
+                );
                 return Err(TimeSeriesError::InvalidParameter(format!(
-                    "element_type {self}: row {row} declares {n} points, which needs {needed} \
+                    "element_type {self}: row {row} declares {n} points, which needs {slots} \
                      slots but the row width is {width}"
                 )));
             }

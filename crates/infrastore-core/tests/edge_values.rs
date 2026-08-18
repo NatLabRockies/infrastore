@@ -934,3 +934,42 @@ fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
     }
     assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 5);
 }
+
+#[test]
+fn an_element_count_too_large_to_represent_is_an_error_not_a_panic() {
+    // Both of these multiply caller-controlled numbers. Unchecked they panic in
+    // a debug build -- against `TypedArray::new`'s documented `Result` contract
+    // -- and, worse, *wrap* in a release build, where the workspace profile
+    // leaves `overflow-checks` off. A wrapped product of 0 makes an empty buffer
+    // "match" a shape describing 2^61 elements, and a wrapped slot count makes
+    // an impossible ragged row pass the width check that `codec::decode` then
+    // trusts.
+    use infrastore_core::{Dtype, ElementType};
+
+    // Shape product overflows `usize`.
+    let err = TypedArray::new(Dtype::F64, vec![2_305_843_009_213_693_952, 8], vec![]).unwrap_err();
+    assert!(err.contains("usize"), "{err}");
+    let err =
+        TypedArray::from_slice(vec![2_305_843_009_213_693_952, 8], &[] as &[f64]).unwrap_err();
+    assert!(err.contains("usize"), "{err}");
+
+    // Element count fits, but count * dtype size does not.
+    let err = TypedArray::new(Dtype::F64, vec![usize::MAX / 4], vec![]).unwrap_err();
+    assert!(err.contains("usize"), "{err}");
+
+    // A ragged row whose declared point count overflows the slots it would need.
+    let huge = TypedArray::from_f64(vec![1, 1], &[9_223_372_036_854_775_808.0]);
+    let err = ElementType::PiecewiseLinear
+        .validate_array(&huge, 1)
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("row width")),
+        "{err}"
+    );
+
+    // Ordinary shapes and well-formed ragged rows are unaffected.
+    assert!(TypedArray::new(Dtype::F64, vec![3, 2], vec![0u8; 48]).is_ok());
+    let ok = TypedArray::from_f64(vec![1, 5], &[2.0, 0.0, 1.0, 10.0, 20.0]);
+    assert!(ElementType::PiecewiseLinear.validate_array(&ok, 1).is_ok());
+}
