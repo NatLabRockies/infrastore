@@ -245,12 +245,26 @@ pub fn is_reserved_feature_name(name: &str) -> bool {
 /// Applied on the write path only, so a store written before this rule existed
 /// stays readable and its offending series can still be listed and removed.
 pub fn validate_features(features: &Features) -> Result<()> {
-    for key in features.keys() {
+    for (key, value) in features {
         if is_reserved_feature_name(key) {
             return Err(TimeSeriesError::InvalidParameter(format!(
                 "feature name {key:?} is reserved: it names a field of a time series \
                  or of the key that addresses one; reserved names are {}",
                 RESERVED_FEATURE_NAMES.join(", ")
+            )));
+        }
+        // NaN is rejected at the door because it cannot survive the round trip:
+        // SQLite has no NaN, so `sqlite3_bind_double` stores it as NULL while
+        // `value_kind` still says 'float', and the read path — which hydrates
+        // *every* feature set a listing touches — then fails on the NULL. One
+        // such row would make `list_keys`/`list_names`/`get_metadata` fail for
+        // the whole store, including series that share nothing with it, and it
+        // would survive reopen because the bad row is on disk. A value that
+        // cannot be stored has to fail on the way in, not poison the catalog.
+        if matches!(value, FeatureValue::Float(f) if f.is_nan()) {
+            return Err(TimeSeriesError::InvalidParameter(format!(
+                "feature {key:?} is NaN, which the catalog cannot store; \
+                 use a sentinel value or omit the feature"
             )));
         }
     }

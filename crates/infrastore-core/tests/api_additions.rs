@@ -1528,3 +1528,70 @@ fn transformed_view_inherits_component_field() {
         Some("max_active_power")
     );
 }
+
+#[test]
+fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
+    // `length` is a public field that `new` derives from the array, so the two
+    // agree at construction and nothing keeps them agreeing afterwards —
+    // replacing `data`, or deserializing a hand-written payload, breaks the tie.
+    // The catalog row is built from the field, so accepting the mismatch would
+    // persist a row that misdescribes its own bytes: it survives
+    // flush/persist_to/compact, and `check_static_consistency`,
+    // `transform_single_time_series` and `build_static_reader` all then work off
+    // the wrong grid. `NonSequentialTimeSeries` has always enforced the
+    // equivalent rule.
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+
+    let mut series = SingleTimeSeries::new(
+        initial,
+        Duration::hours(1),
+        TypedArray::from_f64(vec![10], &(0..10).map(f64::from).collect::<Vec<_>>()),
+        "load",
+    );
+    // The array is swapped out; `length` still says 10.
+    series.data = TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]);
+
+    let request = || {
+        AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series.clone()),
+        )
+    };
+
+    for (path, err) in [
+        ("add", store.add(request()).unwrap_err()),
+        (
+            "add_time_series_bulk",
+            store.add_time_series_bulk(vec![request()]).unwrap_err(),
+        ),
+    ] {
+        assert!(
+            matches!(err, TimeSeriesError::InvalidParameter(ref m)
+                if m.contains("length 10") && m.contains("3 time steps")),
+            "{path}: {err}"
+        );
+    }
+
+    // Nothing was written by either attempt.
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 0);
+
+    // A series whose fields agree is still accepted.
+    let good = SingleTimeSeries::new(
+        initial,
+        Duration::hours(1),
+        TypedArray::from_f64(vec![3], &[1.0, 2.0, 3.0]),
+        "load",
+    );
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(good),
+        ))
+        .unwrap();
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+}

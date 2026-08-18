@@ -3792,3 +3792,65 @@ end
         end
     end
 end
+
+@testset "a dtype disagreement is reported, never reinterpreted" begin
+    # Both halves of this are the same mistake: bytes decoded as a type the store
+    # did not store them as. The dtype is known on both paths — the FFI reports
+    # it on a read, and `eltype(data)` fixes it on a write — so a disagreement is
+    # a question the wrapper can answer rather than a reinterpretation it should
+    # perform. Silently reinterpreting produced numbers like `5.0e-323` in place
+    # of `Int64[10, 20, 30]`, with no error anywhere.
+    store = Store(in_memory=true)
+    t0 = DateTime(2024, 1, 1)
+    res = Hour(1)
+
+    k = add_time_series!(
+        store, 1, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[10, 20, 30], "counts"),
+    )
+    h = get_metadata(store, k).data_hash
+
+    # Reading as the wrong type is an error naming the right one...
+    err = try
+        get_array_by_hash(store, h)   # T defaults to Float64
+        nothing
+    catch e
+        e
+    end
+    @test err isa InfraStore.InvalidParameterError
+    @test occursin("Int64", sprint(showerror, err))
+    # ...and reading as the stored type still works.
+    @test get_array_by_hash(store, h, Int64) == Int64[10, 20, 30]
+
+    # A declared element_type must agree with the array it describes. The
+    # core validates only the total byte length, so a same-width mismatch
+    # (Int64 declared "f64") used to be stored and read back as garbage;
+    # only the width-mismatched case failed.
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 2, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[1, 2, 3, 4], "m"; element_type="f64"),
+    )
+    # The inner dtype of a tuple/function spelling is checked the same way.
+    @test_throws InfraStore.InvalidParameterError add_time_series!(
+        store, 3, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[1 2; 3 4], "t"; element_type="tuple(2,f64)"),
+    )
+
+    # Agreeing declarations, and no declaration at all, are unaffected.
+    ki = add_time_series!(
+        store, 4, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[1, 2, 3, 4], "ok_i64"; element_type="i64"),
+    )
+    @test get_time_series(store, ki).data == Int64[1, 2, 3, 4]
+    add_time_series!(
+        store, 5, "Generator", Component,
+        SingleTimeSeries(
+            t0, res, Float64[1 2; 3 4], "ok_tuple"; element_type="tuple(2,f64)"
+        ),
+    )
+    kn = add_time_series!(
+        store, 6, "Generator", Component,
+        SingleTimeSeries(t0, res, Int64[7, 8], "inferred"),
+    )
+    @test get_time_series(store, kn).data == Int64[7, 8]
+end

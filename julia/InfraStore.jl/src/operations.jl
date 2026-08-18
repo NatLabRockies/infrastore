@@ -338,9 +338,14 @@ end
 """
     get_array_by_hash(store, data_hash, ::Type{T}=Float64) -> Vector{T}
 
-Fetch the full stored array for a 32-byte content hash, interpreting the raw
-element bytes as `T`. For multi-dimensional element shapes the result is the
-flat row-major vector; the caller reshapes using the known element shape.
+Fetch the full stored array for a 32-byte content hash, decoding the raw element
+bytes as `T`. For multi-dimensional element shapes the result is the flat
+row-major vector; the caller reshapes using the known element shape.
+
+Throws [`InvalidParameterError`](@ref) when the array is not stored as `T`. The
+store knows its own dtype and reports it through the ABI, so a mismatch is a
+question this call can answer rather than a reinterpretation it should perform;
+the error names the dtype to ask for.
 """
 function get_array_by_hash(
     store::Store, data_hash::Vector{UInt8}, ::Type{T}=Float64
@@ -361,6 +366,15 @@ function get_array_by_hash(
         copy(unsafe_wrap(Array, out_data[], Int(out_len[]); own=false))
     finally
         _free_u8(out_data[], out_len[])
+    end
+    stored = _julia_dtype(out_dtype[])
+    if stored !== T
+        throw(
+            InvalidParameterError(
+                "array is stored as $stored, not $T; " *
+                "call get_array_by_hash(store, data_hash, $stored)",
+            ),
+        )
     end
     return collect(reinterpret(T, bytes))
 end

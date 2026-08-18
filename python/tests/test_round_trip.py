@@ -239,6 +239,67 @@ def test_numpy_array_received_as_ndarray():
     assert arr.shape == (24,)
 
 
+@pytest.mark.parametrize(
+    "descr", ["<f8", ">f8", ">f4", ">i8", ">i4", ">i2", ">u8", ">u2"]
+)
+def test_byte_order_is_normalised_not_reinterpreted(descr):
+    """A big-endian array stores its values, not its bytes.
+
+    `.dtype.name` drops byte order (`np.dtype('>f8').name == 'float64'`) while
+    `.tobytes()` keeps it, so a big-endian array used to be written under a
+    little-endian label and read back byte-reversed -- silently, since every
+    reversed value is still a legal number. The binding normalises to the
+    store's documented little-endian layout instead.
+    """
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    expected = np.array([1, 2, 3], dtype=descr)
+
+    series = SingleTimeSeries(initial, timedelta(hours=1), expected, "load")
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    got = np.asarray(store.get_time_series(key).data)
+
+    # Values survive, and the caller gets them in the host's own byte order.
+    assert np.array_equal(got, expected)
+    assert got.dtype == np.dtype(descr).newbyteorder("=")
+
+
+def test_single_byte_dtypes_are_unaffected_by_byte_order():
+    """`bool`/`int8`/`uint8` have no byte order to normalise ('|' in numpy)."""
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for owner, values in enumerate(
+        [
+            np.array([True, False, True]),
+            np.array([-1, 0, 1], dtype=np.int8),
+            np.array([0, 128, 255], dtype=np.uint8),
+        ]
+    ):
+        series = SingleTimeSeries(initial, timedelta(hours=1), values, "load")
+        key = store.add_time_series(
+            owner + 1, "Generator", OwnerCategory.Component, series
+        )
+        got = np.asarray(store.get_time_series(key).data)
+        assert np.array_equal(got, values)
+        assert got.dtype == values.dtype
+
+
+def test_non_contiguous_big_endian_array_round_trips():
+    """The two representational normalisations compose: order and byte order."""
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    # A strided view of a big-endian array: neither C-contiguous nor LE.
+    expected = np.arange(12, dtype=">f8").reshape(3, 4)[:, ::2]
+    assert not expected.flags["C_CONTIGUOUS"]
+
+    series = SingleTimeSeries(initial, timedelta(hours=1), expected, "load")
+    key = store.add_time_series(1, "Generator", OwnerCategory.Component, series)
+    got = np.asarray(store.get_time_series(key).data)
+
+    assert np.array_equal(got, expected)
+    assert got.shape == expected.shape
+
+
 def test_non_sequential_round_trip_and_slice():
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)

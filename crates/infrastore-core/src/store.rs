@@ -3720,6 +3720,7 @@ fn build_request_parts(item: &AddRequest) -> Result<RequestParts> {
     let element_type = resolve_element_type(item)?;
     let (hash, group, layout, meta, key) = match &item.data {
         TimeSeriesData::SingleTimeSeries(single) => {
+            validate_single(single)?;
             let hash = array_hash(&single.data);
             (
                 hash,
@@ -4027,6 +4028,32 @@ fn insert_association(
         Ok(false) => MetadataStore::insert_batched(tx, meta, cache).map(|_| ()),
         Err(e) => Err(e),
     }
+}
+
+/// Check that a `SingleTimeSeries` describes its own array.
+///
+/// `length` is a public field that `SingleTimeSeries::new` derives from the
+/// array, so the two agree at construction — but nothing keeps them agreeing
+/// afterwards. Replacing `data` (or deserializing a hand-written payload, which
+/// is a supported round trip) leaves a `length` that describes an array the
+/// series no longer holds, and the catalog row is built from that field. Without
+/// this check the store persists a row that misdescribes its own bytes: reads
+/// return a series whose `length` and `data.length()` disagree, the mismatch
+/// survives `flush`/`persist_to`/`compact`, and every consumer that trusts the
+/// catalog — `check_static_consistency`, `transform_single_time_series`,
+/// `build_static_reader` — works off the wrong grid.
+///
+/// The sibling [`validate_non_sequential`] has always enforced the equivalent
+/// rule; this is the static path catching up.
+fn validate_single(series: &SingleTimeSeries) -> Result<()> {
+    if series.length != series.data.length() {
+        return Err(TimeSeriesError::InvalidParameter(format!(
+            "SingleTimeSeries declares length {} but its array holds {} time steps",
+            series.length,
+            series.data.length()
+        )));
+    }
+    Ok(())
 }
 
 fn validate_non_sequential(series: &NonSequentialTimeSeries) -> Result<()> {

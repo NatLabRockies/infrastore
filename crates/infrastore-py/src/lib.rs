@@ -296,29 +296,53 @@ fn dtype_from_numpy_name(name: &str) -> PyResult<core_lib::Dtype> {
     })
 }
 
-fn numpy_name(dtype: core_lib::Dtype) -> &'static str {
+/// The numpy type descriptor for a dtype, with byte order stated explicitly:
+/// `"<f8"`, `"<i4"`, and `"|u1"` for the single-byte types where order does not
+/// apply.
+///
+/// Spelled this way rather than as a plain name (`"float64"`), which numpy
+/// resolves to the *host's* byte order. A `TypedArray`'s bytes are always
+/// little-endian — that is the documented on-disk layout — so decoding them
+/// under the native order would read them backwards on a big-endian host.
+fn numpy_le_descr(dtype: core_lib::Dtype) -> &'static str {
     match dtype {
-        core_lib::Dtype::F64 => "float64",
-        core_lib::Dtype::F32 => "float32",
-        core_lib::Dtype::I64 => "int64",
-        core_lib::Dtype::I32 => "int32",
-        core_lib::Dtype::I16 => "int16",
-        core_lib::Dtype::I8 => "int8",
-        core_lib::Dtype::U64 => "uint64",
-        core_lib::Dtype::U32 => "uint32",
-        core_lib::Dtype::U16 => "uint16",
-        core_lib::Dtype::U8 => "uint8",
-        core_lib::Dtype::Bool => "bool",
+        core_lib::Dtype::F64 => "<f8",
+        core_lib::Dtype::F32 => "<f4",
+        core_lib::Dtype::I64 => "<i8",
+        core_lib::Dtype::I32 => "<i4",
+        core_lib::Dtype::I16 => "<i2",
+        core_lib::Dtype::I8 => "|i1",
+        core_lib::Dtype::U64 => "<u8",
+        core_lib::Dtype::U32 => "<u4",
+        core_lib::Dtype::U16 => "<u2",
+        core_lib::Dtype::U8 => "|u1",
+        core_lib::Dtype::Bool => "|b1",
     }
 }
 
 /// Build a [`TypedArray`] from any numpy array: dtype from `.dtype.name`, shape
-/// from `.shape`, and C-order (row-major) bytes from `.tobytes()`.
+/// from `.shape`, and little-endian C-order (row-major) bytes.
+///
+/// The array is normalized to little-endian first. `.dtype.name` drops byte
+/// order (`np.dtype(">f8").name == "float64"`) while `.tobytes()` preserves it,
+/// so without the conversion a big-endian array's bytes would be stored under a
+/// little-endian label and read back byte-reversed — silently, since every value
+/// is still a legal one. Converting rather than rejecting matches what this
+/// function already does about memory layout, where `.tobytes()` re-orders a
+/// non-contiguous array instead of refusing it: the caller's values are right,
+/// only their representation differs from the store's. `copy=False` makes this a
+/// no-op for an array that is already little-endian, which is every array on a
+/// little-endian host.
 fn typed_array_from_numpy(data: &Bound<'_, PyAny>) -> PyResult<core_lib::TypedArray> {
     let shape: Vec<usize> = data.getattr("shape")?.extract()?;
-    let dtype_name: String = data.getattr("dtype")?.getattr("name")?.extract()?;
+    let dtype_obj = data.getattr("dtype")?;
+    let dtype_name: String = dtype_obj.getattr("name")?.extract()?;
     let dtype = dtype_from_numpy_name(&dtype_name)?;
-    let bytes: Vec<u8> = data.call_method0("tobytes")?.extract()?;
+    let little_endian = dtype_obj.call_method1("newbyteorder", ("<",))?;
+    let kwargs = PyDict::new(data.py());
+    kwargs.set_item("copy", false)?;
+    let normalized = data.call_method("astype", (little_endian,), Some(&kwargs))?;
+    let bytes: Vec<u8> = normalized.call_method0("tobytes")?.extract()?;
     core_lib::TypedArray::new(dtype, shape, bytes).map_err(InvalidParameterError::new_err)
 }
 
@@ -329,7 +353,7 @@ fn numpy_from_typed<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let np = py.import("numpy")?;
     let buf = PyBytes::new(py, &arr.bytes);
-    let flat = np.call_method1("frombuffer", (buf, numpy_name(arr.dtype)))?;
+    let flat = np.call_method1("frombuffer", (buf, numpy_le_descr(arr.dtype)))?;
     let shaped = flat.call_method1("reshape", (arr.shape.clone(),))?;
     // frombuffer is read-only; hand back a writable copy.
     shaped.call_method0("copy")

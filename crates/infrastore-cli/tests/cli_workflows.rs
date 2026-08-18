@@ -1924,3 +1924,105 @@ fn a_closed_pipe_ends_a_stdout_stream_cleanly_instead_of_panicking() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("a JSON descriptor");
     assert_eq!(doc["type"], "SingleTimeSeries");
 }
+
+#[test]
+fn add_replace_works_on_a_fresh_store_and_alongside_new_series() {
+    // `--replace` means "replace it if it is there". Routing the whole load's
+    // identities through the all-or-nothing bulk remove made it fail with
+    // `NotFound` whenever *any* of them was absent — which is every first load
+    // into a new store, and every descriptor that adds a series next to the ones
+    // it replaces.
+    let dir = tempfile::tempdir().unwrap();
+    let two = r#"[{"owner_id": 42, "owner_type": "Generator", "name": "load",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"},
+                  {"owner_id": 42, "owner_type": "Generator", "name": "newone",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}]"#;
+
+    // Nothing exists yet: --replace still loads.
+    let fresh = dir.path().join("fresh.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+    let d = write(dir.path(), "two.json", two);
+    run(
+        &fresh,
+        &["add", "--descriptor", d.to_str().unwrap(), "--replace"],
+    );
+    assert_eq!(data_lines(&run(&fresh, &["-f", "csv", "list"])).len(), 2);
+
+    // One of the two already exists: the present one is replaced, the absent one
+    // is added, and neither fails the batch.
+    let mixed = dir.path().join("mixed.h5");
+    seed_one(dir.path(), &mixed);
+    write(dir.path(), "v.csv", "value\n9\n8\n7\n");
+    run(
+        &mixed,
+        &["add", "--descriptor", d.to_str().unwrap(), "--replace"],
+    );
+    let listed = run(&mixed, &["-f", "csv", "list"]);
+    assert_eq!(data_lines(&listed).len(), 2, "{listed}");
+    let values = run(&mixed, &["-f", "csv", "get", "--name", "load"]);
+    assert!(values.contains(",9"), "the new values must win: {values}");
+
+    // Still idempotent: a second identical run replaces rather than duplicating.
+    run(
+        &mixed,
+        &["add", "--descriptor", d.to_str().unwrap(), "--replace"],
+    );
+    assert_eq!(data_lines(&run(&mixed, &["-f", "csv", "list"])).len(), 2);
+}
+
+#[test]
+fn a_failed_in_memory_load_still_leaves_an_openable_store() {
+    // Creating the store stamps the HDF5 half at once, while an in-memory
+    // catalog writes no `.sqlite` until `persist_catalog`. Returning early on a
+    // mid-load error therefore used to leave a stamped array file with no
+    // catalog — the `MismatchedArtifact` state, which is terminal: the corrected
+    // re-run cannot open it either, and the only recovery is to delete the file.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("halfway.h5");
+    write(dir.path(), "v.csv", "value\n1\n2\n3\n");
+
+    // A descriptor that declares the same series twice: the load opens the
+    // store, then fails on the duplicate.
+    let dup = r#"[{"owner_id": 42, "owner_type": "Generator", "name": "load",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"},
+                  {"owner_id": 42, "owner_type": "Generator", "name": "load",
+                   "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                   "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}]"#;
+    let d = write(dir.path(), "dup.json", dup);
+    let err = run_err(
+        &store,
+        &[
+            "add",
+            "--descriptor",
+            d.to_str().unwrap(),
+            "--catalog",
+            "in-memory",
+        ],
+    );
+    assert!(!err.is_empty(), "the duplicate must still fail the load");
+
+    // Both halves are on disk, and the store opens.
+    assert!(store.exists(), "the HDF5 half should be there");
+    assert!(
+        crate::catalog_beside(&store).exists(),
+        "the catalog half must be written even on the failure path"
+    );
+    run(&store, &["-f", "csv", "list"]);
+
+    // And a corrected load at the same path succeeds.
+    let one = r#"{"owner_id": 42, "owner_type": "Generator", "name": "load",
+                  "type": "SingleTimeSeries", "element_type": "f64", "csv": "v.csv",
+                  "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H"}"#;
+    let good = write(dir.path(), "one_only.json", one);
+    run(&store, &["add", "--descriptor", good.to_str().unwrap()]);
+    assert_eq!(data_lines(&run(&store, &["-f", "csv", "list"])).len(), 1);
+}
+
+fn catalog_beside(store: &Path) -> std::path::PathBuf {
+    let mut name = store.as_os_str().to_owned();
+    name.push(".sqlite");
+    std::path::PathBuf::from(name)
+}

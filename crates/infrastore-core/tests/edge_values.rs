@@ -870,3 +870,67 @@ fn hostile_names_survive_a_non_sequential_disk_round_trip() {
     assert_eq!(ns.name, name);
     assert_eq!(ns.timestamps, timestamps);
 }
+
+#[test]
+fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
+    // SQLite has no NaN: `sqlite3_bind_double` stores it as NULL while
+    // `value_kind` still says 'float', and the read path — which hydrates every
+    // feature set a listing touches — then fails on the NULL. Accepting such a
+    // value would make `list_keys`/`list_names`/`get_metadata` fail for the
+    // *whole* store, including series sharing nothing with it, and survive a
+    // reopen because the bad row is on disk. So it fails on the way in.
+    use infrastore_core::FeatureValue;
+    let mut store = create_store(None, true).unwrap();
+    let data = TypedArray::from_slice(vec![3], &[1.0f64, 2.0, 3.0]).unwrap();
+
+    store
+        .add(AddRequest::new(
+            1,
+            "Generator",
+            OwnerCategory::Component,
+            sts("healthy", data.clone()),
+        ))
+        .unwrap();
+
+    let mut features = Features::new();
+    features.insert("x".into(), FeatureValue::Float(f64::NAN));
+    let err = store
+        .add(
+            AddRequest::new(
+                2,
+                "Generator",
+                OwnerCategory::Component,
+                sts("load", data.clone()),
+            )
+            .with_features(features),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m) if m.contains("NaN")),
+        "{err}"
+    );
+
+    // The rejection is total: nothing was written, so the catalog still reads.
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
+
+    // Every other float value, including the infinities and -0.0, is still fine.
+    for (i, v) in [f64::INFINITY, f64::NEG_INFINITY, -0.0, 1.5]
+        .into_iter()
+        .enumerate()
+    {
+        let mut features = Features::new();
+        features.insert("x".into(), FeatureValue::Float(v));
+        store
+            .add(
+                AddRequest::new(
+                    10 + i as i64,
+                    "Generator",
+                    OwnerCategory::Component,
+                    sts("load", data.clone()),
+                )
+                .with_features(features),
+            )
+            .unwrap_or_else(|e| panic!("float feature {v} should be storable: {e}"));
+    }
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 5);
+}

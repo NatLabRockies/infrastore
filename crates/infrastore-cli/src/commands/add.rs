@@ -229,32 +229,57 @@ pub fn run(store_path: &Path, opts: &Options<'_>) -> Result<(), String> {
     let mut added: Vec<String> = Vec::new();
     let mut total = 0usize;
 
-    for (i, desc) in descriptors.iter().enumerate() {
-        pending.extend(desc.to_add_requests(base_dir.as_deref(), csv_override)?);
-        progress.tick(i + 1, total + pending.len());
-        // `>=` rather than `==`: a wide descriptor contributes many requests at
-        // once, so the batch can overshoot the size in one step. Chunks are
-        // separate transactions, which is the trade the flag exists to make.
-        if pending.len() >= batch {
-            if store.is_none() {
-                store = Some(open(opts.compression, opts.catalog)?);
+    // The load runs to completion or to its first error; either way the catalog
+    // is written out below. Nothing between here and there may return early.
+    let loaded = (|| -> Result<(), String> {
+        for (i, desc) in descriptors.iter().enumerate() {
+            pending.extend(desc.to_add_requests(base_dir.as_deref(), csv_override)?);
+            progress.tick(i + 1, total + pending.len());
+            // `>=` rather than `==`: a wide descriptor contributes many requests
+            // at once, so the batch can overshoot the size in one step. Chunks
+            // are separate transactions, which is the trade the flag exists to
+            // make.
+            if pending.len() >= batch {
+                if store.is_none() {
+                    store = Some(open(opts.compression, opts.catalog)?);
+                }
+                let store = store.as_mut().expect("just opened");
+                total += flush(store, &mut pending, opts.replace, &mut added)?;
             }
-            let store = store.as_mut().expect("just opened");
+        }
+        if !pending.is_empty() && store.is_none() {
+            store = Some(open(opts.compression, opts.catalog)?);
+        }
+        if let Some(store) = store.as_mut() {
             total += flush(store, &mut pending, opts.replace, &mut added)?;
         }
-    }
-    if !pending.is_empty() && store.is_none() {
-        store = Some(open(opts.compression, opts.catalog)?);
-    }
+        Ok(())
+    })();
+
     if let Some(store) = store.as_mut() {
-        total += flush(store, &mut pending, opts.replace, &mut added)?;
         // `persist_catalog` rather than `flush`, because one of these is a
         // per-process store. An in-memory catalog that is never written before
         // this command exits is not "not yet durable" — it is gone, and every
         // array this load streamed to the HDF5 file is unreachable. For an
         // attached catalog this *is* `flush`.
-        store.persist_catalog().map_err(|e| e.to_string())?;
+        //
+        // On the failure path too, and that is the point. Creating the store
+        // stamps the HDF5 half immediately, while an in-memory catalog writes no
+        // `.sqlite` until this call — so returning early on a mid-load error
+        // used to leave a stamped array file with no catalog beside it. That is
+        // the `MismatchedArtifact` state, and it is terminal: the store cannot
+        // be opened again, not even by the corrected re-run, and the user's only
+        // recovery is to delete the file. Every batch that did commit is
+        // all-or-nothing, so what we write here is a valid store holding exactly
+        // the batches that succeeded.
+        let persisted = store.persist_catalog().map_err(|e| e.to_string());
+        // The load error is the one that explains what went wrong; a persist
+        // failure on top of it is a consequence, not the cause.
+        if loaded.is_ok() {
+            persisted?;
+        }
     }
+    loaded?;
     progress.finish();
 
     if opts.quiet {
@@ -301,14 +326,15 @@ fn flush(
     }
     let requests = std::mem::take(pending);
     if replace {
-        // Remove-then-add per identity, inside the same transaction as the add
-        // that follows it, so a re-run of a load leaves either the new series or
-        // the old one — never neither.
+        // Remove-then-add per identity, so a re-run of a load leaves either the
+        // new series or the old one — never neither. Identities the store does
+        // not hold are skipped rather than failing the batch: `--replace` says
+        // "replace it if it is there", which has to hold on the first load into
+        // an empty store and on a descriptor that adds a series alongside ones
+        // it is replacing.
         let identities: Vec<KeyIdentity> = requests.iter().map(request_identity).collect();
         let refs: Vec<&KeyIdentity> = identities.iter().collect();
-        store
-            .remove_time_series_bulk(&refs)
-            .map_err(|e| e.to_string())?;
+        store_access::remove_existing(store, &refs)?;
     }
     let keys = store
         .add_time_series_bulk(requests)
