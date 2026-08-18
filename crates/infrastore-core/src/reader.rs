@@ -641,6 +641,16 @@ impl WindowSlot {
                 let start = (window / cols) * cols;
                 let end = (start + cols).min(self.count);
                 if self.cached.as_ref() != Some(&(start..end)) {
+                    // Invalidated *before* the read, not after it. `read_block`
+                    // may clear `self.block` and then fail — the HDF5 backend
+                    // does exactly that, emptying `out` before the lookup that
+                    // returns `NotFound` — and leaving `cached` set across that
+                    // failure left the slot advertising a range it no longer
+                    // held. The next read landing in that range then skipped the
+                    // I/O and `gather_window` indexed an empty buffer, turning a
+                    // removed array into an out-of-range panic instead of the
+                    // `NotFound` the failing read had already reported.
+                    self.cached = None;
                     read_block(
                         &self.hash,
                         dtype,

@@ -2745,38 +2745,44 @@ end
     end
 end
 
-@testset "a Microsecond resolution is silently flattened to zero" begin
-    # FINDING F13, from the Julia side: a `Period` is a whole number of
-    # milliseconds, so a `Microsecond(1)` resolution loses its magnitude. The add
-    # succeeds and the stored resolution reads back as `Millisecond(0)` rather
-    # than being rejected. PINNED, not fixed.
+@testset "a Microsecond resolution is refused, not flattened to zero" begin
+    # Formerly FINDING F13, pinned as flatten-and-accept; now fixed. A `Period`
+    # is a whole number of milliseconds, so `Microsecond(1)` lost its magnitude:
+    # the add succeeded, the resolution read back as `Millisecond(0)`, and only a
+    # time-sliced read then failed, on a zero-length step. The write path now
+    # rejects any resolution that is not a positive whole millisecond, as every
+    # forecast constructor already did.
     store = Store(in_memory=true)
     t = DateTime(2024, 1, 1)
+    # Note `_period_to_iso` rounds to the nearest millisecond, so only values
+    # that round to zero (or below) are refused here; `Nanosecond(999_999)`
+    # rounds *up* to 1 ms and is stored as such.
+    for bad in [Microsecond(1), Microsecond(499), Millisecond(0), Hour(-1)]
+        @test_throws InfraStore.InvalidParameterError add_time_series!(
+            store,
+            1,
+            "Generator",
+            Component,
+            SingleTimeSeries(t, bad, Float64[1, 2, 3, 4], "micro"),
+        )
+    end
+    @test isempty(list_keys(store; owner_id=1))
+
+    # One whole millisecond is the finest grid the store can express.
     add_time_series!(
         store,
         1,
         "Generator",
         Component,
-        SingleTimeSeries(t, Microsecond(1), Float64[1, 2, 3, 4], "micro"),
+        SingleTimeSeries(t, Millisecond(1), Float64[1, 2, 3, 4], "milli"),
     )
     keys = list_keys(store; owner_id=1)
     @test length(keys) == 1
-    @test keys[1].resolution == Millisecond(0)
-
-    # A full read still works; a time-sliced one cannot divide by a zero step.
+    @test keys[1].resolution == Millisecond(1)
     got = get_time_series(
-        SingleTimeSeries, store, 1, Component, "micro"; resolution=Millisecond(0)
+        SingleTimeSeries, store, 1, Component, "milli"; resolution=Millisecond(1)
     )
     @test length(got.data) == 4
-    @test_throws InfraStore.InvalidParameterError get_time_series(
-        SingleTimeSeries,
-        store,
-        1,
-        Component,
-        "micro";
-        resolution=Millisecond(0),
-        time_range=(t, t + Second(1)),
-    )
 end
 
 @testset "pre-1970 and far-future timestamps round trip" begin

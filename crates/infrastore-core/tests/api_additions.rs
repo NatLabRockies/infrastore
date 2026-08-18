@@ -1595,3 +1595,221 @@ fn a_single_time_series_whose_length_disagrees_with_its_array_is_rejected() {
         .unwrap();
     assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
 }
+
+/// `Deterministic` and `DeterministicSingleTimeSeries` are mutually exclusive
+/// for one family — on *every* path that writes an association row.
+///
+/// The add path has always enforced this. `copy_time_series`, `replace_owner`
+/// and `rename_time_series` did not: they write through
+/// `MetadataStore::insert`/`replace_owner`/`rename`, which skip the check, and
+/// each of the three moves a row to a *new* family identity, which is precisely
+/// the operation that can pair the two. The resulting state is one the rest of
+/// the code treats as unreachable: `resolve_forecast_key` reports the family as
+/// ambiguous with no way to narrow it (both candidates share resolution *and*
+/// interval), and `transform_single_time_series` refuses to run again.
+#[test]
+fn every_write_path_refuses_to_pair_deterministic_with_its_single_view() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+
+    // A store whose owner 1 holds a SingleTimeSeries "load" and the DST derived
+    // from it.
+    let seeded = || {
+        let mut store = create_store(None, true).unwrap();
+        let vals: Vec<f64> = (0..24).map(f64::from).collect();
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                    initial,
+                    Duration::hours(1),
+                    TypedArray::from_f64(vec![24], &vals),
+                    "load",
+                )),
+            ))
+            .unwrap();
+        store
+            .transform_single_time_series(
+                Duration::hours(4),
+                Duration::hours(2),
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        store
+    };
+
+    // A dense Deterministic on the same grid, added under `owner`/`name`.
+    let dense = |store: &mut infrastore_core::Store, owner: i64, name: &str| {
+        let vals: Vec<f64> = (0..12).map(f64::from).collect();
+        store
+            .add(AddRequest::new(
+                owner,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(4),
+                        Duration::hours(2),
+                        3,
+                        TypedArray::from_f64(vec![4, 3], &vals),
+                        name,
+                    )
+                    .unwrap(),
+                ),
+            ))
+            .unwrap()
+    };
+
+    let types_of_owner_1 = |store: &infrastore_core::Store| {
+        let mut t: Vec<&'static str> = store
+            .list_keys(ListFilter::new().owner_id(1))
+            .unwrap()
+            .iter()
+            .map(|k| k.time_series_type().as_str())
+            .collect();
+        t.sort_unstable();
+        t
+    };
+
+    // Route 1: copy the Deterministic onto the owner that holds the DST.
+    let mut store = seeded();
+    let src = dense(&mut store, 2, "load");
+    let err = store
+        .copy_time_series(src.identity(), 1, "Generator", None)
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
+        "copy: {err}"
+    );
+    assert_eq!(
+        types_of_owner_1(&store),
+        ["DeterministicSingleTimeSeries", "SingleTimeSeries"]
+    );
+
+    // Route 2: move the whole owner that holds the Deterministic onto it.
+    let mut store = seeded();
+    dense(&mut store, 3, "load");
+    let err = store
+        .replace_owner(3, 1, OwnerCategory::Component)
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
+        "replace_owner: {err}"
+    );
+    assert_eq!(
+        types_of_owner_1(&store),
+        ["DeterministicSingleTimeSeries", "SingleTimeSeries"]
+    );
+
+    // Route 3: rename a Deterministic the same owner already holds into the
+    // DST's family.
+    let mut store = seeded();
+    let other = dense(&mut store, 1, "other");
+    let err = store
+        .rename_time_series(other.identity(), "load")
+        .unwrap_err();
+    assert!(
+        matches!(err, TimeSeriesError::InvalidParameter(ref m) if m.contains("mutually exclusive")),
+        "rename: {err}"
+    );
+    // "other" is a different family, so it legitimately survives untouched.
+    assert_eq!(
+        store
+            .list_keys(ListFilter::new().owner_id(1))
+            .unwrap()
+            .iter()
+            .filter(|k| k.name() == "load")
+            .count(),
+        2
+    );
+
+    // The rule still permits the unrelated cases: a Deterministic on a family
+    // with no DST, and a copy to a family that is free.
+    let mut store = seeded();
+    dense(&mut store, 5, "unrelated");
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 3);
+}
+
+/// A rename names one series, and touches one row or none.
+///
+/// `MetadataStore::rename` matched any interval when the key carried none —
+/// a predicate copied from `delete_by_key`, where it is a documented
+/// convenience. For a rename it meant a key with `interval: None` updated
+/// *every* interval of a forecast family, and `rename_time_series` committed
+/// that multi-row update before discovering the ambiguity, reporting an error
+/// for an operation that had already taken full effect.
+#[test]
+fn renaming_with_an_underspecified_key_changes_nothing() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut store = create_store(None, true).unwrap();
+    let vals: Vec<f64> = (0..12).map(f64::from).collect();
+
+    // Two forecasts of one variable that differ only by interval — a day-ahead
+    // and a real-time forecast, which the catalog treats as distinct series.
+    for interval in [Duration::hours(1), Duration::hours(24)] {
+        store
+            .add(AddRequest::new(
+                1,
+                "Generator",
+                OwnerCategory::Component,
+                TimeSeriesData::Deterministic(
+                    Deterministic::new(
+                        initial,
+                        Duration::hours(1),
+                        Duration::hours(4),
+                        interval,
+                        3,
+                        TypedArray::from_f64(vec![4, 3], &vals),
+                        "load",
+                    )
+                    .unwrap(),
+                ),
+            ))
+            .unwrap();
+    }
+
+    let underspecified = KeyIdentity {
+        owner_id: 1,
+        owner_category: OwnerCategory::Component,
+        time_series_type: TimeSeriesType::Deterministic,
+        name: "load".into(),
+        resolution: Some(Duration::hours(1).into()),
+        interval: None,
+        features: Features::new(),
+    };
+    assert!(
+        store
+            .rename_time_series(&underspecified, "renamed")
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .list_keys(ListFilter::new())
+            .unwrap()
+            .iter()
+            .filter(|k| k.name() == "load")
+            .count(),
+        2,
+        "a failed rename must leave both rows alone"
+    );
+
+    // Naming the interval renames exactly that one.
+    let exact = KeyIdentity {
+        interval: Some(Duration::hours(24).into()),
+        ..underspecified
+    };
+    store.rename_time_series(&exact, "day_ahead").unwrap();
+    let mut names: Vec<String> = store
+        .list_keys(ListFilter::new())
+        .unwrap()
+        .iter()
+        .map(|k| k.name().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["day_ahead", "load"]);
+}
