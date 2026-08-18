@@ -433,6 +433,15 @@ pub fn summary(
         }
     }
 
+    // Static and forecast series are two shapes, and the human table shows them
+    // as two tables under two headings. CSV cannot: a stream carrying a prose
+    // line, a 6-column header, a 1-line heading and an 8-column header is not a
+    // CSV at all, and a strict reader dies on row two. Every other query command
+    // in this file has a dedicated `Format::Csv` arm for exactly this reason.
+    //
+    // So machine output is one uniform table, `Kind` naming which shape a row
+    // is and the columns that do not apply left as `-`. Nothing is lost against
+    // the human view, and the JSON form keeps its two separate lists.
     match format {
         f if f.is_json() => output::print_value(
             f,
@@ -441,6 +450,53 @@ pub fn summary(
                 "forecast": forecast_items,
             }),
         )?,
+        Format::Csv => {
+            let headers: Vec<String> = [
+                "Kind",
+                "Owner Type",
+                "Type",
+                "Name",
+                "Resolution",
+                "Time Steps",
+                "Horizon",
+                "Interval",
+                "Windows",
+                "Series",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            for v in &static_items {
+                rows.push(vec![
+                    "static".to_string(),
+                    json_str(v, "owner_type"),
+                    json_str(v, "time_series_type"),
+                    json_str(v, "name"),
+                    json_str(v, "resolution"),
+                    json_str(v, "time_step_count"),
+                    "-".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                    json_str(v, "count"),
+                ]);
+            }
+            for v in &forecast_items {
+                rows.push(vec![
+                    "forecast".to_string(),
+                    json_str(v, "owner_type"),
+                    json_str(v, "time_series_type"),
+                    json_str(v, "name"),
+                    json_str(v, "resolution"),
+                    "-".to_string(),
+                    json_str(v, "horizon"),
+                    json_str(v, "interval"),
+                    json_str(v, "window_count"),
+                    json_str(v, "count"),
+                ]);
+            }
+            output::display_csv_rows(&headers, &rows)?;
+        }
         _ => {
             // `Series` (not `Count`): this column is how many series fall in the
             // group. The forecast table also has a real forecast `count` — the
@@ -473,11 +529,7 @@ pub fn summary(
                         ]
                     })
                     .collect();
-                if format == Format::Csv {
-                    output::display_csv_rows(&headers, &rows)?;
-                } else {
-                    output::display_table_dyn(&headers, &rows);
-                }
+                output::display_table_dyn(&headers, &rows);
             }
             if show_forecast {
                 println!("{}", color::header("Forecast series"));
@@ -509,11 +561,7 @@ pub fn summary(
                         ]
                     })
                     .collect();
-                if format == Format::Csv {
-                    output::display_csv_rows(&headers, &rows)?;
-                } else {
-                    output::display_table_dyn(&headers, &rows);
-                }
+                output::display_table_dyn(&headers, &rows);
             }
         }
     }

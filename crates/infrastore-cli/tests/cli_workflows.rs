@@ -2195,3 +2195,111 @@ fn a_timestamp_column_must_agree_with_the_grid_the_descriptor_declares() {
     run(&plain, &["add", "--descriptor", d2.to_str().unwrap()]);
     assert_eq!(data_lines(&run(&plain, &["-f", "csv", "list"])).len(), 1);
 }
+
+/// `summary -f csv` is a CSV, not a report with tables in it.
+///
+/// Static and forecast series are two shapes, and the human view shows them as
+/// two tables under two headings. The CSV path printed those headings into the
+/// stream and then emitted both tables, so the output carried rows of 1, 6, 6,
+/// 1, 8 and 8 fields — a strict reader dies on row two. Machine output is now
+/// one uniform table with a `Kind` column and `-` where a column does not apply.
+#[test]
+fn summary_csv_is_one_uniform_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("summary.h5");
+    seed_one(dir.path(), &store);
+    // A forecast too, so both shapes are present.
+    run(
+        &store,
+        &["transform", "--horizon", "PT2H", "--interval", "PT1H"],
+    );
+
+    let out = run(&store, &["-f", "csv", "summary"]);
+    let mut lines = out.lines().filter(|l| !l.trim().is_empty());
+    let header = lines.next().expect("a header row");
+    assert!(header.starts_with("Kind,"), "{out}");
+    let width = header.split(',').count();
+
+    let rows: Vec<&str> = lines.collect();
+    assert!(rows.len() >= 2, "both kinds should appear: {out}");
+    for row in &rows {
+        assert_eq!(
+            row.split(',').count(),
+            width,
+            "every row must have the header's width: {out}"
+        );
+    }
+    // No prose headings leaked into the stream.
+    assert!(!out.contains("Static series"), "{out}");
+    assert!(!out.contains("Forecast series"), "{out}");
+    // Both kinds are labelled, and each carries the columns that apply to it.
+    assert!(rows.iter().any(|r| r.starts_with("static,")), "{out}");
+    assert!(rows.iter().any(|r| r.starts_with("forecast,")), "{out}");
+
+    // The human view still shows its two headed tables.
+    let human = run(&store, &["summary"]);
+    assert!(human.contains("Static series"), "{human}");
+    assert!(human.contains("Forecast series"), "{human}");
+}
+
+/// A canvas an SVG cannot express is refused, not written.
+///
+/// `--width`/`--height` are bare floats that went straight into the root
+/// element, so `--width=-100` wrote `width="-100"` (an error per the SVG spec)
+/// and `--width=nan` wrote `width="NaN"` (not a `<length>` at all, and it leaked
+/// into the body geometry as `x="NaN"`). Both reported success and exit 0.
+#[test]
+fn plot_refuses_a_canvas_an_svg_cannot_express() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("canvas.h5");
+    seed_one(dir.path(), &store);
+    let out = dir.path().join("chart.svg");
+
+    for (flag, value) in [
+        ("--width", "-100"),
+        ("--width", "nan"),
+        ("--width", "0"),
+        ("--width", "inf"),
+        ("--width", "10"),
+        ("--height", "-5"),
+        ("--height", "nan"),
+    ] {
+        let err = run_err(
+            &store,
+            &[
+                "plot",
+                "--kind",
+                "line",
+                "--name",
+                "load",
+                &format!("{flag}={value}"),
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            err.contains(flag.trim_start_matches("--")),
+            "{flag}={value}: {err}"
+        );
+        assert!(!out.exists(), "{flag}={value} must not write a chart");
+    }
+
+    // An ordinary canvas is unaffected, and lands in the document.
+    run(
+        &store,
+        &[
+            "plot",
+            "--kind",
+            "line",
+            "--name",
+            "load",
+            "--width=800",
+            "--height=400",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    let svg = fs::read_to_string(&out).unwrap();
+    assert!(svg.contains(r#"viewBox="0 0 800 400""#), "{svg}");
+    assert!(!svg.contains("NaN"), "{svg}");
+}

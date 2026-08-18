@@ -59,7 +59,37 @@ pub struct Options<'a> {
     pub format: Format,
 }
 
+/// The smallest canvas worth rendering. Below this the margins alone consume the
+/// whole document and the plot area clamps to a sliver, so a chart this size is
+/// a mistake rather than a request.
+const MIN_CANVAS: f64 = 50.0;
+
+/// Reject a canvas dimension an SVG cannot express.
+///
+/// `width`/`height` are bare `f64`s that went straight into the root element's
+/// `viewBox` and `width`/`height` attributes, so anything clap could parse
+/// reached the file: `--width=-100` wrote `width="-100"`, which the SVG spec
+/// makes an error, and `--width=nan` wrote `width="NaN"`, which is not a
+/// `<length>` at all — `NaN` then leaked into the body geometry as well
+/// (`x="NaN"`). Both reported success and exit 0, so a pipeline only found out
+/// when something downstream refused to render the file.
+fn check_canvas(value: f64, flag: &str) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err(format!(
+            "--{flag} must be a finite number of pixels, not {value}"
+        ));
+    }
+    if value < MIN_CANVAS {
+        return Err(format!(
+            "--{flag} must be at least {MIN_CANVAS:.0} pixels, got {value}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn run(store_path: &Path, selector: &SelectorArgs, opts: &Options<'_>) -> Result<(), String> {
+    check_canvas(opts.width, "width")?;
+    check_canvas(opts.height, "height")?;
     let store = store_access::open_readonly(store_path)?;
     let range = crate::parse::parse_time_range(opts.time_range)?;
     let document = match opts.kind {
