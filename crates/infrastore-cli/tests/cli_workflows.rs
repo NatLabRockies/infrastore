@@ -1205,6 +1205,75 @@ fn diff_reports_added_removed_and_changed_and_exits_nonzero() {
     );
 }
 
+/// Two series whose feature maps *render* alike are still two series.
+///
+/// `diff` used to pair rows on the rendered identity, where features are `k=v`
+/// pairs joined by `,`. That rendering is not injective -- `{"a": "1,b=2"}` and
+/// `{"a": "1", "b": "2"}` both come out as `a=1,b=2` -- so the two collapsed
+/// into one map entry, one of them dropped out of the comparison, and a store
+/// that genuinely differed was reported as `0 changed` with exit 0. Anything
+/// gating CI on that status passed silently.
+#[test]
+fn diff_pairs_series_by_identity_not_by_how_the_identity_renders() {
+    let dir = tempfile::tempdir().unwrap();
+    let left = dir.path().join("collide_left.h5");
+    let right = dir.path().join("collide_right.h5");
+
+    // Two series identical but for features that render to the same text.
+    let descriptor = |values: &str| {
+        format!(
+            r#"[{{"owner_id": 42, "owner_type": "G", "name": "load",
+                  "type": "SingleTimeSeries", "element_type": "f64", "csv": "{values}",
+                  "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                  "features": {{"a": "1,b=2"}}}},
+                 {{"owner_id": 42, "owner_type": "G", "name": "load",
+                  "type": "SingleTimeSeries", "element_type": "f64", "csv": "same.csv",
+                  "initial_timestamp": "2024-01-01T00:00:00Z", "resolution": "PT1H",
+                  "features": {{"a": "1", "b": "2"}}}}]"#
+        )
+    };
+    write(dir.path(), "same.csv", "value\n1\n2\n");
+    write(dir.path(), "differs.csv", "value\n7\n7\n");
+    let l = write(dir.path(), "cl.json", &descriptor("same.csv"));
+    let r = write(dir.path(), "cr.json", &descriptor("differs.csv"));
+    run(&left, &["add", "--descriptor", l.to_str().unwrap()]);
+    run(&right, &["add", "--descriptor", r.to_str().unwrap()]);
+
+    // Both stores really do hold two series each.
+    assert_eq!(data_lines(&run(&left, &["-f", "csv", "list"])).len(), 2);
+    assert_eq!(data_lines(&run(&right, &["-f", "csv", "list"])).len(), 2);
+
+    // One of the two differs, so the diff reports it and exits nonzero.
+    let output = raw(&left, &["diff", "--against", right.to_str().unwrap()]);
+    assert!(
+        !output.status.success(),
+        "a store that differs must exit nonzero: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // `--all` so the identical row shows up too. Parsed from `raw`, since a
+    // differing diff deliberately exits nonzero.
+    let json = raw(
+        &left,
+        &[
+            "-f",
+            "json",
+            "diff",
+            "--against",
+            right.to_str().unwrap(),
+            "--all",
+        ],
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&json.stdout)).unwrap();
+    assert_eq!(report["changed"], 1, "{report}");
+    assert_eq!(report["same"], 1, "{report}");
+    assert_eq!(report["added"], 0, "{report}");
+    assert_eq!(report["removed"], 0, "{report}");
+    // Neither series was swallowed by the other.
+    assert_eq!(report["items"].as_array().unwrap().len(), 2, "{report}");
+}
+
 /// `diff` reports the differences by default and exits nonzero on them; `--all`
 /// adds the identical rows, and two stores that agree still exit zero.
 #[test]
