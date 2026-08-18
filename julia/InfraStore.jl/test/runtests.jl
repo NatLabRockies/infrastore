@@ -3891,3 +3891,45 @@ end
     )
     @test get_time_series(store, k).initial_timestamp == t
 end
+
+@testset "Store(path=...) creates a file-backed store" begin
+    # `in_memory` used to default to `true`, and the non-`overwrite` branch
+    # passed both it and the path to `infrastore_store_create_with_catalog`,
+    # which ignores the path when in-memory wins. The contradictory pair was
+    # accepted silently: the user got an in-memory store, and everything written
+    # was discarded at `close!` with no file ever created. It now defaults to
+    # "whatever the path implies", and the contradiction is an error -- the same
+    # rule the `overwrite=true` branch has always enforced.
+    mktempdir() do dir
+        path = joinpath(dir, "inferred.h5")
+        s = Store(path=path)
+        @test get_path(s) == path
+        @test catalog_mode(s) === :attached
+        add_time_series!(
+            s, 1, "Generator", Component,
+            SingleTimeSeries(DateTime(2024, 1, 1), Hour(1), Float64[1, 2, 3], "load"),
+        )
+        close!(s)
+        @test isfile(path)
+
+        # It really is a store, and it holds what was written.
+        open_store(path; read_only=true) do reopened
+            @test length(list_keys(reopened)) == 1
+        end
+
+        # No path still means in-memory.
+        mem = Store()
+        @test get_path(mem) === nothing
+        @test catalog_mode(mem) === :memory
+        close!(mem)
+
+        # Asking for both is refused rather than silently resolved.
+        @test_throws ArgumentError Store(path=joinpath(dir, "x.h5"), in_memory=true)
+
+        # And an explicit `in_memory=false` with a path still works.
+        p2 = joinpath(dir, "explicit.h5")
+        s2 = Store(path=p2, in_memory=false)
+        close!(s2)
+        @test isfile(p2)
+    end
+end

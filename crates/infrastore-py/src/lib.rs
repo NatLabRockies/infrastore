@@ -1605,14 +1605,29 @@ impl PyStore {
     ) -> PyResult<PyTimeSeriesKey> {
         let features = features_from_dict(features)?;
         let mut data = extract_time_series_data(time_series)?;
-        // These describe the series, so they are set on it, not on the request.
-        data.set_units(units);
-        data.set_application_data(application_data);
-        data.set_quantity_kind(quantity_kind);
-        data.set_unit_system(parse_unit_system(unit_system.as_deref())?);
-        data.set_component_field(component_field);
-        // Omitting it keeps whatever the series already carries — a constructor
-        // resolved that to plain scalars of the array's dtype.
+        // These describe the series, so they are set on it, not on the request —
+        // and each is applied only when the caller actually supplied it, the way
+        // `element_type` always has been. Setting them unconditionally from
+        // arguments that default to `None` meant a read-then-re-add silently
+        // dropped five of the six descriptors that `get_time_series` had just
+        // populated, while keeping the sixth; the value classes expose no
+        // properties for them, so the caller could neither notice nor re-supply
+        // what was lost. Omitting one now keeps whatever the series carries.
+        if let Some(units) = units {
+            data.set_units(Some(units));
+        }
+        if let Some(application_data) = application_data {
+            data.set_application_data(Some(application_data));
+        }
+        if let Some(quantity_kind) = quantity_kind {
+            data.set_quantity_kind(Some(quantity_kind));
+        }
+        if let Some(unit_system) = unit_system {
+            data.set_unit_system(parse_unit_system(Some(unit_system.as_str()))?);
+        }
+        if let Some(component_field) = component_field {
+            data.set_component_field(Some(component_field));
+        }
         if let Some(et) = element_type {
             data.set_element_type(parse_element_type(&et)?);
         }
@@ -1683,12 +1698,23 @@ impl PyStore {
                 _ => None,
             };
             let mut data = extract_time_series_data(&time_series)?;
-            data.set_units(units);
-            data.set_application_data(application_data);
-            data.set_quantity_kind(quantity_kind);
-            data.set_unit_system(parse_unit_system(unit_system.as_deref())?);
-            data.set_component_field(component_field);
-            // As above: an absent `element_type` leaves the series' own.
+            // As in `add_time_series`: a key the item omits leaves the series'
+            // own descriptor alone rather than clearing it.
+            if let Some(units) = units {
+                data.set_units(Some(units));
+            }
+            if let Some(application_data) = application_data {
+                data.set_application_data(Some(application_data));
+            }
+            if let Some(quantity_kind) = quantity_kind {
+                data.set_quantity_kind(Some(quantity_kind));
+            }
+            if let Some(unit_system) = unit_system {
+                data.set_unit_system(parse_unit_system(Some(unit_system.as_str()))?);
+            }
+            if let Some(component_field) = component_field {
+                data.set_component_field(Some(component_field));
+            }
             if let Some(et) = element_type {
                 data.set_element_type(et);
             }

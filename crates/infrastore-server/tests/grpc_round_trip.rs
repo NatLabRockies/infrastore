@@ -507,3 +507,86 @@ async fn component_field_filters_and_round_trips_over_the_wire() {
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].component_field, None);
 }
+
+/// A value read over gRPC describes its values the way a local one does.
+///
+/// `GetResp` carried no unit descriptors, so the encoder dropped `units`,
+/// `quantity_kind`, `unit_system` and `component_field` and the decoder wrote
+/// `None` back in. The identical `Store::get_time_series` against a local store
+/// returns them populated — the core attaches them in `materialize_time_series`
+/// precisely so a read round-trips what a write declared. The server tests only
+/// ever asserted descriptors through `GetMetadata`, so the gap was invisible.
+#[tokio::test]
+async fn a_value_read_carries_the_unit_descriptors() {
+    let mut store = create_store(None, true).unwrap();
+    let described = TimeSeriesData::SingleTimeSeries(series(2024, 24, 100.0))
+        .with_units("MW")
+        .with_quantity_kind("ActivePower")
+        .with_unit_system(infrastore_core::UnitSystem::ComponentBase)
+        .with_component_field("max_active_power");
+    store
+        .add_time_series(
+            42,
+            "Generator",
+            OwnerCategory::Component,
+            described,
+            Features::new(),
+        )
+        .unwrap();
+    // A second series declaring none of them, to pin that absent stays absent.
+    store
+        .add_time_series(
+            43,
+            "Generator",
+            OwnerCategory::Component,
+            TimeSeriesData::SingleTimeSeries(series(2024, 24, 5.0)),
+            Features::new(),
+        )
+        .unwrap();
+
+    let local_key = store
+        .list_keys(infrastore_core::ListFilter::new().owner_id(42))
+        .unwrap()[0]
+        .clone();
+    let local_described = store.get_time_series(local_key.identity(), None).unwrap();
+
+    let addr = spawn_server(store).await;
+    let client = RemoteClient::connect(addr).await.unwrap();
+
+    let keys = client
+        .get_time_series_keys(42, OwnerCategory::Component)
+        .await
+        .unwrap();
+    let remote = client
+        .get_time_series(keys[0].identity(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(remote.units(), Some("MW"));
+    assert_eq!(remote.quantity_kind(), Some("ActivePower"));
+    assert_eq!(
+        remote.unit_system(),
+        Some(infrastore_core::UnitSystem::ComponentBase)
+    );
+    assert_eq!(remote.component_field(), Some("max_active_power"));
+
+    // Byte-for-byte the same descriptors the local read reports.
+    assert_eq!(remote.units(), local_described.units());
+    assert_eq!(remote.quantity_kind(), local_described.quantity_kind());
+    assert_eq!(remote.unit_system(), local_described.unit_system());
+    assert_eq!(remote.component_field(), local_described.component_field());
+
+    // Unset stays unset rather than becoming an empty string.
+    let bare_keys = client
+        .get_time_series_keys(43, OwnerCategory::Component)
+        .await
+        .unwrap();
+    let bare = client
+        .get_time_series(bare_keys[0].identity(), None)
+        .await
+        .unwrap();
+    assert_eq!(bare.units(), None);
+    assert_eq!(bare.quantity_kind(), None);
+    assert_eq!(bare.unit_system(), None);
+    assert_eq!(bare.component_field(), None);
+}

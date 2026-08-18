@@ -813,7 +813,10 @@ fn hostile_feature_keys_and_values_round_trip_and_disambiguate() {
         "键 with spaces".into(),
         FeatureValue::Str("值'\"[*]".into()),
     );
-    features.insert("f".into(), FeatureValue::Float(-0.0));
+    // Not -0.0: SQLite's REAL storage drops the sign of a negative zero, so it
+    // is refused on write (see the round-trip test below). The infinities and
+    // subnormals do survive bit-for-bit.
+    features.insert("f".into(), FeatureValue::Float(f64::NEG_INFINITY));
     features.insert("b".into(), FeatureValue::Bool(false));
 
     let key = store
@@ -913,10 +916,38 @@ fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
     // The rejection is total: nothing was written, so the catalog still reads.
     assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 1);
 
-    // Every other float value, including the infinities and -0.0, is still fine.
-    for (i, v) in [f64::INFINITY, f64::NEG_INFINITY, -0.0, 1.5]
-        .into_iter()
-        .enumerate()
+    // Negative zero is refused for the same reason, and separately: SQLite keeps
+    // an exactly-integral REAL as an integer, so the sign is lost and it reads
+    // back as +0.0.
+    let mut features = Features::new();
+    features.insert("x".into(), FeatureValue::Float(-0.0));
+    let err = store
+        .add(
+            AddRequest::new(
+                3,
+                "Generator",
+                OwnerCategory::Component,
+                sts("load", data.clone()),
+            )
+            .with_features(features),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, infrastore_core::TimeSeriesError::InvalidParameter(ref m)
+            if m.contains("negative zero")),
+        "{err}"
+    );
+
+    // Every other float value round-trips bit-for-bit, the infinities included.
+    for (i, v) in [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        1.5,
+        f64::MIN_POSITIVE,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let mut features = Features::new();
         features.insert("x".into(), FeatureValue::Float(v));
@@ -932,7 +963,19 @@ fn a_nan_feature_value_is_rejected_and_leaves_the_catalog_readable() {
             )
             .unwrap_or_else(|e| panic!("float feature {v} should be storable: {e}"));
     }
-    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 5);
+    assert_eq!(store.list_keys(ListFilter::new()).unwrap().len(), 6);
+
+    // And what came back is what went in.
+    for key in store.list_keys(ListFilter::new()).unwrap() {
+        if let Some(FeatureValue::Float(v)) = key.identity().features.get("x") {
+            let stored = store.get_metadata(key.identity()).unwrap();
+            assert_eq!(
+                stored.features.get("x"),
+                Some(&FeatureValue::Float(*v)),
+                "float feature {v} did not survive the catalog"
+            );
+        }
+    }
 }
 
 #[test]
@@ -972,4 +1015,72 @@ fn an_element_count_too_large_to_represent_is_an_error_not_a_panic() {
     assert!(TypedArray::new(Dtype::F64, vec![3, 2], vec![0u8; 48]).is_ok());
     let ok = TypedArray::from_f64(vec![1, 5], &[2.0, 0.0, 1.0, 10.0, 20.0]);
     assert!(ElementType::PiecewiseLinear.validate_array(&ok, 1).is_ok());
+}
+
+#[test]
+fn feature_value_equality_hashing_and_ordering_agree() {
+    // `FeatureValue` is part of a series' identity, so the three have to be one
+    // rule. They are the *catalog's* rule: `features_hash` digests a float by
+    // its bit pattern, and that hash is what the uniqueness index keys on. A
+    // derived `PartialEq` gave IEEE semantics instead, so `0.0 == -0.0` compared
+    // equal while hashing differently — breaking the `Hash` contract all the way
+    // up through `Features`, `KeyIdentity` and `TimeSeriesKey`.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use infrastore_core::FeatureValue;
+
+    fn hash_of(v: &FeatureValue) -> u64 {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    // Equal implies equal hashes, for every variant.
+    for (a, b) in [
+        (FeatureValue::Int(7), FeatureValue::Int(7)),
+        (FeatureValue::Float(1.5), FeatureValue::Float(1.5)),
+        (FeatureValue::Float(f64::NAN), FeatureValue::Float(f64::NAN)),
+        (
+            FeatureValue::Float(f64::INFINITY),
+            FeatureValue::Float(f64::INFINITY),
+        ),
+        (FeatureValue::Bool(true), FeatureValue::Bool(true)),
+        (FeatureValue::Str("x".into()), FeatureValue::Str("x".into())),
+    ] {
+        assert_eq!(a, b, "{a:?} vs {b:?}");
+        assert_eq!(hash_of(&a), hash_of(&b), "{a:?} vs {b:?}");
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
+    }
+
+    // `Eq` is reflexive even for NaN, which the derived impl was not: a NaN
+    // feature was not equal to itself, so such a key could never be found in any
+    // `HashMap` or `HashSet` while `impl Eq` claimed otherwise.
+    let nan = FeatureValue::Float(f64::NAN);
+    assert_eq!(nan, nan.clone());
+
+    // Unequal implies a defined, consistent ordering — never `Equal`.
+    for (a, b) in [
+        (FeatureValue::Float(0.0), FeatureValue::Float(-0.0)),
+        (FeatureValue::Float(1.0), FeatureValue::Float(2.0)),
+        (FeatureValue::Int(1), FeatureValue::Float(1.0)),
+        (FeatureValue::Bool(false), FeatureValue::Bool(true)),
+    ] {
+        assert_ne!(a, b, "{a:?} vs {b:?}");
+        assert_ne!(a.cmp(&b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
+        assert_eq!(
+            a.cmp(&b),
+            b.cmp(&a).reverse(),
+            "{a:?} vs {b:?} antisymmetry"
+        );
+    }
+
+    // The contract that was actually broken: a set lookup by an equal value.
+    let mut set = std::collections::HashSet::new();
+    set.insert(FeatureValue::Float(0.0));
+    assert!(set.contains(&FeatureValue::Float(0.0)));
+    assert!(
+        !set.contains(&FeatureValue::Float(-0.0)),
+        "-0.0 is a distinct value here, as it is to the catalog"
+    );
 }

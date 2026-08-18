@@ -1813,3 +1813,63 @@ fn renaming_with_an_underspecified_key_changes_nothing() {
     names.sort();
     assert_eq!(names, ["day_ahead", "load"]);
 }
+
+/// A reader's column layout is a total order, so series that differ only by
+/// feature land in the same position every run.
+///
+/// `identity_sort_key` used to be `(owner_id, owner_category, name)`. The
+/// catalog's uniqueness index deliberately allows one owner to hold the same
+/// name at the same resolution under different `features_hash` values —
+/// scenarios of one variable — so those rows tied. `sort_by` is stable and the
+/// listing query carries no `ORDER BY`, so the tie fell through to whatever row
+/// order SQLite produced, which is not stable across index choices, catalog
+/// rebuilds, or SQLite versions. A consumer caching "column j is component X"
+/// could then read another component's values with nothing reporting an error.
+#[test]
+fn reader_columns_are_ordered_by_features_when_nothing_else_separates_them() {
+    let initial = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let scenarios = [3i64, 1, 2]; // deliberately not inserted in sorted order
+
+    let column_order = |insertion: &[i64]| -> Vec<i64> {
+        let mut store = create_store(None, true).unwrap();
+        for &s in insertion {
+            let mut features = Features::new();
+            features.insert("scenario".into(), FeatureValue::Int(s));
+            let vals: Vec<f64> = (0..3).map(|i| (s * 100 + i) as f64).collect();
+            store
+                .add(
+                    AddRequest::new(
+                        1,
+                        "Generator",
+                        OwnerCategory::Component,
+                        TimeSeriesData::SingleTimeSeries(SingleTimeSeries::new(
+                            initial,
+                            Duration::hours(1),
+                            TypedArray::from_f64(vec![3], &vals),
+                            "load",
+                        )),
+                    )
+                    .with_features(features),
+                )
+                .unwrap();
+        }
+        let reader = store
+            .build_static_reader(ListFilter::new().resolution(Duration::hours(1)))
+            .unwrap();
+        let group = &reader.groups()[0];
+        assert_eq!(group.num_columns(), insertion.len());
+        group
+            .keys()
+            .iter()
+            .map(|k| match k.identity().features.get("scenario") {
+                Some(FeatureValue::Int(v)) => *v,
+                other => panic!("unexpected feature {other:?}"),
+            })
+            .collect()
+    };
+
+    // Columns come out in feature order regardless of the order they were added.
+    assert_eq!(column_order(&scenarios), vec![1, 2, 3]);
+    assert_eq!(column_order(&[1, 2, 3]), vec![1, 2, 3]);
+    assert_eq!(column_order(&[3, 2, 1]), vec![1, 2, 3]);
+}

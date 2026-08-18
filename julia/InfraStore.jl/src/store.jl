@@ -61,12 +61,18 @@ function _catalog_code(catalog::Union{Nothing, Symbol, AbstractString}, in_memor
 end
 
 """
-    Store(; in_memory=true, path=nothing,
+    Store(; in_memory=nothing, path=nothing,
             compression=:deflate, compression_level=3, shuffle=true,
             catalog=nothing, overwrite=false)
 
-Construct a new store. Pass `path` (and `in_memory=false`) to persist to an
-HDF5 file on disk.
+Construct a new store. Pass `path` to persist to an HDF5 file on disk; the
+store is in-memory when no path is given.
+
+`in_memory` defaults to "whichever the path implies" and rarely needs setting.
+Passing `path` together with `in_memory=true` is a contradiction and throws:
+the FFI ignores the path for an in-memory store, so it used to be accepted
+silently and everything written was discarded at `close!`, leaving no file
+behind.
 
 Throws [`StoreExistsError`](@ref) if `path` (or `\$path.sqlite`) already holds a
 store: creating there would discard its arrays while keeping its catalog,
@@ -96,7 +102,7 @@ true, else `:attached`.
     deliberately provides none.
 """
 function Store(;
-    in_memory::Bool=true,
+    in_memory::Union{Nothing, Bool}=nothing,
     path::Union{Nothing, AbstractString}=nothing,
     compression::Union{Symbol, AbstractString}=:deflate,
     compression_level::Integer=3,
@@ -104,6 +110,23 @@ function Store(;
     catalog::Union{Nothing, Symbol, AbstractString}=nothing,
     overwrite::Bool=false,
 )
+    # A path means a file-backed store unless the caller says otherwise, and a
+    # path with `in_memory=true` is a contradiction rather than a preference:
+    # `infrastore_store_create_with_catalog` ignores the path in that case, so
+    # accepting it silently produced an in-memory store whose contents vanished
+    # at `close!` with no file ever created. The `overwrite` branch below has
+    # always rejected its own version of this; this is the same rule for the
+    # ordinary one.
+    if in_memory === true && path !== nothing
+        throw(
+            ArgumentError(
+                "in_memory=true ignores `path`; drop one of the two (omit `in_memory` to " *
+                "let the path decide)",
+            ),
+        )
+    end
+    in_memory = in_memory === nothing ? path === nothing : in_memory
+
     kind = Symbol(compression)
     compression_kind = if kind === :none
         UInt8(0)

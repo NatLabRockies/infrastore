@@ -351,6 +351,67 @@ def test_resolution_must_be_a_whole_positive_millisecond():
     assert len(np.asarray(store.get_time_series(key).data)) == 4
 
 
+def test_omitted_descriptor_kwargs_keep_what_the_series_carries():
+    """Re-adding a series read back from the store keeps its descriptors.
+
+    `units`, `quantity_kind`, `unit_system`, `component_field` and
+    `application_data` were set unconditionally from kwargs defaulting to None,
+    so a read-then-re-add silently cleared five of the six descriptors that
+    `get_time_series` had just populated -- while keeping `element_type`, which
+    was already guarded. The value classes expose no properties for the five, so
+    the caller could neither notice nor re-supply what was lost.
+    """
+    store = Store.create(in_memory=True)
+    initial = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    series = SingleTimeSeries(initial, timedelta(hours=1), np.arange(4.0), "load")
+    described = dict(
+        units="MW",
+        quantity_kind="ActivePower",
+        unit_system="component_base",
+        component_field="max_active_power",
+        application_data='{"a": 1}',
+        element_type="f64",
+    )
+    key = store.add_time_series(
+        1, "Generator", OwnerCategory.Component, series, **described
+    )
+
+    # Read it back and re-add it under a new owner, supplying nothing.
+    round_tripped = store.get_time_series(key)
+    key2 = store.add_time_series(
+        2, "Generator", OwnerCategory.Component, round_tripped
+    )
+    meta = store.get_metadata(key2)
+    for field, expected in described.items():
+        assert meta[field] == expected, field
+
+    # The bulk path behaves the same way.
+    (key3,) = store.add_time_series_bulk(
+        [
+            {
+                "owner_id": 3,
+                "owner_type": "Generator",
+                "owner_category": OwnerCategory.Component,
+                "time_series": store.get_time_series(key),
+            }
+        ]
+    )
+    meta3 = store.get_metadata(key3)
+    for field, expected in described.items():
+        assert meta3[field] == expected, f"bulk: {field}"
+
+    # An explicitly supplied value still overrides.
+    key4 = store.add_time_series(
+        4,
+        "Generator",
+        OwnerCategory.Component,
+        store.get_time_series(key),
+        units="kW",
+    )
+    assert store.get_metadata(key4)["units"] == "kW"
+    assert store.get_metadata(key4)["quantity_kind"] == "ActivePower"
+
+
 def test_non_sequential_round_trip_and_slice():
     store = Store.create(in_memory=True)
     initial = datetime(2024, 1, 1, tzinfo=timezone.utc)

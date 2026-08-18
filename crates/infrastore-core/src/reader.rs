@@ -42,7 +42,7 @@ use crate::storage::common::window_block_cols;
 use crate::types::array::{Dtype, Element};
 use crate::types::element_type::ElementType;
 use crate::types::key::TimeSeriesKey;
-use crate::types::metadata::TimeSeriesMetadata;
+use crate::types::metadata::{Features, TimeSeriesMetadata};
 use crate::types::period::Period;
 use crate::types::time_series::{TimeSeriesType, compute_h};
 
@@ -1051,9 +1051,29 @@ fn grid_of(m: &TimeSeriesMetadata) -> Result<(DateTime<Utc>, Period, usize)> {
     Ok((initial, resolution, length))
 }
 
-/// A cheap, total ordering key for deterministic column layout within a group.
-fn identity_sort_key(m: &TimeSeriesMetadata) -> (i64, &'static str, &str) {
-    (m.owner_id, m.owner_category.as_str(), m.name.as_str())
+/// A total ordering key for deterministic column layout within a group.
+///
+/// `features` is part of it because it is part of the identity: the catalog's
+/// uniqueness index deliberately allows one owner to hold the same name at the
+/// same resolution under different `features_hash` values — scenarios of one
+/// variable — so series that agree on everything else are a normal state, not a
+/// pathological one. Without features in the key those rows tied, and since
+/// `sort_by` is stable and the catalog query carries no `ORDER BY`, their column
+/// positions fell through to whatever row order SQLite happened to produce.
+/// That is not stable across index choices, catalog rebuilds, or SQLite
+/// versions, so a consumer caching "column j is component X" could read another
+/// component's values with nothing reporting an error.
+///
+/// The remaining identity fields need not appear: a reader spans one timeline,
+/// so `resolution` is uniform across its rows, and `interval` is uniform too —
+/// `None` throughout for the static types, one value for a `ForecastReader`.
+fn identity_sort_key(m: &TimeSeriesMetadata) -> (i64, &'static str, &str, &Features) {
+    (
+        m.owner_id,
+        m.owner_category.as_str(),
+        m.name.as_str(),
+        &m.features,
+    )
 }
 
 #[cfg(test)]

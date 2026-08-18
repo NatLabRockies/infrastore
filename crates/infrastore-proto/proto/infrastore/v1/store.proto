@@ -180,6 +180,18 @@ message GetResp {
   // stays client-side: the server ships raw `value_bytes` plus `shape` and this
   // field, and a codec turns them into per-timestep values.
   string             element_type                = 16;
+  // Unit descriptors, mirroring the same fields on TimeSeriesMetadata (16, 22,
+  // 23, 24). Unlike `application_data` above these *are* properties of the
+  // time-series data types, and the core populates them on every local read, so
+  // omitting them made a value read over gRPC return a series whose descriptors
+  // were all unset where the identical local call returned them. `optional` so
+  // "absent" stays distinct from the empty string, exactly as on the metadata
+  // message — for `unit_system` in particular, absent means *unspecified*, not
+  // natural units.
+  optional string    units                       = 17;
+  optional string    quantity_kind               = 18;
+  optional string    unit_system                 = 19;
+  optional string    component_field             = 20;
 }
 
 // ---- GetTimeSeriesKeys ----
