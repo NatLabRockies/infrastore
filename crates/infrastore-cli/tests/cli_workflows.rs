@@ -2095,3 +2095,103 @@ fn catalog_beside(store: &Path) -> std::path::PathBuf {
     name.push(".sqlite");
     std::path::PathBuf::from(name)
 }
+
+/// A timestamped CSV's timestamp column is a claim about the data, not decoration.
+///
+/// The regular types take their timeline from `initial_timestamp` + `resolution`
+/// and store no timestamps of their own, so the column an exported file carries
+/// was stripped and dropped — parsed for the irregular types, discarded for
+/// these. That made the round trip `export` advertises silently lossy: a slice
+/// fed back under a descriptor naming a different grid had every value
+/// relocated onto it, and a column of outright garbage was accepted without a
+/// word.
+#[test]
+fn a_timestamp_column_must_agree_with_the_grid_the_descriptor_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("grid.h5");
+    write(dir.path(), "v.csv", "value\n10\n11\n12\n13\n14\n15\n");
+    let hourly = |name: &str, csv: &str, initial: &str, resolution: &str, owner: i64| {
+        format!(
+            r#"{{"owner_id": {owner}, "owner_type": "Generator", "name": "{name}",
+                 "type": "SingleTimeSeries", "element_type": "f64", "csv": "{csv}",
+                 "initial_timestamp": "{initial}", "resolution": "{resolution}"}}"#
+        )
+    };
+    let d = write(
+        dir.path(),
+        "seed.json",
+        &hourly("load", "v.csv", "2024-01-01T00:00:00Z", "PT1H", 42),
+    );
+    run(&store, &["add", "--descriptor", d.to_str().unwrap()]);
+
+    // Export a slice: it starts at 02:00, not at the series' own start.
+    let slice = run(
+        &store,
+        &[
+            "-f",
+            "csv",
+            "export",
+            "--owner-id",
+            "42",
+            "--name",
+            "load",
+            "--time-range",
+            "2024-01-01T02:00:00Z..2024-01-01T05:00:00Z",
+        ],
+    );
+    assert!(slice.contains("2024-01-01T02:00:00"), "{slice}");
+    write(dir.path(), "slice.csv", &slice);
+
+    // Re-adding it under a descriptor naming a different grid is refused, and
+    // the message says how to resolve it either way.
+    let wrong = write(
+        dir.path(),
+        "wrong.json",
+        &hourly("relocated", "slice.csv", "2030-06-15T00:00:00Z", "PT15M", 7),
+    );
+    let dest = dir.path().join("dest.h5");
+    let err = run_err(&dest, &["add", "--descriptor", wrong.to_str().unwrap()]);
+    assert!(err.contains("2030-06-15"), "{err}");
+    assert!(err.contains("drop the timestamp column"), "{err}");
+    assert!(!dest.exists() || data_lines(&run(&dest, &["-f", "csv", "list"])).is_empty());
+
+    // The same file under the grid it was written from loads, values intact —
+    // the round trip `export` advertises.
+    let right = write(
+        dir.path(),
+        "right.json",
+        &hourly("ok", "slice.csv", "2024-01-01T02:00:00Z", "PT1H", 9),
+    );
+    let round = dir.path().join("round.h5");
+    run(&round, &["add", "--descriptor", right.to_str().unwrap()]);
+    let got = run(&round, &["-f", "csv", "get", "--owner-id", "9"]);
+    assert!(got.contains("2024-01-01T02:00:00"), "{got}");
+    assert!(got.contains(",12"), "{got}");
+
+    // Garbage in the column is reported rather than ignored.
+    write(
+        dir.path(),
+        "garbage.csv",
+        "timestamp,value\nnot-a-timestamp,1.0\nBANANA,2.0\n",
+    );
+    let bad = write(
+        dir.path(),
+        "garbage.json",
+        &hourly("garbage", "garbage.csv", "2024-01-01T00:00:00Z", "PT1H", 8),
+    );
+    let err = run_err(
+        &dir.path().join("garbage.h5"),
+        &["add", "--descriptor", bad.to_str().unwrap()],
+    );
+    assert!(err.contains("invalid timestamp"), "{err}");
+
+    // A value-only CSV is unaffected: no column, nothing to disagree with.
+    let plain = dir.path().join("plain.h5");
+    let d2 = write(
+        dir.path(),
+        "plain.json",
+        &hourly("load", "v.csv", "2024-01-01T00:00:00Z", "PT1H", 42),
+    );
+    run(&plain, &["add", "--descriptor", d2.to_str().unwrap()]);
+    assert_eq!(data_lines(&run(&plain, &["-f", "csv", "list"])).len(), 1);
+}
